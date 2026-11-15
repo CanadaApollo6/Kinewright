@@ -1,4 +1,192 @@
-# Ruling 6 needs snapshot and Candidate lifecycle changes
+# Creation-sized history admission
+
+## Ruling 7 implementation
+
+The immutable descriptor records creation kind, original baseline capacity and
+lineage/resource charge, and the initial staging batch charge. It is mandatory in
+the stored shell and in the canonical owner identity. Creation and open call the
+same checked pure function. Captures retain exactly that lease; subsequent edits
+and discarded initial deltas do not change it. Open checks the actual retained
+states against the derived limits and uses normal pool admission.
+
+Ordinary is fixed: 1 MiB encoded operations, 24 MiB decoded history, 8 MiB encoded
+and live document limits, four anchors, 32 MiB owners: `6*8+24+32=104 MiB`.
+Task and Candidate document room is
+`min(max(2*original baseline live+512 KiB,original baseline live+2 MiB),8 MiB)`.
+The doubled-baseline floor stays 512 KiB; the minimum incremental room is 2 MiB
+so a tiny baseline still holds the fixed 2,000-removal fixture. Owners are the original baseline charge plus 3 MiB (construction refuses a
+baseline above 29 MiB). Task has one anchor and 1/24 MiB history. Live Candidate
+has the same history room and no anchors. Staging Candidate has no anchors and
+`min(initial batch+64 KiB encoded / 512 KiB decoded,1/24 MiB)` history.
+
+| Clips, 8 tracks | Document room MiB | Owner room MiB | Task lease MiB | Live / full staging lease MiB | Tasks with capture room | Revise live Cores with one staging/capture free |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1,000 | 2.459 | 3.894 | 35.272 | 32.812 | 10 | 3 |
+| 5,000 | 4.290 | 7.434 | 44.305 | 40.015 | 8 | 2 |
+| 20,000 | 8.000 | 20.709 | 68.709 | 60.709 | 4 | 1 |
+
+The fixture is unchanged from undo-merge-limits.md. This table follows the
+production constructor path: an Ordinary Core's long-lived baseline is replay
+padded before a Task or Candidate borrows it. The earlier raw-document table was
+optimistic at 5,000 clips: the first constructor-path regression found seven,
+not eight, Task slots with the old 2 MiB additive floor. The floor above restores
+eight without changing the pool caps or the fixture. Assertion:
+`PRODUCT_FORK_TASK_SLOTS_INCLUDE_CAPTURE_HEADROOM`.
+
+The Task pool leaves one largest live Task lease free for checkpointing. Live
+Candidate admission similarly leaves one largest live Candidate lease free for
+staging or persistence. Staging previews will transfer their owned state when
+consumed; they need no second independently retained preview. Concurrent command
+scratch is admitted separately, so one full workspace can run at a time.
+
+Candidate pool: `2*(2*8+24+32)=144 MiB`. The measured plain 20,000-clip
+baseline needs only 60.709 MiB per candidate, but the descriptor permits a
+32 MiB owner envelope. Using the full product maximum preserves merge fit for
+every admitted source, including richer lineage than the plain fixture.
+
+The App retains both tab Cores in `App::projects`; `new_project` pushes the
+second without dropping the first. Saving either owns a third Ordinary lease.
+The default Ordinary pool is therefore `3*104=312 MiB`, with new-Core admission
+leaving one largest capture free. The measured owner-flow assertion is
+`TWO_TABS_AND_SAVE_NEED_THREE_ORDINARY_LEASES`; the actual App path is also gated
+when it switches. A third live tab is a typed refusal before it starts; both
+existing tabs can still save. The generated one-project-per-process corpus
+continues to assert a peak of two.
+
+Workspace is 168 MiB: the large ripple's warm subtotal is
+`7*8+3*32=152 MiB`, plus 64 KiB metadata and 10% margin, under 168 MiB.
+Cold ingress is covered by the incoming retained lease together with scratch:
+raw shell <=88 MiB, structural body decoder <=64 MiB, one untrusted document
+under its separate 64 MiB decoder ceiling, and the previous document already
+checked against D. Including fixed headers, this is under `72+168 MiB` for a
+maximal Candidate. The structural decoder charge already includes twice the
+encoded input; the executor separately applies its 10% replay margin. The descriptor's smaller shell cap is checked before
+body decoding. Raw ingress is dropped before semantic replay builds indexes;
+replay uses its existing checked reservation with at most two A owner scratch.
+The running merge guard includes the destination's three A scratch and margin.
+Pool total: `312+400+144+168=1024 MiB`.
+Kernel validation, duration and identity passes remain unchanged.
+
+A NeverFold Core also keeps running additive observation charges and a largest
+kernel scratch peak (excluding observations). Admission reserves the eventual one-batch replay with the
+Ordinary destination's owner scratch. This is necessary because observations
+from many individually accepted commands coexist when forwarded as one batch.
+Undo/Redo move the existing charges; a new Do drops Redo's charge. No command
+scans retained history to compute this bound. The source refuses before accepting
+work that cannot fit a fresh destination's workspace. The recorded scratch
+adds eight bytes to Step (now 112 bytes) and is charged in decoded history;
+observations are counted once even after commands are forwarded as one batch.
+
+The session model gives GUI and writer their own process pools. Its independent
+cold verification reader also has a separate pool; it does not count as a third
+Core inside the writer process. The product pool admits two live Ordinary Cores plus one capture; the permanent
+one-project model assertion still checks a measured peak of two. Adversarial
+unit stories holding several sibling histories use an explicitly larger test
+pool; those fixtures are not product admission evidence.
+
+The table is accounting admission capacity, not a new scheduler limit. The host
+still has 64 run slots and each run has at most eight tasks (`revise.rs` and
+`run_admission.rs`); the process pool is the tighter simultaneous limit above.
+
+
+Replay safety also accounts for allocation geometry. An in-memory vector may
+have a different spare capacity from the same vector decoded on another process.
+The running live bound admits the larger of actual capacity and geometric wire
+capacity per field. Construction pads an initial long-lived baseline once when
+needed; install canonicalises its long-lived baseline. Warm commands preserve
+capacity in their one atomic candidate copy. The independent bound oracle still
+measures actual capacities without a normalising copy. The structural body
+forecast remains capped at the decoder's existing 64 MiB ceiling even though
+workspace is larger; a command cannot create a saved body its decoder rejects.
+| Clips, 8 tracks | Encoded bytes | Fork baseline live bytes | Document room MiB | Owner room MiB | Task lease MiB | Live / full staging lease MiB | Tasks with capture room | Revise live Cores with one staging/capture free |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1,000 | 156,882 | 246,608 | 2.235 | 3.894 | 34.599 | 32.364 | 10 | 3 |
+| 5,000 | 788,882 | 1,966,928 | 4.252 | 7.434 | 44.189 | 39.937 | 8 | 2 |
+| 20,000 | 3,179,988 | 7,865,168 | 8.000 | 20.709 | 68.709 | 60.709 | 4 | 1 |
+
+The fixture is unchanged from undo-merge-limits.md. This table follows the
+production constructor path: an Ordinary Core's long-lived baseline is replay
+padded before a Task or Candidate borrows it. The earlier raw-document table was
+optimistic at 5,000 clips: the first constructor-path regression found seven,
+not eight, Task slots with the old 2 MiB additive floor. The floor above restores
+eight without changing the pool caps or the fixture. Assertion:
+`PRODUCT_FORK_TASK_SLOTS_INCLUDE_CAPTURE_HEADROOM`.
+
+The Task pool leaves one largest live Task lease free for checkpointing. Live
+Candidate admission similarly leaves one largest live Candidate lease free for
+staging or persistence. Staging previews will transfer their owned state when
+consumed; they need no second independently retained preview. Concurrent command
+scratch is admitted separately, so one full workspace can run at a time.
+
+Candidate pool: `2*(2*8+24+32)=144 MiB`. The measured plain 20,000-clip
+baseline needs only 60.709 MiB per candidate, but the descriptor permits a
+32 MiB owner envelope. Using the full product maximum preserves merge fit for
+every admitted source, including richer lineage than the plain fixture.
+
+The App retains both tab Cores in `App::projects`; `new_project` pushes the
+second without dropping the first. Saving either owns a third Ordinary lease.
+The default Ordinary pool is therefore `3*104=312 MiB`, with new-Core admission
+leaving one largest capture free. The measured owner-flow assertion is
+`TWO_TABS_AND_SAVE_NEED_THREE_ORDINARY_LEASES`; the actual App path is also gated
+when it switches. A third live tab is a typed refusal before it starts; both
+existing tabs can still save. The generated one-project-per-process corpus
+continues to assert a peak of two.
+
+Workspace is 168 MiB: the large ripple's warm subtotal is
+`7*8+3*32=152 MiB`, plus 64 KiB metadata and 10% margin, under 168 MiB.
+Cold ingress is covered by the incoming retained lease together with scratch:
+raw shell <=88 MiB, structural body decoder <=64 MiB, one untrusted document
+under its separate 64 MiB decoder ceiling, and the previous document already
+checked against D. Including fixed headers, this is under `72+168 MiB` for a
+maximal Candidate. The structural decoder charge already includes twice the
+encoded input; the executor separately applies its 10% replay margin. The descriptor's smaller shell cap is checked before
+body decoding. Raw ingress is dropped before semantic replay builds indexes;
+replay uses its existing checked reservation with at most two A owner scratch.
+The running merge guard includes the destination's three A scratch and margin.
+Pool total: `312+400+144+168=1024 MiB`.
+Kernel validation, duration and identity passes remain unchanged.
+
+A NeverFold Core also keeps running additive observation charges and a largest
+kernel scratch peak (excluding observations). Admission reserves the eventual one-batch replay with the
+Ordinary destination's owner scratch. This is necessary because observations
+from many individually accepted commands coexist when forwarded as one batch.
+Undo/Redo move the existing charges; a new Do drops Redo's charge. No command
+scans retained history to compute this bound. The source refuses before accepting
+work that cannot fit a fresh destination's workspace. The recorded scratch
+adds eight bytes to Step (now 112 bytes) and is charged in decoded history;
+observations are counted once even after commands are forwarded as one batch.
+
+The session model gives GUI and writer their own process pools. Its independent
+cold verification reader also has a separate pool; it does not count as a third
+Core inside the writer process. The product pool admits two live Ordinary Cores plus one capture; the permanent
+one-project model assertion still checks a measured peak of two. Adversarial
+unit stories holding several sibling histories use an explicitly larger test
+pool; those fixtures are not product admission evidence.
+
+The table is accounting admission capacity, not a new scheduler limit. The host
+still has 64 run slots and each run has at most eight tasks (`revise.rs` and
+`run_admission.rs`); the process pool is the tighter simultaneous limit above.
+
+
+Replay safety also accounts for allocation geometry. An in-memory vector may
+have a different spare capacity from the same vector decoded on another process.
+The running live bound admits the larger of actual capacity and geometric wire
+capacity per field. Construction pads an initial long-lived baseline once when
+needed; install canonicalises its long-lived baseline. Warm commands preserve
+capacity in their one atomic candidate copy. The independent bound oracle still
+measures actual capacities without a normalising copy. The structural body
+forecast remains capped at the decoder's existing 64 MiB ceiling even though
+workspace is larger; a command cannot create a saved body its decoder rejects.
+
+Metadata vectors reserve the larger of their actual capacity and the cold JSON
+sequence capacity. The manifest-context regression filled a Task with
+one-reference contexts; the former length-one allocation charge admitted a
+record that cold decode refused at `ADMITTED_MANIFEST_CONTEXT_HISTORY_REOPENS`.
+Input references and approval targets now pay their wire allocation shape at
+admission, without normalising copies. The same test retains at least 2,000
+commands and checks identity and every accepted command after open.
+
+## Historical ruling 6 scope diagnostics
 
 The task constructor can take a fixed creation profile and pass that profile
 through its capture/open paths. The full ruling cannot be implemented only
@@ -113,3 +301,17 @@ Remove that temporary include afterward. The probe passed all named assertions
 in `target/hx-h2b/creation-sizing-probe.log`; the include was removed. These are
 diagnostics of today's representation, not permanent acceptance tests for a
 future sizing descriptor. All runs started for this scope check finished.
+
+## Ruling 7 qualification
+
+The final Core/Project gate passed 1,195 tests (24 ignored); workspace Clippy,
+format checking and slow-test lint passed. The complete 64-seed, 65,536-attempt
+portable corpus plus its 128 primer transitions passed, as did the unchanged
+2,000 four-track-removal fixture and spare-capacity save/open/merge fixture
+(18 release qualifications, 256.13 seconds). Every generated range observed at
+most two simultaneous Ordinary leases per process. Seven profile-dimension
+mutations failed their named compile-time fit assertions and were reverted.
+The manifest-context round-trip and real constructor-slot regressions each
+failed before their accounting correction and passed afterwards.
+These qualify the new history implementation; product callers have not switched
+at this commit. Product-path timings and the shipping builds belong to checkpoint 1.

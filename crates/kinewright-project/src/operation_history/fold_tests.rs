@@ -23,7 +23,7 @@ fn marker(n: u64) -> Command {
 }
 fn make(doc: Document, bounds: RoleBounds) -> OwnerHistory {
     OwnerHistory::measured(
-        &HistoryPool::new(PoolLimits::default()),
+        &super::tests::story_pool(),
         Role::Ordinary,
         Role::Ordinary.policy(),
         &origin(1),

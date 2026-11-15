@@ -24,8 +24,12 @@ pub(super) fn saved_open(owner: &OwnerHistory) {
     super::stored::assert_decode_forecast(&shell, owner.decode_bound);
     let OwnerSnapshot { data, reservation } = owner.capture().unwrap();
     let bytes = serde_json::to_vec(&data).unwrap();
-    drop(data);
-    let data = serde_json::from_slice(&bytes).expect("SAVED_OWNER_BYTES_DECODE");
+    drop((data, reservation));
+    let data: super::snapshot::SnapshotData =
+        serde_json::from_slice(&bytes).expect("SAVED_OWNER_BYTES_DECODE");
+    // A cold reader has its own process pool, rather than borrowing the live writer's leases.
+    let pool = HistoryPool::new(PoolLimits::default());
+    let reservation = pool.admit_sized(data.sizing).unwrap();
     let opened = OwnerSnapshot { data, reservation }
         .validate()
         .expect("WHAT_CAN_BE_SAVED_CAN_BE_OPENED")
@@ -163,7 +167,7 @@ pub(super) fn older_install(
 #[test]
 fn older_snapshot_install_with_later_do_can_reopen() {
     let owner = older_install(
-        &HistoryPool::new(PoolLimits::default()),
+        &super::tests::story_pool(),
         InstallCase::Single,
         approval().reference,
     );
@@ -172,7 +176,7 @@ fn older_snapshot_install_with_later_do_can_reopen() {
 #[test]
 fn two_older_snapshot_installs_with_later_do_can_reopen() {
     let owner = older_install(
-        &HistoryPool::new(PoolLimits::default()),
+        &super::tests::story_pool(),
         InstallCase::Twice,
         approval().reference,
     );
@@ -181,7 +185,7 @@ fn two_older_snapshot_installs_with_later_do_can_reopen() {
 #[test]
 fn older_snapshot_install_with_approved_undo_can_reopen() {
     let owner = older_install(
-        &HistoryPool::new(PoolLimits::default()),
+        &super::tests::story_pool(),
         InstallCase::Undo,
         approval().reference,
     );
@@ -191,7 +195,7 @@ fn older_snapshot_install_with_approved_undo_can_reopen() {
 #[test]
 fn historic_approval_positions_still_refuse_overflow() {
     let owner = older_install(
-        &HistoryPool::new(PoolLimits::default()),
+        &super::tests::story_pool(),
         InstallCase::Single,
         approval().reference,
     );
@@ -222,7 +226,7 @@ fn generated_owner_states_can_be_saved_and_opened() {
     let mut invalid_reference_refusals = 0;
     for seed in 1..=4_u64 {
         for role in [Role::Ordinary, Role::Task] {
-            let pool = HistoryPool::new(PoolLimits::default());
+            let pool = super::tests::story_pool();
             let bounds = kinewright_core::undo::RoleBounds {
                 step_cap: 3,
                 ..role.bounds()

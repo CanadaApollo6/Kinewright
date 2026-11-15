@@ -1,9 +1,9 @@
 use super::{
     Approval, ApprovalLedger, CommandOrigin, CreationOrigin, Error, HistoryPool,
-    HistoryReservation, Lineage, RemovedTarget, Resource, Resources, Role,
+    HistoryReservation, Lineage, Resource, Resources, Role,
 };
 use kinewright_core::{
-    Command, Document,
+    Command, Document, Operation,
     undo::{CommandKey, EditEvent, Effects, History, RetentionPolicy},
 };
 use std::{
@@ -306,24 +306,37 @@ struct Plan {
     )>,
 }
 impl OwnerHistory {
-    pub fn new(
+    pub fn new<D: Into<Arc<Document>>>(
         pool: &HistoryPool,
         role: Role,
         policy: RetentionPolicy,
         seed: &CreationOrigin,
-        make_document: impl FnOnce() -> Result<Document, Error>,
+        make_document: impl FnOnce() -> Result<D, Error>,
     ) -> Result<Self, Error> {
-        Self::with_bounds(pool, role, policy, seed, role.bounds(), make_document)
+        Self::create(
+            pool,
+            match role {
+                Role::Ordinary => super::CreationKind::Ordinary,
+                Role::Task => super::CreationKind::Task,
+                Role::Candidate => super::CreationKind::LiveCandidate,
+            },
+            policy,
+            seed,
+            None,
+            kinewright_core::undo::Charge::default(),
+            None,
+            make_document,
+        )
     }
     /// Measurement seam: limits may only be lowered, never raised past a role.
     #[cfg(any(test, feature = "history-metrics"))]
-    pub fn measured(
+    pub fn measured<D: Into<Arc<Document>>>(
         pool: &HistoryPool,
         role: Role,
         policy: RetentionPolicy,
         seed: &CreationOrigin,
         bounds: kinewright_core::undo::RoleBounds,
-        make_document: impl FnOnce() -> Result<Document, Error>,
+        make_document: impl FnOnce() -> Result<D, Error>,
     ) -> Result<Self, Error> {
         let maximum = role.bounds();
         if bounds.document_bytes > maximum.document_bytes
@@ -336,34 +349,121 @@ impl OwnerHistory {
         {
             return Err(Error::Capacity("measurement limits"));
         }
-        Self::with_bounds(pool, role, policy, seed, bounds, make_document)
+        Self::create(
+            pool,
+            match role {
+                Role::Ordinary => super::CreationKind::Ordinary,
+                Role::Task => super::CreationKind::Task,
+                Role::Candidate => super::CreationKind::LiveCandidate,
+            },
+            policy,
+            seed,
+            Some(bounds),
+            kinewright_core::undo::Charge::default(),
+            None,
+            make_document,
+        )
     }
-    fn with_bounds(
+    /// A fresh merge destination preserves the source's original sizing even
+    /// when a cold decoder has compacted its baseline allocations.
+    pub fn live_candidate<D: Into<Arc<Document>>>(
         pool: &HistoryPool,
-        role: Role,
+        seed: &CreationOrigin,
+        source_sizing: super::CreationSizing,
+        make_document: impl FnOnce() -> Result<D, Error>,
+    ) -> Result<Self, Error> {
+        if source_sizing.kind == super::CreationKind::Ordinary {
+            return Err(Error::InvalidPolicy);
+        }
+        source_sizing.limits()?;
+        Self::create(
+            pool,
+            super::CreationKind::LiveCandidate,
+            RetentionPolicy::NeverFold,
+            seed,
+            None,
+            kinewright_core::undo::Charge::default(),
+            Some(source_sizing),
+            make_document,
+        )
+    }
+    pub fn staging<D: Into<Arc<Document>>>(
+        pool: &HistoryPool,
+        seed: &CreationOrigin,
+        source_sizing: super::CreationSizing,
+        initial_delta: &[Operation],
+        make_document: impl FnOnce() -> Result<D, Error>,
+    ) -> Result<Self, Error> {
+        if source_sizing.kind == super::CreationKind::Ordinary {
+            return Err(Error::InvalidPolicy);
+        }
+        source_sizing.limits()?;
+        let charge = kinewright_core::undo::batch_charge(initial_delta)?;
+        Self::create(
+            pool,
+            super::CreationKind::StagingCandidate,
+            RetentionPolicy::NeverFold,
+            seed,
+            None,
+            charge,
+            Some(source_sizing),
+            make_document,
+        )
+    }
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one constructor for fixed creation and measurement profiles"
+    )]
+    fn create<D: Into<Arc<Document>>>(
+        pool: &HistoryPool,
+        kind: super::CreationKind,
         policy: RetentionPolicy,
         seed: &CreationOrigin,
-        bounds: kinewright_core::undo::RoleBounds,
-        make_document: impl FnOnce() -> Result<Document, Error>,
+        measured: Option<kinewright_core::undo::RoleBounds>,
+        initial_batch: kinewright_core::undo::Charge,
+        source_sizing: Option<super::CreationSizing>,
+        make_document: impl FnOnce() -> Result<D, Error>,
     ) -> Result<Self, Error> {
+        let role = kind.role();
         if policy != role.policy() {
             return Err(Error::InvalidPolicy);
         }
-        // Reserve the entire retained role envelope before the factory may
-        // allocate a document. Growth stays inside that admitted envelope.
-        let reservation = pool.admit(role)?;
-        let _workspace = reservation.workspace()?;
-        let core = History::new(make_document()?, policy, bounds)?;
-        let document = core.baseline();
+        // Scratch covers construction before the measured retained lease exists.
+        // Admission failure drops these private values without starting a task.
+        let _workspace = pool.workspace(role)?;
+        let document = make_document()?.into();
+        let baseline_live = kinewright_core::undo::document_capacity_bytes(&document)?
+            .max(source_sizing.map_or(0, |s| s.baseline_live));
         scan();
-        let seeds = Lineage::seed(document, seed);
+        let seeds = Lineage::seed(&document, seed);
         scan();
-        let resources = Resources::new(document);
+        let resources = Resources::new(&document);
+        let sizing = super::CreationSizing {
+            kind,
+            baseline_live,
+            baseline_owners: baseline_charge(&seeds, &resources.baseline)?
+                .max(source_sizing.map_or(0, |s| s.baseline_owners)),
+            initial_batch,
+        };
+        let reservation = pool.admit_sized(sizing)?.into_core()?;
+        let limits = reservation.limits();
+        let core = History::new(
+            document,
+            policy,
+            measured.unwrap_or(limits.bounds).intersect(limits.bounds),
+        )?;
+        let core = if role != Role::Ordinary
+            && core.bounds().replay_workspace == super::sizing::WORKSPACE_BYTES
+        {
+            core.with_merge_destination(super::sizing::MERGE_DESTINATION_INPUT)?
+        } else {
+            core
+        };
         let fold = if role == Role::Ordinary {
             Some(super::fold::FoldState::new(
                 &seeds,
-                document,
-                role.envelope().workspace,
+                core.baseline(),
+                limits.envelope.workspace,
             )?)
         } else {
             None
@@ -372,18 +472,18 @@ impl OwnerHistory {
             state.costs()?
         } else {
             (
-                baseline_charge(&seeds, &resources.baseline)?,
+                sizing.baseline_owners,
                 super::stored::baseline_decode_charge(
                     &seeds,
                     resources.baseline.len(),
-                    role.envelope().workspace,
+                    limits.envelope.workspace,
                 )?,
             )
         };
-        if baseline_bytes > role.envelope().owners {
+        if baseline_bytes > limits.envelope.owners {
             return Err(Error::Capacity("owner metadata"));
         }
-        if baseline_decode > role.envelope().workspace {
+        if baseline_decode > limits.envelope.workspace.min(super::stored::DECODE_LIMIT) {
             return Err(Error::Capacity("owner decode"));
         }
         Ok(Self {
@@ -459,13 +559,13 @@ impl OwnerHistory {
         };
         let new_key_decode = super::stored::key_decode_charge(
             open_key,
-            self.reservation.role().envelope().workspace,
+            self.reservation.limits().envelope.workspace,
         );
         let wire_charge = super::stored::command_decode_charge(
             &command,
             &creation,
             &inputs,
-            self.reservation.role().envelope().workspace,
+            self.reservation.limits().envelope.workspace,
         );
         let Self {
             core,
@@ -485,7 +585,7 @@ impl OwnerHistory {
         } = self;
         let (effects, plan) = core.execute_prepared(
             command,
-            reservation.role().envelope().owners * if fold.is_some() { 3 } else { 2 },
+            reservation.limits().envelope.owners * if fold.is_some() { 3 } else { 2 },
             |event| {
                 prepare(
                     &event,
@@ -498,7 +598,7 @@ impl OwnerHistory {
                     origins,
                     *owner_bytes,
                     *baseline_bytes,
-                    reservation.role(),
+                    reservation.limits().envelope,
                     wire_charge,
                     *decode_bound,
                     *baseline_decode,
@@ -564,19 +664,23 @@ impl OwnerHistory {
         // The query owns an independent occurrence map while the baseline
         // remains immutable. Only the returned boundary survives this replay.
         let mut lineage = self.seeds();
+        // This holder contains a document and lineage, not operation stacks or
+        // cache anchors. Its full independent lease covers that query result.
+        let lineage_cap = reservation
+            .limits()
+            .envelope
+            .retained
+            .checked_sub(self.core.bounds().document_live_bytes)
+            .ok_or(Error::Reservation)?;
         let document = self.core.visit_boundary(
             depth,
-            self.reservation.role().envelope().owners * 2,
+            self.reservation.limits().envelope.owners * 2,
             |command, effects| {
                 let origin = self.origins.get(&command.id).ok_or(Error::InvalidOrigin)?;
                 if origin.origin.payload_digest != command.payload_digest {
                     return Err(Error::InvalidOrigin);
                 }
-                lineage.apply_bounded(
-                    &origin.origin.creation,
-                    effects,
-                    self.reservation.role().envelope().owners,
-                )
+                lineage.apply_bounded(&origin.origin.creation, effects, lineage_cap)
             },
         )?;
         lineage.prune();
@@ -606,7 +710,7 @@ fn prepare(
     origins: &Origins,
     mut owner_bytes: u64,
     old_baseline: u64,
-    role: Role,
+    envelope: super::Envelope,
     wire_charge: Result<u64, Error>,
     mut decode_bound: u64,
     old_baseline_decode: u64,
@@ -698,8 +802,7 @@ fn prepare(
         (None, old_baseline, old_baseline_decode)
     } else {
         let state = fold.ok_or(Error::InvalidPolicy)?;
-        let mut patch =
-            super::fold::FoldPatch::new(state, role.envelope().owners, role.envelope().workspace);
+        let mut patch = super::fold::FoldPatch::new(state, envelope.owners, envelope.workspace);
         let mut root = None;
         let mut prefix = kinewright_core::undo::StepEvidenceBuilder::new();
         let mut count = 0;
@@ -760,10 +863,10 @@ fn prepare(
             .ok_or(Error::Capacity("owner decode"))?;
         (Some(patch), bytes, decode)
     };
-    if decode_bound > role.envelope().workspace {
+    if decode_bound > envelope.workspace.min(super::stored::DECODE_LIMIT) {
         return Err(Error::Capacity("owner decode"));
     }
-    if owner_bytes > role.envelope().owners {
+    if owner_bytes > envelope.owners {
         return Err(Error::Capacity("owner metadata"));
     }
     let mut terminal_updates = Vec::new();
@@ -828,10 +931,7 @@ pub(super) fn origin_charge(
         + origin.creation.branch.allocated_capacity() as u64
         + origin.creation.batch.allocated_capacity() as u64;
     bytes = bytes
-        .checked_add(
-            (origin.inputs.capacity() * std::mem::size_of::<crate::bundle_records::ObjectRef>())
-                as u64,
-        )
+        .checked_add(vector_replay_bytes(&origin.inputs)?)
         .ok_or(Error::Capacity("origin size"))?;
     for reference in &origin.inputs {
         bytes = bytes
@@ -847,9 +947,32 @@ pub(super) fn approval_charge(approval: &Approval) -> Result<u64, Error> {
     // The key repeats its digest so folded sibling approvals stay distinct.
     // Baseline's fixed headers cover the two initially sparse BTree roots.
     1280_u64
-        .checked_add((approval.targets.capacity() * std::mem::size_of::<RemovedTarget>()) as u64)
+        .checked_add(vector_replay_bytes(&approval.targets)?)
         .and_then(|n| n.checked_add(approval.reference.sha256.capacity() as u64))
         .ok_or(Error::Capacity("approval size"))
+}
+fn vector_replay_bytes<T>(values: &Vec<T>) -> Result<u64, Error> {
+    // A one-element vec! can have one slot; a cold JSON sequence starts at
+    // Vec's geometric minimum. Reserve both without normalising either copy.
+    let replay = if values.is_empty() {
+        0
+    } else {
+        let minimum = if std::mem::size_of::<T>() == 1 {
+            8
+        } else if std::mem::size_of::<T>() <= 1024 {
+            4
+        } else {
+            1
+        };
+        values
+            .len()
+            .checked_next_power_of_two()
+            .ok_or(Error::Capacity("owner metadata"))?
+            .max(minimum)
+    };
+    (values.capacity().max(replay) as u64)
+        .checked_mul(std::mem::size_of::<T>() as u64)
+        .ok_or(Error::Capacity("owner metadata"))
 }
 pub(super) fn baseline_charge(
     lineage: &Lineage,

@@ -31,7 +31,7 @@ fn stored_older_install(case: super::super::roundtrip_tests::InstallCase) {
     let _pin = store
         .admit_blob(&mut bytes.as_slice(), &reference, &[])
         .unwrap();
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::super::tests::story_pool();
     let owner = super::super::roundtrip_tests::older_install(&pool, case, reference);
     let capture = owner.capture().unwrap();
     let sealed = capture.persist(store, |_| Ok(None)).unwrap();
@@ -59,7 +59,7 @@ fn stored_older_snapshot_install_with_approved_undo_can_reopen() {
 fn compact_record_roundtrip_at_ten_thousand_commands_is_openable() {
     let (_temp, mut session) = session("hx-compact-record");
     let store = session.store_mut();
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::super::tests::story_pool();
     let mut owner = OwnerHistory::new(
         &pool,
         Role::Ordinary,
@@ -137,7 +137,7 @@ fn task_holds_256_approve_delete_undo_cycles_in_its_role() {
     let (_temp, mut session) = session("hx-task-256-cycles");
     let store = session.store_mut();
     let mut evidence_pins = Vec::new();
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::super::tests::story_pool();
     let mut owner = OwnerHistory::new(
         &pool,
         Role::Task,
@@ -221,7 +221,8 @@ fn redo_payload_owns_a_real_blob_through_collection_and_open() {
         "../../../kinewright-core/tests/support/history_operation_cases.json"
     ))
     .unwrap();
-    let document = serde_json::from_value(cases["AddLutAsset"]["document"].clone()).unwrap();
+    let document: kinewright_core::Document =
+        serde_json::from_value(cases["AddLutAsset"]["document"].clone()).unwrap();
     let mut operation: Operation =
         serde_json::from_value(cases["AddLutAsset"]["operation"].clone()).unwrap();
     if let Operation::AddLutAsset { asset } = &mut operation {
@@ -230,7 +231,7 @@ fn redo_payload_owns_a_real_blob_through_collection_and_open() {
     } else {
         unreachable!()
     }
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::super::tests::story_pool();
     let mut owner = OwnerHistory::new(
         &pool,
         Role::Task,
@@ -357,7 +358,7 @@ fn media_binding_owns_its_manifest_and_chunk_table() {
     };
     let context = session.admit_inputs(&manifest).unwrap();
     let context_ref = context.reference.clone();
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::super::tests::story_pool();
     {
         let mut external = document();
         external.media_pool.push(unhashed_asset);
@@ -461,7 +462,7 @@ fn stored_owner_metadata_malformations_are_typed_and_atomic() {
     let _pin = store
         .admit_blob(&mut evidence.as_slice(), &reference, &[])
         .unwrap();
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::super::tests::story_pool();
     let mut owner = OwnerHistory::new(
         &pool,
         Role::Task,
@@ -568,7 +569,7 @@ fn folded_approval_requires_the_installed_baselines_exact_fact() {
     let _pin = store
         .admit_blob(&mut bytes.as_slice(), &reference, &[])
         .unwrap();
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::super::tests::story_pool();
     let mut owner = OwnerHistory::new(
         &pool,
         Role::Ordinary,
@@ -653,7 +654,7 @@ fn folded_approval_requires_the_installed_baselines_exact_fact() {
 #[test]
 fn closed_and_older_gesture_keys_roundtrip_inside_decode_forecast() {
     let (_temp, mut session) = session("hx-gesture-keys");
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::super::tests::story_pool();
     let mut owner = OwnerHistory::new(
         &pool,
         Role::Ordinary,
@@ -736,7 +737,7 @@ fn open_reserves_before_reading_the_owner_record() {
     assert!(
         matches!(
             StoredOwnerRecord::read(session.store(), &nonexistent, &pool, Role::Task),
-            Err(Error::Reservation)
+            Err(Error::PoolFull(Role::Task))
         ),
         "OPEN_REFUSAL_PRECEDES_RECORD_ALLOCATION"
     );
@@ -745,7 +746,7 @@ fn open_reserves_before_reading_the_owner_record() {
         (0, 0),
         "OPEN_REFUSAL_HAS_NO_PARTIAL_LEASE"
     );
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::super::tests::story_pool();
     let oversized = ObjectRef {
         byte_length: Role::Candidate.persisted_shell_cap() + 1,
         ..nonexistent
@@ -767,7 +768,7 @@ fn open_reserves_before_reading_the_owner_record() {
 #[test]
 fn stored_owner_shell_identity_mismatch_is_typed_and_atomic() {
     let (_temp, mut session) = session("hx-owner-shell-identity");
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::super::tests::story_pool();
     let owner = OwnerHistory::new(
         &pool,
         Role::Task,
@@ -830,7 +831,7 @@ fn stored_folded_sibling_transition_approvals_survive_repeated_installs() {
             );
         }
     }
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::super::tests::story_pool();
     let captures = fixture::sibling_captures(&pool);
     let mut owner = fixture::make(&pool);
     for selected in [0_usize, 1, 0, 1] {
@@ -855,7 +856,7 @@ fn stored_folded_sibling_transition_approvals_survive_repeated_installs() {
 #[test]
 fn stored_surplus_resources_are_refused_before_open() {
     let (_temp, mut session) = session("hx-surplus-resource-refusal");
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::super::tests::story_pool();
     let owner = OwnerHistory::new(
         &pool,
         Role::Task,

@@ -71,7 +71,7 @@ fn approved(owner: &mut OwnerHistory, direction: Direction, value: u64) {
 }
 #[test]
 fn approved_destructive_undo_then_install_of_its_snapshot_holds() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut history = owner(&pool, false, true);
     history.execute(add(), origin(2), vec![], None).unwrap();
     let target = history.transition_target(Direction::Undo).unwrap();
@@ -112,7 +112,7 @@ fn approved_destructive_undo_then_install_of_its_snapshot_holds() {
 }
 #[test]
 fn approved_undo_then_redo_is_reversed() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut history = owner(&pool, false, true);
     history.execute(add(), origin(2), vec![], None).unwrap();
     approved(&mut history, Direction::Undo, 1);
@@ -127,7 +127,7 @@ fn approved_undo_then_redo_is_reversed() {
 }
 #[test]
 fn approved_redo_then_undo_then_new_do_is_discarded() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut history = owner(&pool, false, false);
     history
         .execute(
@@ -170,7 +170,7 @@ fn approved_redo_then_undo_then_new_do_is_discarded() {
 }
 #[test]
 fn approved_undo_of_a_dropped_step_holds_even_behind_frontier() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut history = owner(&pool, true, true);
     history.execute(add(), origin(2), vec![], None).unwrap();
     approved(&mut history, Direction::Undo, 1);
@@ -200,7 +200,7 @@ fn approved_undo_of_a_dropped_step_holds_even_behind_frontier() {
 }
 #[test]
 fn redo_closes_the_approved_gesture_before_the_next_edit() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut history = owner(&pool, false, false);
     for (n, operation) in [Operation::RemoveTrack { track: TrackId(81) }, marker(1)]
         .into_iter()
@@ -255,7 +255,7 @@ fn redo_closes_the_approved_gesture_before_the_next_edit() {
 }
 #[test]
 fn installed_exact_prefix_holds_and_an_incompatible_prefix_is_uncertain() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut history = owner(&pool, false, false);
     for (n, operation) in [Operation::RemoveTrack { track: TrackId(81) }, marker(1)]
         .into_iter()
@@ -342,7 +342,7 @@ fn installed_exact_prefix_holds_and_an_incompatible_prefix_is_uncertain() {
 }
 #[test]
 fn folded_snapshot_before_the_transition_approval_reports_only_uncertain() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut history = owner(&pool, true, true);
     history.execute(add(), origin(2), vec![], None).unwrap();
     let before_fold = history.capture().unwrap();
@@ -387,7 +387,7 @@ fn folded_snapshot_before_the_transition_approval_reports_only_uncertain() {
 }
 #[test]
 fn known_folded_transition_target_keeps_its_exact_answer() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut history = owner(&pool, true, true);
     history.execute(add(), origin(2), vec![], None).unwrap();
     approved(&mut history, Direction::Undo, 1);
@@ -418,7 +418,7 @@ fn known_folded_transition_target_keeps_its_exact_answer() {
 
 #[test]
 fn transition_entries_share_the_256_approval_cap_and_have_fixed_evidence() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut history = owner(&pool, false, true);
     history.execute(add(), origin(2), vec![], None).unwrap();
     let before_approvals = history.owner_bytes();
@@ -486,7 +486,7 @@ fn transition_entries_share_the_256_approval_cap_and_have_fixed_evidence() {
 
 #[test]
 fn target_digest_conflict_is_refused_even_after_the_step_was_dropped() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut history = owner(&pool, false, false);
     history
         .execute(
@@ -540,7 +540,7 @@ fn target_digest_conflict_is_refused_even_after_the_step_was_dropped() {
 }
 #[test]
 fn malformed_fold_frontier_is_refused_before_install() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut history = owner(&pool, false, true);
     history.execute(add(), origin(2), vec![], None).unwrap();
     let before = history.history().snapshot_identity().unwrap();
@@ -591,7 +591,7 @@ fn transition_evidence_digest_has_literal_ordered_identity_bytes() {
 
 #[test]
 fn preapproval_folded_do_fact_settles_a_later_redo_approval() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut history = owner(&pool, true, false);
     let bounds = history.history().bounds();
     history
@@ -643,7 +643,7 @@ fn preapproval_folded_do_fact_settles_a_later_redo_approval() {
 
 #[test]
 fn folded_do_fact_does_not_turn_a_nonprefix_transition_into_holds() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut doc = document();
     doc.tracks.push(Track {
         id: TrackId(82),

@@ -13,7 +13,7 @@ impl DocumentBound {
         metrics::exact(encoded);
         let result = Self {
             encoded,
-            live: capacity::document_bytes(document)?,
+            live: capacity::replay_document_bytes(document)?,
         };
         result.check(bounds)?;
         Ok(result)
@@ -41,17 +41,36 @@ impl DocumentBound {
 }
 
 fn array_growth<T>(values: &Vec<T>) -> u64 {
-    if values.len() < values.capacity() {
-        return 0;
-    }
-    // The same geometric array reservation used by ReplayBudget. Capacity is
-    // preserved by the atomic copy, so unused slots remain available.
-    let next = values
-        .capacity()
-        .saturating_mul(2)
-        .max(values.len().saturating_add(1))
-        .max(4);
-    (next.saturating_sub(values.capacity()) as u64).saturating_mul(std::mem::size_of::<T>() as u64)
+    let minimum = if std::mem::size_of::<T>() == 1 {
+        8
+    } else if std::mem::size_of::<T>() <= 1024 {
+        4
+    } else {
+        1
+    };
+    let next_len = values.len().saturating_add(1);
+    let actual = if values.len() < values.capacity() {
+        0
+    } else {
+        values
+            .capacity()
+            .saturating_mul(2)
+            .max(next_len)
+            .max(minimum)
+            .saturating_sub(values.capacity())
+    };
+    let canonical = |len: usize| {
+        if len == 0 {
+            0
+        } else {
+            len.checked_next_power_of_two()
+                .unwrap_or(usize::MAX)
+                .max(minimum)
+        }
+    };
+    let replay = canonical(next_len).saturating_sub(canonical(values.len()));
+    // Bound both possible array geometries without copying either one.
+    actual.max(replay).saturating_mul(std::mem::size_of::<T>()) as u64
 }
 
 #[allow(

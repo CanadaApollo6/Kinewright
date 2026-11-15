@@ -4,6 +4,15 @@ use kinewright_core::{
     undo::{History, PhaseCounters, RetentionPolicy, RoleBounds},
 };
 
+/// Adversarial stories retain several independent sibling lines at once.
+/// This fixture is not a product process admission test; `session_model` uses
+/// the unmodified two-Ordinary default pool and asserts its observed peak.
+pub(super) fn story_pool() -> HistoryPool {
+    let mut limits = PoolLimits::default();
+    limits.retained[0] = 8 * Role::Ordinary.envelope().retained;
+    limits.peak[0] = limits.retained[0] + limits.workspace;
+    HistoryPool::new(limits)
+}
 pub(super) fn origin(value: u64) -> CreationOrigin {
     CreationOrigin {
         branch: serde_json::from_str(&format!("\"{:032x}\"", 1)).unwrap(),
@@ -275,15 +284,14 @@ fn role_reservations_are_atomic_and_released() {
         peak: [0, envelope.retained + envelope.workspace, 0],
         workspace: envelope.workspace,
     });
-    let mut reservation = pool.reserve(Role::Task, envelope.retained - 1).unwrap();
-    reservation.grow_to(envelope.retained).unwrap();
+    let reservation = pool.admit(Role::Task).unwrap();
     assert_eq!(
         pool.usage(Role::Task).unwrap(),
         (envelope.retained, 0),
         "RESERVATION_EXACT_FIT"
     );
     assert!(
-        matches!(pool.reserve(Role::Task, 1), Err(Error::Reservation)),
+        matches!(pool.admit(Role::Task), Err(Error::PoolFull(Role::Task))),
         "RESERVATION_ONE_BYTE_OVER"
     );
     assert_eq!(
@@ -294,7 +302,7 @@ fn role_reservations_are_atomic_and_released() {
     {
         let _workspace = reservation.workspace().unwrap();
         assert!(
-            matches!(reservation.workspace(), Err(Error::Reservation)),
+            matches!(reservation.workspace(), Err(Error::PoolFull(Role::Task))),
             "WORKSPACE_SUM_BOUND"
         );
     }
@@ -321,35 +329,46 @@ fn role_reservations_are_atomic_and_released() {
                 Ok(document())
             }
         ),
-        Err(Error::Reservation)
+        Err(Error::PoolFull(Role::Task))
     ));
     assert!(!called, "REFUSAL_PRECEDES_DOCUMENT_ALLOCATION");
 }
 #[test]
 fn candidate_workspace_and_shared_peak_have_their_own_arithmetic() {
     let role = Role::Candidate.envelope();
-    assert_eq!(role.retained, 2 << 20, "CANDIDATE_RETAINED_ENVELOPE");
-    assert_eq!(role.workspace, 16 << 20, "CANDIDATE_WORKSPACE_ENVELOPE");
-    let max_ops = (512_u64 << 10) / std::mem::size_of::<Operation>() as u64;
-    let observations = max_ops
-        * 4
-        * (std::mem::size_of::<kinewright_core::OperationIdentityEffect>() as u64
-            + std::mem::size_of::<kinewright_core::undo::CommandEffects>() as u64
-            + 4 * 16);
-    // Eight D kernel workspace, O+2A+8 KiB stored input, two A owner scratch,
-    // inline observations and 64 KiB fixed headers; leave ten percent slack.
-    let subtotal =
-        (4 << 20) + Role::Candidate.persisted_shell_cap() + (1 << 20) + observations + (64 << 10);
+    assert_eq!(
+        role.retained,
+        72 << 20,
+        "CANDIDATE_MAXIMUM_RETAINED_ENVELOPE"
+    );
+    assert_eq!(role.workspace, 168 << 20, "CANDIDATE_WORKSPACE_ENVELOPE");
+    // Raw ingress includes the structural decoder's 64 MiB ceiling and
+    // one untrusted document at its separate 64 MiB decoder ceiling. The
+    // previous document was already checked against D. The structural charge
+    // includes twice the encoded input; replay's 10% margin is separate.
+    let ingress = Role::Candidate.persisted_shell_cap()
+        + 2 * (64 << 20)
+        + Role::Candidate.bounds().document_live_bytes
+        + (64 << 10);
     assert!(
-        subtotal * 11 / 10 < role.workspace,
+        ingress < role.retained + role.workspace,
         "CANDIDATE_WORKSPACE_ARITHMETIC"
+    );
+    // The 20,000-clip ripple uses seven D in the kernel reservation; the
+    // Ordinary executor also reserves three A, with the same 10% margin.
+    let ripple = 7 * Role::Ordinary.bounds().document_live_bytes
+        + 3 * Role::Ordinary.envelope().owners
+        + (64 << 10);
+    assert!(
+        ripple + ripple.div_ceil(10) < role.workspace,
+        "ORDINARY_RIPPLE_WORKSPACE_ARITHMETIC"
     );
     let pool = HistoryPool::new(PoolLimits::default());
     let task = pool.admit(Role::Task).unwrap();
     let candidate = pool.admit(Role::Candidate).unwrap();
     let window = task.workspace().unwrap();
     assert!(
-        matches!(candidate.workspace(), Err(Error::Reservation)),
+        matches!(candidate.workspace(), Err(Error::PoolFull(Role::Candidate))),
         "SHARED_WORKSPACE_WINDOW"
     );
     assert_eq!(

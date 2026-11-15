@@ -6,7 +6,7 @@ use kinewright_core::{
 };
 
 fn owner() -> OwnerHistory {
-    owner_in(&HistoryPool::new(PoolLimits::default()))
+    owner_in(&super::tests::story_pool())
 }
 fn owner_in(pool: &HistoryPool) -> OwnerHistory {
     OwnerHistory::new(
@@ -132,7 +132,7 @@ fn one_reference_cannot_name_two_do_approvals() {
 #[test]
 fn approval_reference_collisions_are_refused_in_both_install_orders() {
     for transition_in_destination in [true, false] {
-        let pool = HistoryPool::new(PoolLimits::default());
+        let pool = super::tests::story_pool();
         let mut destination = owner_in(&pool);
         let mut source = owner_in(&pool);
         for (history, transition) in [
@@ -262,8 +262,8 @@ fn typed_origin_key_must_match_its_command() {
 
 #[test]
 fn cross_pool_install_refuses_without_mutation_or_leaked_lease() {
-    let first = HistoryPool::new(PoolLimits::default());
-    let second = HistoryPool::new(PoolLimits::default());
+    let first = super::tests::story_pool();
+    let second = super::tests::story_pool();
     let make = |pool: &HistoryPool| {
         OwnerHistory::new(
             pool,
@@ -304,7 +304,7 @@ fn cross_pool_install_refuses_without_mutation_or_leaked_lease() {
 
 #[test]
 fn sibling_line_mid_step_transition_is_uncertain_and_reopenable() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let make = || {
         OwnerHistory::new(
             &pool,
@@ -405,7 +405,7 @@ fn shared_lut_and_font_survive_one_contributor_and_leave_after_the_last() {
     let (document, lut, title) = resource_fixture();
     let required = [lut_reference(&lut), Resource::TitleFont];
     let mut owner = OwnerHistory::new(
-        &HistoryPool::new(PoolLimits::default()),
+        &super::tests::story_pool(),
         Role::Task,
         RetentionPolicy::NeverFold,
         &origin(1),
@@ -469,7 +469,7 @@ fn folded_resource_counts_transfer_and_unreachable_baseline_resources_leave() {
     let (document, lut, title) = resource_fixture();
     let required = [lut_reference(&lut), Resource::TitleFont];
     let mut owner = OwnerHistory::measured(
-        &HistoryPool::new(PoolLimits::default()),
+        &super::tests::story_pool(),
         Role::Ordinary,
         RetentionPolicy::Fold,
         &origin(1),

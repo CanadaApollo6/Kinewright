@@ -12,10 +12,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::{collections::VecDeque, sync::Arc};
 
+pub(super) const DECODE_LIMIT: u64 = kinewright_core::undo::DECODED_PAYLOAD_BYTES;
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredOwnerRecord {
     pub role: Role,
+    pub sizing: super::CreationSizing,
     pub baseline: ObjectRef,
     pub document: ObjectRef,
     pub identity: String,
@@ -154,7 +157,7 @@ impl OwnerSnapshot {
             ledger: &data.ledger,
             folded_approvals: &data.folded_approvals,
         })?;
-        if size > data.role.persisted_body_cap() {
+        if size > data.sizing.limits()?.body_cap() {
             return Err(Error::Capacity("persisted owner body"));
         }
         let body = serde_json::value::to_raw_value(&BorrowedBody {
@@ -175,13 +178,14 @@ impl OwnerSnapshot {
         .map_err(|_| Error::InvalidRecord)?;
         let record = StoredOwnerRecord {
             role: data.role,
+            sizing: data.sizing,
             baseline,
             document,
             identity: digest_text(&self.snapshot_identity()?),
             edges: edges.into_iter().collect(),
             body,
         };
-        if super::owner::exact_size(&record)? > data.role.persisted_shell_cap() {
+        if super::owner::exact_size(&record)? > data.sizing.limits()?.shell_cap() {
             return Err(Error::Capacity("persisted owner shell"));
         }
         Ok(record)
@@ -274,19 +278,17 @@ impl StoredOwnerRecord {
         if reference.byte_length > expected_role.persisted_shell_cap() {
             return Err(Error::Capacity("persisted owner shell"));
         }
-        let reservation = pool.admit(expected_role)?;
-        let window = reservation.workspace()?;
+        let window = pool.workspace(expected_role)?;
         let record = store
             .read_record::<Self>(reference)
             .map_err(store_error)?
             .take();
-        record.resolve_reserved(
-            store,
-            expected_role,
-            reservation,
-            window,
-            expected_role.bounds(),
-        )
+        if record.role != expected_role || record.sizing.kind.role() != expected_role {
+            return Err(Error::Reservation);
+        }
+        let reservation = pool.admit_sized(record.sizing)?;
+        let bounds = reservation.limits().bounds;
+        record.resolve_reserved(store, expected_role, reservation, window, bounds)
     }
     #[cfg(all(test, target_os = "linux"))]
     pub(super) fn resolve(
@@ -298,15 +300,10 @@ impl StoredOwnerRecord {
         if self.role != expected_role {
             return Err(Error::Reservation);
         }
-        let reservation = pool.admit(self.role)?;
+        let reservation = pool.admit_sized(self.sizing)?;
+        let bounds = reservation.limits().bounds;
         let window = reservation.workspace()?;
-        self.resolve_reserved(
-            store,
-            expected_role,
-            reservation,
-            window,
-            expected_role.bounds(),
-        )
+        self.resolve_reserved(store, expected_role, reservation, window, bounds)
     }
     #[expect(
         clippy::too_many_lines,
@@ -323,18 +320,34 @@ impl StoredOwnerRecord {
         if self.role != expected_role {
             return Err(Error::Reservation);
         }
+        if reservation.sizing() != self.sizing {
+            return Err(Error::InvalidRecord);
+        }
         self.validate(store.limits()).map_err(store_error)?;
         let typed = kinewright_core::undo::payload_memory_bound(self.body.get().as_bytes())
             .map_err(|_| Error::Capacity("owner decode"))?;
         if typed
             .checked_add(self.body.get().len() as u64)
-            .is_none_or(|n| n > self.role.envelope().workspace)
+            .is_none_or(|n| n > reservation.limits().envelope.workspace)
         {
             return Err(Error::Capacity("owner decode"));
         }
         let body = self.decode_body()?;
         let baseline = store.document(&self.baseline)?;
+        if kinewright_core::undo::document_capacity_bytes(&baseline)? > bounds.document_live_bytes {
+            return Err(Error::History(
+                kinewright_core::undo::Error::DocumentCapacity,
+            ));
+        }
+        // Check each decoded object before loading the next. Record validation
+        // installs the baseline's canonical allocation shape once, after this
+        // raw ingress has released its store body.
         let document = store.document(&self.document)?;
+        if kinewright_core::undo::document_capacity_bytes(&document)? > bounds.document_live_bytes {
+            return Err(Error::History(
+                kinewright_core::undo::Error::DocumentCapacity,
+            ));
+        }
         let mut expected = std::collections::BTreeSet::new();
         for (_, inputs) in &body.origins {
             expected.extend(inputs.iter().cloned());
@@ -401,6 +414,7 @@ impl StoredOwnerRecord {
         };
         let data = SnapshotData {
             role: self.role,
+            sizing: self.sizing,
             fold_frontier: body.fold_frontier,
             terminal_facts: body.terminal_facts,
             history,
@@ -445,12 +459,19 @@ impl BundleRecord for StoredOwnerRecord {
         compact_decode_charge(bytes)
     }
     fn validate(&self, _limits: &StorageLimits) -> Result<(), BundleError> {
+        let limits = self
+            .sizing
+            .limits()
+            .map_err(|_| BundleError::Capacity("creation sizing"))?;
+        if self.sizing.kind.role() != self.role {
+            return Err(BundleError::Corrupt("creation sizing role".into()));
+        }
         if self.baseline.byte_length > self.role.bounds().document_bytes
             || self.document.byte_length > self.role.bounds().document_bytes
         {
             return Err(BundleError::Capacity("owner document edge"));
         }
-        if self.body.get().len() as u64 > self.role.persisted_body_cap() {
+        if self.body.get().len() as u64 > limits.body_cap() {
             return Err(BundleError::Capacity("persisted owner body"));
         }
         if self.baseline.record_kind != RecordKind::Document
@@ -473,6 +494,7 @@ pub(crate) fn compact_decode_charge(bytes: &[u8]) -> Result<u64, BundleError> {
     #[derive(Deserialize)]
     struct Header {
         role: Role,
+        sizing: super::CreationSizing,
         edges: Count,
         #[serde(default)]
         body: serde::de::IgnoredAny,
@@ -505,7 +527,14 @@ pub(crate) fn compact_decode_charge(bytes: &[u8]) -> Result<u64, BundleError> {
     let header: Header =
         serde_json::from_slice(bytes).map_err(|e| BundleError::Corrupt(e.to_string()))?;
     let _ = header.body;
-    if bytes.len() as u64 > header.role.persisted_shell_cap() {
+    let limits = header
+        .sizing
+        .limits()
+        .map_err(|_| BundleError::Capacity("creation sizing"))?;
+    if header.sizing.kind.role() != header.role {
+        return Err(BundleError::Corrupt("creation sizing role".into()));
+    }
+    if bytes.len() as u64 > limits.shell_cap() {
         return Err(BundleError::Capacity("persisted owner shell"));
     }
     (bytes.len() as u64)

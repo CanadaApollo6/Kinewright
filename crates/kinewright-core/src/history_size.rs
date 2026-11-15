@@ -36,7 +36,7 @@ pub(crate) fn payload_memory_bound(bytes: &[u8]) -> Result<u64, HistoryError> {
                 .0
                 .get()
                 .checked_add(amount)
-                .filter(|value| *value <= 64 << 20)
+                .filter(|value| *value <= crate::undo::DECODED_PAYLOAD_BYTES)
                 .ok_or_else(|| E::custom("history payload capacity"))?;
             self.0.set(next);
             Ok(())
@@ -89,7 +89,7 @@ pub(crate) fn payload_memory_bound(bytes: &[u8]) -> Result<u64, HistoryError> {
     }
     let initial = (bytes.len() as u64)
         .checked_mul(2)
-        .filter(|value| *value <= 64 << 20)
+        .filter(|value| *value <= crate::undo::DECODED_PAYLOAD_BYTES)
         .ok_or(HistoryError::Capacity)?;
     let charge = Cell::new(initial);
     let mut parser = serde_json::Deserializer::from_slice(bytes);
@@ -627,6 +627,7 @@ pub(crate) struct ReplayBudget {
     input: u64,
     identities: u64,
     dynamic_peak: u64,
+    kernel_peak: u64,
 }
 impl ReplayBudget {
     /// A streaming replay owns one scratch document, not retained boundary snapshots.
@@ -637,6 +638,7 @@ impl ReplayBudget {
             input: 0,
             identities: 0,
             dynamic_peak: 0,
+            kernel_peak: 0,
         };
         budget.check(0)?;
         Ok(budget)
@@ -657,6 +659,11 @@ impl ReplayBudget {
             self.dynamic_peak,
         ])?;
         sum([raw, raw.div_ceil(10)])
+    }
+    /// Kernel scratch alone, so a later one-batch merge adds all observations
+    /// exactly once instead of counting the largest step's observations twice.
+    pub(crate) fn kernel_peak_with_margin(&self) -> Result<u64, HistoryError> {
+        sum([self.kernel_peak, self.kernel_peak.div_ceil(10)])
     }
     /// A private, already-margined step peak is recomputed at admission/open.
     /// Add the current replay's staged documents and metadata without applying
@@ -687,20 +694,25 @@ impl ReplayBudget {
             input: overhead,
             identities: 0,
             dynamic_peak: 0,
+            kernel_peak: 0,
         };
         budget.documents = transport_document_bytes(baseline)?;
         budget.check(0)?;
         Ok(budget)
     }
     fn check(&mut self, additional: u64) -> Result<(), HistoryError> {
-        self.dynamic_peak =
+        let kernel_peak = self.kernel_peak.max(sum([self.documents, additional])?);
+        let dynamic_peak =
             self.dynamic_peak
                 .max(sum([self.documents, self.identities, additional])?);
-        let bytes = sum([self.input, self.dynamic_peak])?;
+        let bytes = sum([self.input, dynamic_peak])?;
         let bytes = sum([bytes, bytes.div_ceil(10)])?;
         if bytes > self.limit {
             return Err(HistoryError::Capacity);
         }
+        // A rejected conservative estimate must not poison a tighter retry.
+        self.kernel_peak = kernel_peak;
+        self.dynamic_peak = dynamic_peak;
         Ok(())
     }
     pub(crate) fn extend_input(

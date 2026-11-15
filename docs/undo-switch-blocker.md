@@ -1,12 +1,11 @@
 # H2b merge-budget boundaries
 
-Ruling 6 replaces the earlier fixed-per-role reservation proposal with creation
-sizing. The current scope boundary is documented in
-[Creation sizing](undo-creation-sizing.md): Ordinary captures/replacement opens
-need different lease ownership, and a live RunCandidate exists before its
-frozen input. Stored records also lack immutable creation-sizing inputs. Those
-changes have not been implemented under the constructor/capture/open-only
-scope. Production profiles and callers remain unchanged.
+Ruling 7 authorizes the creation descriptor, separate live and staging Candidate
+kinds, full Ordinary capture leases and the 1,024 MiB accounting ceiling. The
+implementation and its qualification are in
+[Creation sizing](undo-creation-sizing.md). These replace the earlier sizing
+stops recorded below. Product callers still use the old history until the H2b
+switch commits.
 
 The [earlier size measurements](undo-merge-limits.md) and the original diagnostic
 below are retained. The latter remains the first required acceptance case when

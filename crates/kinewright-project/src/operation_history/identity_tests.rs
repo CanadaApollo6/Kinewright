@@ -26,7 +26,7 @@ fn different(base: &OwnerSnapshot, changed: OwnerSnapshot, name: &str) {
 }
 #[test]
 fn owner_identity_binds_valid_origin_and_seed_with_core_fixed() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut owner = make(&pool, Role::Task, clip_document());
     let track = owner.history().document().tracks[0].id;
     owner
@@ -57,7 +57,7 @@ fn owner_identity_binds_valid_origin_and_seed_with_core_fixed() {
 }
 #[test]
 fn owner_identity_binds_transition_direction_with_core_fixed() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut owner = make(&pool, Role::Task, document());
     owner.execute(remove(), origin(2), vec![], None).unwrap();
     owner
@@ -74,7 +74,7 @@ fn owner_identity_binds_transition_direction_with_core_fixed() {
 }
 #[test]
 fn owner_identity_binds_fold_fact_with_core_fixed() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut snapshots = Vec::new();
     for coalesced in [false, true] {
         let bounds = RoleBounds {
@@ -132,7 +132,7 @@ fn owner_identity_binds_fold_fact_with_core_fixed() {
 }
 #[test]
 fn owner_identity_binds_role_with_core_fixed() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let task = make(&pool, Role::Task, document());
     let candidate = make(&pool, Role::Candidate, document());
     different(

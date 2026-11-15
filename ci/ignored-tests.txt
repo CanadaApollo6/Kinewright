@@ -226,3 +226,6 @@ history_fix2_cost history_fix2_startup_sample crates/kinewright-agent/tests/hist
 history_fix2_cost history_fix2_edit_and_save_sample crates/kinewright-agent/tests/history_fix2_cost.rs linux on-demand # Debug manual admission and changed publication timing at 1000 and 12000 edits
 manual_history_capacity manual_history_heavy_copy_capacity_census crates/kinewright-project/tests/manual_history_capacity.rs linux on-demand # Exact ordinary heavy-copy peak and largest accepted fanout measurement
 kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_medium_run_keeps_approvals_stop_and_recovery_bounded crates/kinewright-agent/src/writer_host/c5e_tests.rs linux on-demand # 128-approval full-tail qualification exceeds the 600-second slow process deadline
+
+kinewright_project operation_history::sizing_tests::two_thousand_four_track_removals_fit_one_task_and_its_merges crates/kinewright-project/src/operation_history/sizing_tests.rs any on-demand  # release qualification of the fixed 2000-removal task and both merge legs
+kinewright_project operation_history::stored::codec_tests::spare_baseline_capacity_preserves_save_open_and_fresh_merge_fit crates/kinewright-project/src/operation_history/stored_codec_tests.rs any on-demand  # release qualification of baseline allocation shape across a long split stream

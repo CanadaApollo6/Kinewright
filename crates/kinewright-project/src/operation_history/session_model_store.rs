@@ -111,9 +111,9 @@ impl ModelStore for MemoryStore {
     }
     fn load(&self, reference: &ObjectRef, pool: &HistoryPool) -> ValidatedOwnerSnapshot {
         assert!(reference.byte_length <= Role::Ordinary.persisted_shell_cap());
-        let reservation = pool.admit(Role::Ordinary).unwrap();
-        let window = reservation.workspace().unwrap();
+        let window = pool.workspace(Role::Ordinary).unwrap();
         let record: StoredOwnerRecord = serde_json::from_slice(self.bytes(reference)).unwrap();
+        let reservation = pool.admit_sized(record.sizing).unwrap();
         let identity: [u8; 64] = record.identity.as_bytes().try_into().unwrap();
         let validated = record
             .resolve_reserved(self, Role::Ordinary, reservation, window, bounds())
@@ -233,13 +233,15 @@ impl ModelStore for NativeStore {
         // Native ingress retains the reserve-before-read rule. Only the
         // test's lower executor cap differs from StoredOwnerRecord::read.
         assert!(reference.byte_length <= Role::Ordinary.persisted_shell_cap());
-        let reservation = pool.admit(Role::Ordinary).unwrap();
-        let window = reservation.workspace().unwrap();
-        self.session
+        let window = pool.workspace(Role::Ordinary).unwrap();
+        let record = self
+            .session
             .store()
             .read_record::<StoredOwnerRecord>(reference)
             .unwrap()
-            .take()
+            .take();
+        let reservation = pool.admit_sized(record.sizing).unwrap();
+        record
             .resolve_reserved(
                 self.session.store(),
                 Role::Ordinary,

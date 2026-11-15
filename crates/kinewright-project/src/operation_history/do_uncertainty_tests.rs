@@ -27,7 +27,7 @@ fn make(pool: &HistoryPool) -> OwnerHistory {
 }
 #[test]
 fn sibling_folded_do_with_no_approval_fact_is_uncertain() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let bounds = kinewright_core::undo::RoleBounds {
         step_cap: 1,
         ..Role::Ordinary.bounds()
@@ -111,7 +111,7 @@ fn sibling_folded_do_with_no_approval_fact_is_uncertain() {
 
 #[test]
 fn future_epoch_absent_from_capture_is_certainly_missing() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut owner = make(&pool);
     let selected = owner.capture().unwrap();
     owner
@@ -133,7 +133,7 @@ fn future_epoch_absent_from_capture_is_certainly_missing() {
 }
 #[test]
 fn same_epoch_after_frontier_and_counter_is_certainly_missing() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut owner = make(&pool);
     owner.execute(marker(1), origin(2), vec![], None).unwrap();
     owner.execute(marker(2), origin(3), vec![], None).unwrap();
@@ -154,7 +154,7 @@ fn same_epoch_after_frontier_and_counter_is_certainly_missing() {
 }
 #[test]
 fn older_epoch_without_snapshot_evidence_is_uncertain() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut owner = make(&pool);
     let mut sibling = make(&pool);
     // The sibling abandons epoch zero; the record deliberately cannot prove
@@ -198,7 +198,7 @@ fn older_epoch_without_snapshot_evidence_is_uncertain() {
 
 #[test]
 fn selected_fold_fact_with_other_digest_discards_only_the_destination_approval() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut destination = make(&pool);
     let mut sibling = make(&pool);
     let a = approval();
@@ -269,7 +269,7 @@ fn selected_fold_fact_with_other_digest_discards_only_the_destination_approval()
 
 #[test]
 fn selected_matching_fold_fact_is_certainly_kept() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut destination = make(&pool);
     let mut sibling = make(&pool);
     sibling
@@ -295,7 +295,7 @@ fn selected_matching_fold_fact_is_certainly_kept() {
 #[test]
 fn folded_sibling_payload_collision_preserves_exact_transition_evidence_in_both_digest_orders() {
     for swapped in [false, true] {
-        let pool = HistoryPool::new(PoolLimits::default());
+        let pool = super::tests::story_pool();
         let mut destination = make(&pool);
         let mut sibling = make(&pool);
         let payload = |extra: bool| {

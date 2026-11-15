@@ -19,7 +19,7 @@ fn snapshot_restores_the_same_approved_command_after_discard() {
     old.request(Command::Undo).unwrap();
     old.request(remove()).unwrap();
     old.restore_history(selected).unwrap();
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut owner = history(&pool);
     let a = owner
         .execute(remove(), origin(2), vec![], Some(approval()))
@@ -86,7 +86,7 @@ fn snapshot_restores_the_same_approved_command_to_redo() {
     let selected = old.export_history().unwrap();
     old.request(Command::Redo).unwrap();
     old.restore_history(selected).unwrap();
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut owner = history(&pool);
     let a = owner
         .execute(remove(), origin(2), vec![], Some(approval()))
@@ -121,7 +121,7 @@ fn snapshot_restores_the_same_approved_command_to_redo() {
 }
 #[test]
 fn conflicting_payload_install_is_typed_and_atomic() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut owner = history(&pool);
     let mut other = history(&pool);
     owner
@@ -161,7 +161,7 @@ fn conflicting_payload_install_is_typed_and_atomic() {
 }
 #[test]
 fn malformed_owner_capture_refusals_leave_destination_unchanged() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut owner = history(&pool);
     owner
         .execute(remove(), origin(2), vec![], Some(approval()))
@@ -242,7 +242,7 @@ fn malformed_owner_capture_refusals_leave_destination_unchanged() {
 
 #[test]
 fn origin_spare_capacity_is_charged_before_commit() {
-    let mut value = String::with_capacity(1 << 20);
+    let mut value = String::with_capacity((3 << 20) + 8192);
     value.push_str("00000000000000000000000000000002");
     let branch = serde_json::from_value(serde_json::Value::String(value)).unwrap();
     let creation = CreationOrigin {
@@ -250,10 +250,10 @@ fn origin_spare_capacity_is_charged_before_commit() {
         batch: origin(2).batch,
     };
     assert!(
-        creation.branch.allocated_capacity() >= 1 << 20,
+        creation.branch.allocated_capacity() >= (3 << 20) + 8192,
         "RESERVED_ORIGIN_FIXTURE"
     );
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut owner = OwnerHistory::new(
         &pool,
         Role::Candidate,
@@ -298,7 +298,7 @@ fn old_answer(old: &kinewright_core::Core) -> ApprovalAnswer {
 
 #[test]
 fn owner_role_policy_and_fold_frontier_follow_accepted_position_order() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let mut called = false;
     assert!(
         matches!(

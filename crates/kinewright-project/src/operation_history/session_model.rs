@@ -153,6 +153,7 @@ struct Coverage {
     baseline_lineage: usize,
     split_ancestry: usize,
     redo_payloads: usize,
+    ordinary_lease_peak: usize,
 }
 impl Coverage {
     fn accumulate(&mut self, other: &Self) {
@@ -175,10 +176,12 @@ impl Coverage {
         self.baseline_lineage += other.baseline_lineage;
         self.split_ancestry += other.split_ancestry;
         self.redo_payloads += other.redo_payloads;
+        self.ordinary_lease_peak = self.ordinary_lease_peak.max(other.ordinary_lease_peak);
     }
 }
 struct Session<S> {
-    pool: HistoryPool,
+    gui_pool: HistoryPool,
+    writer_pool: HistoryPool,
     gui: OwnerHistory,
     writer: OwnerHistory,
     store: S,
@@ -193,9 +196,10 @@ struct Session<S> {
 }
 impl<S: ModelStore> Session<S> {
     fn new(mut store: S) -> Self {
-        let pool = HistoryPool::new(PoolLimits::default());
-        let gui = fresh(&pool);
-        let writer = fresh(&pool);
+        let gui_pool = HistoryPool::new(PoolLimits::default());
+        let writer_pool = HistoryPool::new(PoolLimits::default());
+        let gui = fresh(&gui_pool);
+        let writer = fresh(&writer_pool);
         let snapshot = store.save(&writer.capture().unwrap());
         let installed = writer.capture().unwrap().snapshot_identity().unwrap();
         store.publish(&Root {
@@ -207,7 +211,8 @@ impl<S: ModelStore> Session<S> {
             authority: 1,
         });
         Self {
-            pool,
+            gui_pool,
+            writer_pool,
             gui,
             writer,
             store,
@@ -291,7 +296,7 @@ impl<S: ModelStore> Session<S> {
                     self.coverage.before_publish += 1;
                     self.writer = self
                         .store
-                        .load(&self.store.root().snapshot, &self.pool)
+                        .load(&self.store.root().snapshot, &self.writer_pool)
                         .open()
                         .unwrap();
                     break;
@@ -345,7 +350,12 @@ impl<S: ModelStore> Session<S> {
     }
     fn assert_equal(&mut self) {
         let root = self.store.root();
-        let opened = self.store.load(&root.snapshot, &self.pool).open().unwrap();
+        let verification_pool = HistoryPool::new(PoolLimits::default());
+        let opened = self
+            .store
+            .load(&root.snapshot, &verification_pool)
+            .open()
+            .unwrap();
         {
             let baseline = opened.boundary(0).unwrap();
             self.coverage.baseline_lineage +=
@@ -357,24 +367,28 @@ impl<S: ModelStore> Session<S> {
             assert_same_values(owner, &opened);
         }
         self.assert_acknowledged();
+        for pool in [&self.gui_pool, &self.writer_pool, &verification_pool] {
+            let peak = pool.lease_counts(Role::Ordinary).unwrap().1;
+            self.coverage.ordinary_lease_peak = self.coverage.ordinary_lease_peak.max(peak);
+            assert!(peak <= 2, "SESSION_ORDINARY_LEASE_PEAK_AT_MOST_TWO");
+        }
     }
-    fn cold_open(&self, reference: &ObjectRef) -> OwnerHistory {
-        let validated = self.store.load(reference, &self.pool);
-        // load verifies this identity against the shell written before Save.
+    fn cold_open(&mut self, reference: &ObjectRef) {
+        let validated = self.store.load(reference, &self.writer_pool);
         let before_save = validated.identity().digest();
-        let opened = validated.open().unwrap();
+        // Replacing the actor releases its old lease before taking a new capture.
+        self.writer = validated.open().unwrap();
         assert_eq!(
-            opened.capture().unwrap().snapshot_identity().unwrap(),
+            self.writer.capture().unwrap().snapshot_identity().unwrap(),
             before_save,
             "SESSION_IDENTITY_AFTER_OPEN_EQUALS_BEFORE_SAVE"
         );
-        opened
     }
     fn restart(&mut self, handoff: bool) {
         let mut root = self.store.cold_root();
         // Reopening committed history preserves the epoch. Authority rotates
         // independently: replay is only the suffix with no committed receipt.
-        self.writer = self.cold_open(&root.snapshot);
+        self.cold_open(&root.snapshot);
         self.authority += 1;
         root.authority = self.authority;
         self.store.publish(&root);
@@ -430,10 +444,10 @@ impl<S: ModelStore> Session<S> {
     }
     fn install(&mut self, snapshot: &ObjectRef) {
         self.gui
-            .install_snapshot(self.store.load(snapshot, &self.pool))
+            .install_snapshot(self.store.load(snapshot, &self.gui_pool))
             .unwrap();
         self.writer
-            .install_snapshot(self.store.load(snapshot, &self.pool))
+            .install_snapshot(self.store.load(snapshot, &self.writer_pool))
             .unwrap();
         assert!(
             self.gui
@@ -512,7 +526,7 @@ impl<S: ModelStore> Session<S> {
             }
         }
         for checkpoint in &self.checkpoints {
-            let _ = self.store.load(&checkpoint.snapshot, &self.pool);
+            let _ = self.store.load(&checkpoint.snapshot, &self.writer_pool);
         }
         self.coverage.collections += 1;
     }

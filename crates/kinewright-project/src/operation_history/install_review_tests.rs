@@ -83,9 +83,10 @@ pub(super) fn install_line(
     bytes: &[u8],
     selected: u64,
 ) {
+    let data: super::snapshot::SnapshotData = serde_json::from_slice(bytes).unwrap();
     let snapshot = OwnerSnapshot {
-        data: serde_json::from_slice(bytes).unwrap(),
-        reservation: pool.admit(Role::Ordinary).unwrap(),
+        reservation: pool.admit_sized(data.sizing).unwrap(),
+        data,
     };
     owner
         .install_snapshot(snapshot.validate_bounded(bounds()).unwrap())
@@ -130,7 +131,7 @@ pub(super) fn install_line(
 }
 #[test]
 fn folded_sibling_transition_approvals_survive_repeated_installs() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let captures = sibling_captures(&pool);
     let mut owner = make(&pool);
     for selected in [0_usize, 1, 0, 1] {
@@ -140,7 +141,7 @@ fn folded_sibling_transition_approvals_survive_repeated_installs() {
 }
 #[test]
 fn surplus_resources_are_refused_before_the_install_token() {
-    let pool = HistoryPool::new(PoolLimits::default());
+    let pool = super::tests::story_pool();
     let owner = make(&pool);
     let before = owner.capture().unwrap().snapshot_identity().unwrap();
     let mut captured = owner.capture().unwrap();

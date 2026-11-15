@@ -29,6 +29,7 @@ impl SnapshotData {
         #[derive(Serialize)]
         struct Owner<'a> {
             role: super::Role,
+            sizing: super::CreationSizing,
             fold_frontier: Option<kinewright_core::undo::CommandKey>,
             #[serde(with = "super::transition::terminal_wire")]
             terminal_facts: &'a super::transition::TerminalFacts,
@@ -41,6 +42,7 @@ impl SnapshotData {
         }
         let owner = Owner {
             role: self.role,
+            sizing: self.sizing,
             fold_frontier: self.fold_frontier,
             terminal_facts: &self.terminal_facts,
             seeds: &self.seeds,

@@ -9,6 +9,8 @@ mod ledger;
 mod lineage;
 mod owner;
 mod reservation;
+mod sizing;
+pub use sizing::{CreationKind, CreationSizing, FixedLimits};
 mod resources;
 mod snapshot;
 mod transition;
@@ -44,11 +46,17 @@ pub enum Error {
     InvalidRecord,
     IdentityMismatch,
     Reservation,
+    PoolFull(Role),
     Store(String),
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::PoolFull(Role::Ordinary) => f.write_str("History memory is in use. Finish saving or close a project, then retry."),
+            Self::PoolFull(Role::Task) => f.write_str("History memory is in use. Finish a task so it can be checkpointed and released, then retry."),
+            Self::PoolFull(Role::Candidate) => f.write_str("History memory is in use. Finish and checkpoint a run so its candidate can be released, then retry."),
+            _ => write!(f, "{self:?}"),
+        }
     }
 }
 impl std::error::Error for Error {}
@@ -106,3 +114,9 @@ mod fold_tests;
 
 #[cfg(test)]
 mod install_review_tests;
+
+#[cfg(test)]
+mod sizing_tests;
+
+#[cfg(test)]
+mod metadata_replay_tests;

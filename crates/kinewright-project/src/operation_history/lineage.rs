@@ -199,10 +199,17 @@ impl Lineage {
                     as u64,
             )
             .ok_or(Error::Capacity("lineage"))?;
+        // The Vec slots above already include each inline Clip. Add only
+        // its separately owned buffers here, alongside the two occurrence IDs.
         for (child, parent, clip) in &self.split_ancestry {
             bytes = bytes
                 .checked_add(id_bytes(child) + id_bytes(parent))
-                .and_then(|n| n.checked_add(kinewright_core::undo::clip_capacity_bytes(clip).ok()?))
+                .and_then(|n| {
+                    n.checked_add(
+                        kinewright_core::undo::clip_capacity_bytes(clip).ok()?
+                            - std::mem::size_of::<Clip>() as u64,
+                    )
+                })
                 .ok_or(Error::Capacity("lineage"))?;
         }
         Ok(bytes)
@@ -217,17 +224,31 @@ impl Lineage {
         let ids =
             (origin.branch.allocated_capacity() + origin.batch.allocated_capacity()) as u64 + 64;
         let mut growth = 0_u64;
+        let mut added_ancestry = 0_usize;
         for effect in effects {
-            // Each inserted BTree entry may allocate a complete eleven-slot
-            // node; ancestry may double its inline array while retaining clips.
+            // BTree entries are already charged a complete node each; adding
+            // an entry does not double the entire existing occurrence map.
             growth = growth.saturating_add(effect.created.len() as u64 * (2048 + ids));
+            added_ancestry = added_ancestry.saturating_add(effect.split_results.len());
             for clip in &effect.split_results {
                 growth = growth.saturating_add(
-                    kinewright_core::undo::clip_capacity_bytes(clip)? + 2 * ids + 2048,
+                    kinewright_core::undo::clip_capacity_bytes(clip)?
+                        - std::mem::size_of::<Clip>() as u64
+                        + 2 * ids
+                        + 2048,
                 );
             }
         }
-        if current.saturating_mul(2).saturating_add(growth) > cap {
+        let needed = self.split_ancestry.len().saturating_add(added_ancestry);
+        let mut capacity = self.split_ancestry.capacity();
+        while capacity < needed {
+            capacity = capacity.saturating_mul(2).max(4);
+        }
+        growth = growth.saturating_add(
+            (capacity - self.split_ancestry.capacity()) as u64
+                * std::mem::size_of::<(OccurrenceId, OccurrenceId, Clip)>() as u64,
+        );
+        if current.saturating_add(growth) > cap {
             return Err(Error::Capacity("lineage"));
         }
         self.apply(origin, effects)?;

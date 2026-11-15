@@ -403,3 +403,15 @@ These are hash-only costs on the 2,000-step heavy fixture, excluding capture all
 The 2,000-command shell is 510,875 bytes (255.4375/command), decode/store charge 515,483 bytes. The measured attached history charges 8,982,538 bytes. [Role profiles](measurements/undo-owner-roles-04660dd3.json): Ordinary 8,980,762 retained bytes / 1,433,200 owner bytes; Task 8,856,298 / 1,308,736; Candidate 341,824 / 194,624 for the small 400-command fixture (heavy is refused). The Ordinary derived indexes add 124,464 charged bytes relative to Task's immutable baseline on this fixture.
 
 Task's unchanged arithmetic is R = (2 + 4) × 4 + 8 + 4 = 36 MiB < 41 MiB native retained cap; W = 64 MiB, peak 100 MiB. Do entries charge 1,280 + target/ref capacity (normally 1,360); transition entries charge 1,280 + ref capacity (normally 1,344), sharing the 256 cap. The 256-Do calculation is 358,000 owner bytes = 348,160 approvals + 9,024 baseline + 464 live origin + 352 retained spare; the record is unchanged at 130,576 bytes and its decode forecast at 4,467,720. The 256-transition literal delta is 344,064 bytes. Candidate remains R = 2 MiB, W = 16 MiB with its own earlier 12.946 MiB subtotal-plus-slack derivation.
+
+
+### H2b creation-sized admission layout
+
+The creation-sized profiles add one recorded kernel-scratch peak to each step,
+so `Step` is now 112 bytes (`StepCommand` 72, `Operation` 160, `Clip` 240,
+identity effect 312, command effects 40). The 104-byte Step above belongs to
+the preceding build. Decoded step admission charges both inline slots; the
+2,000-removal qualification therefore pays 32,000 more bytes than the preceding
+20,433,822-byte measurement. The merged single batch pays 16 more bytes.
+Kernel validation, duration and identity passes remain unchanged. These are
+admission layout numbers; no new product-path latency measurement is claimed.

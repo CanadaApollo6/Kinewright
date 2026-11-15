@@ -13,9 +13,13 @@ mod size;
 use capacity::Heap;
 pub use metrics::PhaseCounters;
 use size::DocumentBound;
+mod merge;
 mod record;
 use cache::Cache;
 pub use record::{Record, ValidatedSnapshot};
+
+/// Structural JSON decoder ceiling, also enforced by live owner forecasts.
+pub const DECODED_PAYLOAD_BYTES: u64 = 64 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,40 +46,46 @@ pub struct RoleBounds {
 }
 
 impl RoleBounds {
-    /// Proposed ordinary profile: `Fold`, with a 32 MiB retained envelope.
-    /// Owners reserve their ledgers and vacant stack storage separately.
+    /// A measurement or caller may lower fixed bounds, never enlarge its lease.
+    #[must_use]
+    pub fn intersect(self, maximum: Self) -> Self {
+        Self {
+            operation_bytes: self.operation_bytes.min(maximum.operation_bytes),
+            decoded_history_bytes: self
+                .decoded_history_bytes
+                .min(maximum.decoded_history_bytes),
+            step_cap: self.step_cap.min(maximum.step_cap),
+            checkpoint_documents: self.checkpoint_documents.min(maximum.checkpoint_documents),
+            replay_workspace: self.replay_workspace.min(maximum.replay_workspace),
+            document_live_bytes: self.document_live_bytes.min(maximum.document_live_bytes),
+            document_bytes: self.document_bytes.min(maximum.document_bytes),
+        }
+    }
+    /// Product profile. Owners add their independently accounted 32 MiB allowance.
     pub const ORDINARY: Self = Self {
-        operation_bytes: 512 << 10,
+        operation_bytes: 1 << 20,
         step_cap: 16_384,
         checkpoint_documents: 4,
-        replay_workspace: 32 << 20,
-        document_live_bytes: 7 << 19,
-        document_bytes: 512 << 10,
-        decoded_history_bytes: 6 << 20,
+        replay_workspace: 168 << 20,
+        document_live_bytes: 8 << 20,
+        document_bytes: 8 << 20,
+        decoded_history_bytes: 24 << 20,
     };
-    /// Proposed task profile: `NeverFold`. Below the current 41 MiB resident cap.
+    /// Creation sizing lowers document room; history room is fixed for life.
     pub const TASK: Self = Self {
-        operation_bytes: 256 << 10,
         step_cap: 4096,
-        checkpoint_documents: 4,
-        replay_workspace: 64 << 20,
-        document_live_bytes: 4 << 20,
-        document_bytes: 2 << 20,
-        decoded_history_bytes: 8 << 20,
+        checkpoint_documents: 1,
+        ..Self::ORDINARY
     };
-    /// Proposed candidate profile: `NeverFold`, within the current 2 MiB cap.
+    /// Live candidates have task history room; frozen-delta staging may lower it.
     pub const CANDIDATE: Self = Self {
-        operation_bytes: 64 << 10,
-        step_cap: 512,
         checkpoint_documents: 0,
-        replay_workspace: 16 << 20,
-        document_live_bytes: 512 << 10,
-        document_bytes: 64 << 10,
-        decoded_history_bytes: 512 << 10,
+        ..Self::TASK
     };
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Charge {
     pub encoded: u64,
     pub decoded: u64,
@@ -179,6 +189,7 @@ pub(crate) struct StepCharge {
     operations: Charge,
     effects_bytes: u64,
     replay_peak: u64,
+    merge_scratch: u64,
     key_bytes: u64,
     after: DocumentBound,
     validated: bool,
@@ -305,6 +316,7 @@ pub enum PreparedError<E> {
 pub fn document_capacity_bytes(document: &Document) -> Result<u64, Error> {
     capacity::document_bytes(document)
 }
+
 impl<E> From<Error> for PreparedError<E> {
     fn from(error: Error) -> Self {
         Self::History(error)
@@ -374,14 +386,16 @@ pub struct History {
     cache: Cache,
     recorder: Option<Vec<Operation>>,
     recorder_bytes: u64,
+    merge_guard: Option<merge::MergeGuard>,
 }
 
 impl History {
     pub fn new(
-        document: Document,
+        document: impl Into<Arc<Document>>,
         policy: RetentionPolicy,
         bounds: RoleBounds,
     ) -> Result<Self, Error> {
+        let document = document.into();
         document.validate().map_err(|error| {
             Error::Batch(BatchError::OperationFailed {
                 op_number: 1,
@@ -389,7 +403,13 @@ impl History {
             })
         })?;
         let document_bound = DocumentBound::measure(&document, bounds)?;
-        let document = Arc::new(document);
+        // A long-lived initial baseline may need replay padding. Preserve all
+        // supplied spare capacity; never add a normalisation copy to an edit.
+        let document = if capacity::document_bytes(&document)? < document_bound.live {
+            Arc::new(capacity::padded_baseline(&document))
+        } else {
+            document
+        };
         Ok(Self {
             baseline: Arc::clone(&document),
             baseline_bound: document_bound,
@@ -406,7 +426,22 @@ impl History {
             cache: Cache::new(bounds.checkpoint_documents, bounds.decoded_history_bytes)?,
             recorder: None,
             recorder_bytes: 0,
+            merge_guard: None,
         })
+    }
+    /// Configure the known fresh merge destination at construction/open only.
+    /// The running guard makes admission O(1), independent of retained depth.
+    pub fn with_merge_destination(mut self, input: u64) -> Result<Self, Error> {
+        if self.policy != RetentionPolicy::NeverFold {
+            return Err(Error::InvalidMetadata);
+        }
+        self.merge_guard = Some(merge::MergeGuard::from_steps(
+            input,
+            &self.undo,
+            &self.redo,
+            self.bounds.replay_workspace,
+        )?);
+        Ok(self)
     }
     pub fn with_recorder(
         document: Document,
@@ -728,6 +763,10 @@ impl History {
         summary.after = candidate_bound;
         summary.validated = true;
         summary.key_bytes = key_bytes;
+        let merge_guard = self
+            .merge_guard
+            .map(|guard| guard.after_edit(top, summary, self.bounds.replay_workspace))
+            .transpose()?;
         let accepted = self.position();
         let digest = digest_operations(&operations)?;
         let mut effects = Effects::new(accepted);
@@ -863,6 +902,7 @@ impl History {
             self.baseline_bound = candidate_bound;
         }
         self.undo_charge = retained;
+        self.merge_guard = merge_guard;
         self.position += 1;
         Ok((effects, prepared))
     }
@@ -874,6 +914,10 @@ impl History {
             let (document, bound) = self.replay_to(target)?;
             let mut step = self.undo.pop_back().unwrap();
             effects.to_redo.extend(step.keys());
+            if let Some(guard) = &mut self.merge_guard {
+                guard.undo_effects -= step.charge.effects_bytes;
+                guard.redo_effects += step.charge.effects_bytes;
+            }
             self.undo_charge.subtract(step.charge.operations);
             close_key(&mut step);
             self.redo_charge = self
@@ -903,6 +947,10 @@ impl History {
             let bound = step.charge.after;
             let mut step = self.redo.pop().unwrap();
             effects.to_undo.extend(step.keys());
+            if let Some(guard) = &mut self.merge_guard {
+                guard.redo_effects -= step.charge.effects_bytes;
+                guard.undo_effects += step.charge.effects_bytes;
+            }
             self.redo_charge.subtract(step.charge.operations);
             self.undo_charge = self
                 .undo_charge
@@ -1038,7 +1086,17 @@ fn apply_mode(
     }
     let mut identities = Vec::with_capacity(if observe { operations.len() } else { 0 });
     for (index, operation) in operations.iter().enumerate() {
-        let growth = size::reservation(document, operation, *size, budget)?;
+        let growth = match size::reservation(document, operation, *size, budget) {
+            Ok(growth) => growth,
+            Err(Error::Capacity) => {
+                // A loose document bound may cross the workspace limit before
+                // the document limit. Tighten at that limit as well; never
+                // refuse a source-proven merge because of spare upper bound.
+                *size = DocumentBound::measure(document, bounds)?;
+                size::reservation(document, operation, *size, budget)?
+            }
+            Err(error) => return Err(error),
+        };
         let effects = if observe {
             crate::operation::apply_batch_observed_in_place(
                 document,
@@ -1069,19 +1127,18 @@ fn apply_mode(
 }
 
 fn observation_bytes(operations: usize) -> Result<u64, Error> {
-    // Include transient observation vectors and the minimum/growth capacities of
-    // Effects vectors. The same charge is reused when admitting future Redo.
+    // apply_mode preallocates exactly N observations. Only one kernel result
+    // Vec (one observation) is transient at a time. CommandEffects and fate
+    // vectors grow geometrically, so reserve four slots per command/container.
     let bytes = operations
-        .checked_mul(std::mem::size_of::<OperationIdentityEffect>())
-        .and_then(|value| {
-            value.checked_add(
-                std::mem::size_of::<CommandEffects>() + 4 * std::mem::size_of::<CommandKey>(),
-            )
-        })
-        .and_then(|value| value.checked_mul(4))
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(std::mem::size_of::<OperationIdentityEffect>()))
+        .and_then(|n| n.checked_add(4 * std::mem::size_of::<CommandEffects>()))
+        .and_then(|n| n.checked_add(16 * std::mem::size_of::<CommandKey>()))
         .ok_or(Error::Capacity)?;
     Ok(bytes as u64)
 }
+
 fn replay_charge(
     previous: StepCharge,
     budget: &ReplayBudget,
@@ -1116,6 +1173,11 @@ fn replay_charge(
             .checked_add(effects)
             .ok_or(Error::Capacity)?,
         replay_peak,
+        merge_scratch: previous.merge_scratch.max(
+            budget
+                .kernel_peak_with_margin()
+                .map_err(|_| Error::Capacity)?,
+        ),
         after: previous.after,
         validated: previous.validated,
     })
@@ -1153,6 +1215,17 @@ fn replay_step(
         }
     }
     Ok(effects)
+}
+/// Exact admission charge for one plain batch, without applying it or copying a document.
+pub fn batch_charge(operations: &[Operation]) -> Result<Charge, Error> {
+    let mut charge = operation_charge(operations)?;
+    charge.decoded = charge
+        .decoded
+        .checked_add(
+            (2 * std::mem::size_of::<StepCommand>() + 2 * std::mem::size_of::<Step>()) as u64,
+        )
+        .ok_or(Error::Capacity)?;
+    Ok(charge)
 }
 fn operation_charge(operations: &[Operation]) -> Result<Charge, Error> {
     operations
@@ -1251,3 +1324,6 @@ mod charge_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod merge_tests;

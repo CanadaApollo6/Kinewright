@@ -50,7 +50,7 @@ impl ValidatedOwnerSnapshot {
             baseline_decode: self.baseline_decode,
             fold_frontier: self.fold_frontier,
             terminal_facts: self.terminal_facts,
-            reservation: self.reservation,
+            reservation: self.reservation.into_core()?,
         })
     }
 }
@@ -58,6 +58,7 @@ impl ValidatedOwnerSnapshot {
 #[serde(deny_unknown_fields)]
 pub(super) struct SnapshotData {
     pub role: Role,
+    pub sizing: super::CreationSizing,
     pub fold_frontier: Option<CommandKey>,
     #[serde(with = "super::transition::terminal_wire")]
     pub terminal_facts: super::transition::TerminalFacts,
@@ -77,6 +78,7 @@ impl OwnerHistory {
         // subsequent edits, folds and installs in the source history.
         let data = SnapshotData {
             role: reservation.role(),
+            sizing: reservation.sizing(),
             fold_frontier: self.fold_frontier,
             terminal_facts: self.terminal_facts.clone(),
             history: self.core.record(),
@@ -234,12 +236,22 @@ impl OwnerHistory {
                 entry.install_epoch = Some(install_epoch);
             }
         }
-        if snapshot.decode_bound > snapshot.reservation.role().envelope().workspace {
+        if snapshot.decode_bound
+            > snapshot
+                .reservation
+                .limits()
+                .envelope
+                .workspace
+                .min(super::stored::DECODE_LIMIT)
+        {
             return Err(Error::Capacity("owner decode"));
         }
-        if snapshot.owner_bytes > snapshot.reservation.role().envelope().owners {
+        if snapshot.owner_bytes > snapshot.reservation.limits().envelope.owners {
             return Err(Error::Capacity("owner metadata"));
         }
+        snapshot
+            .reservation
+            .promote_replacing(Some(&self.reservation))?;
         let position = self.core.install_snapshot(snapshot.core)?;
         self.ledger = snapshot.ledger;
         self.folded_approvals = snapshot.folded_approvals;
@@ -269,7 +281,7 @@ impl OwnerSnapshot {
         Ok(self.identity()?.digest())
     }
     pub fn validate(self) -> Result<ValidatedOwnerSnapshot, Error> {
-        let bounds = self.reservation.role().bounds();
+        let bounds = self.reservation.limits().bounds;
         self.validate_inner(bounds)
     }
     #[cfg(test)]
@@ -292,6 +304,7 @@ impl OwnerSnapshot {
         let _workspace = reservation.workspace()?;
         let SnapshotData {
             role,
+            sizing,
             fold_frontier,
             terminal_facts,
             history,
@@ -301,6 +314,14 @@ impl OwnerSnapshot {
             mut ledger,
             folded_approvals,
         } = data;
+        let limits = sizing.limits()?;
+        if sizing.kind.role() != role
+            || reservation.sizing() != sizing
+            || reservation.limits() != limits
+        {
+            return Err(Error::InvalidRecord);
+        }
+        let bounds = bounds.intersect(limits.bounds);
         ledger.rebuild_indices();
         if !ledger.references_unique()
             || ledger
@@ -341,7 +362,7 @@ impl OwnerSnapshot {
             Some(super::fold::FoldState::new(
                 &seeds,
                 &history.baseline,
-                role.envelope().workspace,
+                limits.envelope.workspace,
             )?)
         } else {
             None
@@ -354,7 +375,7 @@ impl OwnerSnapshot {
                 super::stored::baseline_decode_charge(
                     &seeds,
                     resources.baseline.len(),
-                    role.envelope().workspace,
+                    limits.envelope.workspace,
                 )?,
             )
         };
@@ -371,7 +392,7 @@ impl OwnerSnapshot {
                     first.id,
                     super::stored::key_decode_charge(
                         step.coalesce_key(),
-                        role.envelope().workspace,
+                        limits.envelope.workspace,
                     )?,
                 ))
             })
@@ -427,7 +448,7 @@ impl OwnerSnapshot {
                         entry.target.first_key.epoch == history.epoch && end > history.position
                     })
                 || entry.target.commands
-                    > role.bounds().decoded_history_bytes
+                    > bounds.decoded_history_bytes
                         / (2 * std::mem::size_of::<kinewright_core::undo::StepCommand>() as u64)
             {
                 return Err(Error::InvalidLedger);
@@ -440,7 +461,7 @@ impl OwnerSnapshot {
                 .checked_add(super::transition::TRANSITION_DECODE)
                 .ok_or(Error::Capacity("owner decode"))?;
         }
-        if owner_bytes > role.envelope().owners {
+        if owner_bytes > limits.envelope.owners {
             return Err(Error::Capacity("owner metadata"));
         }
         // Working occurrences follow precisely the same semantic replay as the
@@ -516,7 +537,7 @@ impl OwnerSnapshot {
         let mut owner_error = None;
         let validated = history.validate_observed(
             bounds,
-            role.envelope().owners * 2,
+            limits.envelope.owners * 2,
             |command, effects, document, is_redo| {
                 let outcome = (|| {
                     if is_redo && !entered_redo {
@@ -540,7 +561,7 @@ impl OwnerSnapshot {
                         &command.operations,
                         &origin.creation,
                         &origin.inputs,
-                        role.envelope().workspace,
+                        limits.envelope.workspace,
                     )?
                     .checked_add(key_charges.get(&command.id).copied().unwrap_or(0))
                     .and_then(|n| n.checked_add(payload.len() as u64 * 4096))
@@ -548,13 +569,13 @@ impl OwnerSnapshot {
                     decode_bound = decode_bound
                         .checked_add(decode_charge)
                         .ok_or(Error::Capacity("owner decode"))?;
-                    if decode_bound > role.envelope().workspace {
+                    if decode_bound > limits.envelope.workspace.min(super::stored::DECODE_LIMIT) {
                         return Err(Error::Capacity("owner decode"));
                     }
                     owner_bytes = owner_bytes
                         .checked_add(charge)
                         .ok_or(Error::Capacity("owner metadata"))?;
-                    if owner_bytes > role.envelope().owners {
+                    if owner_bytes > limits.envelope.owners {
                         return Err(Error::Capacity("owner metadata"));
                     }
                     if let Some(entry) = ledger
@@ -631,6 +652,13 @@ impl OwnerSnapshot {
             &folded_approvals,
             fold_frontier,
         )?;
+        let validated = if role != Role::Ordinary
+            && bounds.replay_workspace == super::sizing::WORKSPACE_BYTES
+        {
+            validated.with_merge_destination(super::sizing::MERGE_DESTINATION_INPUT)?
+        } else {
+            validated
+        };
         Ok(ValidatedOwnerSnapshot {
             identity,
             core: validated,

@@ -170,7 +170,7 @@ fn run_seed<S: ModelStore>(seed: u64, length: u64) -> Coverage {
             7 => {
                 session.drain(false, false);
                 let root = session.store.cold_root();
-                session.writer = session.cold_open(&root.snapshot);
+                session.cold_open(&root.snapshot);
                 session.coverage.opens += 1;
                 session.assert_equal();
             }
@@ -259,7 +259,7 @@ pub(super) fn run_range<S: ModelStore>(first: u64, last: u64, length: u64) {
         assert!(count > 0, "SESSION_GRAMMAR_REACHES_{name}");
     }
     println!(
-        "HX_SESSION_MODEL first_seed={first} last_seed={last} seeds={seeds} random_attempts={} primed_transitions={} elapsed_ms={} folds={} restart={} lost_ack={} prepublication_crash={} handoff={} save={} save_as={} rescue={} cold_open={} collect={} approvals={} transition_approvals={} baseline_lineage={} split_ancestry={} redo_payloads={}",
+        "HX_SESSION_MODEL first_seed={first} last_seed={last} seeds={seeds} random_attempts={} primed_transitions={} elapsed_ms={} folds={} restart={} lost_ack={} prepublication_crash={} handoff={} save={} save_as={} rescue={} cold_open={} collect={} approvals={} transition_approvals={} baseline_lineage={} split_ancestry={} redo_payloads={} ordinary_lease_peak={}",
         seeds * length,
         seeds * 2,
         started.elapsed().as_millis(),
@@ -277,7 +277,8 @@ pub(super) fn run_range<S: ModelStore>(first: u64, last: u64, length: u64) {
         totals.transitions,
         totals.baseline_lineage,
         totals.split_ancestry,
-        totals.redo_payloads
+        totals.redo_payloads,
+        totals.ordinary_lease_peak
     );
 }
 
@@ -305,7 +306,7 @@ fn prime_redo_payload<S: ModelStore>(session: &mut Session<S>, seed: u64) {
         });
     }
     session.save(false);
-    session.writer = session.cold_open(&session.store.root().snapshot);
+    session.cold_open(&session.store.root().snapshot);
     session.assert_equal();
     session.collect();
 }

@@ -28,6 +28,7 @@ pub struct ValidatedSnapshot {
     redo_charge: Charge,
     baseline_bound: DocumentBound,
     document_bound: DocumentBound,
+    merge_guard: Option<super::merge::MergeGuard>,
 }
 impl Record {
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
@@ -80,6 +81,12 @@ impl Record {
     ) -> Result<ValidatedSnapshot, Error> {
         self.baseline.validate().map_err(Error::InvalidDocument)?;
         self.document.validate().map_err(Error::InvalidDocument)?;
+        // Charge typed input capacities before installation can compact them.
+        DocumentBound::measure(&self.baseline, bounds)?;
+        self.baseline = Arc::new(super::capacity::compact_baseline(
+            &self.baseline,
+            bounds.document_live_bytes,
+        )?);
         let baseline_bound = DocumentBound::measure(&self.baseline, bounds)?;
         DocumentBound::measure(&self.document, bounds)?;
         if self
@@ -223,6 +230,7 @@ impl Record {
             redo_charge,
             baseline_bound,
             document_bound,
+            merge_guard: None,
         })
     }
 }
@@ -319,6 +327,7 @@ impl History {
         self.undo_charge = snapshot.undo_charge;
         self.redo_charge = snapshot.redo_charge;
         self.cache = cache;
+        self.merge_guard = snapshot.merge_guard;
         Ok(self.position())
     }
 }
@@ -339,6 +348,18 @@ impl Serialize for History {
 }
 
 impl ValidatedSnapshot {
+    pub fn with_merge_destination(mut self, input: u64) -> Result<Self, Error> {
+        if self.record.policy != RetentionPolicy::NeverFold {
+            return Err(Error::InvalidMetadata);
+        }
+        self.merge_guard = Some(super::merge::MergeGuard::from_steps(
+            input,
+            &self.record.undo,
+            &self.record.redo,
+            self.bounds.replay_workspace,
+        )?);
+        Ok(self)
+    }
     #[must_use]
     pub const fn undo(&self) -> &std::collections::VecDeque<Step> {
         &self.record.undo
@@ -408,6 +429,7 @@ impl ValidatedSnapshot {
             cache,
             recorder: None,
             recorder_bytes: 0,
+            merge_guard: self.merge_guard,
         })
     }
 }
