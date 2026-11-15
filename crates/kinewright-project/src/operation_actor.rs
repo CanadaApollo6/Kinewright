@@ -71,6 +71,12 @@ pub struct ChangeId {
     pub revision: TimelineRevision,
     pub position: CommandKey,
 }
+/// One actor transition supplies both values. The snapshot owns its full
+/// independent lease; the identifier adds no document or history holder.
+pub struct CapturedHistory {
+    pub change: ChangeId,
+    pub snapshot: OwnerSnapshot,
+}
 /// A frozen attachment proof contains no independently retained history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcceptedCut {
@@ -149,7 +155,11 @@ enum Message {
     ),
     Subscribe(Sender<Notification>),
     Change(Sender<Result<ChangeId, Error>>),
-    Capture(Sender<Result<OwnerSnapshot, Error>>),
+    Capture(Sender<Result<CapturedHistory, Error>>),
+    Approval(
+        ObjectRef,
+        Sender<Result<Option<crate::operation_history::ApprovalAnswer>, Error>>,
+    ),
     Boundary(usize, Sender<Result<OwnerBoundary, Error>>),
     Operations(bool, Sender<Result<OwnerOperations, Error>>),
     Counters(
@@ -321,7 +331,16 @@ impl Core {
         self.call(Message::Change)?
     }
     pub fn export_history(&self) -> Result<OwnerSnapshot, Error> {
+        Ok(self.capture_state()?.snapshot)
+    }
+    pub fn capture_state(&self) -> Result<CapturedHistory, Error> {
         self.call(Message::Capture)?
+    }
+    pub fn approval_answer(
+        &self,
+        reference: ObjectRef,
+    ) -> Result<Option<crate::operation_history::ApprovalAnswer>, Error> {
+        self.call(|reply| Message::Approval(reference, reply))?
     }
     pub fn boundary(&self, depth: usize) -> Result<OwnerBoundary, Error> {
         self.call(|reply| Message::Boundary(depth, reply))?
@@ -551,7 +570,17 @@ impl State {
                 Message::Capture(reply) => {
                     let result = self
                         .history()
-                        .and_then(|history| history.capture().map_err(Error::from));
+                        .and_then(|history| history.capture().map_err(Error::from))
+                        .and_then(|snapshot| {
+                            self.change()
+                                .map(|change| CapturedHistory { change, snapshot })
+                        });
+                    let _ = reply.send(result);
+                }
+                Message::Approval(reference, reply) => {
+                    let result = self.history().and_then(|history| {
+                        history.approval_answer(&reference).map_err(Error::from)
+                    });
                     let _ = reply.send(result);
                 }
                 Message::Counters(reply) => {

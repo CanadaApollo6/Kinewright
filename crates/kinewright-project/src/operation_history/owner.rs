@@ -550,6 +550,20 @@ impl OwnerHistory {
     pub fn ledger(&self) -> &ApprovalLedger {
         &self.ledger
     }
+    /// Audit reports the approved command or transition, without retaining a
+    /// document or making an independently owned copy of the ledger.
+    pub fn approval_answer(
+        &self,
+        reference: &crate::bundle_records::ObjectRef,
+    ) -> Result<Option<super::ApprovalAnswer>, Error> {
+        reference.validate().map_err(|_| Error::InvalidLedger)?;
+        if let Some(entry) = self.ledger.get_approval(reference) {
+            return Ok(Some(entry.answer()));
+        }
+        Ok(self
+            .transition_fate(reference)?
+            .map(super::TransitionFate::answer))
+    }
     #[must_use]
     pub fn resources(&self) -> &Resources {
         &self.resources

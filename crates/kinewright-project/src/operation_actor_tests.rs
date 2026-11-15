@@ -1115,3 +1115,173 @@ fn a_peer_actor_adopts_the_selected_epoch_at_its_own_frozen_cut() {
         "PEER_INSTALL_INVALIDATES_ITS_OLD_FROZEN_CUT"
     );
 }
+
+#[test]
+fn captured_state_pairs_its_revision_and_position_with_the_same_immutable_record() {
+    let pool = HistoryPool::new(PoolLimits::default());
+    let core = small(&pool, Role::Ordinary);
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let writer = core.clone();
+    let writer_barrier = Arc::clone(&barrier);
+    let worker = std::thread::spawn(move || {
+        for index in 0..64 {
+            writer_barrier.wait();
+            assert!(matches!(
+                writer.request(Command::Do(lock(index % 2 == 0))).unwrap(),
+                Event::DocumentChanged { .. }
+            ));
+            writer_barrier.wait();
+        }
+    });
+    for round in 0..64 {
+        barrier.wait();
+        let captured = core.capture_state().unwrap();
+        let record = captured.snapshot.history();
+        assert_eq!(
+            captured.change.position.position, record.position,
+            "CAPTURE_IDENTIFIER_NAMES_ITS_EXACT_IMMUTABLE_RECORD"
+        );
+        assert_eq!(captured.change.position.epoch, record.epoch);
+        assert_eq!(
+            captured.change.revision.0, record.position,
+            "CAPTURE_REVISION_AND_RECORD_HAVE_ONE_ACTOR_CUT"
+        );
+        assert!((round..=round + 1).contains(&record.position));
+        assert_eq!(
+            record.document.tracks[0].sync_lock,
+            record.position % 2 == 1,
+            "CAPTURE_DOCUMENT_MATCHES_ITS_ACCEPTED_POSITION"
+        );
+        barrier.wait();
+    }
+    worker.join().unwrap();
+    assert_eq!(core.change_id().unwrap().position.position, 64);
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one approved command and Undo lifecycle through discard and retirement"
+)]
+fn audit_answers_read_command_fate_without_holding_a_task_history() {
+    use crate::{
+        bundle_records::RecordKind,
+        operation_history::{ApprovalAnswer, Direction, RemovedTarget},
+    };
+    let pool = HistoryPool::new(PoolLimits::default());
+    let origin = origin();
+    let core = Core::spawn(&pool, Role::Task, origin.clone(), document()).unwrap();
+    let do_ref = ObjectRef {
+        sha256: "a".repeat(64),
+        byte_length: 1,
+        record_kind: RecordKind::OwnedEvidence,
+    };
+    let undo_ref = ObjectRef {
+        sha256: "b".repeat(64),
+        byte_length: 1,
+        record_kind: RecordKind::OwnedEvidence,
+    };
+    let context = |approval, transition| CommandContext {
+        creation: origin.clone(),
+        inputs: vec![],
+        approval,
+        transition,
+    };
+    core.request_with_context(
+        Command::Do(Operation::RemoveTrack { track: TrackId(1) }),
+        context(
+            Some(Approval {
+                reference: do_ref.clone(),
+                targets: vec![RemovedTarget::Track(TrackId(1))],
+            }),
+            None,
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        core.approval_answer(do_ref.clone()).unwrap(),
+        Some(ApprovalAnswer::Kept)
+    );
+    let target = core
+        .export_history()
+        .unwrap()
+        .history()
+        .undo
+        .back()
+        .unwrap()
+        .evidence()
+        .unwrap();
+    core.request_with_context(
+        Command::Undo,
+        context(
+            None,
+            Some(TransitionApproval {
+                id: undo_ref.clone(),
+                direction: Direction::Undo,
+                target,
+            }),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        core.approval_answer(do_ref.clone()).unwrap(),
+        Some(ApprovalAnswer::Missing)
+    );
+    assert_eq!(
+        core.approval_answer(undo_ref.clone()).unwrap(),
+        Some(ApprovalAnswer::Kept)
+    );
+    core.request(Command::Redo).unwrap();
+    assert_eq!(
+        core.approval_answer(do_ref.clone()).unwrap(),
+        Some(ApprovalAnswer::Kept)
+    );
+    assert_eq!(
+        core.approval_answer(undo_ref.clone()).unwrap(),
+        Some(ApprovalAnswer::Missing)
+    );
+    core.request(Command::Undo).unwrap();
+    core.request(Command::Do(Operation::RemoveTrack { track: TrackId(1) }))
+        .unwrap();
+    let before = core.counters().unwrap();
+    let accounting = pool.usage(Role::Task).unwrap();
+    assert_eq!(
+        core.approval_answer(do_ref).unwrap(),
+        Some(ApprovalAnswer::Missing),
+        "AUDIT_QUERY_NEVER_CREDITS_A_DIFFERENT_REMOVAL"
+    );
+    let held_answer = core.approval_answer(undo_ref).unwrap();
+    assert_eq!(
+        held_answer,
+        Some(ApprovalAnswer::Kept),
+        "APPROVED_UNDO_HOLDS_AFTER_ITS_REDO_TARGET_IS_DROPPED"
+    );
+    assert_eq!(
+        pool.usage(Role::Task).unwrap(),
+        accounting,
+        "AUDIT_QUERY_RETAINS_NO_INDEPENDENT_HISTORY_LEASE"
+    );
+    let after = core.counters().unwrap();
+    let kernel = after.0.since(before.0);
+    let owner = after.1.since(before.1);
+    assert_eq!(
+        (
+            kernel.document_copies,
+            kernel.exact_measurements,
+            owner.owner_identity_hashes,
+            owner.document_scans,
+            owner.seed_map_copies
+        ),
+        (0, 0, 0, 0, 0),
+        "AUDIT_QUERY_COPIES_AND_HASHES_NO_DOCUMENT_OR_OWNER"
+    );
+    let attachment = core.attach(&Proof).unwrap();
+    let cut = attachment.freeze(&Proof).unwrap();
+    attachment.retire(&Proof, cut).unwrap();
+    assert_eq!(held_answer, Some(ApprovalAnswer::Kept));
+    assert_eq!(
+        pool.usage(Role::Task).unwrap(),
+        (0, 0),
+        "FIXED_AUDIT_ANSWER_DOES_NOT_DELAY_TASK_RELEASE"
+    );
+}
