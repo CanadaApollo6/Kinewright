@@ -13030,7 +13030,7 @@ fn open_capabilities(tools: &[Tool], args: CapabilityArgs) -> CallToolResult {
                 .iter()
                 .find(|tool| tool.name == name.as_str())
                 .expect("a descriptor is built from a matching tool");
-            serde_json::json!({
+            let mut opened = serde_json::json!({
                 "capability": descriptor,
                 "input_schema": tool.input_schema,
                 "invocation": if is_invocable_capability(name) || crate::dialogue_tools::TOOL_NAMES.contains(&name.as_str()) {
@@ -13038,7 +13038,11 @@ fn open_capabilities(tools: &[Tool], args: CapabilityArgs) -> CallToolResult {
                 } else {
                     "prepare_edit_plan"
                 }
-            })
+            });
+            if tool.name == "cut_dialogue" {
+                opened["guide"] = crate::dialogue_tools::GUIDE.into();
+            }
+            opened
         })
         .collect::<Vec<_>>();
     if opened.len() == 1 {

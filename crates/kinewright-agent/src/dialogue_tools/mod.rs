@@ -19,6 +19,7 @@ use std::{
 
 /// Flip only when the Media adapter supplies real, stream-bound measurements.
 pub const SERVE_DIALOGUE_TOOLS: bool = false;
+pub(crate) const GUIDE: &str = include_str!("guide.md");
 pub(crate) const TOOL_NAMES: &[&str] = &["cut_dialogue", "check_dialogue_cut"];
 pub(crate) type ProviderSlot = Arc<RwLock<Option<Arc<dyn DialogueMeasurements>>>>;
 

@@ -907,4 +907,5 @@ mod dialogue_tool_tests {
         assert_eq!(schemas.len(), 3);
     }
     include!("dialogue_tools_review_tests.rs");
+    include!("dialogue_tools_guide_tests.rs");
 }
