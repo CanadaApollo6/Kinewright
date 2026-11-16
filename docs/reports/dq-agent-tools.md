@@ -926,3 +926,185 @@ No Media source changed and no real provider, paid or dry launch ran.
 
 NOT RUN: real-recording R4 rehearsal and renderer conformance (Media worker),
 Windows execution, full Media/Project suites. M5 remains off.
+
+## R5 filler yield: local dips and measured onset offsets
+
+Starting head `91de5baf`. Read the R4 report and evidence in the media worktree in place; no recording, transcript, source profile or call log was copied. Derived rows and file digests are in `target/dq-r5/distribution.json`; `target/dq-r5/measure.py` reproduces them. No tool registration, description or `get_dialogue_pacing` change.
+
+### Measure before changing the rules
+
+The R4 terminal replies identify 27 filler refusals for ruling 10: 21 no-edge and six unrequested-sound. For each side, the table gives the deepest local minimum in the existing resolver search window as RMS dBFS / depth below BOTH neighbouring medians. The two medians use the full 150 ms on each side excluding the candidate hop; equal-depth ties choose the earliest. These are 10 ms source-profile hops, not exports or ASR ends. The window formula uses the recording's original adjacent word addresses; current-clip clipping can further restrict availability. This is a source measurement, not a replay of current cut geometry. Negative depth means no trough against both sides. Quantiles use nearest rank; even-count medians average the two middle measurements.
+
+| Word index / source s | Left RMS / depth, dB | Right RMS / depth, dB |
+|---|---:|---:|
+| 9 / 5.76 | -45.77 / -0.67 | -71.19 / 8.56 |
+| 65 / 32.48 | -82.44 / 8.10 | -52.83 / 12.38 |
+| 76 / 36.24 | -82.28 / 10.22 | -47.81 / 8.42 |
+| 150 / 70.56 | -58.80 / 24.53 | -89.68 / 4.28 |
+| 202 / 126.72 | -78.32 / 6.69 | -76.22 / 30.77 |
+| 238 / 143.60 | -43.44 / -0.87 | -78.58 / 17.95 |
+| 271 / 180.48 | -43.10 / 2.05 | -65.27 / 29.09 |
+| 379 / 234.64 | -71.68 / 10.01 | -72.04 / 11.53 |
+| 395 / 239.84 | -79.08 / 7.39 | -76.26 / 18.70 |
+| 468 / 275.60 | -83.35 / 9.59 | -84.63 / 7.13 |
+| 513 / 307.12 | -51.55 / 13.68 | -70.17 / 17.75 |
+| 524 / 312.00 | -57.06 / 11.43 | -73.51 / 17.48 |
+| 533 / 315.92 | -65.20 / 4.17 | -51.27 / 16.37 |
+| 573 / 336.48 | -61.06 / 16.65 | -72.96 / 23.49 |
+| 618 / 347.44 | -33.81 / -0.41 | -58.04 / 15.52 |
+| 670 / 376.32 | -70.03 / 25.52 | -43.36 / 3.10 |
+| 685 / 384.16 | -83.96 / 14.82 | -42.13 / 1.02 |
+| 697 / 387.52 | -83.29 / 16.50 | -54.65 / 13.43 |
+| 706 / 393.12 | -88.04 / 6.53 | -54.99 / 4.84 |
+| 718 / 397.92 | -61.90 / 19.46 | -73.85 / 8.34 |
+| 728 / 400.88 | -80.68 / 32.36 | -40.40 / -11.45 |
+| 739 / 406.56 | -67.91 / 20.14 | -51.53 / 7.65 |
+| 801 / 434.80 | -42.32 / -0.58 | -83.39 / 5.74 |
+| 805 / 436.96 | -53.28 / 8.89 | -61.72 / 15.12 |
+| 856 / 460.16 | -45.77 / 0.16 | -72.20 / 14.19 |
+| 878 / 469.44 | -57.89 / 10.19 | -84.55 / 4.48 |
+| 880 / 471.60 | -66.32 / 20.80 | -80.97 / 5.55 |
+
+There are 54 nonempty search-window measurements. Min / p10 / p25 / median / p75 / p90 / max depth is **−11.45 / 0.16 / 5.55 / 10.10 / 16.65 / 23.49 / 32.36 dB**. The independent start-to-start flank search has median 10.205 dB and range −6.81…32.36 dB. These flanks include already-quiet points, so their depth alone does not justify a new sound split.
+
+Restricting both 150 ms windows to one continuous above-quiet component leaves **46** side measurements; eight sides have no such minimum. Min / p10 / p25 / median / p75 / p90 / max is **−4.30 / −0.87 / 0.23 / 3.235 / 10.45 / 16.65 / 24.81 dB**. Twenty are at least 6 dB deep; 14 of those are outside a kept word's forward 300 ms protection. This supports some fused-component splits, not the premise that every no-edge refusal is curable. Eligibility is not an applied-cut count; both-edge, attribution, frame and retention guards still apply.
+
+For ruling 11, the table uses the actual typed refusal component. Offset is component onset minus filler ASR start; word ends do not enter it.
+
+| Word | Offset ms | Length ms | Voice hops / total |
+|---|---:|---:|---:|
+| 32 | -400 | 570 | 56 / 57 |
+| 115 | -390 | 800 | 78 / 80 |
+| 148 | -470 | 810 | 81 / 81 |
+| 135 | 680 | 90 | 0 / 9 |
+| 206 | -680 | 40 | 4 / 4 |
+| 264 | -520 | 530 | 50 / 53 |
+| 436 | -860 | 20 | 0 / 2 |
+| 551 | -520 | 910 | 65 / 91 |
+| 552 | -890 | 10 | 0 / 1 |
+| 571 | -730 | 770 | 71 / 77 |
+| 662 | -920 | 10 | 1 / 1 |
+| 773 | 750 | 10 | 0 / 1 |
+| 813 | -460 | 700 | 68 / 70 |
+| 848 | -520 | 710 | 67 / 71 |
+
+The 14 offsets have min / median / max **−920 / −520 / +750 ms**; lengths **10 / 550 / 910 ms**. Eight components contain the selected ASR start and are long, mostly voiced, with onsets **390–730 ms early**. The six others are detached 10–90 ms components; four are entirely unvoiced and two have only one/four voiced hops. The measurement does not identify those transients as a particular breath or click, so no such label or permission is inferred. They remain refused.
+
+All ten previously attributed components intersecting the R4 applied filler cuts are also measured below. A separate exact-source-extent inventory confirms all 56 applied members: 10 filler cuts and 46 pause trims, with zero above-quiet hop intersections in the pause trims. These are components from all ten applied fillers; three fillers had no above-quiet component and some others had more than one. Cut extents come from exact source edges in committed ready replies, not transcript intervals.
+
+| Word | Offset ms | Length ms |
+|---|---:|---:|
+| 96 | -210 | 540 |
+| 358 | -170 | 20 |
+| 358 | -140 | 500 |
+| 401 | -130 | 540 |
+| 508 | -150 | 290 |
+| 668 | -300 | 460 |
+| 668 | 170 | 10 |
+| 679 | -280 | 10 |
+| 679 | -260 | 700 |
+| 746 | -80 | 390 |
+
+Their offset min / median / max is **−300 / −160 / +170 ms**, and length **10 / 425 / 700 ms**.
+
+### Rules supported by the measurements
+
+**Ruling 10 stopped after measurement; no local-dip product change is retained.** The prototype required at least 6 dB below each full 150 ms side median in one above-quiet component. A split was the exact end of the complete minimum hop, so the kept side lost no hop; fractional/frame support could not cross that boundary. Its positive witness failed on the parent and passed in the prototype, and the both-dips and R4 controls passed. A final-partial-hop regression also failed then passed after requiring the full physical 150 ms window. The prototype and its logs are saved under `target/dq-r5/parked-r10/` and `target/dq-r5/pairs/`, not committed as product code.
+
+The decisive additional check is frame support. None of the **14** deepest eligible minima outside kept starts' forward 300 ms windows has its hop end on this take's original 30 fps, zero-origin grid. Searching *all* eligible minima gives **29** points, **21** outside those forward windows, and only one grid-aligned secondary point: word 697, right side, **387.700 s**, 8.10 dB deep. Keeping the minimum hop on the right for incoming edges, rather than always on the left, also gives zero grid-aligned deepest points. Across all candidates that alternative gives three secondary boundaries: word 513 at 307.900 s (12.84 dB), word 533 at 316.000 s (12.19 dB), word 618 at 347.700 s (6.07 dB), all right-side edges. These points are before the further guard/whole-cut checks, not successful cuts. A local-minimum RMS observation alone does not establish a safe project-frame edge. This evidence does not support the prototype as the promised filler-yield fix. Choosing a fractional split inside a hop would need a ruling on retaining the kept side's complete hops, or the already-deferred sub-frame support. Neither is silently substituted here. No threshold, frame rule or R4 protection is relaxed. The fused-sound premise holds for some flanks but does not by itself establish a usable edge; R5's 40/54 target remains unverified.
+
+Ruling 11 keeps the original ±300 ms rule and adds only a **750 ms early-onset** allowance for a component with at least one VAD-voice hop, CONTAINING the requested word start, without any other word start between component onset and that start. It never reaches across another ASR start. Existing kept-word vetoes and the half-open unrequested-start invariant are independent. Detached components get no extension. This changes the attribution mechanism, not the recogniser timing or word ends.
+
+### Gate finding outside dialogue
+
+The first full Agent slow-feature command is **red**, not silently promoted by a
+rerun: **1438 passed / 1 failed / 65 ignored**, Cargo wall **1687.704 s**, test
+wall **1608.20 s**. The only failure is
+`writer_host::hooks_tests::tests::history_capacity_full_lifecycle_crash_reopen`,
+`history_capacity_lifecycle_tests.rs:307`, `CAPACITY_CHILD_TIMEOUT clips=400`.
+Its unchanged parent watchdog is **500 s**. The child logged all **200 accepted
+edits** in **469.545 s**, then storage/actor counters before the watchdog
+terminated and reaped it during the finish/merge/Stop tail. The edit timer starts
+AFTER fixture setup; the parent bound includes setup and the tail. No capacity
+refusal or corrupt-history assertion is shown by this failure.
+
+The fixture uses `set_track_sync_lock` and one `ripple_delete_clip` batch through
+`prepare_edit_plan` / `commit_edit_plan`; it does not call dialogue resolution or
+attribution. Its source and all history/store paths are unchanged. That is a
+source-traced independence finding, not a claim that load alone is proved to be
+the cause. Load averages at command start/end were
+**9.17/10.95/11.97** and **11.43/12.11/12.04**. Raw evidence is
+`target/dq-r5/agent-slow.log` and `agent-slow-result.json`. No watchdog, history
+limit, fixture assertion or production history code is changed here. Remaining
+Agent targets, App and shipping checks, plus one focused repeat of this unchanged
+witness, are recorded separately below when complete.
+
+### Retained proof and final local gate
+
+The retained rule has four permanent Core controls:
+`r5_early_voiced_onset_is_bounded_by_the_neighbour_start`,
+`r5_detached_transients_do_not_gain_the_early_voice_window`,
+`r5_early_voice_does_not_cross_a_neighbour_or_extend_past_750_ms`, and
+`r5_unvoiced_start_containing_sound_does_not_get_the_extension`.
+The R4 nearest-quiet `were`, kept-sound, fractional extent and nine-unrequested-start
+controls remain in the passing Core suite. Existing Agent dialogue controls also
+passed in the library run; its only failure was the history watchdog above.
+
+`scripts/dq-r5-mutations.py` retains one pair, `early-onset`. Restoring the old
+300 ms reach is **red, 0 passed / 1 failed**, at `R5_EARLY_VOICED_ONSET` with
+`UnattributedSound` for source 700000–1500000. Restoring the final source is
+**green, 1 passed / 0 failed**. Both restore bytes and final source SHA-256
+`152b6f2fcffce242fc120c9719e2dce3b2e3933b1ed5a7c4805c4c5b9281d8e2`
+match. Red/green wall including lock waits was **19.652 / 45.327 s**. Logs and
+metadata are in `target/dq-r5/retained-pairs/`. The stopped local-split and
+full-window prototype pairs are separately labelled prototype evidence; neither
+is a claim about shipped behavior.
+
+The lead narrowed the per-commit gate during this run. The required Core/Agent
+results, read from `target/dq-r5/*-result.json`, are:
+
+| Command group | Passed / failed / ignored or result | Cargo wall, s |
+|---|---:|---:|
+| Core, full test targets | 933 / 0 / 2 | 55.74 |
+| Agent library, slow enabled, original full run | **1438 / 1 / 65** | 1687.70 |
+| Agent integration targets, slow enabled | 340 / 0 / 34 | 139.89 |
+| Agent binary targets, slow enabled | 46 / 0 / 5 | 44.49 |
+| Agent doc tests, slow enabled | 4 / 0 / 0 | 1.76 |
+| Unchanged lifecycle witness, one focused repeat | 1 / 0 / 0 | 452.26 |
+| Core + Agent clippy, all targets, Agent slow enabled, `-D warnings` | pass | 25.54 |
+| Pin tests | 2 / 0 / 0; pin unchanged | 71.81 |
+| Cargo fmt check and explicit touched-file rustfmt check | pass | 4.66 / untimed |
+
+Core has no `slow-tests` feature; its full suite is the applicable gate. The
+original Agent-library result stays **red**. The unchanged focused lifecycle
+repeat completed the entire finish/merge/Stop and crash/reopen path in **424.73 s**
+of test time, including 200 edits in **396.165 s**, with load averages
+**4.58/6.52/8.94 → 2.67/3.52/6.51**. That is consistent with a load-sensitive
+500-second guard, not proof that external load alone caused the full-run failure
+or that the fixture is fixed. No whole-library rerun or parent-source rerun is
+claimed. The original failed case plus its later passing repeat is not silently
+presented as one green full invocation. The other Agent targets were run
+separately because Cargo stopped after the library failure.
+
+Additional work completed before the gate was narrowed: workspace build and
+three clippy feature modes; App slow binary **1087 / 0 / 5** in **430.87 s**;
+slow-test lint **140 tests / 161 ignored entries / 27 equipped skip sites**;
+parser selftests **52 pass**, shard selftests **23 pass**; default guard
+**3 artifacts**. Three isolated Linux shipping builds completed and removed their
+3.7G target. One Windows workspace cross-clippy check completed in **39.78 s**.
+The next queued MSVC step was cancelled before it started Cargo when the lead
+changed the gate. Its wrapper exit 143 is intentional cancellation, not a code
+failure or a completed Windows gate. PID/cwd/argv/empty-child checks are recorded
+in `optional-gate-cancel.json`. No further workspace, App, shipping or Windows
+runs were launched. Cargo times above start after the outer lock; fixture and
+pair wall times are not a throughput comparison.
+
+All retained Rust source hashes match `target/dq-r5/final-source-sha256.json`;
+no mutation is left in place. Pin model/option values remain OPEN. No Media
+source, tool registration, description or pacing-removal change. Real-recording
+R5 replay, the 40/54 yield target, renderer/listening conformance, real provider
+and paid/dry launches, and Windows execution are **NOT RUN**. Ruling 10 and the
+full-library history watchdog remain open. The Explain the Number principle
+kept eligibility separate from applied yield; Test Behavior kept the permanent
+pair on real resolution and its typed refusal. Final `target/` size is **28G** by `du -sh`; all started jobs ended before the
+local commit.
