@@ -18,6 +18,9 @@ PREFIX = 'server::tests::dialogue_tool_tests::'
 CHECK = 'crates/kinewright-agent/src/dialogue_tools/check.rs'
 RETENTION = 'crates/kinewright-agent/src/dialogue_tools/retention.rs'
 PAIRS = {
+    # Restore the old report-and-continue loss policy; its counters were removed.
+    'unmeasured-extents': ([(RETENTION, 'return Err(unverified(base.clip, lost, proven));', 'continue;')],
+        'dq_tools_item12_unmeasured_sync_sounding_loss_is_refused', 'DQ_TOOLS_UNMEASURED_SYNC_PRESERVED'),
     'outside-extents': ([(RETENTION, 'if self.exact_splits {', 'if true || self.exact_splits {')],
         'dq_tools_review_unselected_sounding_tail_is_preserved', 'DQ_TOOLS_UNSELECTED_TAIL_PROTECTED'),
     'scoped-overrule': ([(CUT, '[outgoing.overrule, last.overrule]', '[first.overrule, last.overrule]')],
@@ -27,8 +30,8 @@ PAIRS = {
     'sync-tracks': ([(CUT, 't.id != cut.track && t.sync_lock', 'false && t.id != cut.track && t.sync_lock')],
         'dq_tools_review_sync_tracks_and_atomic_undo', 'DQ_TOOLS_SYNC_EXACT_GEOMETRY'),
     'late-binding': ([('crates/kinewright-agent/src/server.rs',
-        'if let Err(reason) = validate() {\n            return Ok(error_text(reason));\n        }\n        let apply =',
-        'if false && let Err(reason) = validate() {\n            return Ok(error_text(reason));\n        }\n        let apply =')],
+        'if let Some(refusal) = validate() {\n            return Ok(refusal);\n        }\n        let apply =',
+        'if false && let Some(refusal) = validate() {\n            return Ok(refusal);\n        }\n        let apply =')],
         'dq_tools_review_binding_changes_during_confirmation', 'DQ_TOOLS_BINDING_RECHECK_AFTER_CONSENT'),
     'tail-overrule': ([(CUT, 'if tail && overrule.is_none() {', 'if tail {')],
         'dq_tools_review_last_word_overrule_keeps_the_requested_end', 'DQ_TOOLS_TAIL_OVERRULE_INSTANT'),

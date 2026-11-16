@@ -428,12 +428,7 @@ fn dq_tools_review_binding_changes_during_confirmation() {
             &r,
             "DQ_TOOLS_BINDING_RECHECK_AFTER_CONSENT",
         );
-        assert!(
-            content(&r)
-                .to_string()
-                .contains("bound words/profile changed"),
-            "{r:?}"
-        );
+        assert_eq!(content(&r)["reason"], json!({"code":"binding_changed"}));
     });
 }
 #[test]
@@ -481,6 +476,7 @@ fn dq_tools_review_stale_before_confirmation_never_prompts() {
         let r = worker.join().unwrap();
         assert!(!prompted, "DQ_TOOLS_STALE_BEFORE_PROMPT");
         assert_refused_unchanged(&s, &before, &history, &r, "DQ_TOOLS_STALE_NOT_CONSUMED");
+        assert_eq!(content(&r)["reason"], json!({"code":"binding_changed"}));
     });
 }
 #[test]
@@ -784,22 +780,21 @@ fn dq_tools_review_two_cuts_and_unmeasured_sync_extents() {
     doc.tracks.push(bed);
     doc.validate().unwrap();
     let s = service(doc, Arc::clone(&v));
+    let before = s.snapshot().unwrap();
+    let history = s.core.export_history_identified().unwrap();
     let r = cut(&s, args(vec![words(&v, 1)]), true);
-    ok(&r);
-    println!("DQ_UNMEASURED_EXTENTS {}", content(&r));
-    assert!(
-        content(&r)["extent_changes"]["unmeasured_extents"]
-            .as_u64()
-            .unwrap()
-            > 0,
-        "DQ_TOOLS_SYNC_UNMEASURED_REPORTED"
-    );
-    assert!(
-        content(&r)["extent_changes"]["largest_unmeasured_us"]
-            .as_u64()
-            .unwrap()
-            > 0
-    );
+    if r.is_error == Some(true) {
+        assert_refused_unchanged(
+            &s,
+            &before,
+            &history,
+            &r,
+            "DQ_TOOLS_SYNC_UNMEASURED_PRESERVED",
+        );
+        assert_eq!(content(&r)["removals"][0]["code"], "unmeasured_extent");
+    } else {
+        item12_assert_sync_zero_change(&before.1, &s.snapshot().unwrap().1, &r);
+    }
 }
 #[test]
 fn dq_tools_review_recording_dictionary_shares_the_wire_budget() {

@@ -265,10 +265,10 @@ mod tests {
         let profile = kinewright_core::dialogue::SoundProfile::from_hops(
             10_000,
             600_000_000,
-            (0..hops).map(|_| kinewright_core::dialogue::Hop {
-                rms_dbfs_hundredths: -6000,
-                peak_dbfs_hundredths: -6000,
-                voice: false,
+            (0..hops).map(|i| kinewright_core::dialogue::Hop {
+                rms_dbfs_hundredths: if i == 0 { -2000 } else { -6000 },
+                peak_dbfs_hundredths: if i == 0 { -2000 } else { -6000 },
+                voice: i == 0,
             }),
         )
         .unwrap();

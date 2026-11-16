@@ -13,6 +13,46 @@ pub struct Hop {
     pub voice: bool,
 }
 
+/// Recording-wide RMS statistics in centidBFS. Empty populations are explicit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordingLevels {
+    pub speech_rms_hundredths: Option<i16>,
+    pub noise_floor_hundredths: Option<i16>,
+}
+fn recording_levels(rms: &[i16], voice: &[bool]) -> RecordingLevels {
+    // The quantized domain has 12,001 values, independent of recording length.
+    let mut counts = vec![[0_usize; 2]; 12_001];
+    let mut totals = [0_usize; 2];
+    for (&db, &voiced) in rms.iter().zip(voice) {
+        let population = usize::from(voiced);
+        counts
+            [usize::try_from(i32::from(db) - i32::from(LEVEL_FLOOR)).expect("validated level")]
+            [population] += 1;
+        totals[population] += 1;
+    }
+    let percentile = |population: usize, rank: usize| {
+        if totals[population] == 0 {
+            return None;
+        }
+        let mut seen = 0;
+        counts.iter().enumerate().find_map(|(index, count)| {
+            seen += count[population];
+            (seen > rank)
+                .then(|| LEVEL_FLOOR + i16::try_from(index).expect("level histogram index"))
+        })
+    };
+    RecordingLevels {
+        speech_rms_hundredths: percentile(1, totals[1].saturating_sub(1) / 2)
+            .zip(percentile(1, totals[1] / 2))
+            .map(|(a, b)| {
+                i16::try_from((i32::from(a) + i32::from(b)).div_euclid(2))
+                    .expect("mean of measured levels")
+            }),
+        noise_floor_hundredths: percentile(0, totals[0].saturating_sub(1) / 10),
+    }
+}
+
 /// Compact parallel arrays; validation is shared by builders and deserialization.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawProfile")]
@@ -22,6 +62,7 @@ pub struct SoundProfile {
     peaks: Box<[i16]>,
     rms: Box<[i16]>,
     voice: Box<[bool]>,
+    levels: RecordingLevels,
 }
 
 #[derive(Deserialize)]
@@ -32,23 +73,30 @@ struct RawProfile {
     peaks: Vec<i16>,
     rms: Vec<i16>,
     voice: Vec<bool>,
+    levels: RecordingLevels,
 }
 
 impl TryFrom<RawProfile> for SoundProfile {
     type Error = ProfileError;
     fn try_from(raw: RawProfile) -> Result<Self, Self::Error> {
-        Self::from_raw(
+        let profile = Self::from_raw(
             raw.hop_micros,
             raw.duration_micros,
             raw.peaks,
             raw.rms,
             raw.voice,
-        )
+        )?;
+        if profile.levels != raw.levels {
+            return Err(ProfileError::Levels);
+        }
+        Ok(profile)
     }
 }
 
 #[derive(Debug, PartialEq, Eq, Error)]
 pub enum ProfileError {
+    #[error("cached recording levels differ from the measured hops")]
+    Levels,
     #[error("profile hop must be between 1 and 31000 microseconds")]
     Hop,
     #[error("profile arrays must agree and cover the nonempty recording exactly")]
@@ -94,7 +142,9 @@ impl SoundProfile {
                 return Err(ProfileError::Level { index });
             }
         }
+        let levels = recording_levels(&rms, &voice);
         Ok(Self {
+            levels,
             hop_micros,
             duration_micros,
             peaks: peaks.into_boxed_slice(),
@@ -127,6 +177,10 @@ impl SoundProfile {
         Self::from_raw(hop_micros, duration_micros, peaks, rms, voice)
     }
 
+    #[must_use]
+    pub const fn levels(&self) -> RecordingLevels {
+        self.levels
+    }
     #[must_use]
     pub const fn hop_micros(&self) -> u32 {
         self.hop_micros

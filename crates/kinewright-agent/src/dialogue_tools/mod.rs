@@ -3,9 +3,10 @@ mod budget;
 mod check;
 mod cut;
 mod retention;
+mod transcript;
 pub(crate) use budget::bound as bound_check;
-pub(crate) use check::{CheckArgs, Detail as CheckDetail, check, check_created, spans};
-pub(crate) use cut::{CutArgs, plan};
+pub(crate) use check::{CheckArgs, Detail as CheckDetail, PlayedSpan, check, check_created, spans};
+pub(crate) use cut::{CutArgs, Outcome, plan};
 use kinewright_core::{
     MediaAsset,
     dialogue::{Dialogue, Settings, SoundProfile, Word},
@@ -16,6 +17,7 @@ use std::{
     fmt::Write as _,
     sync::{Arc, RwLock},
 };
+pub(crate) use transcript::{neighbours, word_frames};
 
 /// Flip only when the Media adapter supplies real, stream-bound measurements.
 pub const SERVE_DIALOGUE_TOOLS: bool = false;
@@ -112,7 +114,21 @@ impl BoundDialogue {
         for b in digest.0.finalize() {
             write!(binding, "{b:02x}").expect("String write");
         }
-        let dialogue = Dialogue::new(profile, words, settings).map_err(|_| Refusal::NotMeasured)?;
+        let dialogue = Dialogue::new(profile, words, settings).map_err(|error| match error {
+            kinewright_core::dialogue::InputError::NoiseSeparation {
+                speech_rms_hundredths,
+                noise_floor_hundredths,
+                quiet_rms_hundredths,
+            } => Refusal::NoiseSeparation {
+                speech_rms_hundredths,
+                noise_floor_hundredths,
+                quiet_rms_hundredths,
+            },
+            kinewright_core::dialogue::InputError::SpeechLevelUnavailable => {
+                Refusal::SpeechLevelUnavailable
+            }
+            _ => Refusal::NotMeasured,
+        })?;
         Ok(Self {
             identity,
             stream,
@@ -158,6 +174,21 @@ pub trait DialogueMeasurements: Send + Sync {
 #[derive(Debug, PartialEq, Eq, Serialize, thiserror::Error)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum Refusal {
+    #[error("member conflicts with earlier member {other_index}: {cause}")]
+    Conflict {
+        other_index: usize,
+        cause: ConflictCause,
+    },
+    #[error("recording has no measured speech level; no edge was guessed")]
+    SpeechLevelUnavailable,
+    #[error(
+        "speech level {speech_rms_hundredths} and floor {noise_floor_hundredths} centidBFS are too close to quiet threshold {quiet_rms_hundredths}; use a cleaner recording"
+    )]
+    NoiseSeparation {
+        speech_rms_hundredths: i16,
+        noise_floor_hundredths: i16,
+        quiet_rms_hundredths: i16,
+    },
     #[error("media content identity is missing or differs from the bound measurement")]
     Identity,
     #[error("audio stream differs from the bound measurement")]
@@ -174,6 +205,22 @@ pub enum Refusal {
     UnselectedAudio {
         clip: u64,
         lost_micros: u64,
+        why: String,
+    },
+    #[error(
+        "clip {clip}: {why}; {changed_micros} microseconds outside the requested cut would change"
+    )]
+    UnmeasuredExtent {
+        clip: u64,
+        changed_micros: u64,
+        why: String,
+    },
+    #[error(
+        "clip {clip}: {why}; {changed_micros} microseconds outside the requested cut would change"
+    )]
+    UnprovenExtent {
+        clip: u64,
+        changed_micros: u64,
         why: String,
     },
     #[error(
@@ -204,6 +251,17 @@ pub enum Refusal {
     MeasurementPending {
         status: crate::dialogue_measurements::MeasurementStatus,
     },
+}
+
+impl Refusal {
+    fn extent_change_micros(&self) -> Option<u64> {
+        match self {
+            Self::UnselectedAudio { lost_micros, .. } => Some(*lost_micros),
+            Self::UnmeasuredExtent { changed_micros, .. }
+            | Self::UnprovenExtent { changed_micros, .. } => Some(*changed_micros),
+            _ => None,
+        }
+    }
 }
 
 impl From<kinewright_core::dialogue::Refusal> for Refusal {
@@ -318,4 +376,13 @@ pub(crate) mod cost {
             OPERATIONS.load(Ordering::Relaxed),
         ]
     }
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictCause {
+    #[error("overlapping removals")]
+    Overlap,
+    #[error("a member word address would be removed")]
+    AddressRemoved,
 }

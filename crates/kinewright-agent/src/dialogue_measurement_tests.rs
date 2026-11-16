@@ -216,6 +216,25 @@ mod dialogue_measurement_tests {
             "DQ_MEDIA_REAL_CHECK_CORE_REPORT"
         );
     }
+    fn assert_transcript_timing(service: &KinewrightMcp) -> CallToolResult {
+        let words = invoke(service, "get_timeline_transcript", json!({}));
+        assert_eq!(
+            words.structured_content.as_ref().unwrap()["word_timing"],
+            "approximate_transcript_intervals",
+            "DQ_WORD_END_DISPATCHED_TRANSCRIPT_BASIS"
+        );
+        let ranged = invoke(
+            service,
+            "get_timeline_transcript",
+            json!({"word_range":{"clip":1,"first":0,"end":1}}),
+        );
+        assert_eq!(
+            ranged.structured_content.as_ref().unwrap()["word_timing"],
+            "approximate_transcript_intervals",
+            "DQ_WORD_END_RANGED_TRANSCRIPT_BASIS"
+        );
+        words
+    }
     #[test]
     fn dq_media_provider_dispatches_pending_then_measured_cut_and_check() {
         let f = fixture(true);
@@ -269,12 +288,7 @@ mod dialogue_measurement_tests {
                 <= -8000,
             "DQ_MEDIA_REAL_QUIET_LEVEL"
         );
-        let words = invoke(&f.handler, "get_timeline_transcript", json!({}));
-        assert_eq!(
-            words.structured_content.as_ref().unwrap()["word_timing"],
-            "approximate_transcript_intervals",
-            "DQ_WORD_END_DISPATCHED_TRANSCRIPT_BASIS"
-        );
+        let words = assert_transcript_timing(&f.handler);
         assert!(
             words
                 .structured_content

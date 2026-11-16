@@ -30,6 +30,18 @@ mod dialogue_tool_tests {
     }
 
     fn value(words: Vec<Word>, duration: u64, read: impl Fn(u64) -> Hop) -> Arc<BoundDialogue> {
+        let mut hops: Vec<_> = (0..duration.div_ceil(10_000))
+            .map(|i| read(i * 10_000 + 5_000))
+            .collect();
+        // Legacy synthetic ambience fixtures carry a reference speech hop.
+        // Calibration and missing-population regressions build profiles directly.
+        if !hops.iter().any(|h| h.voice) {
+            hops[0] = Hop {
+                rms_dbfs_hundredths: -2_000,
+                peak_dbfs_hundredths: -2_000,
+                voice: true,
+            };
+        }
         Arc::new(
             BoundDialogue::new(
                 MediaIdentity {
@@ -38,12 +50,7 @@ mod dialogue_tool_tests {
                 },
                 0,
                 "literal-v1".into(),
-                SoundProfile::from_hops(
-                    10_000,
-                    duration,
-                    (0..duration.div_ceil(10_000)).map(|i| read(i * 10_000 + 5_000)),
-                )
-                .unwrap(),
+                SoundProfile::from_hops(10_000, duration, hops).unwrap(),
                 words,
                 Settings::default(),
             )
@@ -168,7 +175,13 @@ mod dialogue_tool_tests {
         json!({"clip":1,"index":index,"binding":v.binding()})
     }
     fn words(v: &BoundDialogue, index: usize) -> Value {
-        json!({"kind":"words","first":address(v,index),"last":address(v,index)})
+        let mut removal = json!({"kind":"words","first":address(v,index),"last":address(v,index)});
+        // Existing geometry controls keep fixed interior air. Boundary defaults
+        // remain standard air; the rehearsal tests opt into natural interior air.
+        if index > 0 && index < v.dialogue().words().len().saturating_sub(1) {
+            removal["leave_micros"] = json!(250_000);
+        }
+        removal
     }
     fn args(removals: Vec<Value>) -> Value {
         Value::Object(serde_json::Map::from_iter([
@@ -259,15 +272,14 @@ mod dialogue_tool_tests {
         let (s, v) = fixture();
         let before = s.snapshot().unwrap();
         let history = s.core.export_history_identified().unwrap();
-        let result = cut(
-            &s,
-            args(vec![
-                words(&v, 1),
-                json!({"kind":"pause","after":address(&v,3),"leave_micros":250_000}),
-                words(&v, 3),
-            ]),
-            true,
-        );
+        let mut request = args(vec![
+            words(&v, 1),
+            json!({"kind":"pause","after":address(&v,3),"leave_micros":250_000}),
+            words(&v, 3),
+        ]);
+        // This retained whole-batch guard is the explicit atomic option now.
+        request["atomic"] = json!(true);
+        let result = cut(&s, request, true);
         assert_eq!(result.is_error, Some(true), "DQ_TOOLS_WHOLE_BATCH_REFUSED");
         assert_eq!(content(&result)["removals"].as_array().unwrap().len(), 3);
         assert_eq!(content(&result)["removals"][0]["outcome"], "ready");
@@ -553,7 +565,8 @@ mod dialogue_tool_tests {
     }
     #[test]
     fn dq_tools_padded_clip_and_sixty_join_default_size() {
-        let v = value(vec![], 40_000, |_| level(true));
+        // Measure speech outside this clip's 40 ms audible source span.
+        let v = value(vec![], 100_000, |t| level(t < 50_000));
         let s = service(
             document(
                 Rational::new(25, 1).unwrap(),
@@ -909,4 +922,9 @@ mod dialogue_tool_tests {
     }
     include!("dialogue_tools_review_tests.rs");
     include!("dialogue_tools_guide_tests.rs");
+    include!("dialogue_tools_rehearsal_core_tests.rs");
+    include!("dialogue_tools_rehearsal_batch_tests.rs");
+    include!("dialogue_tools_rehearsal_read_tests.rs");
+    include!("dialogue_tools_item12_tests.rs");
+    include!("dialogue_tools_item13_tests.rs");
 }

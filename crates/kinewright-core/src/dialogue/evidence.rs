@@ -1,5 +1,5 @@
 // Derived from Scarlet packages/mcp/src/dialogue-join.ts at 2cbab542; see LICENSES/scarlet-MIT.txt.
-use super::{InputError, Settings, SoundProfile, Span, Word};
+use super::{InputError, Settings, SoundProfile, Span, Thresholds, Word};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sound {
@@ -15,6 +15,7 @@ pub struct Dialogue {
     pub(super) profile: SoundProfile,
     pub(super) words: Vec<Word>,
     pub(super) settings: Settings,
+    pub(super) thresholds: Thresholds,
     quiet: Vec<Span>,
     valleys: Vec<Span>,
     pub(super) gaps: Vec<Span>,
@@ -24,9 +25,9 @@ pub struct Dialogue {
 fn append(runs: &mut Vec<Span>, span: Span) {
     if let Some(last) = runs
         .last_mut()
-        .filter(|last| last.end_micros == span.start_micros)
+        .filter(|last| last.end_micros >= span.start_micros)
     {
-        last.end_micros = span.end_micros;
+        last.end_micros = last.end_micros.max(span.end_micros);
     } else {
         runs.push(span);
     }
@@ -55,22 +56,24 @@ impl Dialogue {
                 return Err(InputError::Word { index });
             }
         }
+        let thresholds = Thresholds::relative(&settings, &profile)?;
         let mut quiet = Vec::new();
         let mut valleys = Vec::new();
         let mut dips = Vec::new();
         for (index, hop) in profile.hops().enumerate() {
             let span = profile.span(index);
-            if hop.rms_dbfs_hundredths <= settings.dip_dbfs_hundredths {
+            if hop.rms_dbfs_hundredths <= thresholds.dip_dbfs_hundredths {
                 append(&mut dips, span);
             }
             if !hop.voice
-                && hop.rms_dbfs_hundredths <= settings.quiet_rms_max
-                && hop.peak_dbfs_hundredths <= settings.quiet_peak_max
+                && hop.rms_dbfs_hundredths <= thresholds.quiet_rms_max
+                && hop.peak_dbfs_hundredths <= thresholds.quiet_peak_max
             {
                 append(&mut quiet, span);
             }
-            if hop.rms_dbfs_hundredths <= settings.valley_rms_max
-                && hop.peak_dbfs_hundredths <= settings.valley_peak_max
+            if !hop.voice
+                && hop.rms_dbfs_hundredths <= thresholds.valley_rms_max
+                && hop.peak_dbfs_hundredths <= thresholds.valley_peak_max
             {
                 append(&mut valleys, span);
             }
@@ -87,11 +90,16 @@ impl Dialogue {
             )
             .collect();
         gaps.sort_by_key(|span| (span.start_micros, std::cmp::Reverse(span.end_micros)));
-        gaps.dedup();
+        let mut merged = Vec::new();
+        for run in gaps {
+            append(&mut merged, run);
+        }
+        let gaps = merged;
         Ok(Self {
             profile,
             words,
             settings,
+            thresholds,
             quiet,
             valleys,
             gaps,
@@ -109,6 +117,15 @@ impl Dialogue {
     #[must_use]
     pub const fn settings(&self) -> &Settings {
         &self.settings
+    }
+    #[must_use]
+    pub const fn thresholds(&self) -> &Thresholds {
+        &self.thresholds
+    }
+    /// Canonical non-voice quiet/valley runs used by edge placement.
+    #[must_use]
+    pub fn gap_runs(&self) -> &[Span] {
+        &self.gaps
     }
     #[must_use]
     pub fn quiet_runs(&self) -> &[Span] {

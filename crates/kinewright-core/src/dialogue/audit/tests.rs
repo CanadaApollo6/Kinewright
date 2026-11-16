@@ -18,9 +18,19 @@ fn said(entries: &[(&str, u64)]) -> Vec<Word> {
 }
 fn recording(duration: u64, words: Vec<Word>, read: impl Fn(u64) -> Hop) -> Dialogue {
     let n = duration.div_ceil(10_000);
-    let profile =
-        SoundProfile::from_hops(10_000, duration, (0..n).map(|i| read(i * 10_000 + 5_000)))
-            .unwrap();
+    let mut hops: Vec<_> = (0..n).map(|i| read(i * 10_000 + 5_000)).collect();
+    let duration = if hops.iter().any(|h| h.voice) {
+        duration
+    } else {
+        // Calibrate ambient-only audit fixtures outside the ranges they retain.
+        hops.extend(std::iter::repeat_n(
+            hop(-12_000, false),
+            usize::try_from(n / 5 + 1).unwrap(),
+        ));
+        hops.push(hop(-2_000, true));
+        u64::try_from(hops.len()).unwrap() * 10_000
+    };
+    let profile = SoundProfile::from_hops(10_000, duration, hops).unwrap();
     Dialogue::new(profile, words, Settings::default()).unwrap()
 }
 fn hop(level: i16, voice: bool) -> Hop {
@@ -507,7 +517,12 @@ fn quiet_fixture(before: i16, phrase: i16, after: i16) -> Dialogue {
             } else {
                 -12_000
             };
-            hop(level, false)
+            hop(
+                level,
+                words
+                    .iter()
+                    .any(|w| w.start_micros <= t && t < w.end_micros),
+            )
         }),
     )
     .unwrap();
@@ -1225,8 +1240,8 @@ fn dialogue_audit_voice_bearing_dip_is_not_a_stretched_silent_word() {
     let side = side(join_at(&r, 950_000), AudibleSide::Out);
     assert_eq!(side.low_air_us, 950_000);
     assert_eq!(side.air_us, 0);
-    assert!(side.edge_in_sound.is_none());
-    assert!(side.dip_intrusion.is_some());
+    assert!(side.edge_in_sound.is_some());
+    assert!(side.dip_intrusion.is_none());
     assert!(side.stretched_word.is_none());
 }
 

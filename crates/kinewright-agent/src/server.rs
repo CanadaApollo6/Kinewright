@@ -2183,9 +2183,16 @@ impl KinewrightMcp {
                 self.asset_transcripts(&args.asset_ids)
             }
             "get_timeline_transcript" => {
-                let args: TimelineTranscriptArgs =
-                    decode_args("get_timeline_transcript", arguments)?;
-                self.timeline_transcript(args.range)
+                if self.dialogue_enabled() {
+                    let args: dialogue_dispatch::TranscriptArgs =
+                        decode_args("get_timeline_transcript", arguments)?;
+                    self.bound_transcript_filtered(args)
+                        .map(approximate_word_timing)
+                } else {
+                    let args: TimelineTranscriptArgs =
+                        decode_args("get_timeline_transcript", arguments)?;
+                    self.timeline_transcript(args.range)
+                }
             }
             "get_dialogue_pacing" => {
                 let args: DialoguePacingArgs = decode_args("get_dialogue_pacing", arguments)?;
@@ -2978,7 +2985,7 @@ impl KinewrightMcp {
         expected_revision: TimelineRevision,
         operations: &[Operation],
     ) -> Result<CallToolResult, McpError> {
-        self.apply_edit_plan_observed(expected_revision, operations, || Ok(()), |_, _| {})
+        self.apply_edit_plan_observed(expected_revision, operations, || None, |_, _| {})
     }
 
     #[allow(clippy::too_many_lines, reason = "one revision-gated edit transaction")]
@@ -2986,7 +2993,7 @@ impl KinewrightMcp {
         &self,
         expected_revision: TimelineRevision,
         operations: &[Operation],
-        validate: impl Fn() -> Result<(), String>,
+        validate: impl Fn() -> Option<CallToolResult>,
         mut observe: impl FnMut(TimelineRevision, &Document),
     ) -> Result<CallToolResult, McpError> {
         let (actual_revision, before) = self.snapshot()?;
@@ -3031,8 +3038,8 @@ impl KinewrightMcp {
         if let Err(error) = self.check_batch_history(operations) {
             return Ok(error_text(error));
         }
-        if let Err(reason) = validate() {
-            return Ok(error_text(reason));
+        if let Some(refusal) = validate() {
+            return Ok(refusal);
         }
         let confirmation = plan_confirmation_description(&before, operations);
         if self.task_control.is_none()
@@ -3057,8 +3064,8 @@ impl KinewrightMcp {
         {
             return Ok(error_text(error));
         }
-        if let Err(reason) = validate() {
-            return Ok(error_text(reason));
+        if let Some(refusal) = validate() {
+            return Ok(refusal);
         }
         let apply = || {
             self.core.request(Command::DoBatchIfRevision {
@@ -8806,14 +8813,9 @@ impl KinewrightMcp {
         requested: Option<TranscriptRangeArgs>,
     ) -> Result<CallToolResult, McpError> {
         if self.dialogue_enabled() {
-            let mut result = self.bound_transcript(requested)?;
-            if let Some(serde_json::Value::Object(payload)) = &mut result.structured_content {
-                payload.insert(
-                    "word_timing".into(),
-                    serde_json::json!("approximate_transcript_intervals"),
-                );
-            }
-            return Ok(result);
+            return self
+                .bound_transcript(requested)
+                .map(approximate_word_timing);
         }
         let document = self.document()?;
         let range = requested.map_or(TimeCode::ZERO..document.duration, |range| {
@@ -15623,6 +15625,16 @@ fn subtract_dialogue_bridges(
 
 fn success_text(text: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(text)])
+}
+
+fn approximate_word_timing(mut result: CallToolResult) -> CallToolResult {
+    if let Some(serde_json::Value::Object(payload)) = &mut result.structured_content {
+        payload.insert(
+            "word_timing".into(),
+            serde_json::json!("approximate_transcript_intervals"),
+        );
+    }
+    result
 }
 
 fn success_structured(text: impl Into<String>, value: serde_json::Value) -> CallToolResult {

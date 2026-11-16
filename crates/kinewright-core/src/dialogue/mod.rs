@@ -13,10 +13,12 @@ mod resolve;
 
 pub use evidence::{Dialogue, Sound};
 pub use frame::{FrameGrid, FramedEdge};
-pub use profile::{DEFAULT_HOP_MICROS, Hop, LEVEL_FLOOR, ProfileError, SoundProfile};
+pub use profile::{
+    DEFAULT_HOP_MICROS, Hop, LEVEL_FLOOR, ProfileError, RecordingLevels, SoundProfile,
+};
 pub use resolve::{
     AudibleSide, CutRequest, DipIntrusion, EdgePlacement, Refusal, RefusalReason, ResolvedCut,
-    ResolvedEdge, Shift, WordBoundary, pad_edge,
+    ResolvedEdge, RetainedAir, Shift, WordBoundary, pad_edge,
 };
 
 use serde::{Deserialize, Serialize};
@@ -131,6 +133,16 @@ impl Default for Settings {
 
 #[derive(Debug, PartialEq, Eq, Error)]
 pub enum InputError {
+    #[error("recording has no voice-flagged hops to measure its speech level")]
+    SpeechLevelUnavailable,
+    #[error(
+        "speech level {speech_rms_hundredths} and noise floor {noise_floor_hundredths} centidBFS leave less than 6 dB below quiet threshold {quiet_rms_hundredths}; use a cleaner recording"
+    )]
+    NoiseSeparation {
+        speech_rms_hundredths: i16,
+        noise_floor_hundredths: i16,
+        quiet_rms_hundredths: i16,
+    },
     #[error("the measured run is empty, reversed or too short for its interior margin")]
     Span,
     #[error("dialogue settings have an invalid level or overflowing/zero padding")]
@@ -139,6 +151,48 @@ pub enum InputError {
     Word { index: usize },
 }
 
+/// Speech level for the normalized dialogue on which the reference thresholds were tuned.
+pub const REFERENCE_SPEECH: i16 = -2_000;
+/// Effective centidBFS limits. Unlike measured levels, a shifted threshold may
+/// lie below the measurement floor; saturating it would create false dips.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct Thresholds {
+    pub quiet_rms_max: i16,
+    pub quiet_peak_max: i16,
+    pub valley_rms_max: i16,
+    pub valley_peak_max: i16,
+    pub dip_dbfs_hundredths: i16,
+}
+impl Thresholds {
+    fn relative(settings: &Settings, profile: &SoundProfile) -> Result<Self, InputError> {
+        let levels = profile.levels();
+        let speech = levels
+            .speech_rms_hundredths
+            .ok_or(InputError::SpeechLevelUnavailable)?;
+        let shift = i32::from(speech) - i32::from(REFERENCE_SPEECH);
+        let shifted = |db: i16| {
+            i16::try_from(i32::from(db) + shift)
+                .expect("validated reference limit and speech shift fit i16")
+        };
+        let thresholds = Self {
+            quiet_rms_max: shifted(settings.quiet_rms_max),
+            quiet_peak_max: shifted(settings.quiet_peak_max),
+            valley_rms_max: shifted(settings.valley_rms_max),
+            valley_peak_max: shifted(settings.valley_peak_max),
+            dip_dbfs_hundredths: shifted(settings.dip_dbfs_hundredths),
+        };
+        if let Some(floor) = levels.noise_floor_hundredths
+            && i32::from(thresholds.quiet_rms_max) - i32::from(floor) < 600
+        {
+            return Err(InputError::NoiseSeparation {
+                speech_rms_hundredths: speech,
+                noise_floor_hundredths: floor,
+                quiet_rms_hundredths: thresholds.quiet_rms_max,
+            });
+        }
+        Ok(thresholds)
+    }
+}
 impl Settings {
     fn validate(&self) -> Result<(), InputError> {
         let levels = [
@@ -165,3 +219,6 @@ impl Settings {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod rehearsal_tests;
