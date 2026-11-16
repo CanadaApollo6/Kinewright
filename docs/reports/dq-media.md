@@ -1273,3 +1273,167 @@ One post-pin gate snapshot briefly reached **40,366,032,315 bytes**; it was
 immediately pruned to 28.0 GB. Inactive generated test executables were removed,
 with `target/dq1/` and all `target/dq-media/` evidence retained. Final target size
 is **29.4 GB** (decimal), below the 40 GB limit.
+
+
+## M5: enable measured dialogue editing on the app branch
+
+M5 starts from `5d0e8b4f`, after the lead accepted R4. The app branch now
+advertises `cut_dialogue`, `check_dialogue_cut` and the addressed
+`get_timeline_transcript` schema. `SERVE_DIALOGUE_TOOLS` is true. The seven
+compact directly served tools remain unchanged; the dialogue descriptors open
+through the existing capability dispatcher.
+
+`get_dialogue_pacing` is deleted from discovery, invocation, the inspector
+name list, schemas, handler and formatter. The product pacing module and its
+tool-only tests are removed. The old unaddressed timeline-transcript handler,
+its renderer, public export, frame helper and golden test, and the test-only
+opt-in catalog override are also gone. There is no alias,
+deprecation route, old-format fallback or compatibility shim.
+
+### Deletion plan and related tools kept
+
+The public deletion list is unchanged from M0: remove `get_dialogue_pacing`.
+One private-code detail changed after the caller audit. The sentence-pause
+classifier also supplies the independent benchmark's `DialoguePauseBounds`
+assertion. Its calculation and oracle tests now live only in
+`eval/sentence_pauses.rs`, under the eval feature. The shipping product no
+longer compiles or calls that classifier. The benchmark prompt and published
+v4 manifest drop the retired inspector lookup and step, along with its obsolete
+required-tool-use assertion. The eval runner has no measurement adapter, so it
+does not require an always-unready replacement call. Independent scoring and
+ground truth are unchanged. No paid benchmark run was made.
+
+These related tools remain because the new pair does not cover their job:
+
+| Tool | Distinct purpose |
+|---|---|
+| `get_transcript`, `get_transcripts` | Source-frame transcripts of assets, including unplaced takes and caption inputs. |
+| `get_timeline_transcript` | Current recording indices and clip bindings required to address the new cuts; optional project or word ranges. |
+| `get_silences`, `get_timeline_silences` | Generic source/timeline silence evidence, including non-dialogue audio, used by other planners. |
+| `plan_dialogue_assembly` | Select and assemble multiple source takes into a new ordered timeline. The new cut tool removes from existing clips. |
+| `plan_dialogue_repair` | Prepare audio repair effects; it does not remove addressed speech or trim pauses. |
+| `get_editorial_readiness` | Check broader delivery and editorial completion, beyond dialogue joins. |
+
+The on-demand cut guide remains **1,228 UTF-8 bytes**, below its 1,500-byte
+bound, with the same hash. It still points at ranged transcript reads and the
+current revision and neighbour addresses returned by cuts. It is returned only
+with the cut schema, once per lookup or batch lookup, not in standing tool
+instructions. The removed inspector has no remaining current guide entry.
+
+### Check the clip shapes proved by M2
+
+The check no longer rejects a unit-speed played span merely because its enabled
+run begins inside its clip. It audits the production timeline segment's exact
+Core source span. Coverage includes equal clocks, 25 fps in 24, NTSC in 30,
+60 fps in 30, nonzero source in-points, stored-source padding, enabled runs
+inside clips, and ranged inspection inside a clip. The existing M2 PCM tests
+still compare export and mixer output with Core within one 48 kHz sample.
+Retimed clips, overlapping dialogue and unavailable measurements retain their
+typed `not_checked` reasons. Cut/retention geometry and safety policy are not
+relaxed by this check-only change.
+
+### Model-visible bytes against `5d0e8b4f`
+
+The following values use the existing `ToolSurfaceMetrics` pin method: sums of
+compact serialized Tool descriptors, input schemas and UTF-8 descriptions.
+
+| Measurement | At `5d0e8b4f` | M5 | Change |
+|---|---:|---:|---:|
+| App registry capabilities | 153 | 154 | +1 |
+| Registry descriptor bytes | 1,978,588 | 1,981,514 | +2,926 |
+| Input-schema bytes | 1,824,687 | 1,826,246 | +1,559 |
+| Description bytes | 128,776 | 130,006 | +1,230 |
+| Directly served descriptor bytes | 5,660 | 5,660 | 0 |
+| Directly served description bytes | 998 | 998 | 0 |
+| On-demand guide text bytes | 1,228 | 1,228 | 0 |
+| Native task manifests and fixed prefixes | All six roles | Byte-identical | 0 |
+
+The removed inspector cost 1,882 descriptor bytes and 360 description bytes.
+The added cut/check descriptors cost 2,769/1,550 bytes, with 817/717 description
+bytes. The addressed transcript descriptor changes from 1,125 to 1,614 bytes;
+its description changes from 247 to 303 bytes. Those observed changes sum to
+the registry delta above. The registry size/count tests and MCP integration
+pins are updated from the serialized observations. The measurement pin is
+regenerated with its native names, schemas, fixed prefixes and model options
+asserted equal to the baseline; only `arm_bridge_sha256.mcp_observation` changes
+to the final server source hash.
+
+### Native measurement wiring remains a separate job
+
+Per the lead's M5 ruling, native task roles do **not** advertise
+`get_timeline_transcript`, `cut_dialogue` or `check_dialogue_cut`.
+`start_task_isolated` and `start_host_isolated` have no installed measurement
+provider. Their unconfigured host catalog omits all three; task admission also
+refuses them. Director, Editor, Motion, Audio, Colour and Reviewer manifests
+retain their existing names and bytes. No permanent `NotMeasured` tool is
+advertised to those models.
+
+**Open item for the separately scheduled native job:** install certified,
+task-scoped dialogue measurements through owned-input admission, with the
+endpoint's Core, retained source authority, content identity and audio stream.
+There must be no file-path or legacy-media fallback. Prove the pending-to-ready
+flow and cut/check through the production native endpoint before adding these
+tools to its role manifests and re-pinning those manifests.
+
+### Verification
+
+The new assertions are:
+
+- `dq_m5_catalog_and_dispatch_expose_measurements_without_pacing`: app catalog
+  and dispatch contain the new tools and reject the removed name and lookup.
+- `dq_m5_check_accepts_renderer_proven_clocks_and_enabled_origins`: the eight
+  proven clock/span shapes have measured check results through the dispatcher.
+- `dq_m5_native_manifests_omit_unwired_dialogue_while_app_catalog_serves_it`:
+  all six native role schemas omit the tools, the unconfigured host catalog
+  hides them, and the app branch catalog includes them.
+
+The first full Agent run exposed two integration misses before publication:
+`check_dialogue_cut` was inferred as an Action despite its read-only annotation,
+and the destructive-hint count still expected 15. The existing explicit kind
+map now classifies the check as an Inspector. The hint pin is 16 for the added
+cut tool, with all seven destructive Operation assertions retained. Both
+regressions then passed directly. The failed and corrected logs are retained
+under `target/dq-media/m5/`; no assertion was relaxed to accept the wrong kind.
+
+The lead reduced the local gate during M5 to the changed crate's all-target
+Clippy, its slow tests including `mcp_server`, the pin tests, and formatting.
+The full workspace suite and the three shipping builds are deferred to CI.
+A subsequent extra workspace build was stopped when that ruling arrived.
+
+Two earlier expanded gate batches ended with SIGTERM before completing;
+the cause was not established. Their completed results and interrupted logs
+are retained, but neither command is claimed as a complete passing gate.
+One redundant standalone MCP retry omitted the software-renderer environment
+and opened GPU devices. It was stopped and discarded, then rerun successfully
+with lavapipe explicitly selected (86 passed). The final focused gate also
+selects lavapipe; the running Agent test had no GPU device file descriptors.
+
+The final Agent package run completed **34 targets: 1,896 passed, zero failed,
+105 ignored**, with `slow-tests,te1-eval` enabled. This includes all **86 MCP
+integration tests**, all **13 measurement/pin tests**, the 1,493 library tests,
+the eval-v4 manifest preflight, native-link/public-API probes and four doc tests.
+The ignored tests retain their on-demand or equipped-session gates; no model
+was downloaded and no paid benchmark/provider run was made.
+
+Final commands, under the workstation lock with four build jobs and lavapipe:
+
+```text
+cargo test --config .cargo/ci-test-linux-slow.toml -p kinewright-agent --features slow-tests,te1-eval -- --test-threads=4
+cargo clippy -p kinewright-agent --all-targets --features slow-tests,te1-eval -- -D warnings
+cargo fmt -- --check
+```
+
+All passed. The explicitly included dialogue test files also pass standalone
+`rustfmt --check`. Slow-test lint reports 140 slow tests and 172 well-formed
+allowlist entries; `actionlint` passes. The four CI self-test scripts pass
+100 tests altogether (slow manifest 52, Linux dependencies 15, shards 24,
+NeMo provisioning 9). The earlier default and slow-feature workspace Clippy
+checks also passed before the gate was reduced. Windows execution, the full
+workspace suite and the three shipping builds remain CI checks, not claimed
+local completions.
+
+After pruning inactive test executables, final `target/` is **21,117,625,081 bytes
+(21.118 GB)**; the largest recorded M5 snapshot is
+**31,347,012,238 bytes**. `target/dq1/` and `target/dq-media/` evidence are
+preserved. All 20 tested source-file hashes still match. Every started local
+build/test process has finished or been stopped and reaped; no push was made.

@@ -78,7 +78,6 @@ mod motion;
 mod muse;
 /// Studio command kernel. Persistence remains disabled until the S3 H1 handoff.
 pub mod orchestration;
-mod pacing;
 mod protocol;
 mod usage_observer;
 #[cfg(feature = "eval-harness")]
@@ -123,9 +122,7 @@ pub use motion::{
     MOTION_PRESETS, MotionPlan, MotionPlanArgs, MotionPlanError, MotionPreset, plan_motion,
 };
 pub use muse::{MUSE_SANDBOX_NOTICE, MuseDriver, muse_models};
-pub use render::{
-    render_asset_transcript, render_clip_info, render_timeline_state, render_timeline_transcript,
-};
+pub use render::{render_asset_transcript, render_clip_info, render_timeline_state};
 pub use runtime::{
     CapabilityDescriptor, CapabilityKind, EditPlanPreview, INVESTIGATOR_TOOL_NAMES, PreparedPlanId,
     ResultSize, ResultSizeMetrics, ToolSurfaceMetrics, compact_tool_names,

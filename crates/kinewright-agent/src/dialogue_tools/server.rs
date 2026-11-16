@@ -148,11 +148,11 @@ fn retimed_transcript_clips(
 impl KinewrightMcp {
     pub(super) fn dialogue_enabled(&self) -> bool {
         dialogue::SERVE_DIALOGUE_TOOLS
-            || cfg!(test)
-                && self
+            && (!self.host_scoped
+                || self
                     .dialogue_measurements
                     .read()
-                    .is_ok_and(|slot| slot.is_some())
+                    .is_ok_and(|slot| slot.is_some()))
     }
     pub(super) fn dialogue_provider(&self) -> Result<Arc<dyn DialogueMeasurements>, Refusal> {
         self.dialogue_measurements
@@ -163,19 +163,16 @@ impl KinewrightMcp {
             .ok_or(Refusal::NotMeasured)
     }
     pub(super) fn dialogue_catalog(&self) -> Result<Vec<Tool>, SchemaError> {
-        let mut result = Self::capability_tools()?;
-        if !dialogue::SERVE_DIALOGUE_TOOLS && self.dialogue_enabled() {
-            result.extend(tools());
+        let mut tools = Self::capability_tools()?;
+        if !self.dialogue_enabled() {
+            tools.retain(|tool| {
+                !matches!(
+                    tool.name.as_ref(),
+                    "get_timeline_transcript" | "cut_dialogue" | "check_dialogue_cut"
+                )
+            });
         }
-        if self.dialogue_enabled()
-            && let Some(tool) = result
-                .iter_mut()
-                .find(|t| t.name == "get_timeline_transcript")
-        {
-            tool.input_schema = schema_object::<TranscriptArgs>();
-            tool.description=Some("Read addressed words from the bound measurement on audible source time. Optional word_range {clip,first,end} uses half-open recording indices; range {start,end} uses project frames. Choose one, or omit both for the full transcript. Times are recogniser estimates; acoustic cut checks use measured sound.".into());
-        }
-        Ok(result)
+        Ok(tools)
     }
     pub(super) fn check_dialogue(&self, args: &CheckArgs) -> Result<CallToolResult, McpError> {
         let (revision, doc) = self.snapshot()?;
@@ -295,15 +292,6 @@ impl KinewrightMcp {
                 serde_json::json!({"status":"applied","from_revision":args.expected_revision,"revision":revision,"removals":plan.outcomes,"neighbours":neighbours,"check_failed":reason,"retained_edges":retained,"extent_changes":plan.changes}),
                 false,
             ),
-        })
-    }
-    pub(super) fn bound_transcript(
-        &self,
-        requested: Option<TranscriptRangeArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.bound_transcript_filtered(TranscriptArgs {
-            range: requested,
-            word_range: None,
         })
     }
     pub(super) fn bound_transcript_filtered(

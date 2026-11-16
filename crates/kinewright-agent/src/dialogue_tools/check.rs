@@ -158,14 +158,6 @@ pub(crate) fn check(
         {
             continue;
         }
-        if !s.proven {
-            not_checked.push(NotChecked {
-                clip: s.clip.0,
-                range: [s.project.start, s.project.end],
-                reason: Refusal::UnprovenSegment { clip: s.clip.0 },
-            });
-            continue;
-        }
         if all.iter().any(|other| {
             other.track == s.track
                 && other.clip != s.clip

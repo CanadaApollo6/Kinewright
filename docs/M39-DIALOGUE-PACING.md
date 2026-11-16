@@ -1,5 +1,7 @@
 # M39: Dialogue pacing
 
+This document records the M39 assembly and independent benchmark evidence. Current measured dialogue editing is described in [the media report](reports/dq-media.md).
+
 ## Why this milestone exists
 
 M38 moved the benchmark from a rejected 2.25/5 artifact to an accepted 4.08/5
@@ -35,13 +37,6 @@ agent inspects the compact preview and sends the handle straight to
 second planning call. Commit remains the revision and confirmation boundary.
 This specifically removes a lossy, token-heavy loop observed during the
 acoustic benchmark correction.
-
-`get_dialogue_pacing` is a compact read-only inspector over final timeline
-words and mapped acoustic silence. It recognizes boundaries from terminal
-punctuation, asset changes, speaker changes, and pause-backed capitalization.
-It reports every boundary's word pair, acoustic pause, transcript-only gap,
-measurement source, reason, and short/target/long classification. Transcript
-timing is an explicit fallback while acoustic analysis is unavailable.
 
 Human review of the first v4 artifact exposed a measurement defect. Its four
 transcript gaps were all reported as 12 frames, but the rendered opening

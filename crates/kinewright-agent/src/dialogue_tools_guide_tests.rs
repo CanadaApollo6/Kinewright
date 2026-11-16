@@ -58,7 +58,7 @@ fn dq_guide_arrives_once_with_the_cut_schema() {
     );
 }
 #[test]
-fn dq_guide_is_hidden_when_the_tools_are_not_served() {
+fn dq_guide_is_available_before_measurement_and_absent_from_catalog() {
     let (s, _) = fixture();
     *s.dialogue_measurements.write().unwrap() = None;
     let r = s
@@ -66,12 +66,8 @@ fn dq_guide_is_hidden_when_the_tools_are_not_served() {
             serde_json::Map::from_iter([("name".into(), json!("cut_dialogue"))]),
         ))
         .unwrap();
-    assert_eq!(r.is_error, Some(true));
-    assert!(
-        !serde_json::to_string(&r)
-            .unwrap()
-            .contains("Keep the speaker's meaning")
-    );
+    ok(&r);
+    assert_eq!(content(&r)["guide"], dq::GUIDE);
     assert!(
         !serde_json::to_string(&KinewrightMcp::capability_tools().unwrap())
             .unwrap()

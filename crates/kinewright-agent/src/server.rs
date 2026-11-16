@@ -93,12 +93,10 @@ use crate::{
         media_refusal_code,
     },
     motion::{MotionPlanArgs, MotionPlanError},
-    pacing::{DialoguePacingGap, dialogue_pacing_gaps},
     render::{
         cuttable_timeline_silences, render_asset_scene_changes, render_asset_silences,
         render_asset_transcript, render_clip_info, render_timeline_scene_changes,
-        render_timeline_silences, render_timeline_state, render_timeline_transcript,
-        track_kind_name,
+        render_timeline_silences, render_timeline_state, track_kind_name,
     },
     runtime::{
         CapabilityDescriptor, CapabilityKind, PreparedEditPlan, PreparedPlanId, PreparedPlanStore,
@@ -2183,20 +2181,10 @@ impl KinewrightMcp {
                 self.asset_transcripts(&args.asset_ids)
             }
             "get_timeline_transcript" => {
-                if self.dialogue_enabled() {
-                    let args: dialogue_dispatch::TranscriptArgs =
-                        decode_args("get_timeline_transcript", arguments)?;
-                    self.bound_transcript_filtered(args)
-                        .map(approximate_word_timing)
-                } else {
-                    let args: TimelineTranscriptArgs =
-                        decode_args("get_timeline_transcript", arguments)?;
-                    self.timeline_transcript(args.range)
-                }
-            }
-            "get_dialogue_pacing" => {
-                let args: DialoguePacingArgs = decode_args("get_dialogue_pacing", arguments)?;
-                self.dialogue_pacing(&args)
+                let args: dialogue_dispatch::TranscriptArgs =
+                    decode_args("get_timeline_transcript", arguments)?;
+                self.bound_transcript_filtered(args)
+                    .map(approximate_word_timing)
             }
             "get_silences" => {
                 let args: SilencesArgs = decode_args("get_silences", arguments)?;
@@ -8808,131 +8796,6 @@ impl KinewrightMcp {
         ))
     }
 
-    fn timeline_transcript(
-        &self,
-        requested: Option<TranscriptRangeArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        if self.dialogue_enabled() {
-            return self
-                .bound_transcript(requested)
-                .map(approximate_word_timing);
-        }
-        let document = self.document()?;
-        let range = requested.map_or(TimeCode::ZERO..document.duration, |range| {
-            range.start..range.end
-        });
-        if range.start < TimeCode::ZERO || range.end <= range.start || range.end > document.duration
-        {
-            return Ok(error_text(format!(
-                "timeline transcript range {}..{} is outside project range 0..{}",
-                range.start.0, range.end.0, document.duration.0
-            )));
-        }
-        for asset in &document.media_pool {
-            if self.analysis.transcript_status(asset) == TranscriptStatus::NotRequested {
-                self.analysis.request_transcription(asset.clone());
-            }
-        }
-        let words: Vec<TimelineTranscriptWord> = match self
-            .analysis
-            .timeline_transcript(&document, Some(range.clone()))
-        {
-            Ok(words) => words,
-            Err(error) => return Ok(error_text(error.to_string())),
-        };
-        let mut rendered = render_timeline_transcript(&document, range, &words);
-        for asset in &document.media_pool {
-            let status = self.analysis.transcript_status(asset);
-            if !matches!(
-                status,
-                TranscriptStatus::Ready(_) | TranscriptStatus::NoSpeech
-            ) {
-                rendered.push('\n');
-                rendered.push_str(&render_asset_transcript(asset.id, &status));
-            }
-        }
-        Ok(success_text(rendered))
-    }
-
-    fn dialogue_pacing(&self, args: &DialoguePacingArgs) -> Result<CallToolResult, McpError> {
-        let document = self.document()?;
-        let range = validated_timeline_range(
-            &document,
-            args.range.as_ref().map(|range| TranscriptRangeArgs {
-                start: range.start,
-                end: range.end,
-            }),
-            "dialogue pacing",
-        )?;
-        let minimum = args.minimum_pause_frames.unwrap_or(TimeCode(10));
-        let maximum = args.maximum_pause_frames.unwrap_or(TimeCode(40));
-        let capitalization_minimum = args
-            .capitalization_boundary_minimum_frames
-            .unwrap_or(TimeCode(4));
-        if minimum < TimeCode::ZERO || maximum < minimum || capitalization_minimum < TimeCode::ZERO
-        {
-            return Ok(error_text(
-                "dialogue pacing requires 0 <= minimum_pause_frames <= maximum_pause_frames and a non-negative capitalization boundary minimum",
-            ));
-        }
-        let referenced_assets = document
-            .tracks
-            .iter()
-            .flat_map(|track| &track.clips)
-            .filter(|clip| clip.content.is_media())
-            .map(|clip| clip.asset)
-            .collect::<BTreeSet<_>>();
-        for asset in document
-            .media_pool
-            .iter()
-            .filter(|asset| referenced_assets.contains(&asset.id))
-        {
-            if self.analysis.transcript_status(asset) == TranscriptStatus::NotRequested {
-                self.analysis.request_transcription(asset.clone());
-            }
-            if self.analysis.silence_status(asset) == SilenceStatus::NotRequested {
-                self.analysis.request_silence_detection(asset.clone());
-            }
-        }
-        let words = match self
-            .analysis
-            .timeline_transcript(&document, Some(range.clone()))
-        {
-            Ok(words) => dedup_timeline_words(words),
-            Err(error) => return Ok(error_text(error.to_string())),
-        };
-        let silences =
-            match self
-                .analysis
-                .timeline_silences(&document, Some(range.clone()), TimeCode(1))
-            {
-                Ok(silences) => silences,
-                Err(error) => return Ok(error_text(error.to_string())),
-            };
-        let pending_acoustic_assets = document
-            .media_pool
-            .iter()
-            .filter(|asset| referenced_assets.contains(&asset.id))
-            .filter(|asset| {
-                !matches!(
-                    self.analysis.silence_status(asset),
-                    SilenceStatus::Ready(_) | SilenceStatus::NoAudio
-                )
-            })
-            .map(|asset| asset.id.0)
-            .collect::<Vec<_>>();
-        let pacing =
-            dialogue_pacing_gaps(&words, &silences, minimum, maximum, capitalization_minimum);
-        Ok(dialogue_pacing_result(
-            range,
-            minimum,
-            maximum,
-            capitalization_minimum,
-            &pacing,
-            &pending_acoustic_assets,
-        ))
-    }
-
     /// AU1 §6.2: measure the mix through the track stage over an optional
     /// project range and report it per track, per bus, and at master.
     fn audio_levels(&self, args: &AudioLevelsArgs) -> Result<CallToolResult, McpError> {
@@ -11231,7 +11094,7 @@ fn clip_window_levels(
 
 /// AU4 §6.1: the finest silence resolution the ducking planner reads, so a
 /// short breath inside a sentence still splits the spoken span before the
-/// hold extension merges it back (`get_dialogue_pacing` uses the same value).
+/// hold extension merges it back.
 const DUCKING_MINIMUM_SILENCE_FRAMES: TimeCode = TimeCode(1);
 /// AU4 §6.1: the default duck depth under the parked fader, in tenth dB.
 const DEFAULT_DUCKING_DEPTH_TENTH_DB: i32 = -120;
@@ -14183,29 +14046,6 @@ fn snake_to_pascal(value: &str) -> String {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct TimelineTranscriptArgs {
-    /// Optional half-open range in exact project frames. Omit for the full timeline.
-    #[serde(default)]
-    range: Option<TranscriptRangeArgs>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct DialoguePacingArgs {
-    /// Optional half-open range in exact project frames. Omit for the full timeline.
-    #[serde(default)]
-    range: Option<TranscriptRangeArgs>,
-    /// Shortest acceptable acoustic pause at a detected sentence boundary. Defaults to 10 project frames.
-    #[serde(default)]
-    minimum_pause_frames: Option<TimeCode>,
-    /// Longest acceptable acoustic pause at a detected sentence boundary. Defaults to 40 project frames.
-    #[serde(default)]
-    maximum_pause_frames: Option<TimeCode>,
-    /// Minimum word gap for an uppercase next word to count as a sentence boundary. Defaults to 4 project frames.
-    #[serde(default)]
-    capitalization_boundary_minimum_frames: Option<TimeCode>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
 struct TranscriptRangeArgs {
     start: TimeCode,
     end: TimeCode,
@@ -14995,14 +14835,8 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "get_timeline_transcript",
-            "Return audible transcript words mapped through clips to project frames and seconds. Word spans are approximate alignments, not measured speech boundaries. Use measured sound to place cut edges; transcript-gap counts can include aligned word tails.",
-            schema_object::<TimelineTranscriptArgs>(),
-        )
-        .with_annotations(read_only()),
-        Tool::new(
-            "get_dialogue_pacing",
-            "Measure sentence-boundary pauses from mapped acoustic silence and classify each as short, target, or long, with transcript timing as an explicit fallback while silence analysis is unavailable. Boundaries use punctuation, asset or speaker changes, and pause-backed capitalization so agents can verify the rhythm viewers hear instead of guessing from clip edges.",
-            schema_object::<DialoguePacingArgs>(),
+            "Read addressed words from the bound measurement on audible source time. Optional word_range {clip,first,end} uses half-open recording indices; range {start,end} uses project frames. Choose one, or omit both for the full transcript. Times are recogniser estimates; acoustic cut checks use measured sound.",
+            schema_object::<dialogue_dispatch::TranscriptArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
@@ -15307,68 +15141,6 @@ fn dialogue_selection(
             minimum_silence_source_frames,
         ),
     })
-}
-
-fn dialogue_pacing_result(
-    range: std::ops::Range<TimeCode>,
-    minimum: TimeCode,
-    maximum: TimeCode,
-    capitalization_minimum: TimeCode,
-    pacing: &[DialoguePacingGap],
-    pending_acoustic_assets: &[u64],
-) -> CallToolResult {
-    let short = pacing.iter().filter(|gap| gap.status == "short").count();
-    let long = pacing.iter().filter(|gap| gap.status == "long").count();
-    let target = pacing.len().saturating_sub(short).saturating_sub(long);
-    let acoustic = pacing
-        .iter()
-        .filter(|gap| gap.measurement == "acoustic_silence")
-        .count();
-    let ready = pending_acoustic_assets.is_empty() && short == 0 && long == 0;
-    let mut rendered = format!(
-        "dialogue pacing range={}..{} boundaries={} acoustic={} target={} short={} long={} pending_acoustic_assets={:?} ready={ready}",
-        range.start.0,
-        range.end.0,
-        pacing.len(),
-        acoustic,
-        target,
-        short,
-        long,
-        pending_acoustic_assets,
-    );
-    for gap in pacing {
-        let _ = write!(
-            rendered,
-            "\n{}..{} gap={} transcript_gap={} measurement={} status={} {:?} -> {:?} reason={}",
-            gap.previous_end.0,
-            gap.next_start.0,
-            gap.pause_frames.0,
-            gap.transcript_pause_frames.0,
-            gap.measurement,
-            gap.status,
-            gap.previous_word,
-            gap.next_word,
-            gap.reason,
-        );
-    }
-    success_structured(
-        rendered,
-        serde_json::json!({
-            "range": {"start": range.start.0, "end": range.end.0},
-            "target_pause_frames": {"minimum": minimum.0, "maximum": maximum.0},
-            "capitalization_boundary_minimum_frames": capitalization_minimum.0,
-            "summary": {
-                "boundaries": pacing.len(),
-                "target": target,
-                "short": short,
-                "long": long,
-                "acoustic": acoustic,
-                "pending_acoustic_asset_ids": pending_acoustic_assets,
-                "ready": ready,
-            },
-            "gaps": pacing,
-        }),
-    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -25186,7 +24958,7 @@ mod tests {
         }
         // IN1 §6.6: get_incidents and resolve_incident join the registry;
         // IN2 §4.1 rule 2 adds propose_fix beside them.
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 89);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 88);
 
         for name in [
             "plan_primary_correction",
@@ -29119,7 +28891,7 @@ mod tests {
             }
         }
 
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 89);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 88);
         // IN1 §6.1 rule 3: nothing the dispatcher accepted before is now
         // refused, and no generated operation tool became invocable.
         let stranded = crate::schema::INSPECTOR_TOOL_NAMES
@@ -30285,7 +30057,9 @@ mod tests {
         println!("registry={registry_metrics:?} served={served_metrics:?}");
         assert_eq!(
             registry_metrics.tool_count,
-            operation_tools().unwrap().len() + crate::schema::INSPECTOR_TOOL_NAMES.len()
+            operation_tools().unwrap().len()
+                + crate::schema::INSPECTOR_TOOL_NAMES.len()
+                + crate::dialogue_tools::TOOL_NAMES.len()
         );
         assert_eq!(served_metrics.tool_count, 7);
         assert!(served_metrics.tool_count < registry_metrics.tool_count / 4);
@@ -30295,15 +30069,15 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_978_588, 5_660),
+            (1_981_514, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_824_687,
+            registry_metrics.input_schema_bytes, 1_826_246,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 128_776,
+            registry_metrics.description_bytes, 130_006,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
@@ -31419,7 +31193,7 @@ mod tests {
             "add_styled_captions",
             "get_captions",
             "plan_caption_corrections",
-            "get_dialogue_pacing",
+            "check_dialogue_cut",
             "get_editorial_readiness",
         ]))
         .unwrap()
@@ -31428,7 +31202,7 @@ mod tests {
             "get_transcripts",
             "plan_dialogue_assembly",
             "add_styled_captions",
-            "get_dialogue_pacing",
+            "check_dialogue_cut",
             "get_editorial_readiness",
         ]))
         .unwrap()
@@ -31436,37 +31210,6 @@ mod tests {
 
         println!("dialogue capability payload: legacy={legacy} B authored={authored} B");
         assert!(authored < legacy);
-    }
-
-    #[test]
-    fn dialogue_pacing_adds_a_bounded_capability_payload() {
-        let tools = KinewrightMcp::tools().unwrap();
-        let shared = [
-            "get_transcripts",
-            "plan_dialogue_assembly",
-            "add_styled_captions",
-            "get_captions",
-            "plan_caption_corrections",
-            "get_editorial_readiness",
-        ];
-        let open = |names: &[&str]| {
-            open_capabilities(
-                &tools,
-                CapabilityArgs {
-                    name: None,
-                    names: names.iter().map(ToString::to_string).collect(),
-                },
-            )
-        };
-        let v3_bytes = serde_json::to_vec(&open(&shared)).unwrap().len();
-        let mut v4 = shared.to_vec();
-        v4.push("get_dialogue_pacing");
-        let v4_bytes = serde_json::to_vec(&open(&v4)).unwrap().len();
-
-        println!("dialogue capability payload: v3={v3_bytes} B v4={v4_bytes} B");
-        assert!(v4_bytes > v3_bytes);
-        assert!(v4_bytes - v3_bytes < 2_500);
-        assert!(v4_bytes < 20_000);
     }
 
     #[test]
@@ -31887,43 +31630,6 @@ mod tests {
         assert_eq!(bridges[0].retained_pause_source_frames, TimeCode(24));
         assert_eq!(bridges[0].cut_start, TimeCode(126));
         assert_eq!(bridges[0].cut_end, TimeCode(229));
-    }
-
-    #[test]
-    fn dialogue_pacing_classifies_sentence_gaps_without_marking_word_gaps() {
-        let word = |text: &str, asset: u64, start: i64, end: i64| TimelineTranscriptWord {
-            text: text.to_owned(),
-            speaker: None,
-            asset: AssetId(asset),
-            track: TrackId(1),
-            clip: ClipId(asset),
-            source_start: TimeCode(start),
-            source_end: TimeCode(end),
-            project_start: TimeCode(start),
-            project_end: TimeCode(end),
-        };
-        let words = vec![
-            word("rain", 1, 80, 100),
-            word("Neighbors", 1, 112, 130),
-            word("instead", 1, 180, 200),
-            word("Over", 2, 212, 230),
-            word("beds", 2, 280, 300),
-            word("Then", 2, 307, 325),
-            word("peppers.", 2, 380, 400),
-            word("Now", 3, 420, 438),
-            word("continues", 3, 440, 458),
-        ];
-
-        let gaps = dialogue_pacing_gaps(&words, &[], TimeCode(9), TimeCode(15), TimeCode(4));
-        assert_eq!(gaps.len(), 4);
-        assert_eq!(gaps[0].status, "target");
-        assert_eq!(gaps[0].reason, "pause_backed_capitalization");
-        assert_eq!(gaps[1].status, "target");
-        assert!(gaps[1].reason.contains("asset_change"));
-        assert_eq!(gaps[2].status, "short");
-        assert_eq!(gaps[2].pause_frames, TimeCode(7));
-        assert_eq!(gaps[3].status, "long");
-        assert!(gaps[3].reason.contains("terminal_punctuation"));
     }
 
     #[test]
@@ -36165,8 +35871,8 @@ mod tests {
                     .as_ref()
                     .is_some_and(|annotations| annotations.destructive_hint == Some(true)))
                 .count(),
-            15,
-            "destructiveHint goes 12 -> 15 with the three generated tools of IN2 §6 rule 5"
+            16,
+            "M5 cut_dialogue adds one destructiveHint to the 15 existing destructive tools"
         );
     }
 
@@ -36232,8 +35938,8 @@ mod tests {
     #[test]
     fn in2_the_registry_grows_by_one_capability() {
         let registry = KinewrightMcp::capability_tools().unwrap();
-        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 153);
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 89);
+        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 154);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 88);
         assert_eq!(operation_tools().unwrap().len(), 64);
         let generated = operation_tools().unwrap();
         for name in [
@@ -37047,8 +36753,6 @@ fn task_role_tools_uncached(names: &[&'static str]) -> Result<Vec<Tool>, String>
         .map(|name| {
             match *name {
                 "get_timeline_state" => Some(compact_get_timeline_state_tool()),
-                "cut_dialogue" | "check_dialogue_cut" => dialogue_dispatch::tools().into_iter().find(|tool|tool.name==*name),
-                "get_timeline_transcript" => inspector_tools().into_iter().find(|tool|tool.name==*name),
                 "prepare_edit_plan" => Some(task_prepare_edit_plan_tool()),
                 "commit_edit_plan" => Some(compact_commit_edit_plan_tool()),
                 "discard_edit_plan" => Some(compact_discard_edit_plan_tool()),

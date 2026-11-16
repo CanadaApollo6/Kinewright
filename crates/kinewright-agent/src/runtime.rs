@@ -178,6 +178,7 @@ pub fn search_capabilities(
 /// advertised as `Action` and be filtered out of an inspection-only search.
 /// Every entry here must agree with the tool's own `read_only()` annotation.
 const CAPABILITY_KIND_OVERRIDES: &[(&str, CapabilityKind)] = &[
+    ("check_dialogue_cut", CapabilityKind::Inspector),
     ("analyze_color_shot", CapabilityKind::Inspector),
     ("render_color_proof", CapabilityKind::Inspector),
     // CC4 §8: `list_look_assets` is read-only LUT-asset evidence.

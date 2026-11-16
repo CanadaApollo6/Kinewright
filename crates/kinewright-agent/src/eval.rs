@@ -1,5 +1,8 @@
 //! Budgeted, typed evaluation support for installed editing-agent harnesses.
 
+mod sentence_pauses;
+use sentence_pauses::sentence_pauses;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
@@ -33,7 +36,6 @@ use thiserror::Error;
 use crate::{
     BudgetKind, ConfirmationBroker, ConfirmationPolicy, McpServer, SessionCounters, SessionFlow,
     SessionLimits, SessionObserver, SessionStop, SharedCounters, StopReason, compact_tool_names,
-    pacing::dialogue_pacing_gaps,
     pump_session,
     render::cuttable_timeline_silences,
     server::{ReframeSubjectProvenance, TrackedSubjectBounds, decode_reframe_subject_provenance},
@@ -8178,8 +8180,7 @@ fn evaluate_dialogue_pause_bounds(
     maximum: TimeCode,
     capitalization_minimum: TimeCode,
 ) -> AssertionResult {
-    let boundaries =
-        dialogue_pacing_gaps(words, silences, minimum, maximum, capitalization_minimum);
+    let boundaries = sentence_pauses(words, silences, minimum, maximum, capitalization_minimum);
     let violations = boundaries
         .iter()
         .filter(|gap| gap.status != "target")

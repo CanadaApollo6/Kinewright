@@ -9,8 +9,8 @@ use kinewright_core::{
     FrameRounding, LinkId, NOISE_PROFILE_BAND_COUNT, NOISE_PROFILE_PARAMETER_NAMES,
     PROFILE_BAND_NEUTRAL_TENTH_DB, PanLaw, ParamValue, Rational, SceneStatus, SilenceSpan,
     SilenceStatus, TRACK_AUTOMATION_PARAMETERS, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
-    TimelineTranscriptWord, Title, TrackKind, TranscriptStatus, is_noise_profile_parameter,
-    map_frames_with_rounding, map_source_range_to_project,
+    Title, TrackKind, TranscriptStatus, is_noise_profile_parameter, map_frames_with_rounding,
+    map_source_range_to_project,
 };
 
 use crate::shrink_silence_span_for_cutting_with_transcript;
@@ -660,39 +660,6 @@ pub fn render_asset_transcript(asset: AssetId, status: &TranscriptStatus) -> Str
     }
 }
 
-#[must_use]
-pub fn render_timeline_transcript(
-    document: &Document,
-    range: std::ops::Range<TimeCode>,
-    words: &[TimelineTranscriptWord],
-) -> String {
-    let mut output = format!(
-        "timeline transcript range={}..{} words={} word_timing=approximate_transcript_intervals (ends are not measured speech boundaries)\n",
-        frame_and_seconds(range.start, document.fps),
-        frame_and_seconds(range.end, document.fps),
-        words.len()
-    );
-    for word in words {
-        let source_fps = document
-            .asset(word.asset)
-            .map_or(word_project_fallback_fps(document), |asset| asset.fps);
-        let _ = writeln!(
-            output,
-            "clip={} asset={} project={}..{} source={}..{}{} {:?}",
-            word.clip,
-            word.asset,
-            frame_and_seconds(word.project_start, document.fps),
-            frame_and_seconds(word.project_end, document.fps),
-            frame_and_seconds(word.source_start, source_fps),
-            frame_and_seconds(word.source_end, source_fps),
-            render_speaker(word.speaker.as_deref()),
-            word.text
-        );
-    }
-    output.pop();
-    output
-}
-
 fn render_catalog(output: &mut String, document: &Document) {
     if !document.catalog.bins.is_empty() {
         output.push_str("bins:\n");
@@ -1062,10 +1029,6 @@ pub fn render_timeline_scene_changes(
     output
 }
 
-fn word_project_fallback_fps(document: &Document) -> Rational {
-    document.fps
-}
-
 /// The one descriptor that carries AU5 §2.1's 31 profile rows, named here as
 /// `schema.rs` names it for the same reason: the compact special case stays
 /// greppable from the module that implements it.
@@ -1212,8 +1175,8 @@ mod tests {
     use kinewright_core::{
         AssetId, AssetSilences, AssetTranscript, CaptionCue, CaptionMotion, CaptionPreset, Clip,
         Effect, EffectId, KeyframeInterpolation, LinkId, Marker, MarkerId, MediaAsset, MediaKind,
-        ParamValue, SilenceSpan, TimelineTranscriptWord, Track, TrackId, TranscriptStatus,
-        Transition, animated_caption_operations, apply_batch,
+        ParamValue, SilenceSpan, Track, TrackId, TranscriptStatus, Transition,
+        animated_caption_operations, apply_batch,
     };
 
     use super::*;
@@ -2184,39 +2147,6 @@ assets:
 30f/1.000s..36f/1.200s "Hello"
 39f/1.300s..45f/1.500s "um"
 48f/1.600s..60f/2.000s "world.""#;
-        assert_eq!(rendered, expected);
-    }
-
-    #[test]
-    fn timeline_transcript_matches_the_fixture_golden_rendering() {
-        let words = vec![
-            TimelineTranscriptWord {
-                text: "Hello".to_owned(),
-                speaker: None,
-                asset: AssetId(4),
-                track: TrackId(7),
-                clip: ClipId(10),
-                source_start: TimeCode(30),
-                source_end: TimeCode(36),
-                project_start: TimeCode(0),
-                project_end: TimeCode(6),
-            },
-            TimelineTranscriptWord {
-                text: "um".to_owned(),
-                speaker: None,
-                asset: AssetId(4),
-                track: TrackId(7),
-                clip: ClipId(10),
-                source_start: TimeCode(39),
-                source_end: TimeCode(45),
-                project_start: TimeCode(9),
-                project_end: TimeCode(15),
-            },
-        ];
-        let rendered = render_timeline_transcript(&fixture(), TimeCode(0)..TimeCode(30), &words);
-        let expected = r#"timeline transcript range=0f/0.000s..30f/1.000s words=2 word_timing=approximate_transcript_intervals (ends are not measured speech boundaries)
-clip=10 asset=4 project=0f/0.000s..6f/0.200s source=30f/1.000s..36f/1.200s "Hello"
-clip=10 asset=4 project=9f/0.300s..15f/0.500s source=39f/1.300s..45f/1.500s "um""#;
         assert_eq!(rendered, expected);
     }
 

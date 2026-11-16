@@ -227,7 +227,7 @@ fn dq_tools_review_ntsc_quiet_loss_is_reported_and_sound_loss_refuses() {
     }
 }
 #[test]
-fn dq_tools_review_unproven_enabled_origins_are_not_guard_evidence() {
+fn dq_tools_review_enabled_origins_have_renderer_conformance() {
     let v = value(vec![], 4_480_000, |t| {
         level(!(1_420_000..1_600_000).contains(&t))
     });
@@ -256,17 +256,8 @@ fn dq_tools_review_unproven_enabled_origins_are_not_guard_evidence() {
         json!({"track_id":1,"detail":"all"}),
     );
     ok(&r);
-    assert!(
-        content(&r)["check"]["segments"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(
-        content(&r)["check"]["not_checked"][0]["code"],
-        "unproven_segment"
-    );
-    assert_eq!(content(&r)["check"]["not_checked"][0]["range"][0], 23);
+    assert!(content(&r)["check"]["not_checked"].is_null(), "{r:?}");
+    assert_eq!(content(&r)["check"]["segments"][0]["start_frame"], 23);
 }
 #[test]
 fn dq_tools_review_global_bound_prioritizes_sound_and_filters_unavailable_range() {

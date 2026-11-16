@@ -10,7 +10,7 @@ struct MergedSilence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct DialoguePacingGap {
+pub(crate) struct SentencePause {
     pub(crate) previous_word: String,
     pub(crate) next_word: String,
     pub(crate) previous_end: TimeCode,
@@ -28,13 +28,13 @@ pub(crate) struct DialoguePacingGap {
     pub(crate) reason: String,
 }
 
-pub(crate) fn dialogue_pacing_gaps(
+pub(crate) fn sentence_pauses(
     words: &[TimelineTranscriptWord],
     silences: &[TimelineSilenceSpan],
     minimum_pause_frames: TimeCode,
     maximum_pause_frames: TimeCode,
     capitalization_boundary_minimum_frames: TimeCode,
-) -> Vec<DialoguePacingGap> {
+) -> Vec<SentencePause> {
     let audible = words
         .iter()
         .filter(|word| !is_filler_word(&word.text))
@@ -79,7 +79,7 @@ pub(crate) fn dialogue_pacing_gaps(
             } else {
                 "target"
             };
-            Some(DialoguePacingGap {
+            Some(SentencePause {
                 previous_word: previous.text.clone(),
                 next_word: next.text.clone(),
                 previous_end: previous.project_end,
@@ -188,7 +188,7 @@ mod tests {
         let words = vec![word("rain", 1, 128, 141), word("Neighbors", 1, 153, 165)];
         let silences = vec![silence(1, 108, 147), silence(2, 147, 153)];
 
-        let gaps = dialogue_pacing_gaps(&words, &silences, TimeCode(9), TimeCode(15), TimeCode(4));
+        let gaps = sentence_pauses(&words, &silences, TimeCode(9), TimeCode(15), TimeCode(4));
 
         assert_eq!(gaps.len(), 1);
         assert_eq!(gaps[0].transcript_pause_frames, TimeCode(12));
@@ -208,7 +208,7 @@ mod tests {
             silence(3, 236, 239),
         ];
 
-        let gaps = dialogue_pacing_gaps(&words, &silences, TimeCode(12), TimeCode(24), TimeCode(4));
+        let gaps = sentence_pauses(&words, &silences, TimeCode(12), TimeCode(24), TimeCode(4));
 
         assert_eq!(gaps.len(), 1);
         assert_eq!(gaps[0].pause_frames, TimeCode(9));
@@ -241,7 +241,7 @@ mod tests {
             silence(8, 470, 474),
         ];
 
-        let gaps = dialogue_pacing_gaps(&words, &silences, TimeCode(10), TimeCode(40), TimeCode(4));
+        let gaps = sentence_pauses(&words, &silences, TimeCode(10), TimeCode(40), TimeCode(4));
 
         assert_eq!(gaps.len(), 4);
         assert_eq!(

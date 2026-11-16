@@ -653,54 +653,19 @@ mod dialogue_tool_tests {
         );
     }
     #[test]
-    fn dq_tools_transcript_legacy_bytes_and_bound_addresses() {
-        fn legacy_words() -> Vec<TimelineTranscriptWord> {
-            vec![TimelineTranscriptWord {
-                text: "Hello".into(),
-                speaker: None,
-                asset: AssetId(1),
-                track: TrackId(1),
-                clip: ClipId(1),
-                source_start: TimeCode(20),
-                source_end: TimeCode(50),
-                project_start: TimeCode(20),
-                project_end: TimeCode(50),
-            }]
-        }
+    fn dq_tools_transcript_measurement_status_and_bound_addresses() {
         let fps = Rational::new(100, 1).unwrap();
-        let doc = document(fps, fps, 0, 400);
-        let media = Arc::new(NoopMedia {
-            timeline_words: Some(legacy_words),
-            transcript: Some(Arc::new(AssetTranscript {
-                asset: AssetId(1),
-                content_sha256: "a".repeat(64),
-                source_fps: fps,
-                words: vec![],
-            })),
-            ..NoopMedia::default()
-        });
-        let playback = Arc::clone(&media);
-        let s = KinewrightMcp::new(
-            Core::spawn(doc).unwrap(),
-            playback,
-            media,
-            ConfirmationBroker::default(),
-        );
+        let (s, _) = fixture();
+        *s.dialogue_measurements.write().unwrap() = None;
         let result = invoke(&s, "get_timeline_transcript", json!({}));
-        ok(&result);
-        assert_eq!(
-            result.content[0].as_text().unwrap().text,
-            "timeline transcript range=0f/0.000s..400f/4.000s words=1 word_timing=approximate_transcript_intervals (ends are not measured speech boundaries)\nclip=1 asset=1 project=20f/0.200s..50f/0.500s source=20f/0.200s..50f/0.500s \"Hello\"",
-            "DQ_TOOLS_SWITCH_OFF_BYTES"
-        );
-        let hidden = invoke(&s, "cut_dialogue", args(vec![]));
-        assert_eq!(hidden.is_error, Some(true));
+        assert_eq!(content(&result)["reason"]["code"], "not_measured");
         let catalog = s.dialogue_catalog().unwrap();
         assert!(
-            !catalog
+            dq::TOOL_NAMES
                 .iter()
-                .any(|t| dq::TOOL_NAMES.contains(&t.name.as_ref()))
+                .all(|name| catalog.iter().any(|t| t.name == *name))
         );
+        assert!(!catalog.iter().any(|t| t.name == "get_dialogue_pacing"));
         let tokens = (0..1800)
             .map(|i| Word {
                 text: format!("word{i}"),
@@ -927,16 +892,10 @@ mod dialogue_tool_tests {
         }
         let checked = invoke(&service, "check_dialogue_cut", json!({"track_id":1}));
         ok(&checked);
-        let schemas = task_role_tools_uncached(&[
-            "get_timeline_transcript",
-            "cut_dialogue",
-            "check_dialogue_cut",
-        ])
-        .unwrap();
-        assert_eq!(schemas.len(), 3);
     }
     include!("dialogue_tools_review_tests.rs");
     include!("dialogue_tools_guide_tests.rs");
+    include!("dialogue_tools_m5_tests.rs");
     include!("dialogue_tools_hole_tests.rs");
     include!("dialogue_tools_rehearsal_core_tests.rs");
     include!("dialogue_tools_rehearsal_batch_tests.rs");

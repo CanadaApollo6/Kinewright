@@ -2611,7 +2611,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        153,
+        154,
         "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool; \
          AU2 Part B adds set_audio_master, set_pan_law and get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds none; \
@@ -2661,7 +2661,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     }
     assert_eq!(
         registry.len() - operations.len(),
-        89,
+        90,
         "AU1 adds get_audio_levels; AU2 Part B adds get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds no inspector; \
          AU4 Part A adds no inspector; AU4 Part B adds the two planners; \
@@ -2754,7 +2754,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
             registry_metrics.input_schema_bytes,
             registry_metrics.description_bytes
         ),
-        (153, 1_978_588, 1_824_687, 128_776),
+        (154, 1_981_514, 1_826_246, 130_006),
         "registry={registry_metrics:?}"
     );
 
@@ -10661,7 +10661,7 @@ async fn mo2_the_served_quad_does_not_move_for_the_twenty_third_measurement() {
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        153,
+        154,
         "IN1 adds two capabilities, IN2 Part A adds propose_fix, MO1 A4a/b/c add six mutators, MO1 Part C adds plan_motion, MO2 Part A adds four mutators, MO2 Part B adds preview_solo"
     );
     assert_eq!(
@@ -10669,7 +10669,7 @@ async fn mo2_the_served_quad_does_not_move_for_the_twenty_third_measurement() {
         64,
         "MO2 Part A adds four Operation variants"
     );
-    assert_eq!(registry.len() - operations.len(), 89);
+    assert_eq!(registry.len() - operations.len(), 90);
     // MO2 R25/R30 (review 1 S1): the registry byte trio beside the counts.
     let registry_metrics = kinewright_agent::capability_tool_metrics().unwrap();
     assert_eq!(
@@ -10679,7 +10679,7 @@ async fn mo2_the_served_quad_does_not_move_for_the_twenty_third_measurement() {
             registry_metrics.input_schema_bytes,
             registry_metrics.description_bytes
         ),
-        (153, 1_978_588, 1_824_687, 128_776),
+        (154, 1_981_514, 1_826_246, 130_006),
         "registry={registry_metrics:?}"
     );
     let state = registry

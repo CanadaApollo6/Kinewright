@@ -11,8 +11,6 @@ artifact contract stable isolates the pacing change. V4 adds:
 
 - acoustic upper bounds across consecutive removed filler words without
   shortening already-natural pauses;
-- a compact `get_dialogue_pacing` inspector that reports sentence boundaries,
-  acoustic pauses, transcript fallbacks, reasons, and short/target/long status;
 - an evaluator-owned assertion requiring every detected acoustic sentence
   pause to land between 10 and 40 project frames;
 - a higher human gate: pacing at least 4.5/5, overall mean at least 4.0/5, and
@@ -38,7 +36,10 @@ cargo run -p kinewright-agent --bin kinewright-eval -- `
   --samples 3
 ```
 
-The current Codex machine baseline on revision `283e704` passes all three
+The archived Codex machine baseline used the M39 inspector. The current driver
+omits that retired inspection step. The independent sentence-rhythm scoring is
+unchanged; the eval runner has no measured-dialogue adapter.
+The baseline on revision `283e704` passes all three
 samples and all 102 assertions. Every sample independently produces the same
 585-frame dialogue timing, four acoustically measured sentence gaps of 33, 15,
 23, and 16 project frames, no cuttable 20-frame silence, and a 4.77%
