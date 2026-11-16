@@ -1045,3 +1045,231 @@ M5 remains off. All started builds and tests completed before this commit.
 The largest observed target snapshot was 37,343,152,336 bytes. Final `target/`
 is **28,829,687,984 bytes**, below 40 GB, retaining `target/dq1/` and all
 `target/dq-media/` evidence, including the preparatory pair and final WAVs.
+
+## R4: nearest edges and measured sound ownership
+
+This rehearsal uses the same AMI take, pinned EN model, driver source and client
+settings as R3. Only the merged production resolver/evidence/audit rules changed.
+M5 remains off. The script still requests pauses longer than 700 ms to leave
+300 ms, removes the same standalone fillers with natural default air, sends
+ready-member batches of at most 32, retries only conflicts, and uses ranged
+reads and returned neighbour addresses. Missing original anchors are not replaced.
+
+The merge is `d159e7b1` (dq1 R3 `0b43d5fc` plus dq2 `91de5baf`). The driver
+SHA-256 is `31c49d363eecd7bd45cf6dd52fa99b0f6deac6ba0991e9f183d72b44ef3f14fc`,
+unchanged from R3. Audio identity is
+`3565188c90972ee3bc6993345c6ecbd611b5957abe12c4d56fa7ffad21c5b4c0`
+(15,360,078 bytes). Both runs have the same 906 transcript words, measured
+profile and gap runs. The standalone filler matches are **40 `um`, 14 `uh`**.
+All remaining settings compare equal after removing the obsolete dip field;
+its replacement is the merged calibration rule, not a client adjustment.
+
+### R4 proof beside R3
+
+| Measure | R3 | R4 |
+|---|---:|---:|
+| Stored speech / noise floor, dBFS | -44.68 / -82.38 | -44.68 / -82.38 |
+| Selected removal candidates | 121 | 121 |
+| Applied cuts | 70 | 56 |
+| Applied exactly as requested / after moving an edge | 0 / 70 | 0 / 56 |
+| Unrequested ASR starts inside cuts | 9 | 0 |
+| ASR starts not selected by that particular cut (stricter control) | 10 | 0 |
+| Sound-hit grid hops above calibrated quiet | 21 | 0 |
+| Unrequested words with an above-quiet hit | 5 | 0 |
+| Among start-inside words, words with above-quiet sound | 1 | 0 |
+| Floor +15 dB hit hops (context) | 48 | 0 |
+| Acoustic filler envelope: over / checked / unavailable | 0 / 18 / 1 | 0 / 6 / 4 |
+| ASR-span envelope count (context only) | 18 | 7 |
+| Applied filler cut length median / p95 / max, s | 1.600 / 5.833 / 5.833 | 0.617 / 1.233 / 1.233 |
+| Whole-batch refusals | 0 | 0 |
+| Transcript reply bytes / applied cut | 1,178.0 | 1,430.2 |
+| Edited duration from 480 s, s | 389.133333 | 429.233333 |
+| Peak whole-child RSS, KiB | 1,060,784 | 1,064,748 |
+| Warm complete replies byte-identical | True | True |
+| Returned neighbour-address uses | 29 | 26 |
+| `were` source 31.72–31.82 s fully kept | False | True |
+
+The effective dip limit changes from **−79.68 to −64.69 dBFS** under the merged
+floor/speech rule; no client setting is changed. The derivation and the 25 R3
+refusal-window measurements are in `dq-agent-tools.md`, R8.
+The primary sound threshold is **−64.69 dBFS**, the prepared recording's calibrated
+quiet RMS limit. **−67.38 dBFS** (stored floor +15) remains context. Both passes
+are re-audited with both thresholds using the same raw recording and unchanged
+10 ms grid, with boundary hops clipped to the cut and the unrequested word's
+300 ms forward window. Source units match the stored profile, before the
+production export's mono-centre gain. Counts de-duplicate (cut, grid-hop) pairs.
+The main count preserves R3's meaning: a word not requested by any filler
+removal in the script. The stricter control excludes only the filler selected
+by that particular member; a pause trim selects no words. Both controls use
+half-open removed source intervals. R3's extra per-member start is the `um` at
+275.60 s, inside another member's 275.133333–276.466667 s cut; it adds no
+above-quiet hit hop. Every reported cut
+interval is verified against source coverage actually missing from the committed
+result document. No unrequested word is exempted merely because it starts before
+the cut. ASR ends remain approximate and do not establish speech ownership.
+
+The acoustic filler envelope is the interval between two distinct calibrated
+quiet flanks supporting its committed edges, plus the shorter full-source flank
+and 300 ms. Dip/boundary or same-gap cases without two distinct flanks remain
+explicitly unavailable, never counted as passing. The old ASR-span envelope is
+context only; an 80 ms stub does not measure acoustic filler duration.
+
+The acoustic-envelope target is verified for **six** applied fillers, with zero
+overruns. **Four remain unmeasurable under this definition**; zero measured
+overruns is not a proof for all ten. Their full evidence is retained in the
+JSON, with no substitute ASR-duration estimate:
+
+| Filler source start | Applied source cut, s | Missing evidence |
+|---:|---|---|
+| 28.000 (`um`) | 27.666667–28.033333 | Both edges sit in the same 27.52–28.18 quiet run |
+| 309.200 (`um`) | 309.200000–309.633333 | Start edge lacks a quiet flank; end has 309.25–309.75 |
+| 409.920 (`uh`) | 409.800000–410.233333 | End edge lacks a quiet flank; start has 409.67–409.84 |
+| 472.880 (`uh`) | 472.900000–473.133333 | Both edges sit in the same 472.84–473.25 quiet run |
+
+### Fillers and pauses
+
+| Kind | R3 selected / applied / refused / unavailable | R4 selected / applied / refused / unavailable |
+|---|---:|---:|
+| filler | 54 / 19 / 34 / 1 | 54 / 10 / 44 / 0 |
+| pause | 67 / 51 / 11 / 5 | 67 / 46 / 19 / 2 |
+
+| Kind and terminal code | R3 | R4 | Up to three R4 examples, original source seconds |
+|---|---:|---:|---|
+| filler: acoustic: no measured quiet or sufficiently deep dip brackets this word boundary | 25 | 21 | 5.760–5.840 (`um`); 36.240–36.320 (`um`); 70.560–70.640 (`uh`) |
+| filler: acoustic: no project frame lies inside this edge's measured support | 8 | 1 | 22.400–22.480 (`um`) |
+| filler: acoustic: the measured edges do not bracket one forward removal | 1 | 1 | 299.040–299.120 (`uh`) |
+| filler: no_surviving_address | 1 | 0 |  |
+| filler: selection_evidence/unattributed_sound | 0 | 14 | 19.120–19.200 (`um`); 53.040–53.120 (`um`); 68.640–68.720 (`um`) |
+| filler: selection_evidence/unrequested_sound | 0 | 6 | 32.480–32.560 (`um`); 126.720–126.800 (`uh`); 234.640–234.720 (`um`) |
+| filler: selection_evidence/unrequested_word_start | 0 | 1 | 40.320–40.400 (`um`) |
+| pause: acoustic: the pause is already too short to leave the requested duration | 11 | 0 |  |
+| pause: no_surviving_address | 5 | 2 | 373.060–374.830 (`um / okay`); 381.310–382.050 (`um / so`) |
+| pause: selection_evidence/pause_limited | 0 | 13 | 13.940–14.690 (`it / and`); 81.060–81.920 (`good / alright`); 90.680–91.420 (`so / this`) |
+| pause: selection_evidence/unrequested_word_start | 0 | 6 | 9.260–10.220 (`so / that's`); 136.230–137.080 (`affection / from`); 274.960–276.590 (`home / um`) |
+
+### The named `were` case
+
+The 31.72–31.82 s source interval is tested against **all** applied cuts, not just
+the associated filler request. Its source coverage result is shown above. The
+terminal result for the `um` request at 32.48 s is retained verbatim in the
+[R4 diagnostic JSON](dq-media-r4-diagnostics.json). No replacement anchor or
+overrule is used. **`were` is kept**, while that `um` removal is refused with
+`selection_evidence/unrequested_sound`: component 31.69–32.45 s, kept word 64.
+The kept source interval maps to **29.053333–29.153333 s in `edited.wav`**.
+Its RMS is −36.320 dBFS in the source and −39.329 dBFS across the stereo export,
+a −3.009 dB difference consistent with the production mono-centre gain. This
+checks the written audio as well as the final document's source coverage.
+
+### Sound and start evidence
+
+Every above-quiet R4 hit is listed below. Floor+15-only windows and all exact
+source intervals are retained in the diagnostic JSON.
+
+| Word | Hop start–end, source seconds | RMS dBFS |
+|---|---|---:|
+| None | | |
+
+Unrequested ASR starts inside R4 cuts:
+
+| Word | Source start, s | Cut, source seconds |
+|---|---:|---|
+| None | | |
+
+### Audit semantics and call costs
+
+R4's holes use `hole_basis: {kind: measured_voice_without_nearby_word_start,
+after_word_start_us: 1000000}`. This measures VAD voice outside the one-second
+forward support of known word starts, with a 100 ms playback minimum; sounding
+uses calibrated quiet RMS. It reads no supplied word end. Long tails and VAD/onset
+errors can still warn, so it is not proof of omitted speech. R3's approximate-word-
+interval counts have a different meaning and are shown only for context.
+
+| Check total | R3 | R4 |
+|---|---:|---:|
+| joins | 72 | 58 |
+| edge_in_sound | 0 | 0 |
+| short_air | 24 | 3 |
+| room_tone_jumps | 4 | 5 |
+| dip_intrusions | 1 | 1 |
+| pauses | 91 | 110 |
+| repeats | 11 | 10 |
+| holes | 238 | 86 |
+| sounding_holes | 110 | 79 |
+| quiet_phrases | 0 | 0 |
+
+| Tool | R3 calls | R4 calls | R4 median / worst, ms | R4 median / worst reply bytes |
+|---|---:|---:|---:|---:|
+| `get_timeline_transcript` | 24 | 21 | 29.317 / 30.497 | 3,116.0 / 11,850.0 |
+| `cut_dialogue` | 28 | 25 | 33.046 / 405.619 | 688.0 / 14,040.0 |
+| `check_dialogue_cut` | 1 | 1 | 57.019 / 57.019 | 16,651.0 / 16,651.0 |
+
+The changed mix of applied and refused calls limits timing comparisons; R4
+applies 56 cuts rather than 70.
+
+These are one cold/warm pair in the same unoptimized Rust test profile and
+Release native SDK as R3, with scripted consent and full reply serialization.
+They are descriptive observations, not a throughput benchmark. `wait4` RSS covers
+both runs, model preparation, engine and WAV exports. R4 load averages before /
+after were 2.76/3.35/4.05 and 2.81/3.31/3.99. Model/profile readiness,
+whole-child CPU/wall/load and warm byte equality are retained in the evidence.
+The child runs under `unshare -rn` with networking disabled. Model and private
+cache paths are explicit; it does not discover application data. The explicit pinned model uses the existing hash-checked provisioning
+path. Audio uses the production export mixer, no GPU or audio device.
+
+Artifacts are under `target/dq-media/rehearsal/r4/`, including the new `edited.wav`,
+complete replies, calls, document snapshots, profile, results, resource counters
+and comparison JSON. The historical R3 evidence is unchanged.
+
+
+| Applied edge moves | R3 | R4 |
+|---|---:|---:|
+| Absolute median / p95 / max, ms | 13.333 / 3,773.333 / 5,546.667 | 13.333 / 3,813.333 / 5,546.667 |
+| Signed min / max, ms | -5,546.667 / 5,536.667 | -5,546.667 / 5,536.667 |
+| Cold / warm transcript-profile readiness, ms | 37,035.445 / 28.325 | 37,321.961 / 29.456 |
+| Whole-child wall / user / system, s | 55.921 / 138.050 / 9.285 | 54.150 / 134.908 / 7.809 |
+
+Warm-run latency observations (reply bytes remain identical):
+
+| Tool | R4 warm median / worst, ms |
+|---|---:|
+| `get_timeline_transcript` | 29.061 / 29.533 |
+| `cut_dialogue` | 34.413 / 408.254 |
+| `check_dialogue_cut` | 55.798 / 55.798 |
+
+### R4 validation and limits
+
+The unchanged ignored test
+`server::tests::dialogue_rehearsal_tests::dq_media_real_recording_rehearsal`
+passed, including both complete runs. Its **47 ready replies** compare
+byte-for-byte equal. The original export is byte-for-byte equal to R3.
+The edited export is **429.233333 s**, stereo 48 kHz float PCM. The diagnostics
+also preserve all typed refusal examples, precise rational source intervals,
+resource counters and the four unavailable acoustic envelopes.
+
+The merge gate passed the complete default-tier workspace suite: **5,604 passed,
+0 failed, 277 existing ignores**, across 92 test/doc-test results. A separate
+`--test mcp_server` run passed **76 / 0 / 10**. The focused provider tests passed
+**9 / 0 / 1**; the existing on-demand rehearsal was the ignore. Workspace build,
+workspace test compilation, warnings-denied all-target clippy, Cargo fmt,
+explicit included-file rustfmt, slow-test lint, actionlint and all four CI
+selftest scripts passed. The pin generator was run against the merged source;
+the full generated JSON is unchanged, and both pin tests passed. **No re-pin
+commit is needed.**
+
+The three shipping builds passed as separate Cargo invocations:
+`cargo build -p kinewright-agent --no-default-features --lib`,
+`cargo build -p kinewright-app --no-default-features --bin kinewright-app`, and
+`cargo build -p kinewright-agent --no-default-features --bin kinewright`.
+Clippy and the rehearsal test compilation passed again immediately before R4.
+Only the report and its diagnostic JSON follow the verified merge; the driver,
+settings and protected production files receive no further edits.
+
+These are local Linux results. Windows execution and hosted CI are not claimed.
+No GPU hardware, audio device, model download, application-data discovery or
+probe-directory write was used. M5 remains off. All started builds and tests
+finished before the result commit.
+
+One post-pin gate snapshot briefly reached **40,366,032,315 bytes**; it was
+immediately pruned to 28.0 GB. Inactive generated test executables were removed,
+with `target/dq1/` and all `target/dq-media/` evidence retained. Final target size
+is **29.4 GB** (decimal), below the 40 GB limit.
