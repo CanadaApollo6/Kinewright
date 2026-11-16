@@ -551,6 +551,30 @@ impl History {
     pub const fn policy(&self) -> RetentionPolicy {
         self.policy
     }
+    /// Necessary capacity checks for a new plain batch, before offering consent.
+    /// The caller measures only the proposed payload. No document or retained
+    /// step is copied or traversed; execution still checks replay and owner need.
+    pub fn check_batch_capacity(&self, charge: Charge) -> Result<(), Error> {
+        self.next_position()?;
+        if charge.encoded > self.bounds.operation_bytes {
+            return Err(Error::StepTooLarge);
+        }
+        if charge.decoded > self.bounds.decoded_history_bytes {
+            return Err(Error::Capacity);
+        }
+        if self.policy == RetentionPolicy::NeverFold {
+            let retained = self.undo_charge.add(charge)?;
+            if self.undo.len() >= self.bounds.step_cap
+                || retained.encoded > self.bounds.operation_bytes
+            {
+                return Err(Error::HistoryFull);
+            }
+            if retained.decoded > self.bounds.decoded_history_bytes {
+                return Err(Error::Capacity);
+            }
+        }
+        Ok(())
+    }
     #[must_use]
     pub fn op_log(&self) -> Option<&[Operation]> {
         self.recorder.as_deref()

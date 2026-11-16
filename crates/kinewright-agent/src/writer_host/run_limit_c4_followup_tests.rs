@@ -190,9 +190,9 @@ mod followups {
         all(target_os = "linux", not(feature = "slow-tests")),
         ignore = "slow tier: cargo test --features slow-tests"
     )]
-    fn c4_followups_undo_and_later_removal_match_kept_targets() {
+    fn c4_followups_undo_and_later_removal_keep_command_fates_separate() {
         if !te15_fix_counting_child(
-            "tests::storage_admission::tests::followups::c4_followups_undo_and_later_removal_match_kept_targets",
+            "tests::storage_admission::tests::followups::c4_followups_undo_and_later_removal_keep_command_fates_separate",
         ) {
             return;
         }
@@ -273,10 +273,11 @@ mod followups {
             let page = b201_page(&b.f, &b.run);
             assert_eq!(page.edit_approvals.len(), 2);
             assert!(
-                page.edit_approvals.iter().all(|edit| edit.applied),
-                "C4_FOLLOWUPS_LATER_REMOVAL_SATISFIES_BOTH_APPROVALS"
+                !page.edit_approvals[0].applied && page.edit_approvals[1].applied,
+                "C4_FOLLOWUPS_LATER_REMOVAL_NEVER_CREDITS_DISCARDED_COMMAND"
             );
-            assert!(page.missing_approved_edits.is_empty());
+            assert_eq!(page.missing_approved_edits.len(), 1);
+            assert!(page.uncertain_approved_edits.is_empty());
             let owner = b.f.host.owner.upgrade().unwrap();
             let host = owner.lock().unwrap();
             let kept = host
@@ -284,8 +285,9 @@ mod followups {
                 .unwrap()
                 .edit_audit_summary(&page.projection, &[])
                 .unwrap();
-            assert!(kept.approvals.iter().all(|edit| edit.applied));
-            assert!(kept.missing.is_empty());
+            assert!(!kept.approvals[0].applied && kept.approvals[1].applied);
+            assert_eq!(kept.missing.len(), 1);
+            assert!(kept.uncertain.is_empty());
         }
     }
 
@@ -401,10 +403,10 @@ mod followups {
                 .unwrap()
                 .unwrap();
             let mut saved = host.saved_task_history(&state, &b.child).unwrap().unwrap();
-            // Exact source binding, but no known lineage: the bounded auxiliary
-            // coverage may be incomplete without refusing the real checkpoint.
-            saved.edit_coverage.cuts.clear();
-            saved.edit_coverage.incomplete = true;
+            // A valid record whose source cannot be matched to the retained
+            // checkpoint cannot prove command fate. Legacy coverage is no
+            // longer evidence: make the native source binding unavailable.
+            saved.source.head = kinewright_project::bundle_records::HeadId::fresh().unwrap();
             let sealed = host
                 .owner_mut()
                 .unwrap()

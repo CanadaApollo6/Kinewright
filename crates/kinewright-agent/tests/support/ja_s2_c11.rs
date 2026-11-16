@@ -647,7 +647,7 @@ pub(super) mod linux {
     pub(crate) fn matrix() {
         for gui_death in [false, true] {
             for after_restore in [false, true] {
-                let (root, path, mut source, target, _) = setup();
+                let (root, path, mut source, before_handover_target, _) = setup();
                 let (configuration, _origin_callback) = handoff_config(&mut source, root.root());
                 let cut = source.freeze_host_cut().unwrap();
                 source.complete_host_cut(&cut, None, None).unwrap();
@@ -660,6 +660,7 @@ pub(super) mod linux {
                     },
                 );
                 let client = host.client.with_manual_editor(identity.clone());
+                let target = offered_snapshot_target(&client, &before_handover_target);
                 let directory = root.path("gui-1");
                 let mut gui = gui_start(
                     &directory,
@@ -735,9 +736,36 @@ pub(super) mod linux {
         }
         publication_cuts();
     }
+    fn offered_snapshot_target(client: &HostClient, expired: &SwitchTarget) -> SwitchTarget {
+        // Handover publishes its new install epoch, and AcquireManual publishes
+        // the stream root. Select from the current offer, after those writes;
+        // the old two-generation automatic recovery window may have expired.
+        let status = successful(client, HostCommand::Status).status;
+        let SwitchTarget::Snapshot { root: expired, .. } = expired else {
+            panic!("C11_SETUP_RETURNS_AUTOMATIC_CHECKPOINT");
+        };
+        assert!(!status.recovery_points.iter().any(|point| matches!(point,
+            kinewright_agent::writer_host::HostRecoverySelection::Checkpoint { root, .. } if root == expired
+        )), "C11_HANDOVER_AND_STREAM_ROOT_EXPIRE_OLD_AUTOMATIC_OFFER");
+        status
+            .recovery_points
+            .into_iter()
+            .find_map(|point| match point {
+                kinewright_agent::writer_host::HostRecoverySelection::Checkpoint {
+                    root,
+                    branch,
+                } => Some(SwitchTarget::Snapshot {
+                    root,
+                    branch,
+                    version: "2".repeat(32),
+                }),
+                kinewright_agent::writer_host::HostRecoverySelection::WorkingBranch { .. } => None,
+            })
+            .expect("C11_CURRENT_OFFER_HAS_RETAINED_CHECKPOINT")
+    }
     fn publication_cuts() {
         for committed in [false, true] {
-            let (root, path, mut source, target, _) = setup();
+            let (root, path, mut source, before_handover_target, _) = setup();
             let signals = root.path("signals");
             std::fs::create_dir(&signals).unwrap();
             let (configuration, _origin_callback) = handoff_config(&mut source, root.root());
@@ -777,11 +805,16 @@ pub(super) mod linux {
                 .read_line(&mut line)
                 .unwrap();
             let endpoint = serde_json::from_str(&line).unwrap();
-            let client = HostClient::connect(endpoint, auth, configuration.roots).unwrap();
+            let HostConfig { roots, origin, .. } = configuration;
+            // The launch bytes have reached the child. The real originating
+            // owner/callback remain alive; this duplicate bootstrap is done.
+            drop(origin);
+            let client = HostClient::connect(endpoint, auth, roots).unwrap();
             let mut host = ProcessHost { client, child };
             let identity = "f".repeat(64);
             acquire(&host, &source, &identity);
             let client = host.client.with_manual_editor(identity.clone());
+            let target = offered_snapshot_target(&client, &before_handover_target);
             let cut = source.freeze_host_cut().unwrap();
             let envelope = successful(&client, HostCommand::PrepareSwitch { target })
                 .switch_envelope

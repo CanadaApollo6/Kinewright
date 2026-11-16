@@ -27,7 +27,14 @@ fn settled_sweep(f: &Fixture) {
     }
 }
 
-fn settled_run(f: &mut Fixture, edits: usize) -> (RunId, TaskId, kinewright_project::operation_history::OwnerSnapshot) {
+fn settled_run(
+    f: &mut Fixture,
+    edits: usize,
+) -> (
+    RunId,
+    TaskId,
+    kinewright_project::operation_history::OwnerSnapshot,
+) {
     let (run, task, history, core) = settled_pending_run(f, edits);
     drop(core);
     settled_sweep(f);
@@ -67,15 +74,13 @@ fn settled_release_candidate_without_a_task_actor_is_released() {
 fn settled_pending_run(
     f: &mut Fixture,
     edits: usize,
-) -> (RunId, TaskId, kinewright_project::operation_history::OwnerSnapshot, Core) {
-    let doc = document_for_test(f
-        .host
-        .owner
-        .upgrade()
-        .unwrap()
-        .lock()
-        .unwrap()
-        .core());
+) -> (
+    RunId,
+    TaskId,
+    kinewright_project::operation_history::OwnerSnapshot,
+    Core,
+) {
+    let doc = document_for_test(f.host.owner.upgrade().unwrap().lock().unwrap().core());
     f.brief = settled_candidate_brief(f, &doc);
     let (run, parent, director) = te13_director(f);
     let mut brief = f.brief.clone();
@@ -137,21 +142,27 @@ fn settled_release_verification_failure_keeps_actor_and_discloses_the_task() {
     let (run, child, expected, core) = settled_pending_run(&mut f, 4);
     let host = f.host.owner.upgrade().unwrap();
     let mut owner = host.lock().unwrap();
-    let saved = owner.owner().unwrap().task_checkpoint_binding(&core.creation_branch().unwrap()).unwrap();
+    let saved = owner
+        .owner()
+        .unwrap()
+        .task_checkpoint_binding(&core.creation_branch().unwrap())
+        .unwrap();
     let checkpoint = owner
         .owner()
         .unwrap()
         .store()
         .unwrap()
-        .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(
-            &saved.checkpoint,
-        )
+        .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(&saved.checkpoint)
         .unwrap();
     let path = f.temp.path(&format!(
         "project.kinewright-assets/studio/objects/{}",
         checkpoint.owner_ref.sha256
     ));
-    assert_eq!(checkpoint.identity, expected.identity().unwrap(), "CORRUPT_THE_EXACT_SETTLED_TASK_CUT");
+    assert_eq!(
+        checkpoint.identity,
+        expected.identity().unwrap(),
+        "CORRUPT_THE_EXACT_SETTLED_TASK_CUT"
+    );
     let original = std::fs::read(&path).unwrap();
     let mut damaged = original.clone();
     damaged[0] = b'!';
@@ -181,7 +192,8 @@ fn settled_release_verification_failure_keeps_actor_and_discloses_the_task() {
         assert!(
             words.contains(child.0.as_str())
                 && words.contains("saved result could not be reopened"),
-            "expected task {}: {words}", child.0.as_str()
+            "expected task {}: {words}",
+            child.0.as_str()
         );
     }
     assert_eq!(std::fs::read(&path).unwrap(), damaged);
@@ -313,6 +325,34 @@ fn settled_release_dirty_checkpoint_rehydrates_and_damaged_retry_refuses_truthfu
     );
 }
 
+fn assert_settled_command_tail(expected: &kinewright_project::operation_history::OwnerSnapshot) {
+    assert_eq!(
+        expected.history().undo.len(),
+        199,
+        "SETTLED_TWO_HUNDRED_EDITS_ONE_UNDONE"
+    );
+    assert_eq!(
+        expected.history().redo.len(),
+        1,
+        "SETTLED_RELEASE_KEEPS_UNDONE_PAYLOAD"
+    );
+    assert_eq!(
+        expected
+            .history()
+            .undo
+            .iter()
+            .chain(&expected.history().redo)
+            .flat_map(kinewright_core::undo::Step::commands)
+            .count(),
+        200,
+        "SETTLED_ALL_TWO_HUNDRED_COMMANDS_RETAINED"
+    );
+    assert_eq!(
+        expected.history().policy,
+        kinewright_core::undo::RetentionPolicy::NeverFold
+    );
+}
+
 #[test]
 fn settled_release_heap_child() {
     if std::env::var_os("KINEWRIGHT_SETTLED_HEAP").is_none() {
@@ -334,9 +374,13 @@ fn settled_release_heap_child() {
     let mut history_charge = 0;
     for run in 1..=6 {
         let (_, _, expected) = settled_run(&mut f, 200);
-        assert_eq!(expected.history().undo.len(), 201);
-        history_charge =
-            expected.creation_sizing().limits().unwrap().envelope.retained;
+        assert_settled_command_tail(&expected);
+        history_charge = expected
+            .creation_sizing()
+            .limits()
+            .unwrap()
+            .envelope
+            .retained;
         drop(expected);
         // Core drops its state on its receiver thread. Sample the quiescent
         // minimum over a bounded interval rather than timing that thread's exit.

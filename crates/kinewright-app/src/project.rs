@@ -1002,7 +1002,30 @@ impl ProjectSession {
         }
         self.recovery.close();
         self.sidecar.authority = None;
-        prepared == ClosePreparation::Ready
+        if prepared != ClosePreparation::Ready {
+            return false;
+        }
+        // The reaper owns worker/namespace teardown, but not this lease. Its
+        // stopped MCP servers may still hold actor handles when Open runs in
+        // the very next frame. Retire before acknowledging Close, after the
+        // journal and incident flushes, so those handles cannot hold the room.
+        if let Some(attachment) = &self.ja1 {
+            attachment.retire_closed_history().is_ok()
+        } else {
+            struct ClosedProject;
+            (|| {
+                if matches!(
+                    self.core.change_id(),
+                    Err(kinewright_project::operation_actor::Error::Retired)
+                ) {
+                    return Ok(());
+                }
+                let attachment = self.core.attach(&ClosedProject)?;
+                let cut = attachment.freeze(&ClosedProject)?;
+                attachment.retire(&ClosedProject, cut)
+            })()
+            .is_ok()
+        }
     }
 
     /// Terminal phase only: persistence and every project's stop signal precede this.

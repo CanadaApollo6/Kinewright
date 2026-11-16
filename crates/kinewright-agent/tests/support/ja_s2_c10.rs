@@ -431,9 +431,15 @@ pub(super) fn prefix_and_pause_cases(case_filter: Option<usize>) {
         let mut frozen = HostSnapshot::capture(&gui).unwrap();
         let mut transmitted = pending.clone();
         if case == 2 {
-            let mut forged = serde_json::to_value(&transmitted[0]).unwrap();
+            let mut forged = serde_json::to_value(transmitted[0].decode().unwrap()).unwrap();
             forged["sequence"] = json!(99);
-            transmitted[0] = serde_json::from_value(forged).unwrap();
+            transmitted[0] =
+                serde_json::from_value(json!(serde_json::to_string(&forged).unwrap())).unwrap();
+            assert_eq!(
+                transmitted[0].decode().unwrap().sequence,
+                99,
+                "C10_FORGED_SEQUENCE_REACHES_WRITER_VALIDATION"
+            );
         }
         if case == 1 {
             frozen.history_sha256 = "0".repeat(64);

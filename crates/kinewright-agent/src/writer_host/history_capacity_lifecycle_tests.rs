@@ -2,6 +2,13 @@ fn capacity_run(clips: usize) -> C5Fix10Run {
     capacity_run_document(&capacity_document(clips), Role::Editor)
 }
 fn capacity_run_document(document: &Document, role: Role) -> C5Fix10Run {
+    capacity_run_document_with_objects(document, role, BTreeSet::new())
+}
+fn capacity_run_document_with_objects(
+    document: &Document,
+    role: Role,
+    objects: BTreeSet<String>,
+) -> C5Fix10Run {
     let clips = document
         .tracks
         .iter()
@@ -13,6 +20,7 @@ fn capacity_run_document(document: &Document, role: Role) -> C5Fix10Run {
         f.brief.scope.base.clone(),
     )
     .unwrap();
+    scope.objects.extend(objects);
     for track in &document.tracks {
         let name = format!("track:{}", track.id);
         scope.objects.insert(name.clone());
@@ -131,7 +139,10 @@ fn history_admission_native_copy_run() -> C5Fix10Run {
             role: Role::Colour,
             scope: r.f.brief.scope.clone(),
         }
-        .validate_batch(&r.core.export_history().unwrap().history().document, &operations)
+        .validate_batch(
+            &r.core.export_history().unwrap().history().document,
+            &operations,
+        )
         .expect("COPY_WITNESS_HAS_THE_REAL_COLOUR_ROLE_AND_EFFECT_GRANTS");
         let event = r
             .core
@@ -405,10 +416,29 @@ fn capacity_next_editor(r: &C5Fix10Run) -> (TaskId, C4Mcp, Core) {
     reason = "all four fixture sizes through accepted and refused candidate merges"
 )]
 fn history_capacity_candidate_refusal_does_not_latch() {
-    use kinewright_core::{Command, Event, Operation, TrackId};
+    use kinewright_core::{Command, Event, Marker, MarkerId, Operation, TimeCode, TrackId};
+    // Keep the original short edit stream and pressure the new byte room with
+    // two explicit payloads. The cleanup test separately fills all task steps.
+    // One seven-digit-ID marker has 79 literal JSON header bytes plus its label.
+    const LABEL_BYTES: usize = 190_000;
+    const PAYLOAD_BYTES: u64 = 380_158;
     let mut observed = Vec::new();
-    for (clips, edits) in [(40, 200), (120, 200), (400, 200), (1200, 68)] {
-        let r = capacity_run(clips);
+    let maximum_merges =
+        kinewright_core::undo::RoleBounds::CANDIDATE.operation_bytes / PAYLOAD_BYTES;
+    assert_eq!(
+        maximum_merges, 2,
+        "CAPACITY_LITERAL_PAYLOAD_ROOM_WITH_UNCHANGED_PROFILE"
+    );
+    for clips in [40, 120, 400, 1200] {
+        let document = capacity_document(clips);
+        let r = capacity_run_document_with_objects(
+            &document,
+            Role::Editor,
+            (1_000_001..=1_000_006)
+                .map(|id| format!("marker:{id}"))
+                .collect(),
+        );
+        let edits: usize = if clips == 1200 { 68 } else { 200 };
         let mut accepted = 0;
         loop {
             let (child, editor, core) = if accepted == 0 {
@@ -433,7 +463,7 @@ fn history_capacity_candidate_refusal_does_not_latch() {
                 } else {
                     vec![Operation::SetTrackSyncLock {
                         track: TrackId(1),
-                        locked: edit % 2 == 0,
+                        locked: edit.is_multiple_of(2),
                     }]
                 };
                 let event = core.request(Command::DoBatch(operations)).unwrap();
@@ -442,6 +472,34 @@ fn history_capacity_candidate_refusal_does_not_latch() {
                     "CAPACITY_CANDIDATE_EDIT {event:?}"
                 );
             }
+            let payload = (1..=2)
+                .map(|offset| Operation::AddMarker {
+                    marker: Marker {
+                        id: MarkerId(1_000_000 + accepted as u64 * 2 + offset),
+                        position: TimeCode(0),
+                        label: "x".repeat(LABEL_BYTES),
+                        color_token: 0,
+                    },
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                serde_json::to_vec(&payload).unwrap().len(),
+                380_161,
+                "CAPACITY_PAYLOAD_HAS_LITERAL_JSON_BYTES"
+            );
+            {
+                let before = core.export_history().unwrap();
+                crate::orchestration::policy::TaskPolicy {
+                    role: Role::Editor,
+                    scope: r.f.brief.scope.clone(),
+                }
+                .validate_batch(&before.history().document, &payload)
+                .expect("CAPACITY_PAYLOAD_HAS_THE_ACTUAL_EDITOR_GRANTS");
+            }
+            assert!(matches!(
+                core.request(Command::DoBatch(payload)).unwrap(),
+                Event::DocumentChanged { .. }
+            ));
             capacity_check_task(&r.f, &core);
             let finish_control = te13_control(&editor, &child, &core);
             let finished = editor.wire("finish_task", finish_control);
@@ -474,6 +532,16 @@ fn history_capacity_candidate_refusal_does_not_latch() {
                     capacity_candidate_actor(owner, &r.f.brief.scope.base.branch),
                 )
             };
+            assert_eq!(
+                before_actor.0.history().policy,
+                kinewright_core::undo::RetentionPolicy::NeverFold,
+                "CAPACITY_CANDIDATE_NEVER_FOLDS"
+            );
+            assert_eq!(
+                before_actor.0.history().undo.len(),
+                accepted,
+                "CAPACITY_EVERY_ACCEPTED_MERGE_STAYS_RETAINED"
+            );
             let merged = r.director.wire(
                 "merge_task",
                 r.director
@@ -484,6 +552,15 @@ fn history_capacity_candidate_refusal_does_not_latch() {
                     })),
             );
             if merged.is_error == Some(true) {
+                assert!(
+                    accepted > 0,
+                    "CAPACITY_FRESH_CANDIDATE_ACCEPTS_ITS_ADMITTED_SOURCE"
+                );
+                assert_eq!(
+                    u64::try_from(accepted).unwrap(),
+                    maximum_merges,
+                    "CAPACITY_LITERAL_MERGE_COUNT {clips}"
+                );
                 observed.push((clips, accepted));
                 assert!(c5_fix10_text(&merged).contains("Candidate history limit reached. Keep this result frozen and use publish_result to report the limit."), "{merged:?}");
                 let state = r.f.projection(&r.run);
@@ -532,6 +609,28 @@ fn history_capacity_candidate_refusal_does_not_latch() {
                 );
                 drop(host);
                 capacity_retire_finished(&r, &child);
+                let retained = cleanup_history(&r.f, &r.run, &child);
+                assert_eq!(
+                    retained.history().undo.len(),
+                    edits + 1,
+                    "CAPACITY_REFUSED_SOURCE_REOPENS_EVERY_ACCEPTED_COMMAND"
+                );
+                for offset in 1..=2 {
+                    let id = MarkerId(1_000_000 + accepted as u64 * 2 + offset);
+                    let marker = retained
+                        .history()
+                        .document
+                        .markers
+                        .iter()
+                        .find(|marker| marker.id == id)
+                        .expect("CAPACITY_REFUSED_SOURCE_REOPENS_THE_ACTUAL_PAYLOAD");
+                    assert_eq!(marker.label.len(), LABEL_BYTES);
+                    assert!(
+                        marker.label.bytes().all(|byte| byte == b'x'),
+                        "CAPACITY_REFUSED_SOURCE_REOPENS_EVERY_PAYLOAD_BYTE"
+                    );
+                }
+                drop(retained);
                 // Finish includes Freeze and retires that endpoint. Use
                 // fresh siblings to prove each available operation after the
                 // refusal, without sending new commands to a terminal task.
@@ -573,15 +672,18 @@ fn history_capacity_candidate_refusal_does_not_latch() {
             }
             assert_eq!(merged.is_error, Some(false), "CAPACITY_MERGE {merged:?}");
             accepted += 1;
-            assert!(accepted <= 4, "CAPACITY_EXPECT_REFUSAL");
+            assert!(
+                u64::try_from(accepted).unwrap() <= maximum_merges,
+                "CAPACITY_REFUSES_BY_LITERAL_ENCODED_BUDGET"
+            );
             capacity_retire_finished(&r, &child);
         }
         capacity_stop(&r.f, &r.run);
     }
     assert_eq!(
-        observed,
-        [(40, 3), (120, 2), (400, 1), (1200, 1)],
-        "CAPACITY_MERGE_COUNTS"
+        observed.iter().map(|(clips, _)| *clips).collect::<Vec<_>>(),
+        [40, 120, 400, 1200],
+        "CAPACITY_ALL_FOUR_DOCUMENT_FIXTURES_EXERCISED"
     );
 }
 
@@ -593,19 +695,46 @@ fn capacity_candidate_metrics(
     accepted: usize,
 ) {
     let store = owner.store().unwrap();
-    let checkpoint = store.read_record::<kinewright_project::bundle_records::BranchCheckpoint>(&before.checkpoint).unwrap();
-    let retained = checkpoint.open(store, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap().into_reader().unwrap().into_capture().unwrap();
-    let delta: Vec<kinewright_core::Operation> = serde_json::from_slice(&store.read_evidence(result.delta_ref.as_ref().unwrap()).unwrap()).unwrap();
+    let checkpoint = store
+        .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(&before.checkpoint)
+        .unwrap();
+    let retained = checkpoint
+        .open(
+            store,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap()
+        .into_reader()
+        .unwrap()
+        .into_capture()
+        .unwrap();
+    let delta: Vec<kinewright_core::Operation> = serde_json::from_slice(
+        &store
+            .read_evidence(result.delta_ref.as_ref().unwrap())
+            .unwrap(),
+    )
+    .unwrap();
     let charge = kinewright_core::undo::batch_charge(&delta).unwrap();
-    let steps: Vec<_> = retained.history().undo.iter().chain(retained.history().redo.iter()).map(kinewright_core::undo::Step::charge).collect();
-    println!("CAPACITY_CANDIDATE_METRICS={}", serde_json::json!({
-        "clips":clips, "accepted_merges":accepted, "operations_in_refused_merge":delta.len(),
-        "retained_steps":steps.len(), "history_encoded": steps.iter().map(|charge| charge.encoded).sum::<u64>(),
-        "history_decoded":steps.iter().map(|charge| charge.decoded).sum::<u64>(),
-        "refused_batch_encoded":charge.encoded, "refused_batch_decoded":charge.decoded,
-        "retained_envelope":retained.creation_sizing().limits().unwrap().envelope.retained,
-        "document_live":kinewright_core::undo::document_capacity_bytes(&retained.history().document).unwrap(),
-    }));
+    let steps: Vec<_> = retained
+        .history()
+        .undo
+        .iter()
+        .chain(retained.history().redo.iter())
+        .map(kinewright_core::undo::Step::charge)
+        .collect();
+    println!(
+        "CAPACITY_CANDIDATE_METRICS={}",
+        serde_json::json!({
+            "clips":clips, "accepted_merges":accepted, "operations_in_refused_merge":delta.len(),
+            "retained_steps":steps.len(), "history_encoded": steps.iter().map(|charge| charge.encoded).sum::<u64>(),
+            "history_decoded":steps.iter().map(|charge| charge.decoded).sum::<u64>(),
+            "refused_batch_encoded":charge.encoded, "refused_batch_decoded":charge.decoded,
+            "retained_envelope":retained.creation_sizing().limits().unwrap().envelope.retained,
+            "document_live":kinewright_core::undo::document_capacity_bytes(&retained.history().document).unwrap(),
+        })
+    );
 }
 
 fn capacity_candidate_actor(
@@ -703,6 +832,11 @@ fn capacity_check_task(f: &Fixture, core: &Core) {
         .1;
     assert_eq!(guard.core().actor_identity(), core.actor_identity());
     let snapshot = core.export_history().unwrap();
-    assert_eq!(snapshot.creation_sizing().kind.role(), kinewright_project::operation_history::Role::Task);
-    snapshot.validate().expect("ACCEPTED_TASK_STATE_FITS_ITS_IMMUTABLE_CREATION_BOUNDS");
+    assert_eq!(
+        snapshot.creation_sizing().kind.role(),
+        kinewright_project::operation_history::Role::Task
+    );
+    snapshot
+        .validate()
+        .expect("ACCEPTED_TASK_STATE_FITS_ITS_IMMUTABLE_CREATION_BOUNDS");
 }

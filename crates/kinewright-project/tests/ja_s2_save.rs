@@ -14,12 +14,11 @@ fn native_windows_still_refuses_before_store_mutation() {
     };
     let temp = kinewright_media::test_support::TempDirectory::new("s2-native-refusal");
     let path = temp.path("refused.kinewright");
+    let pool = kinewright_project::operation_history::HistoryPool::new(
+        kinewright_project::operation_history::PoolLimits::default(),
+    );
     let (result, trace) = io_observer::observe(|| {
-        ProjectBundle::activate(
-            &path,
-            BundleWriteAdmission::new_document(),
-            core.history_pool(),
-        )
+        ProjectBundle::activate(&path, BundleWriteAdmission::new_document(), &pool)
     });
     assert!(matches!(result, Err(BundleError::DurabilityUnsupported)));
     assert!(trace.events.is_empty());

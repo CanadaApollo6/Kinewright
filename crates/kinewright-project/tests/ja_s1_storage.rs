@@ -1744,6 +1744,7 @@ mod durable_bundle {
 #[test]
 fn windows_portable_fixtures_refuse_durability_without_mutation() {
     use kinewright_core::{Command, Document, JournalCommand, TimelineRevision};
+    use kinewright_project::operation_actor::Core;
     use kinewright_project::{bundle::BundleWriteAdmission, headless::save_headless_bundle};
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../kinewright-agent/tests/fixtures/ja");
@@ -1785,7 +1786,7 @@ fn windows_portable_fixtures_refuse_durability_without_mutation() {
         core.request(Command::from(command)).unwrap();
         let frozen = core.export_history().unwrap();
         assert_eq!(
-            frozen.cursor.undo.len(),
+            frozen.history().undo.len(),
             1,
             "the unchanged edit fixture reached Core"
         );

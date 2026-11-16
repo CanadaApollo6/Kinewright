@@ -252,6 +252,7 @@ enum Message {
     ),
     Capture(Sender<Result<CapturedHistory, Error>>),
     Preview(Command, Sender<Result<OwnerSnapshot, Error>>),
+    BatchCapacity(kinewright_core::undo::Charge, Sender<Result<(), Error>>),
     Approval(
         ObjectRef,
         Sender<Result<Option<crate::operation_history::ApprovalAnswer>, Error>>,
@@ -569,6 +570,21 @@ impl Core {
     /// the source actor and its command counter and approval ledger are unchanged.
     pub fn preview_command(&self, command: Command) -> Result<OwnerSnapshot, Error> {
         self.call(|reply| Message::Preview(command, reply))?
+    }
+    /// Refuse impossible plain batches before consent, without a document preview.
+    /// This is advisory; the executor remains the atomic admission authority.
+    pub fn check_batch_capacity(
+        &self,
+        operations: &[kinewright_core::Operation],
+    ) -> Result<(), Error> {
+        if operations.is_empty() {
+            return Err(HistoryError::History(kinewright_core::undo::Error::Batch(
+                kinewright_core::BatchError::Empty,
+            ))
+            .into());
+        }
+        let charge = kinewright_core::undo::batch_charge(operations).map_err(HistoryError::from)?;
+        self.call(|reply| Message::BatchCapacity(charge, reply))?
     }
     pub fn operations(&self, recorded: bool) -> Result<OwnerOperations, Error> {
         self.call(|reply| Message::Operations(recorded, reply))?
@@ -914,6 +930,16 @@ impl State {
                             .into_capture()
                             .map_err(Error::from)
                     })();
+                    let _ = reply.send(result);
+                }
+                Message::BatchCapacity(charge, reply) => {
+                    let result = self.live().and_then(|()| {
+                        self.history()?
+                            .history()
+                            .check_batch_capacity(charge)
+                            .map_err(HistoryError::from)
+                            .map_err(Error::from)
+                    });
                     let _ = reply.send(result);
                 }
                 Message::Capture(reply) => {

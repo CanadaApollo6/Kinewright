@@ -3378,7 +3378,11 @@ fn s2h_lost_save_floor_stays_frozen_until_exact_publisher_result() {
         12_000,
         "TWELVE_THOUSAND_RETAINED_EXECUTOR_STEPS"
     );
-    let before = before.identity().unwrap();
+    let mut before = {
+        let value = serde_json::to_value(&before).unwrap();
+        drop(before);
+        value
+    };
     let mut app = Ja1Attachment::new(owner).unwrap();
     app.launch_host_at(
         &host::executable(),
@@ -3390,6 +3394,22 @@ fn s2h_lost_save_floor_stays_frozen_until_exact_publisher_result() {
     )
     .unwrap();
     assert!(app.host.as_ref().unwrap().manual.is_none());
+    // Handover starts a fresh attachment epoch before the Save request. The
+    // frozen cut below must preserve that complete state until its exact reply.
+    let handed = core.export_history().unwrap();
+    let handed_json = serde_json::to_value(&handed).unwrap();
+    assert_eq!(
+        handed_json["history"]["epoch"].as_u64(),
+        before["history"]["epoch"].as_u64().map(|epoch| epoch + 1),
+        "SAVE_FLOOR_HANDOVER_ADVANCES_ONLY_INSTALL_EPOCH"
+    );
+    before["history"]["epoch"] = handed_json["history"]["epoch"].clone();
+    assert_eq!(
+        handed_json, before,
+        "SAVE_FLOOR_HANDOVER_PRESERVES_ALL_RETAINED_WORK"
+    );
+    let before = handed.identity().unwrap();
+    drop(handed);
     let proxy = app.host.as_mut().unwrap().drop_http_reply("save", false);
     assert!(app.apply(Action::Save).is_err());
     let remote = app

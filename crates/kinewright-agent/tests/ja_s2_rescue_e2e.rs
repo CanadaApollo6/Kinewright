@@ -9,6 +9,32 @@ fn durable_test_root() -> &'static Path {
     Path::new(env!("CARGO_TARGET_TMPDIR"))
 }
 
+#[cfg(target_os = "linux")]
+fn recopy_oracle(
+    core: &kinewright_project::operation_actor::Core,
+    expected: kinewright_project::operation_history::OwnerSnapshot,
+) -> kinewright_project::operation_history::OwnerSnapshot {
+    let copied = core.export_history().unwrap();
+    // Consume the old capture: the JSON oracle needs no full history lease.
+    let mut expected_copy = serde_json::to_value(expected).unwrap();
+    let actual_copy = serde_json::to_value(&copied).unwrap();
+    let epoch = expected_copy["history"]["epoch"].as_u64().unwrap() + 1;
+    expected_copy["history"]["epoch"] = serde_json::json!(epoch);
+    assert_eq!(
+        actual_copy, expected_copy,
+        "RESCUE_RECOPY_CHANGES_ONLY_INSTALL_EPOCH"
+    );
+    assert_eq!(
+        core.history_pool()
+            .lease_counts(kinewright_project::operation_history::Role::Ordinary)
+            .unwrap()
+            .0,
+        2,
+        "RESCUE_RECONCILE_HAS_ONLY_LIVE_AND_ORACLE_CAPTURES"
+    );
+    copied
+}
+
 #[test]
 #[cfg_attr(
     not(feature = "slow-tests"),
@@ -71,7 +97,7 @@ fn rescue_reopen_recopy_retention_stress() {
                 .unwrap(),
             CopyStatus::Committed(_)
         ));
-        assert_eq!(owner.core().export_history().unwrap(), expected);
+        let expected = recopy_oracle(owner.core(), expected);
         std::fs::rename(hidden, drive).unwrap();
         agent.owner().reconcile_retained_destination(&path).unwrap();
         assert!(

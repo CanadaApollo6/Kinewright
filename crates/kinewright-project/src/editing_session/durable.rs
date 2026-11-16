@@ -534,7 +534,28 @@ impl Ja1EditingSession {
             };
             let update = owner
                 .prepare_merge(&cut, frozen.delta(self)?.iter().cloned().collect(), context)
-                .map_err(crate::bundle::operation_error)?;
+                .map_err(|error| {
+                    use crate::{operation_actor::Error, operation_history::Error as HistoryError};
+                    if matches!(
+                        error,
+                        Error::History(
+                            HistoryError::History(
+                                kinewright_core::undo::Error::StepTooLarge
+                                    | kinewright_core::undo::Error::HistoryFull
+                                    | kinewright_core::undo::Error::Capacity
+                                    | kinewright_core::undo::Error::DocumentCapacity
+                            ) | HistoryError::Capacity(_)
+                        )
+                    ) {
+                        BundleError::RunAdmission(
+                            "Candidate history limit reached. Keep this result frozen and use publish_result to report the limit.",
+                        )
+                    } else {
+                        // Temporary pool/workspace pressure stays typed and
+                        // retryable; only this fixed history budget is exhausted.
+                        crate::bundle::operation_error(error)
+                    }
+                })?;
             drop(update);
             envelope.encoded_bytes()?;
             Ok(())

@@ -353,6 +353,33 @@ impl Ja1EditingSession {
             .map_or(Ok(true), SessionStore::close_originating_source)
     }
 
+    /// After explicit Close has drained source readers, retire the foreground
+    /// history synchronously. Slow namespace/worker destruction may follow on a
+    /// reaper; stale view handles must not keep this full pool lease alive.
+    pub fn retire_closed_history(&self) -> Result<(), BundleError> {
+        if !self.host_retention_lost {
+            return Err(BundleError::Unsettled);
+        }
+        if matches!(
+            self.core.change_id(),
+            Err(crate::operation_actor::Error::Retired)
+        ) {
+            return Ok(());
+        }
+        // request_close already froze this exact cut. Reuse it even if a
+        // failed handoff sealed the view; a sealed actor cannot be refrozen.
+        let cut = if let Some(cut) = self.host_cut {
+            cut
+        } else {
+            self.attachment
+                .freeze()
+                .map_err(crate::bundle::operation_error)?
+        };
+        self.attachment
+            .retire(&cut)
+            .map_err(crate::bundle::operation_error)
+    }
+
     fn require_local_writer(&self) -> Result<(), BundleError> {
         if self.host_attached || self.host_retention_lost {
             return Err(BundleError::Identity(

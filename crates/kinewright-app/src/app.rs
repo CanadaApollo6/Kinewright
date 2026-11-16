@@ -14664,8 +14664,25 @@ mod in2b_tests {
         );
 
         // Closing frees the guard: the path opens fresh again.
+        let closed_core = app.focused().core.clone();
         app.close_project(id);
         assert_eq!(app.projects.len(), 1);
+        assert!(
+            matches!(
+                closed_core.change_id(),
+                Err(kinewright_project::operation_actor::Error::Retired)
+            ),
+            "CLOSED_PROJECT_RELEASES_HISTORY_WITH_STALE_MCP_HANDLES"
+        );
+        assert_eq!(
+            closed_core
+                .history_pool()
+                .lease_counts(kinewright_project::operation_history::Role::Ordinary)
+                .unwrap()
+                .0,
+            1,
+            "CLOSE_LEAVES_ONLY_THE_OTHER_PROJECT_LEASE"
+        );
         app.open_project(&project_path);
         assert_eq!(app.projects.len(), 2, "a closed path reopens");
 

@@ -1364,6 +1364,9 @@ impl Ja1Attachment {
         }
         self.host.as_mut().is_none_or(host::HostAttachment::close)
     }
+    pub(crate) fn retire_closed_history(&self) -> Result<(), BundleError> {
+        self.owner.retire_closed_history()
+    }
     pub(crate) fn continuation_pending(&self) -> bool {
         self.host
             .as_ref()

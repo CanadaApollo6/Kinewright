@@ -1154,6 +1154,38 @@ fn manual_value_fix2_healthy_previews_wait_without_abandoning() {
         assert!(f.edits().notice().is_none());
         assert_eq!(f.app.focused().core.export_history().unwrap(), before);
     }
+    {
+        // Every preview has been checked against the complete owner. The
+        // oracle is no longer needed while the real pending work drains.
+        let pool = f.app.focused().core.history_pool();
+        let leases = pool
+            .lease_counts(kinewright_project::operation_history::Role::Ordinary)
+            .unwrap()
+            .0;
+        drop(before);
+        assert_eq!(
+            pool.lease_counts(kinewright_project::operation_history::Role::Ordinary)
+                .unwrap()
+                .0,
+            leases - 1,
+            "MANUAL_PREVIEW_ORACLE_RELEASES_ITS_FULL_LEASE_BEFORE_DRAIN"
+        );
+    }
     f.finish();
     assert!(f.edits().notice().is_none());
+    let Event::QueryResult(QueryResult::Snapshot { document, .. }) = f
+        .app
+        .focused()
+        .core
+        .request(Command::Query(Query::Snapshot))
+        .unwrap()
+    else {
+        panic!("MANUAL_HEALTHY_PREVIEW_HAS_ITS_ACTUAL_DOCUMENT");
+    };
+    assert_eq!(
+        document.clip(ClipId(1)).unwrap().effects[0].keyframes["exposure_milli_stops"].keyframes[0]
+            .value,
+        2,
+        "MANUAL_HEALTHY_PREVIEW_DRAINS_THE_RETAINED_FINAL_VALUE"
+    );
 }

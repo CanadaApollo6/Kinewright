@@ -1,13 +1,14 @@
 use super::*;
+#[cfg(target_os = "linux")]
+use crate::operation_history::{Approval, ApprovalAnswer, OwnerHistory, PoolLimits, RemovedTarget};
 use crate::{
     bundle_records::BatchId,
     operation_actor::CommandContext,
-    operation_history::{
-        Approval, ApprovalAnswer, CreationOrigin, OwnerHistory, PoolLimits, RemovedTarget,
-    },
+    operation_history::CreationOrigin,
     operation_protocol::{Action, Seed},
     receipts::IssuerId,
 };
+#[cfg(target_os = "linux")]
 use kinewright_core::{Document, Operation, Track, TrackId, TrackKind};
 
 fn reference(kind: RecordKind, digit: &str) -> ObjectRef {

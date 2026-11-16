@@ -111,6 +111,74 @@ fn revision_token_survives_a_history_capacity_refusal() {
     );
 }
 #[test]
+fn consent_capacity_preflight_touches_no_document_and_preserves_the_cut() {
+    let pool = HistoryPool::new(PoolLimits::default());
+    let core = small(&pool, Role::Task);
+    core.check_batch_capacity(&[lock(true)]).unwrap();
+    core.request(Command::Do(lock(true))).unwrap();
+    let before = core.change_id().unwrap();
+    let phases = core.counters().unwrap();
+    assert!(
+        matches!(
+            core.check_batch_capacity(&[lock(false)]),
+            Err(Error::History(HistoryError::History(
+                kinewright_core::undo::Error::HistoryFull
+            )))
+        ),
+        "CONSENT_REFUSES_EXHAUSTED_EXECUTOR_STEP_ROOM"
+    );
+    let after = core.counters().unwrap();
+    assert_eq!(
+        after.0.since(phases.0).document_copies,
+        0,
+        "CONSENT_CAPACITY_PREFLIGHT_COPIES_NO_DOCUMENT"
+    );
+    assert_eq!(
+        after.0.since(phases.0).exact_measurements,
+        0,
+        "CONSENT_CAPACITY_PREFLIGHT_MEASURES_NO_DOCUMENT"
+    );
+    assert_eq!(
+        core.change_id().unwrap(),
+        before,
+        "CONSENT_CAPACITY_PREFLIGHT_CHANGES_NO_ACCEPTED_STATE"
+    );
+    core.request(Command::Undo).unwrap();
+    core.check_batch_capacity(&[lock(false)]).unwrap();
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn explicit_close_retires_a_sealed_view_using_its_existing_cut() {
+    let temp = kinewright_media::test_support::TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "closed-sealed-history",
+    );
+    let pool = HistoryPool::new(PoolLimits::default());
+    let core = Core::spawn(&pool, Role::Ordinary, origin(), document()).unwrap();
+    let mut owner = crate::editing_session::Ja1EditingSession::new(
+        temp.root(),
+        &core,
+        crate::storage_budget::StorageLimits::default(),
+    )
+    .unwrap();
+    assert!(owner.close_originating_source().unwrap());
+    let attachment = crate::ProjectAttachment::new(&core).unwrap();
+    let cut = attachment.capture().unwrap();
+    attachment.seal(&cut).unwrap();
+    owner
+        .retire_closed_history()
+        .expect("EXPLICIT_CLOSE_RETIRES_ALREADY_SEALED_VIEW");
+    assert!(
+        matches!(core.change_id(), Err(Error::Retired)),
+        "CLOSED_SEALED_VIEW_HAS_NO_HISTORY"
+    );
+    assert_eq!(
+        pool.lease_counts(Role::Ordinary).unwrap().0,
+        0,
+        "CLOSED_SEALED_VIEW_RELEASES_ITS_FULL_LEASE"
+    );
+}
+#[test]
 fn no_op_close_advances_position_and_default_recorder_is_disabled() {
     let pool = HistoryPool::new(PoolLimits::default());
     let core = small(&pool, Role::Ordinary);

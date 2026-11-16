@@ -37,7 +37,7 @@ mod tests {
     }
 
     fn assert_recovered_task_owner(core: &Core, mut expected: serde_json::Value, marker: &str) {
-        let mut actual = serde_json::to_value(core.export_history().unwrap()).unwrap();
+        let actual = serde_json::to_value(core.export_history().unwrap()).unwrap();
         assert_eq!(
             actual["role"], "Ordinary",
             "{marker}: person recovery uses ordinary retention"
@@ -68,14 +68,12 @@ mod tests {
             }
             command["install_epoch"] = serde_json::json!(epoch);
         }
-        // Reprofiling changes only admission and future retention. Every native
-        // document, stack, command identity, owner fact and resource stays exact.
-        for value in [&mut actual, &mut expected] {
-            let object = value.as_object_mut().unwrap();
-            object.remove("role");
-            object.remove("sizing");
-            value["history"].as_object_mut().unwrap().remove("policy");
-        }
+        // Reprofiling preserves the immutable creation baseline. Only its
+        // role, future policy and (candidate-only) initial batch room change.
+        expected["role"] = serde_json::json!("Ordinary");
+        expected["sizing"]["kind"] = serde_json::json!("Ordinary");
+        expected["sizing"]["initial_batch"] = serde_json::json!({"encoded":0,"decoded":0});
+        expected["history"]["policy"] = serde_json::json!("Fold");
         assert_eq!(actual, expected, "{marker}");
     }
 

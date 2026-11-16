@@ -334,10 +334,13 @@ impl TaskEndpoint {
         if !self.matches_core(core) {
             return Err("task actor changed".into());
         }
-        let _ = operations;
-        // Capacity is admitted atomically by the executor. A second document
-        // preview here would copy the entire project once more on every edit.
-        Ok(())
+        core.check_batch_capacity(operations).map_err(|error| {
+            if error.is_capacity() {
+                kinewright_project::task_history_admission::LIMIT_REASON.to_owned()
+            } else {
+                error.to_string()
+            }
+        })
     }
     pub(crate) fn validate_batch(
         &self,

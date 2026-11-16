@@ -75,6 +75,41 @@ impl ProjectBundle {
         let depth = old_reader.history().undo().len();
         let old_boundary = old_reader.into_boundary(depth)?;
         let old_lineage = old_boundary.lineage();
+        let old_matches = revision.anchor.target.as_ref().is_some_and(|target| {
+            old_lineage.occurrences.get(&target.local_clip_id) == target.occurrence_id.as_ref()
+                && target.occurrence_id.is_some()
+        });
+        // Mapping needs only the target's ancestor identities from the old
+        // checkpoint, not its whole document/history while the new one opens.
+        // Each copied identity has two validated 32-byte IDs. 512 bytes per
+        // slot covers its typed value, owned strings and allocation slack.
+        let slots = old_lineage.split_ancestry.len() + 1;
+        let bytes = u64::try_from(slots)
+            .ok()
+            .and_then(|n| n.checked_mul(512))
+            .ok_or(BundleError::Capacity("feedback ancestor proof"))?;
+        let charge = self.store().reserve_read(0, bytes, 0, false)?;
+        let mut ancestors = Vec::with_capacity(slots);
+        if let Some(mut next) = revision
+            .anchor
+            .target
+            .as_ref()
+            .and_then(|t| t.occurrence_id.as_ref())
+        {
+            for _ in 0..slots {
+                ancestors.push(next.clone());
+                let Some((_, parent, _)) = old_lineage
+                    .split_ancestry
+                    .iter()
+                    .find(|(child, _, _)| child == next)
+                else {
+                    break;
+                };
+                next = parent;
+            }
+        }
+        let old_ancestors = charge.hold(ancestors);
+        drop(old_boundary);
         let new_reader = checkpoint
             .open(self.store(), self.history_pool())?
             .into_reader()?;
@@ -111,7 +146,7 @@ impl ProjectBundle {
         let Some(occurrence) = &target.occurrence_id else {
             return Ok(result);
         };
-        if old_lineage.occurrences.get(&target.local_clip_id) != Some(occurrence)
+        if !old_matches
             || revision.anchor.snapshot.document_hash != snapshot.descriptor.document_ref.sha256
             || revision.anchor.fps.numerator != origin.fps.numerator()
             || revision.anchor.fps.denominator != origin.fps.denominator()
@@ -167,7 +202,7 @@ impl ProjectBundle {
                     continue;
                 };
                 if !descends_from(current, occurrence, new_lineage)
-                    && !descends_from(occurrence, current, old_lineage)
+                    && !old_ancestors.iter().any(|ancestor| ancestor == current)
                 {
                     continue;
                 }
