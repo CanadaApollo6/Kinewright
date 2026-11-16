@@ -3807,7 +3807,7 @@ pub mod task_preparation_words;
 
 pub use task_mcp::consent::EditApproval;
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 fn document_for_test(core: &Core) -> Arc<Document> {
     let kinewright_core::Event::QueryResult(kinewright_core::QueryResult::Document(document)) =
         core.request(kinewright_core::Command::Query(
@@ -3820,13 +3820,13 @@ fn document_for_test(core: &Core) -> Arc<Document> {
     document
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 fn received_reply_for_test(reply: HostReply) -> HostReply {
     let bytes = serde_json::to_vec(&reply).unwrap();
     drop(reply);
     serde_json::from_slice(&bytes).unwrap()
 }
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 fn received_snapshot_for_test(core: &Core) -> Result<HostSnapshot, HostError> {
     // These fixtures stand in for a separate GUI process. Its sender lease
     // must not become an extra history holder inside the writer's pool.
@@ -3835,12 +3835,12 @@ fn received_snapshot_for_test(core: &Core) -> Result<HostSnapshot, HostError> {
     drop(capture);
     Ok(serde_json::from_slice(&bytes)?)
 }
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 fn host_snapshot_for_test(host: &WriterHost) -> HostSnapshot {
     let owner = host.owner.upgrade().unwrap();
     locked_host_snapshot_for_test(&owner)
 }
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 fn locked_host_snapshot_for_test(owner: &std::sync::Mutex<HostCommandOwner>) -> HostSnapshot {
     let owner = owner.lock().unwrap();
     received_snapshot_for_test(owner.core()).unwrap()

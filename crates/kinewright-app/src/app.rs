@@ -18075,11 +18075,7 @@ pub(crate) fn ja_c9_manual_producer_gate_witness() {
     drop(engine);
 }
 
-#[cfg(test)]
-#[allow(
-    dead_code,
-    reason = "portable App helper for the Linux-only durable activation witness"
-)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn ja_s2h_legacy_activation_witness() {
     let root = kinewright_media::test_support::workspace_target_dir();
     let temp = kinewright_media::test_support::TempDirectory::new_in(&root, "s2h-legacy");

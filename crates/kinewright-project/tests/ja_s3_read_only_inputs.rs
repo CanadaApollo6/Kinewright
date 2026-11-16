@@ -753,7 +753,7 @@ fn s3_read_only_production_fixture_and_store_identity_ledger() {
 #[cfg(windows)]
 #[test]
 fn s3_read_only_windows_certification_keeps_write_refusal_zero_mutation() {
-    use kinewright_project::bundle::{BundleWriteAdmission, ProjectBundle};
+    use kinewright_project::bundle::{BundleError, BundleWriteAdmission, ProjectBundle};
     let fixture = Fixture::new();
     let admission = fixture.admit().unwrap();
     assert!(
@@ -765,14 +765,13 @@ fn s3_read_only_windows_certification_keeps_write_refusal_zero_mutation() {
     );
     let destination = fixture.root.path("must-remain-absent.kinewright");
     let before = std::fs::read_dir(fixture.root.root()).unwrap().count();
-    assert!(
-        ProjectBundle::activate(
-            &destination,
-            BundleWriteAdmission::new_document(),
-            core.history_pool()
-        )
-        .is_err()
+    let pool = kinewright_project::operation_history::HistoryPool::new(
+        kinewright_project::operation_history::PoolLimits::default(),
     );
+    assert!(matches!(
+        ProjectBundle::activate(&destination, BundleWriteAdmission::new_document(), &pool),
+        Err(BundleError::DurabilityUnsupported)
+    ));
     assert!(!destination.exists());
     assert_eq!(
         std::fs::read_dir(fixture.root.root()).unwrap().count(),

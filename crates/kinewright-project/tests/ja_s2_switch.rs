@@ -10,12 +10,11 @@ fn native_windows_switch_admission_refuses_before_mutation() {
     };
     let root = kinewright_media::test_support::TempDirectory::new("c11-refusal");
     let path = root.path("a.kinewright");
+    let pool = kinewright_project::operation_history::HistoryPool::new(
+        kinewright_project::operation_history::PoolLimits::default(),
+    );
     let (result, trace) = io_observer::observe(|| {
-        ProjectBundle::activate(
-            &path,
-            BundleWriteAdmission::new_document(),
-            core.history_pool(),
-        )
+        ProjectBundle::activate(&path, BundleWriteAdmission::new_document(), &pool)
     });
     assert!(matches!(result, Err(BundleError::DurabilityUnsupported)));
     assert!(trace.events.is_empty());

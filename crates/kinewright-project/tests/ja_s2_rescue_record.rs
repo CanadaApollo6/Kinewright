@@ -1303,10 +1303,14 @@ fn w14_raw_switch_structure_and_ordinary_v3_backward_control() {
     #[cfg(not(target_os = "linux"))]
     {
         let path = temp.path("refused.kinewright");
+        let pool = kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        );
         let (result, trace) = kinewright_project::io_observer::observe(|| {
             kinewright_project::bundle::ProjectBundle::activate(
                 &path,
                 BundleWriteAdmission::new_document(),
+                &pool,
             )
         });
         assert!(matches!(
