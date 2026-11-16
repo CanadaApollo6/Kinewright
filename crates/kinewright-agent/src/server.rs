@@ -30283,7 +30283,7 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_978_409, 5_660),
+            (1_978_588, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
@@ -30291,7 +30291,7 @@ mod tests {
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 128_597,
+            registry_metrics.description_bytes, 128_776,
             "registry={registry_metrics:?}"
         );
         assert_eq!(

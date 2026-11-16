@@ -2754,7 +2754,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
             registry_metrics.input_schema_bytes,
             registry_metrics.description_bytes
         ),
-        (153, 1_978_409, 1_824_687, 128_597),
+        (153, 1_978_588, 1_824_687, 128_776),
         "registry={registry_metrics:?}"
     );
 
@@ -10679,7 +10679,7 @@ async fn mo2_the_served_quad_does_not_move_for_the_twenty_third_measurement() {
             registry_metrics.input_schema_bytes,
             registry_metrics.description_bytes
         ),
-        (153, 1_978_409, 1_824_687, 128_597),
+        (153, 1_978_588, 1_824_687, 128_776),
         "registry={registry_metrics:?}"
     );
     let state = registry
