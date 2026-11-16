@@ -14,6 +14,7 @@ mod dialogue_rehearsal_tests {
     use serde::Serialize;
     use serde_json::Value;
     use std::{
+        collections::{BTreeMap, BTreeSet},
         fs,
         io::{BufWriter, Write},
         path::{Path, PathBuf},
@@ -54,8 +55,8 @@ mod dialogue_rehearsal_tests {
         result
     }
     fn actions(read: &Value, measured: &kinewright_core::dialogue::Dialogue) -> Vec<Action> {
-        use kinewright_core::dialogue::Span;
-        let words = addressed(read);
+        let mut words = addressed(read);
+        words.dedup_by_key(|w| w.index);
         let mut result = Vec::new();
         for word in &words {
             let text = word.word[0].as_str().unwrap();
@@ -75,36 +76,11 @@ mod dialogue_rehearsal_tests {
                 });
             }
         }
-        // Use measured quiet/valley runs, including silence hidden inside a
-        // stretched recognizer word end. Coalesce overlapping evidence once.
-        let mut runs: Vec<_> = measured
-            .quiet_runs()
-            .iter()
-            .chain(
-                measured
-                    .valleys()
-                    .iter()
-                    .filter(|r| r.duration() >= measured.settings().valley_pause_micros),
-            )
-            .copied()
-            .collect();
-        runs.sort_by_key(|r| (r.start_micros(), r.end_micros()));
-        let mut union: Vec<Span> = Vec::new();
-        for run in runs {
-            if let Some(last) = union
-                .last_mut()
-                .filter(|last| run.start_micros() <= last.end_micros())
-            {
-                *last = Span::new(last.start_micros(), last.end_micros().max(run.end_micros()))
-                    .unwrap();
-            } else {
-                union.push(run);
-            }
-        }
+        let union = measured.gap_runs().iter().copied();
         let settings = measured.settings();
         let share = 300_000 * settings.air_after_micros
             / (settings.air_after_micros + settings.air_before_micros);
-        for run in union.into_iter().filter(|r| r.duration() > 700_000) {
+        for run in union.filter(|r| r.duration() > 700_000) {
             let before = words
                 .iter()
                 .rev()
@@ -133,17 +109,6 @@ mod dialogue_rehearsal_tests {
         // The initial clip is the complete source at project zero, unit speed.
         result.sort_by_key(|a| (a.original_project_us[0], a.index));
         result
-    }
-    fn removal(action: &Action, read: &Value) -> Option<Value> {
-        let words = addressed(read);
-        // Indices name the original recording's words, even after a split.
-        // A deleted left word cannot be replaced with a different pause address.
-        let word = words.iter().find(|w| Some(w.index) == action.index)?;
-        Some(if action.kind == "filler" {
-            json!({"kind":"words","first":word.address,"last":word.address})
-        } else {
-            json!({"kind":"pause","after":word.address,"leave_micros":300_000})
-        })
     }
     #[derive(Serialize)]
     struct Call {
@@ -235,70 +200,216 @@ mod dialogue_rehearsal_tests {
         ];
         json!({"action":action,"status":if moves[0][0]==0&&moves[1][0]==0{"as_asked"}else{"moved"},"nominal_source_us":nominal,"actual_source_us":actual,"edge_moves_us":moves,"outcome":outcome})
     }
+    #[derive(Default)]
+    struct Addresses {
+        words: BTreeMap<usize, Value>,
+        revision: Value,
+        neighbour_uses: usize,
+        neighbours: BTreeSet<usize>,
+    }
+    impl Addresses {
+        fn read(&mut self, reply: &Value) {
+            self.revision = reply["revision"].clone();
+            for w in addressed(reply) {
+                if self.words.get(&w.index) != Some(&w.address) {
+                    self.words.insert(w.index, w.address);
+                    self.neighbours.remove(&w.index);
+                }
+            }
+        }
+        fn applied(&mut self, reply: &Value, args: &Value) {
+            self.revision = reply["revision"].clone();
+            let changed: BTreeSet<_> = reply["removals"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|r| r["outcome"] == "ready")
+                .map(|r| {
+                    let request =
+                        &args["removals"][usize::try_from(r["index"].as_u64().unwrap()).unwrap()];
+                    request.get("first").unwrap_or(&request["after"])["clip"]
+                        .as_u64()
+                        .unwrap()
+                })
+                .collect();
+            self.words
+                .retain(|_, a| !changed.contains(&a["clip"].as_u64().unwrap()));
+            let n = &reply["neighbours"];
+            for join in n["joins"].as_array().expect("current neighbours") {
+                assert!(
+                    join["not_measured"].as_array().unwrap().is_empty(),
+                    "{join}"
+                );
+                for a in join["left"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .chain(join["right"].as_array().unwrap())
+                {
+                    let clip = a[0].as_u64().unwrap();
+                    let index = usize::try_from(a[1].as_u64().unwrap()).unwrap();
+                    self.words.insert(index, json!({"clip":clip,"index":index,"binding":n["bindings"][clip.to_string()]}));
+                    self.neighbours.insert(index);
+                }
+            }
+        }
+        fn address_index(&self, action: &Action) -> Option<usize> {
+            action.index.filter(|index| self.words.contains_key(index))
+        }
+        fn removal(&mut self, action: &Action) -> Option<Value> {
+            let index = self.address_index(action)?;
+            let a = self.words.get(&index)?;
+            if self.neighbours.contains(&index) {
+                self.neighbour_uses += 1;
+            }
+            Some(if action.kind == "filler" {
+                json!({"kind":"words","first":a,"last":a})
+            } else {
+                json!({"kind":"pause","after":a,"leave_micros":300_000})
+            })
+        }
+    }
+    #[allow(clippy::too_many_lines, reason = "one opt-in scripted editor sequence")]
     fn execute(
         service: &KinewrightMcp,
         measured: &kinewright_core::dialogue::Dialogue,
         calls: &mut Vec<Call>,
-    ) -> (Vec<Value>, Value) {
-        let mut read = invoke(service, "get_timeline_transcript", json!({}), calls);
-        assert!(
-            read["not_measured"].as_array().unwrap().is_empty(),
-            "{read}"
-        );
-        let actions = actions(&read, measured);
+    ) -> (Vec<Value>, Value, usize) {
+        let (_, doc) = service.snapshot().unwrap();
+        let fps = doc.fps;
+        let page = fps.numerator() * 30 / fps.denominator();
+        let mut book = Addresses::default();
+        let mut initial = json!({"segments":[]});
+        let mut start = 0;
+        while start < doc.duration.0 {
+            let end = (start + i64::from(page)).min(doc.duration.0);
+            let read = invoke(
+                service,
+                "get_timeline_transcript",
+                json!({"range":{"start":start,"end":end}}),
+                calls,
+            );
+            assert!(
+                read["not_measured"].as_array().unwrap().is_empty(),
+                "{read}"
+            );
+            assert_eq!(read["word_timing"], "approximate_transcript_intervals");
+            book.read(&read);
+            initial["segments"]
+                .as_array_mut()
+                .unwrap()
+                .extend(read["segments"].as_array().unwrap().iter().cloned());
+            start = end;
+        }
+        let actions = actions(&initial, measured);
         let mut results = Vec::new();
-        for batch in actions.chunks(32) {
-            let pending: Vec<_> = batch
-                .iter()
-                .filter_map(|a| removal(a, &read).map(|r| (a, r)))
-                .collect();
-            for a in batch.iter().filter(|a| removal(a, &read).is_none()) {
-                results.push(json!({"action":a,"status":"unaddressable","reason":{"code":"no_surviving_address"}}));
+        let mut cuts: Vec<[i64; 2]> = Vec::new();
+        let mut duration = doc.duration.0;
+        let source_frame = |t: u64| {
+            i64::try_from(
+                u128::from(t) * u128::from(fps.numerator())
+                    / (1_000_000 * u128::from(fps.denominator())),
+            )
+            .unwrap()
+        };
+        let project_frame = |t: u64, cuts: &[[i64; 2]]| {
+            let source = source_frame(t);
+            source
+                - cuts
+                    .iter()
+                    .map(|c| (source.min(c[1]) - c[0]).max(0))
+                    .sum::<i64>()
+        };
+        let mut work: std::collections::VecDeque<Vec<&Action>> = actions
+            .chunks(32)
+            .map(|batch| batch.iter().collect())
+            .collect();
+        while let Some(batch) = work.pop_front() {
+            if batch.iter().any(|a| book.address_index(a).is_none()) {
+                let first = batch.first().unwrap().source_us[0].saturating_sub(3_000_000);
+                let last = batch.last().unwrap().source_us[1].saturating_add(3_000_000);
+                let from = project_frame(first, &cuts).clamp(0, duration.saturating_sub(1));
+                let end = project_frame(last, &cuts).clamp(from + 1, duration);
+                let read = invoke(
+                    service,
+                    "get_timeline_transcript",
+                    json!({"range":{"start":from,"end":end}}),
+                    calls,
+                );
+                assert!(
+                    read["not_measured"].as_array().unwrap().is_empty(),
+                    "{read}"
+                );
+                book.read(&read);
+            }
+            let mut pending = Vec::new();
+            for action in &batch {
+                if let Some(removal) = book.removal(action) {
+                    pending.push((action, removal));
+                } else {
+                    results.push(json!({"action":action,"status":"unaddressable","reason":{"code":"no_surviving_address"}}));
+                }
             }
             if pending.is_empty() {
                 continue;
             }
-            let reply = cut(
-                service,
-                json!({"expected_revision":read["revision"],"removals":pending.iter().map(|(_,r)|r).collect::<Vec<_>>()}),
-                calls,
-            );
+            let args = json!({"expected_revision":book.revision,"removals":pending.iter().map(|(_,r)|r).collect::<Vec<_>>()});
+            let reply = cut(service, args.clone(), calls);
             if reply["status"] == "applied" {
                 assert_eq!(reply["removals"].as_array().unwrap().len(), pending.len());
-                for ((action, _), outcome) in
+                book.applied(&reply, &args);
+                for ((action, request), outcome) in
                     pending.iter().zip(reply["removals"].as_array().unwrap())
                 {
-                    results.push(result(action, outcome));
-                }
-                read = invoke(service, "get_timeline_transcript", json!({}), calls);
-            } else {
-                // The API is atomic. An unsafe member refuses the whole batch;
-                // retry each original request in order, on the current addresses.
-                for (action, _) in pending {
-                    let Some(removal) = removal(action, &read) else {
-                        results.push(json!({"action":action,"status":"unaddressable","reason":{"code":"no_surviving_address"}}));
+                    if outcome["outcome"] == "refused" && outcome["code"] == "conflict" {
                         continue;
-                    };
-                    let reply = cut(
-                        service,
-                        json!({"expected_revision":read["revision"],"removals":[removal]}),
-                        calls,
-                    );
-                    if reply["status"] == "applied" {
-                        results.push(result(action, &reply["removals"][0]));
-                        read = invoke(service, "get_timeline_transcript", json!({}), calls);
-                    } else {
-                        results.push(
-                            json!({"action":action,"status":"refused","reason":refusal(&reply,0)}),
-                        );
                     }
+                    let mut row = result(action, outcome);
+                    row["address_used"] = request.get("first").unwrap_or(&request["after"]).clone();
+                    if outcome["outcome"] == "ready" {
+                        let edge = |i: usize| {
+                            let x = &outcome["edges"][i][2];
+                            let n =
+                                u128::from(x[0].as_u64().unwrap()) * u128::from(fps.numerator());
+                            let d = u128::from(x[1].as_u64().unwrap())
+                                * 1_000_000
+                                * u128::from(fps.denominator());
+                            assert_eq!(
+                                n % d,
+                                0,
+                                "committed edge lies on the exact source frame grid"
+                            );
+                            i64::try_from(n / d).unwrap()
+                        };
+                        cuts.push([edge(0), edge(1)]);
+                        duration -= outcome["cut"][1].as_i64().unwrap()
+                            - outcome["cut"][0].as_i64().unwrap();
+                    }
+                    results.push(row);
+                }
+                for ((action, _), outcome) in pending
+                    .iter()
+                    .zip(reply["removals"].as_array().unwrap())
+                    .rev()
+                {
+                    if outcome["outcome"] == "refused" && outcome["code"] == "conflict" {
+                        work.push_front(vec![**action]);
+                    }
+                }
+            } else {
+                for (index, (action, _)) in pending.iter().enumerate() {
+                    results.push(
+                        json!({"action":action,"status":"refused","reason":refusal(&reply,index)}),
+                    );
                 }
             }
         }
-        assert_eq!(
-            results.len(),
-            actions.len(),
-            "every planned removal has one terminal result"
+        assert_eq!(results.len(), actions.len());
+        assert!(
+            calls
+                .iter()
+                .filter(|c| c.tool == "get_timeline_transcript")
+                .all(|c| c.arguments.get("range").is_some())
         );
         assert!(
             calls
@@ -306,13 +417,17 @@ mod dialogue_rehearsal_tests {
                 .filter(|c| c.tool == "cut_dialogue")
                 .all(|c| c.arguments["removals"].as_array().unwrap().len() <= 32)
         );
+        assert!(
+            book.neighbour_uses > 0,
+            "script must reuse returned neighbour addresses"
+        );
         let checked = invoke(
             service,
             "check_dialogue_cut",
             json!({"track_id":1,"detail":"all"}),
             calls,
         );
-        (results, checked)
+        (results, checked, book.neighbour_uses)
     }
     fn environment(name: &str) -> PathBuf {
         let path = PathBuf::from(
@@ -422,12 +537,19 @@ mod dialogue_rehearsal_tests {
                 thread::sleep(Duration::from_millis(50));
             };
             let measurement_us = started.elapsed().as_micros();
+            if run == 1 {
+                write_json(
+                    &output.join("measurement.json"),
+                    &json!({"profile":measured.dialogue().profile(),"words":measured.dialogue().words(),"gaps":measured.dialogue().gap_runs(),"settings":measured.dialogue().settings()}),
+                );
+            }
             write_json(
                 &output.join("stage.json"),
                 &json!({"stage":"scripted editor through real dispatcher","run":run}),
             );
             let mut calls = Vec::new();
-            let (results, checked) = execute(&service, measured.dialogue(), &mut calls);
+            let (results, checked, neighbour_uses) =
+                execute(&service, measured.dialogue(), &mut calls);
             let (_, after) = service.snapshot().unwrap();
             write_json(&output.join(format!("run{run}-results.json")), &results);
             let mut trace = BufWriter::new(
@@ -447,7 +569,7 @@ mod dialogue_rehearsal_tests {
             }
             raw.flush().unwrap();
             write_json(&output.join(format!("run{run}-document.json")), &after);
-            runs.push(json!({"run":run,"measurement_us":measurement_us,"before_frames":doc.duration,"after_frames":after.duration,"fps":doc.fps,"results":results,"check":checked,"calls":calls.iter().map(|c|json!({"tool":c.tool,"elapsed_us":c.elapsed_us,"reply_bytes":c.reply_bytes})).collect::<Vec<_>>()}));
+            runs.push(json!({"run":run,"neighbour_address_uses":neighbour_uses,"measurement_us":measurement_us,"before_frames":doc.duration,"after_frames":after.duration,"fps":doc.fps,"results":results,"check":checked,"calls":calls.iter().map(|c|json!({"tool":c.tool,"elapsed_us":c.elapsed_us,"reply_bytes":c.reply_bytes})).collect::<Vec<_>>()}));
             wires.push(calls.into_iter().map(|c| c.wire).collect::<Vec<_>>());
             if run == 1 {
                 write_json(

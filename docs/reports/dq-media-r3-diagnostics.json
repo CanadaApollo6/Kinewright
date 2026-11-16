@@ -1,0 +1,3345 @@
+{
+  "version": 1,
+  "identity": {
+    "byte_length": 15360078,
+    "sha256": "3565188c90972ee3bc6993345c6ecbd611b5957abe12c4d56fa7ffad21c5b4c0"
+  },
+  "levels_cdb": {
+    "noise_floor_hundredths": -8238,
+    "speech_rms_hundredths": -4468
+  },
+  "rms_hit_threshold_dbfs": -67.38,
+  "method": "Source-aligned 10ms hop RMS, clipped to actual cut and [ASR start, ASR start+300ms); all unrequested word windows; strict > floor+15dB. ASR-span filler envelope uses estimated ends, not measured acoustic word ends. Both passes use current full-source calibrated gaps.",
+  "source_coverage_verified": true,
+  "warm_replies_byte_identical": true,
+  "original_export_byte_identical_to_r2": true,
+  "r2": {
+    "requested": 165,
+    "applied": 78,
+    "by_kind": {
+      "pause": {
+        "refused": 53,
+        "moved": 38,
+        "unaddressable": 19,
+        "as_asked": 1
+      },
+      "filler": {
+        "refused": 15,
+        "moved": 39
+      }
+    },
+    "whole_batch_refusals": 6,
+    "filler_lengths_s": {
+      "count": 39,
+      "median": 1.6666666666666667,
+      "p90": 4.433333333333334,
+      "p95": 7.3,
+      "max": 9.766666666666667
+    },
+    "filler_over_bound": [
+      {
+        "word": "um",
+        "start_s": 19.12,
+        "length_s": 0.9,
+        "bound_s": 0.66,
+        "flanks": [
+          {
+            "end_micros": 18720000,
+            "start_micros": 18320000
+          },
+          {
+            "end_micros": 19660000,
+            "start_micros": 19380000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 22.4,
+        "length_s": 0.8,
+        "bound_s": 0.45,
+        "flanks": [
+          {
+            "end_micros": 22170000,
+            "start_micros": 22100000
+          },
+          {
+            "end_micros": 22960000,
+            "start_micros": 22880000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 28.0,
+        "length_s": 2.2666666666666666,
+        "bound_s": 0.43,
+        "flanks": [
+          {
+            "end_micros": 26300000,
+            "start_micros": 25890000
+          },
+          {
+            "end_micros": 28240000,
+            "start_micros": 28190000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 32.48,
+        "length_s": 0.9,
+        "bound_s": 0.79,
+        "flanks": [
+          {
+            "end_micros": 31690000,
+            "start_micros": 31280000
+          },
+          {
+            "end_micros": 33070000,
+            "start_micros": 32530000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 40.32,
+        "length_s": 1.6666666666666667,
+        "bound_s": 0.38,
+        "flanks": [
+          null,
+          {
+            "end_micros": 40630000,
+            "start_micros": 40390000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 42.8,
+        "length_s": 1.1,
+        "bound_s": 0.38,
+        "flanks": [
+          {
+            "end_micros": 42150000,
+            "start_micros": 42110000
+          },
+          null
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 53.04,
+        "length_s": 2.2333333333333334,
+        "bound_s": 0.38,
+        "flanks": [
+          {
+            "end_micros": 52430000,
+            "start_micros": 52040000
+          },
+          null
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 62.72,
+        "length_s": 3.433333333333333,
+        "bound_s": 0.38,
+        "flanks": [
+          null,
+          {
+            "end_micros": 64520000,
+            "start_micros": 64320000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 68.64,
+        "length_s": 1.5666666666666667,
+        "bound_s": 0.38,
+        "flanks": [
+          {
+            "end_micros": 68170000,
+            "start_micros": 67480000
+          },
+          null
+        ]
+      },
+      {
+        "word": "uh",
+        "start_s": 126.72,
+        "length_s": 0.6666666666666666,
+        "bound_s": 0.38,
+        "flanks": [
+          {
+            "end_micros": 126490000,
+            "start_micros": 126320000
+          },
+          null
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 128.96,
+        "length_s": 1.8333333333333333,
+        "bound_s": 0.38,
+        "flanks": [
+          null,
+          {
+            "end_micros": 130150000,
+            "start_micros": 129350000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 178.56,
+        "length_s": 3.6,
+        "bound_s": 0.49,
+        "flanks": [
+          {
+            "end_micros": 175200000,
+            "start_micros": 172160000
+          },
+          {
+            "end_micros": 178820000,
+            "start_micros": 178710000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 228.8,
+        "length_s": 6.766666666666667,
+        "bound_s": 0.38,
+        "flanks": [
+          {
+            "end_micros": 223580000,
+            "start_micros": 223430000
+          },
+          null
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 234.64,
+        "length_s": 1.3666666666666667,
+        "bound_s": 0.39,
+        "flanks": [
+          {
+            "end_micros": 234040000,
+            "start_micros": 234030000
+          },
+          {
+            "end_micros": 235480000,
+            "start_micros": 235340000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 242.24,
+        "length_s": 1.6666666666666667,
+        "bound_s": 0.38,
+        "flanks": [
+          null,
+          {
+            "end_micros": 242870000,
+            "start_micros": 242650000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 256.8,
+        "length_s": 4.2,
+        "bound_s": 0.38,
+        "flanks": [
+          null,
+          {
+            "end_micros": 259730000,
+            "start_micros": 259330000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 275.6,
+        "length_s": 4.0,
+        "bound_s": 0.38,
+        "flanks": [
+          null,
+          {
+            "end_micros": 277030000,
+            "start_micros": 276620000
+          }
+        ]
+      },
+      {
+        "word": "uh",
+        "start_s": 299.04,
+        "length_s": 9.766666666666667,
+        "bound_s": 0.41,
+        "flanks": [
+          {
+            "end_micros": 294010000,
+            "start_micros": 293730000
+          },
+          {
+            "end_micros": 303550000,
+            "start_micros": 303520000
+          }
+        ]
+      },
+      {
+        "word": "uh",
+        "start_s": 307.12,
+        "length_s": 1.0333333333333334,
+        "bound_s": 0.44,
+        "flanks": [
+          {
+            "end_micros": 306440000,
+            "start_micros": 306310000
+          },
+          {
+            "end_micros": 307380000,
+            "start_micros": 307320000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 309.2,
+        "length_s": 1.2333333333333334,
+        "bound_s": 0.38,
+        "flanks": [
+          null,
+          {
+            "end_micros": 309750000,
+            "start_micros": 309250000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 322.72,
+        "length_s": 2.8333333333333335,
+        "bound_s": 0.58,
+        "flanks": [
+          {
+            "end_micros": 322200000,
+            "start_micros": 322000000
+          },
+          {
+            "end_micros": 325030000,
+            "start_micros": 324790000
+          }
+        ]
+      },
+      {
+        "word": "uh",
+        "start_s": 325.92,
+        "length_s": 1.5,
+        "bound_s": 0.5,
+        "flanks": [
+          {
+            "end_micros": 325030000,
+            "start_micros": 324790000
+          },
+          {
+            "end_micros": 326560000,
+            "start_micros": 326440000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 332.16,
+        "length_s": 4.433333333333334,
+        "bound_s": 0.38,
+        "flanks": [
+          {
+            "end_micros": 331140000,
+            "start_micros": 330990000
+          },
+          null
+        ]
+      },
+      {
+        "word": "uh",
+        "start_s": 336.48,
+        "length_s": 1.3,
+        "bound_s": 0.38,
+        "flanks": [
+          null,
+          {
+            "end_micros": 337540000,
+            "start_micros": 337180000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 369.6,
+        "length_s": 4.133333333333334,
+        "bound_s": 0.38,
+        "flanks": [
+          null,
+          {
+            "end_micros": 370290000,
+            "start_micros": 370030000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 372.8,
+        "length_s": 4.2,
+        "bound_s": 0.38,
+        "flanks": [
+          null,
+          {
+            "end_micros": 375470000,
+            "start_micros": 375410000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 380.24,
+        "length_s": 3.6333333333333333,
+        "bound_s": 0.46,
+        "flanks": [
+          {
+            "end_micros": 378850000,
+            "start_micros": 378580000
+          },
+          {
+            "end_micros": 382430000,
+            "start_micros": 382350000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 393.12,
+        "length_s": 0.7,
+        "bound_s": 0.38,
+        "flanks": [
+          {
+            "end_micros": 392720000,
+            "start_micros": 391910000
+          },
+          null
+        ]
+      },
+      {
+        "word": "uh",
+        "start_s": 397.92,
+        "length_s": 0.6333333333333333,
+        "bound_s": 0.38,
+        "flanks": [
+          null,
+          {
+            "end_micros": 398400000,
+            "start_micros": 398280000
+          }
+        ]
+      },
+      {
+        "word": "uh",
+        "start_s": 400.88,
+        "length_s": 0.6666666666666666,
+        "bound_s": 0.38,
+        "flanks": [
+          null,
+          null
+        ]
+      },
+      {
+        "word": "uh",
+        "start_s": 409.92,
+        "length_s": 1.7333333333333334,
+        "bound_s": 0.38,
+        "flanks": [
+          {
+            "end_micros": 408960000,
+            "start_micros": 408530000
+          },
+          null
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 424.88,
+        "length_s": 1.7,
+        "bound_s": 0.38,
+        "flanks": [
+          {
+            "end_micros": 424720000,
+            "start_micros": 424500000
+          },
+          null
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 439.76,
+        "length_s": 3.2333333333333334,
+        "bound_s": 0.38,
+        "flanks": [
+          {
+            "end_micros": 438920000,
+            "start_micros": 438500000
+          },
+          null
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 451.52,
+        "length_s": 7.3,
+        "bound_s": 0.38,
+        "flanks": [
+          null,
+          {
+            "end_micros": 458300000,
+            "start_micros": 456290000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 469.44,
+        "length_s": 1.1333333333333333,
+        "bound_s": 0.38,
+        "flanks": [
+          null,
+          {
+            "end_micros": 470350000,
+            "start_micros": 469620000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 471.6,
+        "length_s": 0.7666666666666667,
+        "bound_s": 0.38,
+        "flanks": [
+          null,
+          {
+            "end_micros": 471990000,
+            "start_micros": 471790000
+          }
+        ]
+      },
+      {
+        "word": "uh",
+        "start_s": 472.88,
+        "length_s": 0.8666666666666667,
+        "bound_s": 0.38,
+        "flanks": [
+          null,
+          null
+        ]
+      }
+    ],
+    "filler_acoustic_over_bound": [
+      {
+        "word": "um",
+        "start_s": 28.0,
+        "length_s": 2.2666666666666666,
+        "bound_s": 2.24
+      }
+    ],
+    "filler_acoustic_unknown": [
+      {
+        "word": "um",
+        "start_s": 40.32,
+        "length_s": 1.6666666666666667,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "um",
+        "start_s": 42.8,
+        "length_s": 1.1,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "um",
+        "start_s": 53.04,
+        "length_s": 2.2333333333333334,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "um",
+        "start_s": 62.72,
+        "length_s": 3.433333333333333,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "um",
+        "start_s": 68.64,
+        "length_s": 1.5666666666666667,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "uh",
+        "start_s": 126.72,
+        "length_s": 0.6666666666666666,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "um",
+        "start_s": 128.96,
+        "length_s": 1.8333333333333333,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "uh",
+        "start_s": 143.6,
+        "length_s": 0.1,
+        "cause": "same_quiet_run"
+      },
+      {
+        "word": "um",
+        "start_s": 228.8,
+        "length_s": 6.766666666666667,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "um",
+        "start_s": 242.24,
+        "length_s": 1.6666666666666667,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "um",
+        "start_s": 256.8,
+        "length_s": 4.2,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "um",
+        "start_s": 275.6,
+        "length_s": 4.0,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "um",
+        "start_s": 309.2,
+        "length_s": 1.2333333333333334,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "um",
+        "start_s": 332.16,
+        "length_s": 4.433333333333334,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "uh",
+        "start_s": 336.48,
+        "length_s": 1.3,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "um",
+        "start_s": 369.6,
+        "length_s": 4.133333333333334,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "um",
+        "start_s": 372.8,
+        "length_s": 4.2,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "um",
+        "start_s": 393.12,
+        "length_s": 0.7,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "uh",
+        "start_s": 397.92,
+        "length_s": 0.6333333333333333,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "uh",
+        "start_s": 400.88,
+        "length_s": 0.6666666666666666,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "uh",
+        "start_s": 409.92,
+        "length_s": 1.7333333333333334,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "um",
+        "start_s": 424.88,
+        "length_s": 1.7,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "um",
+        "start_s": 439.76,
+        "length_s": 3.2333333333333334,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "um",
+        "start_s": 451.52,
+        "length_s": 7.3,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "um",
+        "start_s": 469.44,
+        "length_s": 1.1333333333333333,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "um",
+        "start_s": 471.6,
+        "length_s": 0.7666666666666667,
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "word": "uh",
+        "start_s": 472.88,
+        "length_s": 0.8666666666666667,
+        "cause": "no_two_quiet_flanks"
+      }
+    ],
+    "transcript_bytes": 3307918,
+    "transcript_bytes_per_cut": 42409.205128205125,
+    "duration_s": [
+      480.0,
+      338.96666666666664
+    ],
+    "tools": {
+      "get_timeline_transcript": {
+        "latency_ms": {
+          "count": 79,
+          "median": 31.383,
+          "p90": 32.368,
+          "p95": 32.541,
+          "max": 33.316
+        },
+        "reply_bytes": {
+          "count": 79,
+          "median": 42038,
+          "p90": 46843,
+          "p95": 47374,
+          "max": 47827
+        }
+      },
+      "cut_dialogue": {
+        "latency_ms": {
+          "count": 152,
+          "median": 153.3185,
+          "p90": 193.711,
+          "p95": 201.588,
+          "max": 214.408
+        },
+        "reply_bytes": {
+          "count": 152,
+          "median": 1972.5,
+          "p90": 3321,
+          "p95": 3483,
+          "max": 5339
+        }
+      },
+      "check_dialogue_cut": {
+        "latency_ms": {
+          "count": 1,
+          "median": 66.184,
+          "p90": 66.184,
+          "p95": 66.184,
+          "max": 66.184
+        },
+        "reply_bytes": {
+          "count": 1,
+          "median": 24087,
+          "p90": 24087,
+          "p95": 24087,
+          "max": 24087
+        }
+      }
+    },
+    "resource": {
+      "exit_code": 0,
+      "wall_s": 85.01514662301634,
+      "user_s": 175.422984,
+      "system_s": 25.795253,
+      "peak_rss_kib": 1058308,
+      "load_before": [
+        2.673828125,
+        3.30908203125,
+        4.3447265625
+      ],
+      "load_after": [
+        3.716796875,
+        3.587890625,
+        4.35693359375
+      ],
+      "nice": 19,
+      "method": "Linux wait4 rusage.ru_maxrss, KiB; child only"
+    },
+    "neighbour_address_uses": 0,
+    "unrequested_words": [
+      {
+        "word": "it",
+        "index": 25,
+        "asr_start_s": 12.08,
+        "cut_source_s": [
+          11.766666666666667,
+          14.833333333333334
+        ],
+        "request": "Craig / isn't",
+        "qualifying_word_hops": 0
+      },
+      {
+        "word": "so",
+        "index": 55,
+        "asr_start_s": 28.16,
+        "cut_source_s": [
+          25.933333333333334,
+          28.2
+        ],
+        "request": "um",
+        "qualifying_word_hops": 4
+      },
+      {
+        "word": "in",
+        "index": 89,
+        "asr_start_s": 40.48,
+        "cut_source_s": [
+          38.86666666666667,
+          40.53333333333333
+        ],
+        "request": "um",
+        "qualifying_word_hops": 0
+      },
+      {
+        "word": "designing",
+        "index": 104,
+        "asr_start_s": 47.28,
+        "cut_source_s": [
+          45.6,
+          47.63333333333333
+        ],
+        "request": "but / designing",
+        "qualifying_word_hops": 29
+      },
+      {
+        "word": "this",
+        "index": 177,
+        "asr_start_s": 91.04,
+        "cut_source_s": [
+          86.73333333333333,
+          91.33333333333333
+        ],
+        "request": "so / this",
+        "qualifying_word_hops": 0
+      },
+      {
+        "word": "from",
+        "index": 226,
+        "asr_start_s": 136.96,
+        "cut_source_s": [
+          136.3,
+          137.0
+        ],
+        "request": "affection / from",
+        "qualifying_word_hops": 0
+      },
+      {
+        "word": "my",
+        "index": 252,
+        "asr_start_s": 151.36,
+        "cut_source_s": [
+          150.53333333333333,
+          151.5
+        ],
+        "request": "beagle / my",
+        "qualifying_word_hops": 4
+      },
+      {
+        "word": "go",
+        "index": 413,
+        "asr_start_s": 245.2,
+        "cut_source_s": [
+          245.2,
+          245.3
+        ],
+        "request": "in / and",
+        "qualifying_word_hops": 1
+      },
+      {
+        "word": "and",
+        "index": 423,
+        "asr_start_s": 250.32,
+        "cut_source_s": [
+          250.03333333333333,
+          251.0
+        ],
+        "request": "mild / and",
+        "qualifying_word_hops": 18
+      },
+      {
+        "word": "the",
+        "index": 440,
+        "asr_start_s": 260.88,
+        "cut_source_s": [
+          260.8666666666667,
+          262.06666666666666
+        ],
+        "request": "sketch / by",
+        "qualifying_word_hops": 23
+      },
+      {
+        "word": "way",
+        "index": 441,
+        "asr_start_s": 260.88,
+        "cut_source_s": [
+          260.8666666666667,
+          262.06666666666666
+        ],
+        "request": "sketch / by",
+        "qualifying_word_hops": 23
+      },
+      {
+        "word": "that",
+        "index": 469,
+        "asr_start_s": 276.88,
+        "cut_source_s": [
+          272.93333333333334,
+          276.93333333333334
+        ],
+        "request": "um",
+        "qualifying_word_hops": 0
+      },
+      {
+        "word": "I",
+        "index": 484,
+        "asr_start_s": 288.08,
+        "cut_source_s": [
+          287.03333333333336,
+          288.3666666666667
+        ],
+        "request": "oh / I",
+        "qualifying_word_hops": 6
+      },
+      {
+        "word": "see",
+        "index": 485,
+        "asr_start_s": 288.32,
+        "cut_source_s": [
+          287.03333333333336,
+          288.3666666666667
+        ],
+        "request": "oh / I",
+        "qualifying_word_hops": 1
+      },
+      {
+        "word": "now",
+        "index": 498,
+        "asr_start_s": 292.72,
+        "cut_source_s": [
+          291.1333333333333,
+          292.73333333333335
+        ],
+        "request": "of / you",
+        "qualifying_word_hops": 0
+      },
+      {
+        "word": "aiming",
+        "index": 700,
+        "asr_start_s": 388.72,
+        "cut_source_s": [
+          388.3333333333333,
+          388.76666666666665
+        ],
+        "request": "and / we're",
+        "qualifying_word_hops": 0
+      },
+      {
+        "word": "so",
+        "index": 707,
+        "asr_start_s": 393.36,
+        "cut_source_s": [
+          392.6666666666667,
+          393.3666666666667
+        ],
+        "request": "um",
+        "qualifying_word_hops": 1
+      },
+      {
+        "word": "twelve",
+        "index": 729,
+        "asr_start_s": 401.04,
+        "cut_source_s": [
+          400.43333333333334,
+          401.1
+        ],
+        "request": "uh",
+        "qualifying_word_hops": 5
+      },
+      {
+        "word": "bas",
+        "index": 748,
+        "asr_start_s": 410.64,
+        "cut_source_s": [
+          410.6,
+          411.1
+        ],
+        "request": "so / bas",
+        "qualifying_word_hops": 2
+      },
+      {
+        "word": "yeah",
+        "index": 750,
+        "asr_start_s": 412.8,
+        "cut_source_s": [
+          412.7,
+          415.23333333333335
+        ],
+        "request": "alright / yeah",
+        "qualifying_word_hops": 23
+      },
+      {
+        "word": "I",
+        "index": 774,
+        "asr_start_s": 426.32,
+        "cut_source_s": [
+          424.6333333333333,
+          426.3333333333333
+        ],
+        "request": "um",
+        "qualifying_word_hops": 2
+      }
+    ],
+    "distinct_hit_grid_hops": 321
+  },
+  "r3": {
+    "requested": 121,
+    "applied": 70,
+    "by_kind": {
+      "pause": {
+        "moved": 51,
+        "refused": 11,
+        "unaddressable": 5
+      },
+      "filler": {
+        "refused": 34,
+        "moved": 19,
+        "unaddressable": 1
+      }
+    },
+    "whole_batch_refusals": 0,
+    "filler_lengths_s": {
+      "count": 19,
+      "median": 1.6,
+      "p90": 4.366666666666666,
+      "p95": 5.833333333333333,
+      "max": 5.833333333333333
+    },
+    "filler_over_bound": [
+      {
+        "word": "um",
+        "start_s": 32.48,
+        "length_s": 1.5333333333333334,
+        "bound_s": 0.44,
+        "flanks": [
+          {
+            "end_micros": 31690000,
+            "start_micros": 31280000
+          },
+          {
+            "end_micros": 33230000,
+            "start_micros": 33170000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 40.32,
+        "length_s": 1.3666666666666667,
+        "bound_s": 0.62,
+        "flanks": [
+          {
+            "end_micros": 39280000,
+            "start_micros": 38930000
+          },
+          {
+            "end_micros": 40630000,
+            "start_micros": 40390000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 42.8,
+        "length_s": 0.9,
+        "bound_s": 0.47,
+        "flanks": [
+          {
+            "end_micros": 42300000,
+            "start_micros": 42160000
+          },
+          {
+            "end_micros": 43220000,
+            "start_micros": 43130000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 68.64,
+        "length_s": 1.4333333333333333,
+        "bound_s": 0.49,
+        "flanks": [
+          {
+            "end_micros": 68170000,
+            "start_micros": 67480000
+          },
+          {
+            "end_micros": 69610000,
+            "start_micros": 69500000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 19.12,
+        "length_s": 2.2,
+        "bound_s": 0.66,
+        "flanks": [
+          {
+            "end_micros": 17450000,
+            "start_micros": 16470000
+          },
+          {
+            "end_micros": 19660000,
+            "start_micros": 19380000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 62.72,
+        "length_s": 1.4333333333333333,
+        "bound_s": 0.98,
+        "flanks": [
+          {
+            "end_micros": 61780000,
+            "start_micros": 61180000
+          },
+          {
+            "end_micros": 63400000,
+            "start_micros": 62610000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 128.96,
+        "length_s": 1.8,
+        "bound_s": 0.38,
+        "flanks": [
+          null,
+          {
+            "end_micros": 130150000,
+            "start_micros": 129350000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 242.24,
+        "length_s": 1.4666666666666666,
+        "bound_s": 0.51,
+        "flanks": [
+          {
+            "end_micros": 241310000,
+            "start_micros": 241180000
+          },
+          {
+            "end_micros": 242870000,
+            "start_micros": 242650000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 256.8,
+        "length_s": 3.933333333333333,
+        "bound_s": 0.49,
+        "flanks": [
+          {
+            "end_micros": 255490000,
+            "start_micros": 255380000
+          },
+          {
+            "end_micros": 259730000,
+            "start_micros": 259330000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 228.8,
+        "length_s": 1.0666666666666667,
+        "bound_s": 0.74,
+        "flanks": [
+          {
+            "end_micros": 228630000,
+            "start_micros": 225160000
+          },
+          {
+            "end_micros": 229710000,
+            "start_micros": 229350000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 304.8,
+        "length_s": 1.0,
+        "bound_s": 0.57,
+        "flanks": [
+          {
+            "end_micros": 304190000,
+            "start_micros": 304000000
+          },
+          {
+            "end_micros": 305340000,
+            "start_micros": 304980000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 322.72,
+        "length_s": 2.8,
+        "bound_s": 0.58,
+        "flanks": [
+          {
+            "end_micros": 322200000,
+            "start_micros": 322000000
+          },
+          {
+            "end_micros": 325030000,
+            "start_micros": 324790000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 332.16,
+        "length_s": 4.366666666666666,
+        "bound_s": 0.45,
+        "flanks": [
+          {
+            "end_micros": 331140000,
+            "start_micros": 330990000
+          },
+          {
+            "end_micros": 335500000,
+            "start_micros": 335430000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 369.6,
+        "length_s": 3.433333333333333,
+        "bound_s": 0.49,
+        "flanks": [
+          {
+            "end_micros": 366690000,
+            "start_micros": 366580000
+          },
+          {
+            "end_micros": 370290000,
+            "start_micros": 370030000
+          }
+        ]
+      },
+      {
+        "word": "uh",
+        "start_s": 325.92,
+        "length_s": 1.6333333333333333,
+        "bound_s": 0.5,
+        "flanks": [
+          {
+            "end_micros": 325030000,
+            "start_micros": 324790000
+          },
+          {
+            "end_micros": 326560000,
+            "start_micros": 326440000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 380.24,
+        "length_s": 1.6,
+        "bound_s": 1.12,
+        "flanks": [
+          {
+            "end_micros": 379960000,
+            "start_micros": 379030000
+          },
+          {
+            "end_micros": 382050000,
+            "start_micros": 381310000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 424.88,
+        "length_s": 1.8,
+        "bound_s": 0.47,
+        "flanks": [
+          {
+            "end_micros": 424460000,
+            "start_micros": 424010000
+          },
+          {
+            "end_micros": 426230000,
+            "start_micros": 426140000
+          }
+        ]
+      },
+      {
+        "word": "um",
+        "start_s": 451.52,
+        "length_s": 5.833333333333333,
+        "bound_s": 1.09,
+        "flanks": [
+          {
+            "end_micros": 450700000,
+            "start_micros": 449990000
+          },
+          {
+            "end_micros": 458300000,
+            "start_micros": 456290000
+          }
+        ]
+      }
+    ],
+    "filler_acoustic_over_bound": [],
+    "filler_acoustic_unknown": [
+      {
+        "word": "um",
+        "start_s": 128.96,
+        "length_s": 1.8,
+        "cause": "no_two_quiet_flanks"
+      }
+    ],
+    "transcript_bytes": 82458,
+    "transcript_bytes_per_cut": 1177.9714285714285,
+    "duration_s": [
+      480.0,
+      389.1333333333333
+    ],
+    "tools": {
+      "get_timeline_transcript": {
+        "latency_ms": {
+          "count": 24,
+          "median": 28.491,
+          "p90": 29.762,
+          "p95": 31.665,
+          "max": 32.029
+        },
+        "reply_bytes": {
+          "count": 24,
+          "median": 3068.5,
+          "p90": 8309,
+          "p95": 10152,
+          "max": 11850
+        }
+      },
+      "cut_dialogue": {
+        "latency_ms": {
+          "count": 28,
+          "median": 150.235,
+          "p90": 504.67,
+          "p95": 549.977,
+          "max": 572.108
+        },
+        "reply_bytes": {
+          "count": 28,
+          "median": 1643.5,
+          "p90": 12619,
+          "p95": 13356,
+          "max": 16719
+        }
+      },
+      "check_dialogue_cut": {
+        "latency_ms": {
+          "count": 1,
+          "median": 65.21,
+          "p90": 65.21,
+          "p95": 65.21,
+          "max": 65.21
+        },
+        "reply_bytes": {
+          "count": 1,
+          "median": 19466,
+          "p90": 19466,
+          "p95": 19466,
+          "max": 19466
+        }
+      }
+    },
+    "resource": {
+      "exit_code": 0,
+      "wall_s": 55.92134021199308,
+      "user_s": 138.050381,
+      "system_s": 9.285309,
+      "peak_rss_kib": 1060784,
+      "load_before": [
+        1.46923828125,
+        1.97607421875,
+        3.0966796875
+      ],
+      "load_after": [
+        2.17138671875,
+        2.11181640625,
+        3.078125
+      ],
+      "nice": 19,
+      "method": "Linux wait4 rusage.ru_maxrss, KiB; child only"
+    },
+    "neighbour_address_uses": 29,
+    "unrequested_words": [
+      {
+        "word": "that's",
+        "index": 19,
+        "asr_start_s": 9.68,
+        "cut_source_s": [
+          9.433333333333334,
+          10.1
+        ],
+        "request": "so / that's",
+        "qualifying_word_hops": 1
+      },
+      {
+        "word": "in",
+        "index": 89,
+        "asr_start_s": 40.48,
+        "cut_source_s": [
+          39.233333333333334,
+          40.6
+        ],
+        "request": "um",
+        "qualifying_word_hops": 0
+      },
+      {
+        "word": "your",
+        "index": 90,
+        "asr_start_s": 40.56,
+        "cut_source_s": [
+          39.233333333333334,
+          40.6
+        ],
+        "request": "um",
+        "qualifying_word_hops": 0
+      },
+      {
+        "word": "from",
+        "index": 226,
+        "asr_start_s": 136.96,
+        "cut_source_s": [
+          136.4,
+          136.96666666666667
+        ],
+        "request": "affection / from",
+        "qualifying_word_hops": 0
+      },
+      {
+        "word": "I",
+        "index": 484,
+        "asr_start_s": 288.08,
+        "cut_source_s": [
+          287.5,
+          288.3666666666667
+        ],
+        "request": "oh / I",
+        "qualifying_word_hops": 6
+      },
+      {
+        "word": "see",
+        "index": 485,
+        "asr_start_s": 288.32,
+        "cut_source_s": [
+          287.5,
+          288.3666666666667
+        ],
+        "request": "oh / I",
+        "qualifying_word_hops": 1
+      },
+      {
+        "word": "now",
+        "index": 498,
+        "asr_start_s": 292.72,
+        "cut_source_s": [
+          291.23333333333335,
+          292.73333333333335
+        ],
+        "request": "you / now",
+        "qualifying_word_hops": 0
+      },
+      {
+        "word": "it",
+        "index": 507,
+        "asr_start_s": 304.08,
+        "cut_source_s": [
+          304.03333333333336,
+          305.03333333333336
+        ],
+        "request": "um",
+        "qualifying_word_hops": 9
+      },
+      {
+        "word": "okay",
+        "index": 661,
+        "asr_start_s": 365.36,
+        "cut_source_s": [
+          363.8666666666667,
+          365.3666666666667
+        ],
+        "request": "here / okay",
+        "qualifying_word_hops": 0
+      }
+    ],
+    "distinct_hit_grid_hops": 48,
+    "hits": [
+      {
+        "word": "that's",
+        "word_index": 19,
+        "cut": 0,
+        "hop_us": 9810000.0,
+        "end_us": 9820000.0,
+        "rms_dbfs": -65.50479681038885
+      },
+      {
+        "word": "were",
+        "word_index": 64,
+        "cut": 4,
+        "hop_us": 31690000.0,
+        "end_us": 31700000.0,
+        "rms_dbfs": -61.65640394741784
+      },
+      {
+        "word": "were",
+        "word_index": 64,
+        "cut": 4,
+        "hop_us": 31700000.0,
+        "end_us": 31710000.0,
+        "rms_dbfs": -62.70077017378508
+      },
+      {
+        "word": "were",
+        "word_index": 64,
+        "cut": 4,
+        "hop_us": 31710000.0,
+        "end_us": 31720000.0,
+        "rms_dbfs": -56.87810220500971
+      },
+      {
+        "word": "were",
+        "word_index": 64,
+        "cut": 4,
+        "hop_us": 31720000.0,
+        "end_us": 31730000.0,
+        "rms_dbfs": -39.836515624998505
+      },
+      {
+        "word": "were",
+        "word_index": 64,
+        "cut": 4,
+        "hop_us": 31730000.0,
+        "end_us": 31740000.0,
+        "rms_dbfs": -37.085267768668785
+      },
+      {
+        "word": "were",
+        "word_index": 64,
+        "cut": 4,
+        "hop_us": 31740000.0,
+        "end_us": 31750000.0,
+        "rms_dbfs": -35.76267294641274
+      },
+      {
+        "word": "were",
+        "word_index": 64,
+        "cut": 4,
+        "hop_us": 31750000.0,
+        "end_us": 31760000.0,
+        "rms_dbfs": -35.47529096687163
+      },
+      {
+        "word": "were",
+        "word_index": 64,
+        "cut": 4,
+        "hop_us": 31760000.0,
+        "end_us": 31770000.0,
+        "rms_dbfs": -35.86363607420664
+      },
+      {
+        "word": "were",
+        "word_index": 64,
+        "cut": 4,
+        "hop_us": 31770000.0,
+        "end_us": 31780000.0,
+        "rms_dbfs": -36.222329875823156
+      },
+      {
+        "word": "were",
+        "word_index": 64,
+        "cut": 4,
+        "hop_us": 31780000.0,
+        "end_us": 31790000.0,
+        "rms_dbfs": -36.228208227088906
+      },
+      {
+        "word": "were",
+        "word_index": 64,
+        "cut": 4,
+        "hop_us": 31790000.0,
+        "end_us": 31800000.0,
+        "rms_dbfs": -36.01270499326583
+      },
+      {
+        "word": "were",
+        "word_index": 64,
+        "cut": 4,
+        "hop_us": 31800000.0,
+        "end_us": 31810000.0,
+        "rms_dbfs": -35.91478322605985
+      },
+      {
+        "word": "were",
+        "word_index": 64,
+        "cut": 4,
+        "hop_us": 31810000.0,
+        "end_us": 31820000.0,
+        "rms_dbfs": -36.15424168935244
+      },
+      {
+        "word": "natural",
+        "word_index": 399,
+        "cut": 33,
+        "hop_us": 241240000.0,
+        "end_us": 241250000.0,
+        "rms_dbfs": -64.98543670547664
+      },
+      {
+        "word": "natural",
+        "word_index": 399,
+        "cut": 33,
+        "hop_us": 241250000.0,
+        "end_us": 241260000.0,
+        "rms_dbfs": -66.4037320929153
+      },
+      {
+        "word": "choice",
+        "word_index": 400,
+        "cut": 33,
+        "hop_us": 241240000.0,
+        "end_us": 241250000.0,
+        "rms_dbfs": -64.98543670547664
+      },
+      {
+        "word": "choice",
+        "word_index": 400,
+        "cut": 33,
+        "hop_us": 241250000.0,
+        "end_us": 241260000.0,
+        "rms_dbfs": -66.4037320929153
+      },
+      {
+        "word": "choice",
+        "word_index": 400,
+        "cut": 33,
+        "hop_us": 241270000.0,
+        "end_us": 241280000.0,
+        "rms_dbfs": -66.50304266770223
+      },
+      {
+        "word": "choice",
+        "word_index": 400,
+        "cut": 33,
+        "hop_us": 241280000.0,
+        "end_us": 241290000.0,
+        "rms_dbfs": -64.70365586804976
+      },
+      {
+        "word": "choice",
+        "word_index": 400,
+        "cut": 33,
+        "hop_us": 241310000.0,
+        "end_us": 241320000.0,
+        "rms_dbfs": -63.47014560846602
+      },
+      {
+        "word": "choice",
+        "word_index": 400,
+        "cut": 33,
+        "hop_us": 241320000.0,
+        "end_us": 241330000.0,
+        "rms_dbfs": -67.17652382797992
+      },
+      {
+        "word": "choice",
+        "word_index": 400,
+        "cut": 33,
+        "hop_us": 241330000.0,
+        "end_us": 241340000.0,
+        "rms_dbfs": -66.92281542128826
+      },
+      {
+        "word": "choice",
+        "word_index": 400,
+        "cut": 33,
+        "hop_us": 241340000.0,
+        "end_us": 241350000.0,
+        "rms_dbfs": -64.54371364148625
+      },
+      {
+        "word": "choice",
+        "word_index": 400,
+        "cut": 33,
+        "hop_us": 241350000.0,
+        "end_us": 241360000.0,
+        "rms_dbfs": -65.1767394373342
+      },
+      {
+        "word": "about",
+        "word_index": 435,
+        "cut": 34,
+        "hop_us": 255470000.0,
+        "end_us": 255480000.0,
+        "rms_dbfs": -66.686648664903
+      },
+      {
+        "word": "about",
+        "word_index": 435,
+        "cut": 34,
+        "hop_us": 255490000.0,
+        "end_us": 255500000.0,
+        "rms_dbfs": -64.3603791642794
+      },
+      {
+        "word": "about",
+        "word_index": 435,
+        "cut": 34,
+        "hop_us": 255500000.0,
+        "end_us": 255510000.0,
+        "rms_dbfs": -57.166757155494835
+      },
+      {
+        "word": "about",
+        "word_index": 435,
+        "cut": 34,
+        "hop_us": 255510000.0,
+        "end_us": 255520000.0,
+        "rms_dbfs": -67.18973914055073
+      },
+      {
+        "word": "about",
+        "word_index": 435,
+        "cut": 34,
+        "hop_us": 255520000.0,
+        "end_us": 255530000.0,
+        "rms_dbfs": -66.05121183058453
+      },
+      {
+        "word": "about",
+        "word_index": 435,
+        "cut": 34,
+        "hop_us": 255530000.0,
+        "end_us": 255540000.0,
+        "rms_dbfs": -65.11958426257758
+      },
+      {
+        "word": "about",
+        "word_index": 435,
+        "cut": 34,
+        "hop_us": 255540000.0,
+        "end_us": 255550000.0,
+        "rms_dbfs": -65.61759273661265
+      },
+      {
+        "word": "about",
+        "word_index": 435,
+        "cut": 34,
+        "hop_us": 255550000.0,
+        "end_us": 255560000.0,
+        "rms_dbfs": -66.06457239466584
+      },
+      {
+        "word": "about",
+        "word_index": 435,
+        "cut": 34,
+        "hop_us": 255650000.0,
+        "end_us": 255660000.0,
+        "rms_dbfs": -67.28907350778788
+      },
+      {
+        "word": "I",
+        "word_index": 484,
+        "cut": 42,
+        "hop_us": 288120000.0,
+        "end_us": 288130000.0,
+        "rms_dbfs": -66.66959003618614
+      },
+      {
+        "word": "I",
+        "word_index": 484,
+        "cut": 42,
+        "hop_us": 288180000.0,
+        "end_us": 288190000.0,
+        "rms_dbfs": -67.19212217337306
+      },
+      {
+        "word": "I",
+        "word_index": 484,
+        "cut": 42,
+        "hop_us": 288200000.0,
+        "end_us": 288210000.0,
+        "rms_dbfs": -67.06373064087272
+      },
+      {
+        "word": "I",
+        "word_index": 484,
+        "cut": 42,
+        "hop_us": 288260000.0,
+        "end_us": 288270000.0,
+        "rms_dbfs": -67.20830839813141
+      },
+      {
+        "word": "I",
+        "word_index": 484,
+        "cut": 42,
+        "hop_us": 288310000.0,
+        "end_us": 288320000.0,
+        "rms_dbfs": -65.02055450995557
+      },
+      {
+        "word": "I",
+        "word_index": 484,
+        "cut": 42,
+        "hop_us": 288350000.0,
+        "end_us": 288360000.0,
+        "rms_dbfs": -66.9509106468354
+      },
+      {
+        "word": "see",
+        "word_index": 485,
+        "cut": 42,
+        "hop_us": 288350000.0,
+        "end_us": 288360000.0,
+        "rms_dbfs": -66.9509106468354
+      },
+      {
+        "word": "is",
+        "word_index": 506,
+        "cut": 46,
+        "hop_us": 304180000.0,
+        "end_us": 304190000.0,
+        "rms_dbfs": -64.90484358274927
+      },
+      {
+        "word": "is",
+        "word_index": 506,
+        "cut": 46,
+        "hop_us": 304190000.0,
+        "end_us": 304200000.0,
+        "rms_dbfs": -62.37948161669304
+      },
+      {
+        "word": "is",
+        "word_index": 506,
+        "cut": 46,
+        "hop_us": 304200000.0,
+        "end_us": 304210000.0,
+        "rms_dbfs": -58.99475703348149
+      },
+      {
+        "word": "is",
+        "word_index": 506,
+        "cut": 46,
+        "hop_us": 304210000.0,
+        "end_us": 304220000.0,
+        "rms_dbfs": -61.43001381822564
+      },
+      {
+        "word": "it",
+        "word_index": 507,
+        "cut": 46,
+        "hop_us": 304180000.0,
+        "end_us": 304190000.0,
+        "rms_dbfs": -64.90484358274927
+      },
+      {
+        "word": "it",
+        "word_index": 507,
+        "cut": 46,
+        "hop_us": 304190000.0,
+        "end_us": 304200000.0,
+        "rms_dbfs": -62.37948161669304
+      },
+      {
+        "word": "it",
+        "word_index": 507,
+        "cut": 46,
+        "hop_us": 304200000.0,
+        "end_us": 304210000.0,
+        "rms_dbfs": -58.99475703348149
+      },
+      {
+        "word": "it",
+        "word_index": 507,
+        "cut": 46,
+        "hop_us": 304210000.0,
+        "end_us": 304220000.0,
+        "rms_dbfs": -61.43001381822564
+      },
+      {
+        "word": "it",
+        "word_index": 507,
+        "cut": 46,
+        "hop_us": 304260000.0,
+        "end_us": 304270000.0,
+        "rms_dbfs": -65.37921341111075
+      },
+      {
+        "word": "it",
+        "word_index": 507,
+        "cut": 46,
+        "hop_us": 304280000.0,
+        "end_us": 304290000.0,
+        "rms_dbfs": -63.49409889244714
+      },
+      {
+        "word": "it",
+        "word_index": 507,
+        "cut": 46,
+        "hop_us": 304300000.0,
+        "end_us": 304310000.0,
+        "rms_dbfs": -65.93238473422025
+      },
+      {
+        "word": "it",
+        "word_index": 507,
+        "cut": 46,
+        "hop_us": 304310000.0,
+        "end_us": 304320000.0,
+        "rms_dbfs": -67.0152741838017
+      },
+      {
+        "word": "it",
+        "word_index": 507,
+        "cut": 46,
+        "hop_us": 304340000.0,
+        "end_us": 304350000.0,
+        "rms_dbfs": -66.85526139360347
+      },
+      {
+        "word": "and",
+        "word_index": 550,
+        "cut": 48,
+        "hop_us": 322033333.3333333,
+        "end_us": 322040000.0,
+        "rms_dbfs": -66.60512487680622
+      }
+    ],
+    "hit_cuts": {
+      "0": {
+        "action": {
+          "index": 18,
+          "kind": "pause",
+          "next": 19,
+          "nominal_source_us": [
+            9440000,
+            10100000
+          ],
+          "original_project_us": [
+            9260000,
+            10220000
+          ],
+          "source_us": [
+            9260000,
+            10220000
+          ],
+          "text": "so / that's"
+        },
+        "actual_source_us": [
+          [
+            28300000,
+            3
+          ],
+          [
+            10100000,
+            1
+          ]
+        ],
+        "address_used": {
+          "binding": "6807ca20f6154eee0ec171ea1bd4833bda2c837f3cb365e99302284a940879b8",
+          "clip": 1,
+          "index": 18
+        },
+        "edge_moves_us": [
+          [
+            -20000,
+            3
+          ],
+          [
+            0,
+            1
+          ]
+        ],
+        "nominal_source_us": [
+          9440000,
+          10100000
+        ],
+        "outcome": {
+          "clip": 1,
+          "cut": [
+            283,
+            303
+          ],
+          "edges": [
+            [
+              283,
+              1,
+              [
+                28300000,
+                3
+              ],
+              "quiet"
+            ],
+            [
+              283,
+              1,
+              [
+                10100000,
+                1
+              ],
+              "quiet"
+            ]
+          ],
+          "index": 1,
+          "kept_air_micros": [
+            880000,
+            3
+          ],
+          "outcome": "ready"
+        },
+        "status": "moved"
+      },
+      "4": {
+        "action": {
+          "index": 65,
+          "kind": "filler",
+          "next": null,
+          "nominal_source_us": [
+            32480000,
+            32560000
+          ],
+          "original_project_us": [
+            32480000,
+            32560000
+          ],
+          "source_us": [
+            32480000,
+            32560000
+          ],
+          "text": "um"
+        },
+        "actual_source_us": [
+          [
+            95000000,
+            3
+          ],
+          [
+            33200000,
+            1
+          ]
+        ],
+        "address_used": {
+          "binding": "6807ca20f6154eee0ec171ea1bd4833bda2c837f3cb365e99302284a940879b8",
+          "clip": 1,
+          "index": 65
+        },
+        "edge_moves_us": [
+          [
+            -2440000,
+            3
+          ],
+          [
+            640000,
+            1
+          ]
+        ],
+        "nominal_source_us": [
+          32480000,
+          32560000
+        ],
+        "outcome": {
+          "clip": 1,
+          "cut": [
+            950,
+            996
+          ],
+          "edges": [
+            [
+              861,
+              1,
+              [
+                95000000,
+                3
+              ],
+              "quiet"
+            ],
+            [
+              861,
+              1,
+              [
+                33200000,
+                1
+              ],
+              "quiet"
+            ]
+          ],
+          "index": 9,
+          "kept_air_micros": [
+            30000,
+            1
+          ],
+          "outcome": "ready"
+        },
+        "status": "moved"
+      },
+      "33": {
+        "action": {
+          "index": 401,
+          "kind": "filler",
+          "next": null,
+          "nominal_source_us": [
+            242240000,
+            242320000
+          ],
+          "original_project_us": [
+            242240000,
+            242320000
+          ],
+          "source_us": [
+            242240000,
+            242320000
+          ],
+          "text": "um"
+        },
+        "actual_source_us": [
+          [
+            723700000,
+            3
+          ],
+          [
+            242700000,
+            1
+          ]
+        ],
+        "address_used": {
+          "binding": "6807ca20f6154eee0ec171ea1bd4833bda2c837f3cb365e99302284a940879b8",
+          "clip": 33,
+          "index": 401
+        },
+        "edge_moves_us": [
+          [
+            -3020000,
+            3
+          ],
+          [
+            380000,
+            1
+          ]
+        ],
+        "nominal_source_us": [
+          242240000,
+          242320000
+        ],
+        "outcome": {
+          "clip": 33,
+          "cut": [
+            6655,
+            6699
+          ],
+          "edges": [
+            [
+              6117,
+              1,
+              [
+                723700000,
+                3
+              ],
+              "quiet"
+            ],
+            [
+              6117,
+              1,
+              [
+                242700000,
+                1
+              ],
+              "quiet"
+            ]
+          ],
+          "index": 29,
+          "kept_air_micros": [
+            670000,
+            3
+          ],
+          "outcome": "ready"
+        },
+        "status": "moved"
+      },
+      "34": {
+        "action": {
+          "index": 436,
+          "kind": "filler",
+          "next": null,
+          "nominal_source_us": [
+            256800000,
+            256880000
+          ],
+          "original_project_us": [
+            256800000,
+            256880000
+          ],
+          "source_us": [
+            256800000,
+            256880000
+          ],
+          "text": "um"
+        },
+        "actual_source_us": [
+          [
+            766300000,
+            3
+          ],
+          [
+            778100000,
+            3
+          ]
+        ],
+        "address_used": {
+          "binding": "6807ca20f6154eee0ec171ea1bd4833bda2c837f3cb365e99302284a940879b8",
+          "clip": 33,
+          "index": 436
+        },
+        "edge_moves_us": [
+          [
+            -4100000,
+            3
+          ],
+          [
+            7460000,
+            3
+          ]
+        ],
+        "nominal_source_us": [
+          256800000,
+          256880000
+        ],
+        "outcome": {
+          "clip": 33,
+          "cut": [
+            7081,
+            7199
+          ],
+          "edges": [
+            [
+              6499,
+              1,
+              [
+                766300000,
+                3
+              ],
+              "quiet"
+            ],
+            [
+              6499,
+              1,
+              [
+                778100000,
+                3
+              ],
+              "quiet"
+            ]
+          ],
+          "index": 30,
+          "kept_air_micros": [
+            1250000,
+            3
+          ],
+          "outcome": "ready"
+        },
+        "status": "moved"
+      },
+      "42": {
+        "action": {
+          "index": 483,
+          "kind": "pause",
+          "next": 484,
+          "nominal_source_us": [
+            287500000,
+            288360000
+          ],
+          "original_project_us": [
+            287320000,
+            288480000
+          ],
+          "source_us": [
+            287320000,
+            288480000
+          ],
+          "text": "oh / I"
+        },
+        "actual_source_us": [
+          [
+            287500000,
+            1
+          ],
+          [
+            865100000,
+            3
+          ]
+        ],
+        "address_used": {
+          "binding": "6807ca20f6154eee0ec171ea1bd4833bda2c837f3cb365e99302284a940879b8",
+          "clip": 73,
+          "index": 483
+        },
+        "edge_moves_us": [
+          [
+            0,
+            1
+          ],
+          [
+            20000,
+            3
+          ]
+        ],
+        "nominal_source_us": [
+          287500000,
+          288360000
+        ],
+        "outcome": {
+          "clip": 73,
+          "cut": [
+            7165,
+            7191
+          ],
+          "edges": [
+            [
+              7146,
+              1,
+              [
+                287500000,
+                1
+              ],
+              "quiet"
+            ],
+            [
+              7146,
+              1,
+              [
+                865100000,
+                3
+              ],
+              "quiet"
+            ]
+          ],
+          "index": 2,
+          "kept_air_micros": [
+            880000,
+            3
+          ],
+          "other_pauses_micros": [
+            100000,
+            150000
+          ],
+          "outcome": "ready"
+        },
+        "status": "moved"
+      },
+      "46": {
+        "action": {
+          "index": 508,
+          "kind": "filler",
+          "next": null,
+          "nominal_source_us": [
+            304800000,
+            304880000
+          ],
+          "original_project_us": [
+            304800000,
+            304880000
+          ],
+          "source_us": [
+            304800000,
+            304880000
+          ],
+          "text": "um"
+        },
+        "actual_source_us": [
+          [
+            912100000,
+            3
+          ],
+          [
+            915100000,
+            3
+          ]
+        ],
+        "address_used": {
+          "binding": "6807ca20f6154eee0ec171ea1bd4833bda2c837f3cb365e99302284a940879b8",
+          "clip": 73,
+          "index": 508
+        },
+        "edge_moves_us": [
+          [
+            -2300000,
+            3
+          ],
+          [
+            460000,
+            3
+          ]
+        ],
+        "nominal_source_us": [
+          304800000,
+          304880000
+        ],
+        "outcome": {
+          "clip": 73,
+          "cut": [
+            7661,
+            7691
+          ],
+          "edges": [
+            [
+              7501,
+              1,
+              [
+                912100000,
+                3
+              ],
+              "quiet"
+            ],
+            [
+              7501,
+              1,
+              [
+                915100000,
+                3
+              ],
+              "quiet"
+            ]
+          ],
+          "index": 9,
+          "kept_air_micros": [
+            340000,
+            1
+          ],
+          "outcome": "ready"
+        },
+        "status": "moved"
+      },
+      "48": {
+        "action": {
+          "index": 551,
+          "kind": "filler",
+          "next": null,
+          "nominal_source_us": [
+            322720000,
+            322800000
+          ],
+          "original_project_us": [
+            322720000,
+            322800000
+          ],
+          "source_us": [
+            322720000,
+            322800000
+          ],
+          "text": "um"
+        },
+        "actual_source_us": [
+          [
+            966100000,
+            3
+          ],
+          [
+            974500000,
+            3
+          ]
+        ],
+        "address_used": {
+          "binding": "6807ca20f6154eee0ec171ea1bd4833bda2c837f3cb365e99302284a940879b8",
+          "clip": 73,
+          "index": 551
+        },
+        "edge_moves_us": [
+          [
+            -2060000,
+            3
+          ],
+          [
+            6100000,
+            3
+          ]
+        ],
+        "nominal_source_us": [
+          322720000,
+          322800000
+        ],
+        "outcome": {
+          "clip": 73,
+          "cut": [
+            8201,
+            8285
+          ],
+          "edges": [
+            [
+              7992,
+              1,
+              [
+                966100000,
+                3
+              ],
+              "quiet"
+            ],
+            [
+              7992,
+              1,
+              [
+                974500000,
+                3
+              ],
+              "quiet"
+            ]
+          ],
+          "index": 15,
+          "kept_air_micros": [
+            230000,
+            1
+          ],
+          "outcome": "ready"
+        },
+        "status": "moved"
+      }
+    },
+    "transient_conflicts": [
+      {
+        "action": {
+          "index": 25,
+          "kind": "pause",
+          "next": 26,
+          "nominal_source_us": [
+            14120000,
+            14570000
+          ],
+          "original_project_us": [
+            13940000,
+            14690000
+          ],
+          "source_us": [
+            13940000,
+            14690000
+          ],
+          "text": "it / and"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 3,
+          "other_index": 2,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 32,
+          "kind": "filler",
+          "next": null,
+          "nominal_source_us": [
+            19120000,
+            19200000
+          ],
+          "original_project_us": [
+            19120000,
+            19200000
+          ],
+          "source_us": [
+            19120000,
+            19200000
+          ],
+          "text": "um"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 5,
+          "other_index": 4,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 135,
+          "kind": "filler",
+          "next": null,
+          "nominal_source_us": [
+            62720000,
+            62800000
+          ],
+          "original_project_us": [
+            62720000,
+            62800000
+          ],
+          "source_us": [
+            62720000,
+            62800000
+          ],
+          "text": "um"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 15,
+          "other_index": 14,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 174,
+          "kind": "pause",
+          "next": 175,
+          "nominal_source_us": [
+            81240000,
+            81800000
+          ],
+          "original_project_us": [
+            81060000,
+            81920000
+          ],
+          "source_us": [
+            81060000,
+            81920000
+          ],
+          "text": "good / alright"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 20,
+          "other_index": 19,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 176,
+          "kind": "pause",
+          "next": 177,
+          "nominal_source_us": [
+            90860000,
+            91300000
+          ],
+          "original_project_us": [
+            90680000,
+            91420000
+          ],
+          "source_us": [
+            90680000,
+            91420000
+          ],
+          "text": "so / this"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 23,
+          "other_index": 22,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 187,
+          "kind": "pause",
+          "next": 188,
+          "nominal_source_us": [
+            99490000,
+            99900000
+          ],
+          "original_project_us": [
+            99310000,
+            100020000
+          ],
+          "source_us": [
+            99310000,
+            100020000
+          ],
+          "text": "animal / is"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 26,
+          "other_index": 25,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 189,
+          "kind": "pause",
+          "next": 190,
+          "nominal_source_us": [
+            103060000,
+            105580000
+          ],
+          "original_project_us": [
+            102880000,
+            105700000
+          ],
+          "source_us": [
+            102880000,
+            105700000
+          ],
+          "text": "like / a"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 28,
+          "other_index": 27,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 189,
+          "kind": "pause",
+          "next": 190,
+          "nominal_source_us": [
+            106400000,
+            108550000
+          ],
+          "original_project_us": [
+            106220000,
+            108670000
+          ],
+          "source_us": [
+            106220000,
+            108670000
+          ],
+          "text": "like / a"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 29,
+          "other_index": 27,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 189,
+          "kind": "pause",
+          "next": 190,
+          "nominal_source_us": [
+            109070000,
+            110300000
+          ],
+          "original_project_us": [
+            108890000,
+            110420000
+          ],
+          "source_us": [
+            108890000,
+            110420000
+          ],
+          "text": "like / a"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 30,
+          "other_index": 27,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 189,
+          "kind": "pause",
+          "next": 190,
+          "nominal_source_us": [
+            110750000,
+            112610000
+          ],
+          "original_project_us": [
+            110570000,
+            112730000
+          ],
+          "source_us": [
+            110570000,
+            112730000
+          ],
+          "text": "like / a"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 31,
+          "other_index": 27,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 191,
+          "kind": "pause",
+          "next": 192,
+          "nominal_source_us": [
+            116450000,
+            116990000
+          ],
+          "original_project_us": [
+            116270000,
+            117110000
+          ],
+          "source_us": [
+            116270000,
+            117110000
+          ],
+          "text": "beagle / and"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 1,
+          "other_index": 0,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 191,
+          "kind": "pause",
+          "next": 192,
+          "nominal_source_us": [
+            117350000,
+            117800000
+          ],
+          "original_project_us": [
+            117170000,
+            117920000
+          ],
+          "source_us": [
+            117170000,
+            117920000
+          ],
+          "text": "beagle / and"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 2,
+          "other_index": 0,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 191,
+          "kind": "pause",
+          "next": 192,
+          "nominal_source_us": [
+            118130000,
+            119700000
+          ],
+          "original_project_us": [
+            117950000,
+            119820000
+          ],
+          "source_us": [
+            117950000,
+            119820000
+          ],
+          "text": "beagle / and"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 3,
+          "other_index": 0,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 191,
+          "kind": "pause",
+          "next": 192,
+          "nominal_source_us": [
+            120190000,
+            121640000
+          ],
+          "original_project_us": [
+            120010000,
+            121760000
+          ],
+          "source_us": [
+            120010000,
+            121760000
+          ],
+          "text": "beagle / and"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 4,
+          "other_index": 0,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 206,
+          "kind": "pause",
+          "next": 207,
+          "nominal_source_us": [
+            129530000,
+            130030000
+          ],
+          "original_project_us": [
+            129350000,
+            130150000
+          ],
+          "source_us": [
+            129350000,
+            130150000
+          ],
+          "text": "um / high"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 7,
+          "other_index": 6,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 263,
+          "kind": "pause",
+          "next": 264,
+          "nominal_source_us": [
+            170480000,
+            171490000
+          ],
+          "original_project_us": [
+            170300000,
+            171610000
+          ],
+          "source_us": [
+            170300000,
+            171610000
+          ],
+          "text": "monkey / um"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 16,
+          "other_index": 15,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 263,
+          "kind": "pause",
+          "next": 264,
+          "nominal_source_us": [
+            172340000,
+            175080000
+          ],
+          "original_project_us": [
+            172160000,
+            175200000
+          ],
+          "source_us": [
+            172160000,
+            175200000
+          ],
+          "text": "monkey / um"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 17,
+          "other_index": 15,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 351,
+          "kind": "pause",
+          "next": 352,
+          "nominal_source_us": [
+            215120000,
+            216900000
+          ],
+          "original_project_us": [
+            214940000,
+            217020000
+          ],
+          "source_us": [
+            214940000,
+            217020000
+          ],
+          "text": "now / impressionist"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 22,
+          "other_index": 21,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 358,
+          "kind": "filler",
+          "next": null,
+          "nominal_source_us": [
+            228800000,
+            228880000
+          ],
+          "original_project_us": [
+            228800000,
+            228880000
+          ],
+          "source_us": [
+            228800000,
+            228880000
+          ],
+          "text": "um"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 25,
+          "other_index": 24,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 475,
+          "kind": "pause",
+          "next": 476,
+          "nominal_source_us": [
+            281240000,
+            281800000
+          ],
+          "original_project_us": [
+            281060000,
+            281920000
+          ],
+          "source_us": [
+            281060000,
+            281920000
+          ],
+          "text": "actually / he"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 1,
+          "other_index": 0,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 502,
+          "kind": "pause",
+          "next": 503,
+          "nominal_source_us": [
+            299170000,
+            300720000
+          ],
+          "original_project_us": [
+            298990000,
+            300840000
+          ],
+          "source_us": [
+            298990000,
+            300840000
+          ],
+          "text": "rooster / uh"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 5,
+          "other_index": 4,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 503,
+          "kind": "filler",
+          "next": null,
+          "nominal_source_us": [
+            299040000,
+            299120000
+          ],
+          "original_project_us": [
+            299040000,
+            299120000
+          ],
+          "source_us": [
+            299040000,
+            299120000
+          ],
+          "text": "uh"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 6,
+          "other_index": 4,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 503,
+          "kind": "pause",
+          "next": 504,
+          "nominal_source_us": [
+            302030000,
+            302790000
+          ],
+          "original_project_us": [
+            301850000,
+            302910000
+          ],
+          "source_us": [
+            301850000,
+            302910000
+          ],
+          "text": "uh / what"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 8,
+          "other_index": 7,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 552,
+          "kind": "filler",
+          "next": null,
+          "nominal_source_us": [
+            325920000,
+            326000000
+          ],
+          "original_project_us": [
+            325920000,
+            326000000
+          ],
+          "source_us": [
+            325920000,
+            326000000
+          ],
+          "text": "uh"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 16,
+          "other_index": 15,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 571,
+          "kind": "pause",
+          "next": 572,
+          "nominal_source_us": [
+            333440000,
+            334220000
+          ],
+          "original_project_us": [
+            333260000,
+            334340000
+          ],
+          "source_us": [
+            333260000,
+            334340000
+          ],
+          "text": "um / and"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 18,
+          "other_index": 17,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 679,
+          "kind": "filler",
+          "next": null,
+          "nominal_source_us": [
+            380240000,
+            380320000
+          ],
+          "original_project_us": [
+            380240000,
+            380320000
+          ],
+          "source_us": [
+            380240000,
+            380320000
+          ],
+          "text": "um"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 27,
+          "other_index": 26,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 848,
+          "kind": "filler",
+          "next": null,
+          "nominal_source_us": [
+            451520000,
+            451600000
+          ],
+          "original_project_us": [
+            451520000,
+            451600000
+          ],
+          "source_us": [
+            451520000,
+            451600000
+          ],
+          "text": "um"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 16,
+          "other_index": 15,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 848,
+          "kind": "pause",
+          "next": 849,
+          "nominal_source_us": [
+            454780000,
+            455200000
+          ],
+          "original_project_us": [
+            454600000,
+            455320000
+          ],
+          "source_us": [
+            454600000,
+            455320000
+          ],
+          "text": "um / oh"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 18,
+          "other_index": 17,
+          "outcome": "refused"
+        }
+      },
+      {
+        "action": {
+          "index": 848,
+          "kind": "pause",
+          "next": 849,
+          "nominal_source_us": [
+            456470000,
+            458180000
+          ],
+          "original_project_us": [
+            456290000,
+            458300000
+          ],
+          "source_us": [
+            456290000,
+            458300000
+          ],
+          "text": "um / oh"
+        },
+        "reason": {
+          "cause": "overlap",
+          "code": "conflict",
+          "index": 19,
+          "other_index": 17,
+          "outcome": "refused"
+        }
+      }
+    ]
+  },
+  "original_addresses_preserved": true
+}
