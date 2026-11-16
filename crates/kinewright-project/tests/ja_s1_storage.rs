@@ -567,6 +567,7 @@ mod bounded_store {
 
 mod durable_bundle {
     use super::*;
+    #[cfg(target_os = "linux")]
     use kinewright_core::{Command, Document, Operation, Track, TrackId, TrackKind};
     #[cfg(target_os = "linux")]
     use kinewright_project::bundle::{BundleWriteAdmission, LoadedBundle, ProjectBundle};

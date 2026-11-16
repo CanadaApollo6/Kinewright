@@ -12080,7 +12080,10 @@ mod in2b_tests {
             let before = admission_tree(temp.root());
             let path = app.focused().project_path.clone();
             let admission = app.focused().source_admission.clone();
-            let history = app.focused().core.export_history().unwrap();
+            // Compare complete captured bytes while releasing the capture lease
+            // before asking for another one alongside the two open projects.
+            let history =
+                serde_json::to_vec(&app.focused().core.export_history().unwrap()).unwrap();
             let (result, trace) =
                 kinewright_project::io_observer::observe(|| app.write_project(&destination));
             assert!(
@@ -12093,7 +12096,10 @@ mod in2b_tests {
             assert_eq!(admission_tree(temp.root()), before);
             assert_eq!(app.focused().project_path, path);
             assert_eq!(app.focused().source_admission, admission);
-            assert_eq!(app.focused().core.export_history().unwrap(), history);
+            assert_eq!(
+                serde_json::to_vec(&app.focused().core.export_history().unwrap()).unwrap(),
+                history
+            );
             in2b_quiesce_engine(&engine);
             in2b_shutdown(&mut app);
         });

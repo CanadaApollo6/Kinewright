@@ -289,6 +289,15 @@ mod tests {
                 .unwrap();
                 grow(&other, count);
                 bundle.save_branch(&branch, &other).unwrap();
+                drop(other);
+                assert_eq!(
+                    core.history_pool()
+                        .lease_counts(kinewright_project::operation_history::Role::Ordinary)
+                        .unwrap()
+                        .0,
+                    1,
+                    "W13_FINISHED_BRANCH_ACTOR_RELEASED_BEFORE_NEXT_OPEN"
+                );
                 spare.push(branch);
             }
             grow(&core, 8);

@@ -198,9 +198,24 @@ fn command_token(command: &Command) -> Option<CommandToken> {
 pub struct Core {
     sender: Sender<Message>,
     identity: ActorIdentity,
-    handles: Arc<()>,
+    handles: Arc<ActorWorker>,
     pool: HistoryPool,
 }
+// Core's sender is declared before this shared worker. On the last handle,
+// Rust drops that sender first, disconnecting the actor's queue before joining.
+// Returning from Drop therefore releases the actor's lease synchronously; a
+// following admission cannot race the scheduler's teardown of the old actor.
+struct ActorWorker {
+    thread: Option<thread::JoinHandle<()>>,
+}
+impl Drop for ActorWorker {
+    fn drop(&mut self) {
+        if let Some(worker) = self.thread.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 pub struct Attachment<P> {
     core: Core,
     _proof: PhantomData<fn() -> P>,
@@ -450,7 +465,7 @@ impl Core {
         let pool = history.pool();
         let identity = ActorIdentity::fresh().ok_or(Error::CounterExhausted)?;
         let (sender, receiver) = unbounded();
-        thread::Builder::new()
+        let worker = thread::Builder::new()
             .name("kinewright-core".into())
             .spawn(move || {
                 State {
@@ -471,7 +486,9 @@ impl Core {
         Ok(Self {
             sender,
             identity,
-            handles: Arc::new(()),
+            handles: Arc::new(ActorWorker {
+                thread: Some(worker),
+            }),
             pool,
         })
     }

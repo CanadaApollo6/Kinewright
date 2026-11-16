@@ -1669,3 +1669,59 @@ fn the_bound_owner_can_reacquire_a_frozen_attachment_without_thawing_it() {
     owner.resume(&Proof, same).unwrap();
     assert!(locked(&core));
 }
+
+#[test]
+fn last_actor_handle_releases_its_lease_before_the_next_admission() {
+    let pool = HistoryPool::new(PoolLimits::default());
+    for _ in 0..64 {
+        let core = small(&pool, Role::Ordinary);
+        let other_handle = core.clone();
+        drop(core);
+        assert_eq!(
+            pool.lease_counts(Role::Ordinary).unwrap().0,
+            1,
+            "CLONED_HANDLE_KEEPS_ACTOR_LEASE"
+        );
+        let reader = other_handle.operations(false).unwrap();
+        drop(other_handle);
+        assert_eq!(
+            pool.lease_counts(Role::Ordinary).unwrap().0,
+            1,
+            "ESCAPED_READER_KEEPS_ITS_OWNED_LEASE"
+        );
+        drop(reader);
+        assert_eq!(
+            pool.lease_counts(Role::Ordinary).unwrap().0,
+            0,
+            "LAST_ACTOR_DROP_RELEASES_BEFORE_RETURN"
+        );
+    }
+}
+
+#[test]
+fn two_live_projects_compare_complete_snapshots_with_one_capture_window() {
+    let pool = HistoryPool::new(PoolLimits::default());
+    let first = small(&pool, Role::Ordinary);
+    let second = small(&pool, Role::Ordinary);
+    let before = serde_json::to_vec(&second.export_history().unwrap()).unwrap();
+    assert_eq!(
+        pool.lease_counts(Role::Ordinary).unwrap().0,
+        2,
+        "SERIALIZED_TEST_EXPECTATION_RELEASES_CAPTURE_WINDOW"
+    );
+    let after = serde_json::to_vec(&second.export_history().unwrap()).unwrap();
+    assert_eq!(
+        after, before,
+        "SEQUENTIAL_CAPTURES_COMPARE_COMPLETE_OWNER_STATE"
+    );
+    drop((first, second));
+    assert_eq!(
+        pool.lease_counts(Role::Ordinary).unwrap().0,
+        0,
+        "ALL_PROJECT_LEASES_RELEASE_SYNCHRONOUSLY"
+    );
+    assert!(
+        pool.lease_counts(Role::Ordinary).unwrap().1 <= 3,
+        "TWO_LIVE_PROJECTS_USE_ONLY_ONE_CAPTURE_WINDOW"
+    );
+}

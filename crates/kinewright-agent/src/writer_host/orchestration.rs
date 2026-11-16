@@ -1349,12 +1349,18 @@ impl HostCommandOwner {
             };
         // C5 fix 10: the invariant witness. A stall the pump has not yet
         // surfaced is still reported, never shown as a running run.
-        let runtime_status = runtime_status
-            .or(self.owner()?.run_publication_status(run)?)
-            .or(self.run_recovery_message(&projection)?)
-            .or_else(|| {
+        let runtime_status = runtime_status.or(self.owner()?.run_publication_status(run)?);
+        // Startup readiness and retained work are independent facts. A generic
+        // recovery notice must not hide the saved task's branch and open route.
+        let runtime_status = match (runtime_status, self.run_recovery_message(&projection)?) {
+            (Some(status), Some(retained)) if status != retained => {
+                Some(format!("{status} {retained}"))
+            }
+            (Some(status), _) | (_, Some(status)) => Some(status),
+            (None, None) => {
                 machine::silently_stalled(&projection).then(|| machine::SILENT_STALL.into())
-            });
+            }
+        };
         let runtime_status = match (
             runtime_status,
             self.hooks

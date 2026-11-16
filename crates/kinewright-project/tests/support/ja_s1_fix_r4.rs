@@ -3,6 +3,7 @@
 use kinewright_core::*;
 #[cfg(target_os = "linux")]
 use kinewright_media::test_support::TempDirectory;
+#[cfg(target_os = "linux")]
 use kinewright_project::operation_actor::Core;
 #[cfg(target_os = "linux")]
 use kinewright_project::{
@@ -43,6 +44,7 @@ fn history_cost_probe(
 fn temp(label: &str) -> TempDirectory {
     TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), label)
 }
+#[cfg(target_os = "linux")]
 fn core(tracks: u64) -> Core {
     Core::for_test(Document {
         tracks: (1..=tracks)
@@ -57,12 +59,14 @@ fn core(tracks: u64) -> Core {
     })
     .unwrap()
 }
+#[cfg(target_os = "linux")]
 fn apply(core: &Core, command: Command) {
     assert!(matches!(
         core.request(command).unwrap(),
         Event::DocumentChanged { .. }
     ));
 }
+#[cfg(target_os = "linux")]
 fn edit(core: &Core, locked: bool) {
     apply(
         core,
