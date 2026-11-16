@@ -20,6 +20,7 @@ pub struct Dialogue {
     valleys: Vec<Span>,
     pub(super) gaps: Vec<Span>,
     pub(super) dips: Vec<Span>,
+    pub(super) rms_sound: Vec<Span>,
 }
 
 fn append(runs: &mut Vec<Span>, span: Span) {
@@ -60,9 +61,16 @@ impl Dialogue {
         let mut quiet = Vec::new();
         let mut valleys = Vec::new();
         let mut dips = Vec::new();
+        let mut rms_sound = Vec::new();
         for (index, hop) in profile.hops().enumerate() {
             let span = profile.span(index);
-            if hop.rms_dbfs_hundredths <= thresholds.dip_dbfs_hundredths {
+            if hop.rms_dbfs_hundredths > thresholds.quiet_rms_max {
+                append(&mut rms_sound, span);
+            }
+            if thresholds
+                .dip_dbfs_hundredths
+                .is_some_and(|limit| hop.rms_dbfs_hundredths <= limit)
+            {
                 append(&mut dips, span);
             }
             if !hop.voice
@@ -104,6 +112,7 @@ impl Dialogue {
             valleys,
             gaps,
             dips,
+            rms_sound,
         })
     }
     #[must_use]

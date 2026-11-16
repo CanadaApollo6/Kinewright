@@ -3,6 +3,8 @@ mod budget;
 mod check;
 mod cut;
 mod retention;
+#[cfg(test)]
+pub(crate) use retention::Retention;
 mod transcript;
 pub(crate) use budget::bound as bound_check;
 pub(crate) use check::{CheckArgs, Detail as CheckDetail, PlayedSpan, check, check_created, spans};
@@ -241,6 +243,13 @@ pub enum Refusal {
         #[serde(serialize_with = "serialize_reason")]
         why: String,
     },
+    #[error("selection refused at {at_us} microseconds: {issue}")]
+    SelectionEvidence {
+        #[serde(flatten)]
+        issue: kinewright_core::dialogue::SelectionIssue,
+        at_us: u64,
+        quiet_us: [Option<u64>; 2],
+    },
     #[error("acoustic guard refused at {at_us} microseconds: {reason}")]
     Acoustic {
         reason: String,
@@ -262,6 +271,13 @@ impl Refusal {
 
 impl From<kinewright_core::dialogue::Refusal> for Refusal {
     fn from(refusal: kinewright_core::dialogue::Refusal) -> Self {
+        if let kinewright_core::dialogue::RefusalReason::Selection { issue } = refusal.reason {
+            return Self::SelectionEvidence {
+                issue,
+                at_us: refusal.at_micros,
+                quiet_us: [refusal.quiet_before, refusal.quiet_after],
+            };
+        }
         let reason = short_reason(refusal.reason.to_string());
         Self::Acoustic {
             reason,

@@ -126,6 +126,12 @@ pub struct ResolvedCut {
 #[derive(Debug, PartialEq, Eq, Serialize, Error)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum RefusalReason {
+    #[error("{issue}")]
+    Selection {
+        #[from]
+        #[serde(flatten)]
+        issue: super::SelectionIssue,
+    },
     #[error("word selection is outside this recording's ordered words")]
     WordRange,
     #[error("no following word names a pause to trim")]
@@ -246,12 +252,24 @@ impl Dialogue {
         if self.quiet_at_ratio(n, d) {
             return Ok(());
         }
-        let dip = self
-            .profile
-            .hop(index)
-            .expect("validated index")
-            .rms_dbfs_hundredths
-            <= self.thresholds.dip_dbfs_hundredths;
+        // A known gap must supply its guarded interior. Reclassifying its
+        // margin as a dip would bypass the mandatory quiet safety margin.
+        let outside_gap_margin = self.gaps.iter().any(|run| {
+            let margin = self.settings.quiet_margin_micros;
+            u128::from(run.start_micros) * d <= n
+                && n < u128::from(run.end_micros) * d
+                && !(run.duration() >= margin * 2
+                    && u128::from(run.start_micros + margin) * d <= n
+                    && n <= u128::from(run.end_micros - margin) * d)
+        });
+        let dip = !outside_gap_margin
+            && self.thresholds.dip_dbfs_hundredths.is_some_and(|limit| {
+                self.profile
+                    .hop(index)
+                    .expect("validated index")
+                    .rms_dbfs_hundredths
+                    <= limit
+            });
         if let Some((index, _, depth)) = self.deepest_intrusion(n, d) {
             if dip && depth <= u128::from(self.settings.dip_reach_micros) * d {
                 return Ok(());
@@ -320,7 +338,7 @@ impl Dialogue {
             return None;
         }
         let index = self.profile.index_at(n, d)?;
-        if self.profile.hop(index)?.rms_dbfs_hundredths > self.thresholds.dip_dbfs_hundredths {
+        if self.profile.hop(index)?.rms_dbfs_hundredths > self.thresholds.dip_dbfs_hundredths? {
             return None;
         }
         let (word, boundary, depth) = self.deepest_intrusion(n, d)?;
@@ -405,6 +423,10 @@ impl Dialogue {
             .filter(|(_, _, db)| *db > self.thresholds.quiet_rms_max)
             .map_or(fallback, |(at, _, _)| at)
     }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one boundary search keeps quiet and dip evidence on the same source clock"
+    )]
     fn word_edge(
         &self,
         kept: Option<&Word>,
@@ -458,9 +480,9 @@ impl Dialogue {
                 if best.is_none_or(|old| {
                     let old = old.quiet_run().expect("quiet edge");
                     if start {
-                        run.start_micros < old.start_micros
+                        run.start_micros > old.start_micros
                     } else {
-                        run.end_micros > old.end_micros
+                        run.end_micros < old.end_micros
                     }
                 }) {
                     best = Some(edge);
@@ -483,7 +505,10 @@ impl Dialogue {
                 .saturating_add(self.settings.dip_reach_micros)
         });
         if let Some((at, index, db)) = self.extreme(from, to, false).filter(|(at, _, db)| {
-            *db <= self.thresholds.dip_dbfs_hundredths && self.guard(*at, side).is_ok()
+            self.thresholds
+                .dip_dbfs_hundredths
+                .is_some_and(|limit| *db <= limit)
+                && self.guard(*at, side).is_ok()
         }) {
             let hop = self.profile.span(index);
             let dip_run = self
@@ -747,6 +772,13 @@ impl Dialogue {
         }
         self.guard(start.at_micros, start.side)?;
         self.guard(end.at_micros, end.side)?;
+        self.validate_cut(
+            request,
+            [
+                crate::ExactMicros::integer(start.at_micros),
+                crate::ExactMicros::integer(end.at_micros),
+            ],
+        )?;
         Ok(ResolvedCut {
             air,
             other_pauses_micros,
@@ -755,6 +787,10 @@ impl Dialogue {
             request,
         })
     }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one pause selection measures full and available runs before placing its two edges"
+    )]
     fn pause_edges(
         &self,
         index: usize,
@@ -773,10 +809,13 @@ impl Dialogue {
         // Word starts locate the exchange; measured run bounds determine its
         // air. A stretched ASR end must not hide the silence inside that word.
         let mut runs: Vec<Span> = Vec::new();
+        let mut full_micros = 0;
+        let mut usable_micros = 0;
         for &run in &self.gaps {
             if run.start_micros < before.start_micros || run.start_micros >= after.start_micros {
                 continue;
             }
+            full_micros = full_micros.max(run.duration());
             let run = if let Some(span) = available {
                 let start = run.start_micros.max(span.start_micros);
                 let end = run.end_micros.min(span.end_micros);
@@ -790,6 +829,7 @@ impl Dialogue {
             } else {
                 run
             };
+            usable_micros = usable_micros.max(run.duration());
             if run.duration() < 2 * self.settings.quiet_margin_micros {
                 continue;
             }
@@ -801,6 +841,22 @@ impl Dialogue {
             } else {
                 runs.push(run);
             }
+        }
+        if let Some(available) = available
+            && full_micros > leave
+            && usable_micros <= leave
+            && usable_micros < full_micros
+        {
+            return Err(self.refuse(
+                super::SelectionIssue::PauseLimited {
+                    full_micros,
+                    usable_micros,
+                    leave_micros: leave,
+                    available,
+                }
+                .into(),
+                before.start_micros,
+            ));
         }
         if !runs.is_empty() && runs.iter().all(|run| run.duration() <= leave) {
             return Err(self.refuse(RefusalReason::NothingToTrim, before.start_micros));

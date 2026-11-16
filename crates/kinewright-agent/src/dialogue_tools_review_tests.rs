@@ -106,7 +106,7 @@ fn tail_value(ntsc: bool, sounding_tail: bool) -> Arc<BoundDialogue> {
             end_micros,
         })
         .collect();
-    value(words, if ntsc { 20_020_000 } else { 4_000_000 }, |t| {
+    value(words, if ntsc { 20_120_100 } else { 4_000_000 }, |t| {
         let sound = ranges
             .iter()
             .any(|&(word, a, b)| a <= t && t < b && (word != "last" || sounding_tail || ntsc))
@@ -188,15 +188,16 @@ fn dq_tools_review_unselected_sounding_tail_is_preserved() {
 fn dq_tools_review_ntsc_quiet_loss_is_reported_and_sound_loss_refuses() {
     for sounding in [false, true] {
         let v = tail_value(true, sounding);
-        let s = service(
-            document(
-                Rational::new(30_000, 1_001).unwrap(),
-                Rational::new(30, 1).unwrap(),
-                0,
-                600,
-            ),
-            Arc::clone(&v),
+        let mut doc = document(
+            Rational::new(30_000, 1_001).unwrap(),
+            Rational::new(30, 1).unwrap(),
+            0,
+            600,
         );
+        // Measure quiet beyond this clip; the new tail edge still needs its
+        // full quiet guard margin, even though the lost slice is much shorter.
+        doc.media_pool[0].duration = TimeCode(603);
+        let s = service(doc, Arc::clone(&v));
         let before = s.snapshot().unwrap();
         let history = s.core.export_history_identified().unwrap();
         let r = cut(&s, args(vec![words(&v, 1)]), true);
@@ -589,7 +590,7 @@ fn dq_tools_review_minimum_uses_source_time_once() {
         let r = cut(
             &s,
             args(vec![
-                json!({"kind":"words","first":address(&v,1),"last":address(&v,1),"overrule":[2_000_000,2_000_000+width]}),
+                json!({"kind":"words","first":address(&v,2),"last":address(&v,2),"overrule":[2_000_000,2_000_000+width]}),
             ]),
             true,
         );
@@ -609,7 +610,15 @@ fn dq_tools_review_minimum_uses_source_time_once() {
 }
 #[test]
 fn dq_tools_review_whole_multiple_cuts_preserve_outside_extent() {
-    let measurement = value(said(), 5_000_000, |_| level(true));
+    let measurement = value(
+        vec![Word {
+            text: "geometry".into(),
+            start_micros: 100_000,
+            end_micros: 200_000,
+        }],
+        5_000_000,
+        |_| level(true),
+    );
     let mut seed = 81_u64;
     for (source, project, frames) in [(30, 30, 120), (60, 30, 240), (60_000, 30_000, 240)] {
         let den = if source == 60_000 { 1001 } else { 1 };
@@ -633,7 +642,7 @@ fn dq_tools_review_whole_multiple_cuts_preserve_outside_extent() {
             let reply = cut(
                 &service,
                 args(vec![
-                    json!({"kind":"words","first":address(&measurement,1),"last":address(&measurement,1),"overrule":[start_us,end_us]}),
+                    json!({"kind":"words","first":address(&measurement,0),"last":address(&measurement,0),"overrule":[start_us,end_us]}),
                 ]),
                 true,
             );
@@ -679,7 +688,7 @@ fn dq_tools_review_adjacent_overrule_does_not_cover_the_backed_off_edge() {
     .collect();
     let v = value(ws, 3_200_000, |t| {
         level(
-            (1_490_000..1_550_000).contains(&t)
+            (1_470_000..1_580_000).contains(&t)
                 || (2_410_000..2_470_000).contains(&t)
                 || (2_490_000..2_550_000).contains(&t)
                 || t >= 3_000_000,
@@ -709,37 +718,51 @@ fn dq_tools_review_adjacent_overrule_does_not_cover_the_backed_off_edge() {
         assert_refused_unchanged(&s, &before, &history, &r, "DQ_TOOLS_SCOPED_OVERRULE");
     } else {
         let outcome = &content(&r)["removals"][0];
-        for edge in outcome["edges"].as_array().unwrap() {
+        if outcome["outcome"] == "refused" {
+            // Ready-member application can keep only B. A's refused source
+            // must then remain, even though B legitimately uses its overrule.
+            assert!(
+                dq::spans(&s.snapshot().unwrap().1)
+                    .unwrap()
+                    .iter()
+                    .any(|span| span.source.start
+                        <= kinewright_core::ExactMicros::integer(1_550_000)
+                        && span.source.end >= kinewright_core::ExactMicros::integer(2_300_000)),
+                "DQ_TOOLS_SCOPED_OVERRULE"
+            );
+        } else {
+            for edge in outcome["edges"].as_array().unwrap() {
+                let exact = kinewright_core::ExactMicros::new(
+                    u128::from(edge[2][0].as_u64().unwrap()),
+                    edge[2][1].as_u64().unwrap(),
+                )
+                .unwrap();
+                assert!(
+                    v.dialogue()
+                        .guard_exact(
+                            exact,
+                            if edge == &outcome["edges"][0] {
+                                AudibleSide::Out
+                            } else {
+                                AudibleSide::In
+                            }
+                        )
+                        .is_ok(),
+                    "DQ_TOOLS_SCOPED_OVERRULE"
+                );
+            }
+            // The sliver's other boundary is still owned by A, although B starts here.
+            let edge = &content(&r)["removals"][1]["edges"][0];
             let exact = kinewright_core::ExactMicros::new(
-                u128::from(edge[2][0].as_u64().unwrap()),
+                edge[2][0].as_u64().unwrap().into(),
                 edge[2][1].as_u64().unwrap(),
             )
             .unwrap();
             assert!(
-                v.dialogue()
-                    .guard_exact(
-                        exact,
-                        if edge == &outcome["edges"][0] {
-                            AudibleSide::Out
-                        } else {
-                            AudibleSide::In
-                        }
-                    )
-                    .is_ok(),
+                v.dialogue().guard_exact(exact, AudibleSide::Out).is_ok(),
                 "DQ_TOOLS_SCOPED_OVERRULE"
             );
         }
-        // The sliver's other boundary is still owned by A, although B starts here.
-        let edge = &content(&r)["removals"][1]["edges"][0];
-        let exact = kinewright_core::ExactMicros::new(
-            edge[2][0].as_u64().unwrap().into(),
-            edge[2][1].as_u64().unwrap(),
-        )
-        .unwrap();
-        assert!(
-            v.dialogue().guard_exact(exact, AudibleSide::Out).is_ok(),
-            "DQ_TOOLS_SCOPED_OVERRULE"
-        );
     }
 }
 #[test]
@@ -909,12 +932,42 @@ fn dq_tools_review_quiet_edge_cannot_hide_sound_later_in_the_lost_stretch() {
             .any(|(a, b)| a <= t && t < b),
         )
     });
+    // Isolate the full-stretch proof from the automatic edge margin. A valid
+    // 25-in-24 checkpoint can lose 40 ms: the new edge is safely 30 ms before
+    // the later 10 ms of sound, so checking just that edge would miss the loss.
+    let mut shortened = document(
+        Rational::new(25, 1).unwrap(),
+        Rational::new(24, 1).unwrap(),
+        0,
+        100,
+    );
+    let retention = dq::Retention::new(&shortened, TrackId(1), Vec::new()).unwrap();
+    shortened.tracks[0].clips[0].source_range.end = TimeCode(99);
+    shortened.duration = shortened
+        .clip_duration(&shortened.tracks[0].clips[0])
+        .unwrap();
+    shortened.validate().unwrap();
+    let edge = dq::spans(&shortened).unwrap()[0].source.end;
     assert!(
         measurement
             .dialogue()
-            .guard(3_985_000, AudibleSide::Out)
+            .guard_exact(edge, AudibleSide::Out)
             .is_ok(),
         "DQ_TOOLS_NEW_EDGE_ALONE_IS_QUIET"
+    );
+    let provider = Fake {
+        value: Arc::clone(&measurement),
+        stream: 0,
+    };
+    let result = retention.validate(
+        &shortened,
+        &BTreeMap::from([(ClipId(1), ClipId(1))]),
+        &mut BTreeMap::new(),
+        &provider,
+    );
+    assert!(
+        matches!(result, Err(Refusal::UnselectedAudio { .. })),
+        "DQ_TOOLS_ENTIRE_LOSS_IS_QUIET"
     );
     let server = service(
         document(

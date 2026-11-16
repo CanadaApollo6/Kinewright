@@ -63,6 +63,35 @@ fn rounding_fixture() -> Dialogue {
     )
     .unwrap()
 }
+// Frame primitives also accept an independently supplied measured edge. The
+// dense 0/100-ms word fixture is now (correctly) refused as a whole removal by
+// the kept-start window; it still exercises the original 40..70-ms frame support.
+fn rounding_edge(d: &Dialogue) -> ResolvedEdge {
+    let run = d.gap_runs()[0];
+    let at = (run.start_micros() + d.settings().air_after_micros)
+        .min(run.end_micros() - d.settings().quiet_margin_micros);
+    let (start, end) = d.quiet_support(run, at).unwrap();
+    ResolvedEdge {
+        at_micros: at,
+        side: AudibleSide::Out,
+        placement: EdgePlacement::Quiet {
+            run,
+            air_after_micros: at - run.start_micros(),
+            air_before_micros: run.end_micros() - at,
+            shift: Shift {
+                micros: 100_000 - at,
+                later: false,
+            },
+            snapped: true,
+        },
+        support: super::resolve::Support {
+            start,
+            end,
+            inclusive_end: true,
+        },
+    }
+}
+
 #[test]
 fn dialogue_profile_has_one_validated_compact_door() {
     assert_eq!(
@@ -295,7 +324,7 @@ fn dialogue_a_single_deep_dip_can_place_a_running_word_boundary() {
             to: 1,
             leave_micros: Some(250_000),
         });
-        if level == -6_000 {
+        if level < -3_900 {
             let cut = cut.unwrap();
             assert_eq!(
                 (cut.start.at_micros, cut.end.at_micros),
@@ -304,9 +333,9 @@ fn dialogue_a_single_deep_dip_can_place_a_running_word_boundary() {
             assert!(matches!(
                 cut.start.placement,
                 EdgePlacement::LevelDip {
-                    rms_dbfs_hundredths: -6_000,
+                    rms_dbfs_hundredths,
                     ..
-                }
+                } if rms_dbfs_hundredths == level
             ));
         } else {
             assert_eq!(cut.unwrap_err().reason, RefusalReason::NoMeasuredEdge);
@@ -473,12 +502,13 @@ fn dialogue_guard_names_word_and_untranscribed_sound_with_quiet_neighbors() {
             20_000,
             5_000_000,
             &[
-                (1_000_000, 1_360_000),
-                (1_380_000, 1_600_000),
+                (1_000_000, 1_600_000),
                 (2_000_000, 2_180_000),
                 (2_280_000, 2_900_000),
             ],
-            &[],
+            // The 20-ms closure is a voiced dip, not a quiet run with
+            // insufficient space for two mandatory 30-ms margins.
+            &[(68, -6_000)],
         ),
         vec![
             word("logo", 1_000_000, 1_360_000),
@@ -534,17 +564,9 @@ fn dialogue_untranscribed_continuous_sound_is_not_silently_accepted() {
 #[test]
 fn dialogue_frame_rounds_into_measured_support_not_nearest_outside() {
     let d = rounding_fixture();
-    let cut = d
-        .resolve(CutRequest::RemoveWords {
-            from: 1,
-            to: 1,
-            leave_micros: Some(250_000),
-        })
-        .unwrap();
-    assert_eq!(cut.start.at_micros, 70_000);
-    let frame = d
-        .frame_edge(cut.start, Rational::new(25, 1).unwrap())
-        .unwrap();
+    let edge = rounding_edge(&d);
+    assert_eq!(edge.at_micros, 70_000);
+    let frame = d.frame_edge(edge, Rational::new(25, 1).unwrap()).unwrap();
     assert_eq!(frame.frame, TimeCode(1), "DQ2_FRAME_ROUNDS_INSIDE_RUN");
     assert!(
         d.guard_ratio(
@@ -555,7 +577,7 @@ fn dialogue_frame_rounds_into_measured_support_not_nearest_outside() {
         .is_ok()
     );
     assert_eq!(
-        d.frame_edge(cut.start, Rational::new(10, 1).unwrap())
+        d.frame_edge(edge, Rational::new(10, 1).unwrap())
             .unwrap_err()
             .reason,
         RefusalReason::NoFrameInRun
@@ -565,14 +587,7 @@ fn dialogue_frame_rounds_into_measured_support_not_nearest_outside() {
 fn dialogue_frame_guard_checks_the_current_profile_and_exact_fraction() {
     // Astra: the frame is 66,733 1/3 us; trusted quiet ends at 66,733.
     let d = rounding_fixture();
-    let edge = d
-        .resolve(CutRequest::RemoveWords {
-            from: 1,
-            to: 1,
-            leave_micros: Some(250_000),
-        })
-        .unwrap()
-        .start;
+    let edge = rounding_edge(&d);
     let other = Dialogue::new(
         SoundProfile::from_hops(
             1,
@@ -754,7 +769,12 @@ fn dialogue_frame_can_use_the_safe_dip_beside_the_minimum_hop() {
 fn dialogue_boundary_dip_reports_the_kept_word_intrusion() {
     // Astra closure witness, with the lead's explicit 50-ms timing tolerance.
     let d = Dialogue::new(
-        profile(10_000, 1_000_000, &[(0, 500_000)], &[(25, -6_000)]),
+        profile(
+            10_000,
+            1_000_000,
+            &[(0, 500_000)],
+            &(25..32).map(|i| (i, -6_000)).collect::<Vec<_>>(),
+        ),
         vec![word("cat", 0, 300_000), word("next", 300_000, 500_000)],
         Settings::default(),
     )
@@ -787,7 +807,12 @@ fn dialogue_boundary_dip_reports_the_kept_word_intrusion() {
 #[test]
 fn dialogue_dip_inside_word_beyond_reach_is_refused() {
     let basis = Dialogue::new(
-        profile(10_000, 1_000_000, &[(0, 500_000)], &[(15, -6_000)]),
+        profile(
+            10_000,
+            1_000_000,
+            &[(0, 500_000)],
+            &(15..32).map(|i| (i, -6_000)).collect::<Vec<_>>(),
+        ),
         vec![word("short", 0, 200_000), word("next", 200_000, 500_000)],
         Settings::default(),
     )
@@ -932,7 +957,8 @@ fn dialogue_exact_dip_support_end_is_excluded() {
 #[test]
 fn dialogue_frame_ties_keep_material_on_each_side() {
     let d = Dialogue::new(
-        profile(10_000, 200_000, &[], &[]),
+        // Calibrate outside the stated 0..200-ms quiet support.
+        profile(10_000, 300_000, &[(200_000, 300_000)], &[]),
         vec![],
         Settings::default(),
     )
@@ -1075,17 +1101,10 @@ fn dialogue_start_side_kept_and_removed_slack_are_not_interchangeable() {
         Settings::default(),
     )
     .unwrap();
-    assert_eq!(
-        d.resolve(CutRequest::RemoveWords {
-            from: 1,
-            to: 1,
-            leave_micros: Some(250_000)
-        })
-        .unwrap()
-        .start
-        .at_micros(),
-        1_350_000
-    );
+    assert!(matches!(
+        d.resolve(CutRequest::RemoveWords { from: 1, to: 1, leave_micros: Some(250_000) }).unwrap_err().reason,
+        RefusalReason::Selection { issue: SelectionIssue::UnattributedSound { component } } if component == Span::new(1_400_000, 1_600_000).unwrap()
+    ));
 }
 
 proptest! {
@@ -1109,7 +1128,12 @@ fn dialogue_fractional_dip_reach_refuses_the_extra_third_microsecond() {
     .unwrap();
     assert!(d.guard(66_733, AudibleSide::Out).is_ok());
     let basis = Dialogue::new(
-        profile(10_000, 1_000_000, &[(0, 500_000)], &[(6, -6_000)]),
+        profile(
+            10_000,
+            1_000_000,
+            &[(0, 600_000)],
+            &(6..32).map(|i| (i, -6_000)).collect::<Vec<_>>(),
+        ),
         vec![word("short", 0, 110_000), word("next", 110_000, 500_000)],
         Settings::default(),
     )

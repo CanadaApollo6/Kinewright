@@ -10,6 +10,7 @@ mod frame;
 pub mod measure;
 mod profile;
 mod resolve;
+mod selection;
 
 pub use evidence::{Dialogue, Sound};
 pub use frame::{FrameGrid, FramedEdge};
@@ -20,6 +21,7 @@ pub use resolve::{
     AudibleSide, CutRequest, DipIntrusion, EdgePlacement, Refusal, RefusalReason, ResolvedCut,
     ResolvedEdge, RetainedAir, Shift, WordBoundary, pad_edge,
 };
+pub use selection::{SelectionIssue, WORD_ATTRIBUTION_MICROS};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -89,7 +91,6 @@ pub struct Settings {
     pub air_after_micros: u64,
     pub air_before_micros: u64,
     pub snap_limit_micros: u64,
-    pub dip_dbfs_hundredths: i16,
     pub dip_reach_micros: u64,
     pub minimum_word_cut_micros: u64,
     pub in_word_gap_micros: u64,
@@ -111,7 +112,6 @@ impl Default for Settings {
             air_after_micros: 150_000,
             air_before_micros: 100_000,
             snap_limit_micros: 120_000,
-            dip_dbfs_hundredths: -5_500,
             dip_reach_micros: 50_000,
             minimum_word_cut_micros: 100_000,
             in_word_gap_micros: 100_000,
@@ -136,7 +136,7 @@ pub enum InputError {
     #[error("recording has no voice-flagged hops to measure its speech level")]
     SpeechLevelUnavailable,
     #[error(
-        "speech level {speech_rms_hundredths} and noise floor {noise_floor_hundredths} centidBFS leave less than 6 dB below quiet threshold {quiet_rms_hundredths}; use a cleaner recording"
+        "speech level {speech_rms_hundredths} and noise floor {noise_floor_hundredths} centidBFS leave no 6 dB-separated quiet/dip threshold (quiet {quiet_rms_hundredths}); use a cleaner recording"
     )]
     NoiseSeparation {
         speech_rms_hundredths: i16,
@@ -161,7 +161,9 @@ pub struct Thresholds {
     pub quiet_peak_max: i16,
     pub valley_rms_max: i16,
     pub valley_peak_max: i16,
-    pub dip_dbfs_hundredths: i16,
+    /// Measured floor/speech midpoint, capped at quiet RMS and at least 6 dB
+    /// above the floor. Without a measured floor no dip is evidence.
+    pub dip_dbfs_hundredths: Option<i16>,
 }
 impl Thresholds {
     fn relative(settings: &Settings, profile: &SoundProfile) -> Result<Self, InputError> {
@@ -174,21 +176,28 @@ impl Thresholds {
             i16::try_from(i32::from(db) + shift)
                 .expect("validated reference limit and speech shift fit i16")
         };
-        let thresholds = Self {
+        let mut thresholds = Self {
             quiet_rms_max: shifted(settings.quiet_rms_max),
             quiet_peak_max: shifted(settings.quiet_peak_max),
             valley_rms_max: shifted(settings.valley_rms_max),
             valley_peak_max: shifted(settings.valley_peak_max),
-            dip_dbfs_hundredths: shifted(settings.dip_dbfs_hundredths),
+            dip_dbfs_hundredths: None,
         };
-        if let Some(floor) = levels.noise_floor_hundredths
-            && i32::from(thresholds.quiet_rms_max) - i32::from(floor) < 600
-        {
-            return Err(InputError::NoiseSeparation {
-                speech_rms_hundredths: speech,
-                noise_floor_hundredths: floor,
-                quiet_rms_hundredths: thresholds.quiet_rms_max,
-            });
+        if let Some(floor) = levels.noise_floor_hundredths {
+            let lower = i32::from(floor) + 600;
+            let upper = i32::from(thresholds.quiet_rms_max).min(i32::from(speech) - 1);
+            if lower > upper {
+                return Err(InputError::NoiseSeparation {
+                    speech_rms_hundredths: speech,
+                    noise_floor_hundredths: floor,
+                    quiet_rms_hundredths: thresholds.quiet_rms_max,
+                });
+            }
+            let midpoint = (i32::from(floor) + i32::from(speech)).div_euclid(2);
+            thresholds.dip_dbfs_hundredths = Some(
+                i16::try_from(midpoint.clamp(lower, upper))
+                    .expect("measured floor and speech bounds fit i16"),
+            );
         }
         Ok(thresholds)
     }
@@ -196,7 +205,6 @@ impl Thresholds {
 impl Settings {
     fn validate(&self) -> Result<(), InputError> {
         let levels = [
-            self.dip_dbfs_hundredths,
             self.quiet_rms_max,
             self.quiet_peak_max,
             self.valley_rms_max,
@@ -222,3 +230,6 @@ mod tests;
 
 #[cfg(test)]
 mod rehearsal_tests;
+
+#[cfg(test)]
+mod r4_tests;

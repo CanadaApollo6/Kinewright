@@ -24,7 +24,11 @@ PAIRS = {
     'outside-extents': ([(RETENTION, 'if self.exact_splits {', 'if true || self.exact_splits {')],
         'dq_tools_review_unselected_sounding_tail_is_preserved', 'DQ_TOOLS_UNSELECTED_TAIL_PROTECTED'),
     'scoped-overrule': ([(CUT, '[outgoing.overrule, last.overrule]', '[first.overrule, last.overrule]')],
-        'dq_tools_review_adjacent_overrule_does_not_cover_the_backed_off_edge', 'DQ_TOOLS_SCOPED_OVERRULE'),
+        # R4 now refuses the old whole-cut trace earlier. Isolate the same
+        # edge-owner defect through real final geometry and heard_join.
+        'dialogue_tools::cut::tests::backed_off_sliver_keeps_the_preceding_removals_guard', 'DQ_TOOLS_SCOPED_OVERRULE'),
+    'entire-loss-stretch': ([(RETENTION, '|| losses.iter().any(|r| {', '|| false && losses.iter().any(|r| {')],
+        'dq_tools_review_quiet_edge_cannot_hide_sound_later_in_the_lost_stretch', 'DQ_TOOLS_ENTIRE_LOSS_IS_QUIET'),
     'one-frame': ([(CUT, 'if end.0 - start.0 < 2 {', 'if end.0 - start.0 < 1 {')],
         'dq_tools_review_one_frame_is_structurally_refused', 'DQ_TOOLS_TWO_PROJECT_FRAMES'),
     'sync-tracks': ([(CUT, 't.id != cut.track && t.sync_lock', 'false && t.id != cut.track && t.sync_lock')],

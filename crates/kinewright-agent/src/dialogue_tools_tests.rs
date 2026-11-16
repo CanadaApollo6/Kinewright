@@ -402,9 +402,11 @@ mod dialogue_tool_tests {
             end_micros,
         })
         .collect();
-        value(words, 2_560_000, |t| {
+        // Keep real quiet margins in the mixed-clock fixture, including beyond
+        // the clip tail; the intentionally unsafe earlier frame remains refused.
+        value(words, 2_640_000, |t| {
             level(
-                (1_490_000..1_550_000).contains(&t)
+                (1_470_000..1_580_000).contains(&t)
                     || (2_000_000..2_300_000).contains(&t)
                     || t >= 2_500_000,
             )
@@ -941,4 +943,5 @@ mod dialogue_tool_tests {
     include!("dialogue_tools_rehearsal_read_tests.rs");
     include!("dialogue_tools_item12_tests.rs");
     include!("dialogue_tools_item13_tests.rs");
+    include!("dialogue_tools_r4_tests.rs");
 }

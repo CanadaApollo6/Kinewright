@@ -732,3 +732,197 @@ All eight changed Rust source hashes still match the verified files.
 Successful shipping targets were removed; `target/` is 33 GiB.
 No Media source changed. Full slow-suite and Windows execution, provider/paid/dry
 launches, and the real-recording rehearsal are NOT RUN here. M5 remains off.
+
+## R4: nearest edges, sound ownership, usable dips and current pauses
+
+R3's `were`/`um` failure came from the reversed quiet-run ordering. The resolver
+now chooses the latest qualifying start-side run and the earliest end-side run.
+Natural/explicit air is computed on those runs with the existing quiet margins.
+The translated R3 fixture keeps the 31.72–31.82 s sound and exactly 660 ms of air.
+
+Every removal also satisfies two hard selection checks, including an overrule.
+No unrequested ASR start may lie in its half-open source extent. Every intersected
+contiguous component whose hop RMS is strictly above calibrated quiet RMS must
+have a requested spoken-word start within 300 ms of its onset, and every
+plausible owner must be requested. Any kept start within that reach, or whose
+forward 300 ms window overlaps the component, vetoes the cut (including a tie
+with a requested start). A component with no requested anchor refuses. One
+requested word can own several nearby syllables. Supplied word ends do not
+establish ownership. This conservative rule
+may refuse run-together or mistimed speech; it never guesses an uncertain owner.
+The prepared profile has one derived component index, not another profile copy.
+
+These checks run in Core resolution and on the Agent's exact source proposal,
+then on every current/prior/final scratch-document join after frame alignment.
+The original selected indices remain separate from clip-boundary resolution.
+Typed `selection_evidence` replies preserve `violation`, the relevant word or
+component and nearby quiet points; no new evidence is stringified. Extent guards
+and the both-dip refusal remain in force. Full real-recording R4 is the Media
+worker's follow-up; these results do not claim that replay.
+
+### R8 measurement and chosen rule
+
+R3 evidence was read in the Media worktree, not copied. The 25 `NoMeasuredEdge`
+filler refusals supply 50 nonempty neighbour search windows. The start-flanks
+below run from the previous word start to
+the filler start and from the filler start to the next word start; they use no
+word ends. Resolver-search minima use its anchor/slack/reach arithmetic. Both
+use the measured 10 ms RMS grid (earliest equal minimum). Start-flank values are
+dB: minimum / above floor / below speech. Negative above-floor values are
+possible because the floor is a 10th percentile, not the minimum. The two window
+definitions are reported separately rather than treated as equivalent.
+
+| Filler index | Start (s) | Left start-flank minimum / above floor / below speech | Right start-flank minimum / above floor / below speech | Left / right resolver-search minima |
+| --- | --- | --- | --- | --- |
+| 9 | 5.76 | -45.77 / 36.61 / 1.09 | -85.31 / -2.93 / 40.63 | -45.77 / -85.31 |
+| 76 | 36.24 | -83.39 / -1.01 / 38.71 | -47.81 / 34.57 / 3.13 | -83.39 / -47.81 |
+| 150 | 70.56 | -71.67 / 10.71 / 26.99 | -89.68 / -7.30 / 45.00 | -75.19 / -89.68 |
+| 202 | 126.72 | -80.70 / 1.68 / 36.02 | -76.48 / 5.90 / 31.80 | -79.47 / -76.48 |
+| 238 | 143.60 | -57.33 / 25.05 / 12.65 | -84.80 / -2.42 / 40.12 | -63.53 / -84.80 |
+| 271 | 180.48 | -41.48 / 40.90 / -3.20 | -62.82 / 19.56 / 18.14 | -43.10 / -65.27 |
+| 379 | 234.64 | -71.68 / 10.70 / 27.00 | -72.04 / 10.34 / 27.36 | -71.68 / -72.04 |
+| 516 | 309.20 | -70.64 / 11.74 / 25.96 | -85.89 / -3.51 / 41.21 | -71.73 / -85.89 |
+| 524 | 312.00 | -42.43 / 39.95 / -2.25 | -86.59 / -4.21 / 41.91 | -57.06 / -86.59 |
+| 533 | 315.92 | -67.63 / 14.75 / 22.95 | -51.27 / 31.11 / 6.59 | -65.20 / -51.27 |
+| 573 | 336.48 | -62.98 / 19.40 / 18.30 | -81.82 / 0.56 / 37.14 | -62.98 / -81.82 |
+| 618 | 347.44 | -52.66 / 29.72 / 7.98 | -58.04 / 24.34 / 13.36 | -35.61 / -58.04 |
+| 670 | 376.32 | -71.20 / 11.18 / 26.52 | -43.36 / 39.02 / -1.32 | -70.03 / -43.36 |
+| 685 | 384.16 | -83.96 / -1.58 / 39.28 | -42.91 / 39.47 / -1.77 | -83.96 / -42.91 |
+| 697 | 387.52 | -84.24 / -1.86 / 39.56 | -54.65 / 27.73 / 9.97 | -84.24 / -54.65 |
+| 706 | 393.12 | -88.04 / -5.66 / 43.36 | -55.05 / 27.33 / 10.37 | -88.04 / -55.83 |
+| 718 | 397.92 | -61.90 / 20.48 / 17.22 | -82.40 / -0.02 / 37.72 | -61.90 / -82.40 |
+| 728 | 400.88 | -80.68 / 1.70 / 36.00 | -55.56 / 26.82 / 10.88 | -80.68 / -49.21 |
+| 739 | 406.56 | -88.39 / -6.01 / 43.71 | -51.53 / 30.85 / 6.85 | -88.39 / -51.53 |
+| 746 | 409.92 | -85.92 / -3.54 / 41.24 | -74.44 / 7.94 / 29.76 | -85.92 / -74.44 |
+| 801 | 434.80 | -46.86 / 35.52 / 2.18 | -90.53 / -8.15 / 45.85 | -47.63 / -90.53 |
+| 805 | 436.96 | -45.32 / 37.06 / 0.64 | -56.57 / 25.81 / 11.89 | -53.28 / -67.00 |
+| 856 | 460.16 | -68.87 / 13.51 / 24.19 | -85.98 / -3.60 / 41.30 | -48.39 / -85.98 |
+| 878 | 469.44 | -62.09 / 20.29 / 17.41 | -84.55 / -2.17 / 39.87 | -62.09 / -84.55 |
+| 880 | 471.60 | -71.34 / 11.04 / 26.66 | -80.97 / 1.41 / 36.29 | -70.94 / -80.97 |
+
+The search minima range from −90.53 to −35.61 dBFS; p10/p25/median/p75/p90
+are −86.59/−83.96/−71.31/−54.65/−47.63 (nearest-rank percentiles, averaged
+middle-pair median). Start-only flanks have median −71.27 and range
+−90.53..−41.48. The recording's floor/speech/quiet are −82.38/−44.68/−64.69.
+The old −79.68 limit admits 18/50 search minima; floor+6 alone admits 20/50.
+
+The chosen dip limit is the floor/speech midpoint (rounded down to a centidB),
+capped at calibrated quiet RMS and below speech, then clamped at least 6 dB
+above the floor. Here it is −64.69 and admits 30/50 minima (29/50 start-only
+flanks, versus 19/50 old). Eligibility is not a prediction of applied cuts:
+reach, kept-word sound, attribution, frame and both-dip guards still apply.
+No measured floor means no dip evidence. The obsolete absolute-reference dip
+setting is removed; the effective optional limit is reported with thresholds.
+
+### R9: why a long reported pause was not usable
+
+Read-only source-span replay of the recorded successful calls explains all 11
+short-pause refusals: earlier cuts split the quiet away from the addressed word's
+current clip. They are not 400 ms of guard padding. Recorded longest full runs
+are 0.90–2.82 s, but the clip containing the `after` word retains only 170–240 ms,
+less than the requested 300 ms. The three 189 and three 191 rows are separate
+recorded retries, not additional distinct pauses.
+
+| Word index | Full longest quiet (ms) | Current clip's longest quiet (ms) | Refusals |
+| --- | --- | --- | --- |
+| 25 | 1390 | 170 | 1 |
+| 174 | 1060 | 193.333 | 1 |
+| 176 | 900 | 190 | 1 |
+| 187 | 990 | 190 | 1 |
+| 189 | 2820 | 196.667 | 3 |
+| 191 | 1870 | 193.333 | 3 |
+| 475 | 930 | 240 | 1 |
+
+A new typed `pause_limited` violation reports the full run, current usable run,
+requested leave and available clip span, and directs the agent to the current
+clip transcript. It does not silently pick another word or clip. Accessible
+long pauses still trim with unchanged margins, and genuinely short full pauses
+keep `NothingToTrim`. Raw recording gaps remain recording evidence; the refusal
+now explains their availability after earlier edits.
+
+### Refusal and margin controls
+
+The original five regressions failed against `40468aa1` product code before
+the fix (1 passed / 5 failed); the accessible-pause control passed. The final tests also cover
+all nine R3 unrequested-start intervals on their exact 30 fps source grid,
+kept sound whose ASR start is outside the cut, overlapping possible owners,
+multiple components of one requested word, fractional half-open boundaries,
+and independence from supplied word ends. These nine interval probes validate
+the selection invariant; they do not replay R3's recording or new cut plans.
+A provider-injected selection refusal remains typed before and after consent.
+
+The calibrated dip cannot bypass a measured gap's geometric quiet margins.
+Short gaps still need both margins even if their RMS qualifies as a dip.
+No frame or limit was relaxed, and no new search for sub-frame instants was
+added; the already-deferred no-frame cases remain outside this work.
+
+Existing dip audit fixtures now supply a measured non-voice floor. Valid dip
+placement controls give the kept word a measured low tail, rather than cutting
+above-quiet sound in its forward window. Two frame-rounding controls prepare
+their measured edge directly: their dense 0/100 ms word setup is no longer an
+admissible whole cut under the new kept-start protection. Their exact rounding
+and fractional-guard assertions remain. The asymmetric-slack test's unanchored
+second component now refuses specifically, instead of inferring ownership from
+a long ASR end. The old −46 dB dip qualifies under its newly measured −39 dB limit.
+
+The mixed-clock fixture has 110 ms of quiet and measurement beyond its clip tail,
+so it satisfies the real margin and retains its frame-25 assertion. Pure geometry
+fixtures now select the correct word or contain one synthetic word; their
+arbitrary intervals no longer accidentally authorize other ASR starts. The NTSC
+quiet-loss control likewise measures beyond the clip's original end, without
+changing its clip or loss bounds. The complete-loss control additionally compares
+a valid shortened checkpoint with its original coverage: its new edge is guarded
+quiet, but the lost interval includes later sound. This isolates the whole-span
+check from an earlier margin refusal. Its ordinary tool refusal still passes.
+
+The scoped-overrule MCP control handles a refused member beside an applied one
+and checks that the refused source remains. R7's nearer flanks/refusals mask the
+old deliberate-break geometry, so `scoped-overrule` now uses the existing
+`backed_off_sliver_keeps_the_preceding_removals_guard` witness. It tests the same
+owner bit through real final geometry and `heard_join`, without selection masking.
+A retained `entire-loss-stretch` pair guards the separate complete-interval proof.
+
+| Deliberate break | Red | Restored green | Restore |
+| --- | --- | --- | --- |
+| R7: reverse the nearest-run comparisons | 0 passed / 1 failed at `R4_NEAREST_KEEPS_WERE` | 1 / 0 | Byte-identical |
+| R8: restore the floor-hugging shifted dip limit | 0 / 1 at `R4_QUIET_TAKE_DIP` | 1 / 0 | Byte-identical |
+| R9: suppress the clipped-pause refusal | 0 / 1 at `R4_PAUSE_CLIP_MEASURE` | 1 / 0 | Byte-identical |
+| Retargeted `scoped-overrule` | 0 / 1 at `DQ_TOOLS_SCOPED_OVERRULE` | 1 / 0 | Byte-identical |
+| `entire-loss-stretch` | 0 / 1 at `DQ_TOOLS_ENTIRE_LOSS_IS_QUIET` | 1 / 0 | Byte-identical |
+
+Final gates are recorded in `target/dq-r4/` (elapsed seconds include compilation):
+
+| Gate | Result | Seconds |
+| --- | --- | --- |
+| Core full suite | 929 / 0 / 2 passed / failed / ignored | 41.96 |
+| Agent full suite, slow tests enabled | 1829 / 0 / 104 passed / failed / ignored | 1576.62 |
+| App full binary, slow tests enabled | 1087 / 0 / 5 passed / failed / ignored | 419.86 |
+| Agent dialogue module | 60 / 0 / 1 passed / failed / ignored | 43.09 |
+| Workspace all-target clippy, default, warnings denied | Pass | 28.74 |
+| Workspace all-target clippy, `te1-eval`, warnings denied | Pass | 16.77 |
+| Workspace all-target clippy, Agent/App slow features, warnings denied | Pass | 15.62 |
+| Workspace build | Pass | 35.26 |
+| Pin tests, unchanged 8,856 fields | 2 / 0 / 0 passed / failed / ignored | 67.73 |
+| Cargo fmt | Pass | 3.83 |
+| Included-file rustfmt | Pass | 0.03 |
+| Windows/shipping matrix | 4 cross-clippy modes; 3 Linux builds; 3 MSVC checks pass | 331.12 |
+| Default-build guard | 3 artifacts; no eval feature or grant entry code | 75.69 |
+| Slow-test lint | 140 slow, 161 ignored entries, 27 skip sites agree | 0.25 |
+| Parser selftests | 52 passed | 0.89 |
+| Shard selftests | 23 passed | 0.16 |
+
+Agent/App slow-mode runs include their fast tests. The 104 Agent and 5 App
+ignored tests remain in their explicit on-demand or equipment-dependent lanes. Standard cargo times start
+when their outer shared lock is acquired; the Windows/default scripts' times
+include their own inner lock waits. No performance conclusion is drawn from
+these gate times. Feature-disabled shipping checks retain existing warnings in
+unchanged Agent code; warnings-denied clippy modes are clean.
+
+The measurement pin, its model-visible leaves and OPEN model/option values are
+unchanged. All 14 changed Rust source hashes match the verified final sources.
+Successful isolated shipping targets were removed. `target/` is 25 GiB (started
+at 33; stale completed test artifacts were pruned before the full suites).
+No Media source changed and no real provider, paid or dry launch ran.
+
+NOT RUN: real-recording R4 rehearsal and renderer conformance (Media worker),
+Windows execution, full Media/Project suites. M5 remains off.

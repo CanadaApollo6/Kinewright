@@ -829,6 +829,9 @@ proptest! {
 fn dialogue_audit_boundary_dip_is_a_fourth_independent_warning() {
     use crate::dialogue::{DipIntrusion, WordBoundary};
     let d = recording(1_000_000, vec![word("cat", 0, 300_000)], |t| {
+        if t >= 500_000 {
+            return hop(-8_000, false);
+        }
         hop(
             if (250_000..260_000).contains(&t) {
                 -5_600
@@ -861,6 +864,9 @@ fn dialogue_audit_boundary_dip_is_a_fourth_independent_warning() {
 #[test]
 fn dialogue_audit_deep_dip_warns_and_cannot_hide_the_sound_flag() {
     let d = recording(1_000_000, vec![word("long", 0, 400_000)], |t| {
+        if t >= 500_000 {
+            return hop(-8_000, false);
+        }
         hop(
             if (150_000..160_000).contains(&t) {
                 -5_600
@@ -1310,13 +1316,16 @@ fn dialogue_audit_exact_edges_and_padding_are_not_measured_quiet() {
 #[test]
 fn dialogue_audit_does_not_floor_the_guard_instant() {
     let d = recording(1_000_000, vec![word("word", 16_733, 400_000)], |t| {
+        if t >= 500_000 {
+            return hop(-8_000, false);
+        }
         hop(
             if (60_000..70_000).contains(&t) {
                 -6_000
             } else {
                 -1_800
             },
-            false,
+            true,
         )
     });
     assert!(d.guard(66_733, AudibleSide::Out).is_ok());
