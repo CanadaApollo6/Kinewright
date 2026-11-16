@@ -1325,3 +1325,32 @@ fn dialogue_audit_does_not_floor_the_guard_instant() {
     assert!(side.edge_in_sound.is_some(), "DQ_AUDIT_FRACTIONAL_GUARD");
     assert_eq!(side.exact_us, Some(end));
 }
+
+#[test]
+fn dialogue_audit_stub_ends_label_timing_dependent_hole_counts() {
+    let check = |end| {
+        one(
+            recording(1_000_000, vec![word("long", 100_000, end)], |t| {
+                if (100_000..900_000).contains(&t) {
+                    hop(-2_000, true)
+                } else {
+                    hop(-8_000, false)
+                }
+            }),
+            &[kept(1, 0, 1_000_000)],
+        )
+    };
+    // Same audio and onset; only the supplied ASR end changes. The sound after
+    // an 80ms emission-frame stub is not proof of untranscribed speech.
+    let stub = check(180_000);
+    let longer = check(900_000);
+    assert_eq!((stub.total.holes, stub.total.sounding_holes), (1, 1));
+    assert_eq!((longer.total.holes, longer.total.sounding_holes), (0, 0));
+    for report in [stub, longer] {
+        assert_eq!(
+            serde_json::to_value(report).unwrap()["hole_basis"],
+            "approximate_transcript_intervals",
+            "DQ_WORD_END_HOLE_BASIS"
+        );
+    }
+}

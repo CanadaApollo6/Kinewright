@@ -187,6 +187,10 @@ mod dialogue_measurement_tests {
         use kinewright_core::dialogue::audit::{
             self, AuditSettings, Detail, KeptRange, RecordingId,
         };
+        assert_eq!(
+            checked["segments"][0]["report"]["hole_basis"], "approximate_transcript_intervals",
+            "DQ_WORD_END_DISPATCHED_HOLE_BASIS"
+        );
         let document = service.snapshot().unwrap().1;
         let kept = crate::dialogue_tools::spans(&document)
             .unwrap()
@@ -266,6 +270,11 @@ mod dialogue_measurement_tests {
             "DQ_MEDIA_REAL_QUIET_LEVEL"
         );
         let words = invoke(&f.handler, "get_timeline_transcript", json!({}));
+        assert_eq!(
+            words.structured_content.as_ref().unwrap()["word_timing"],
+            "approximate_transcript_intervals",
+            "DQ_WORD_END_DISPATCHED_TRANSCRIPT_BASIS"
+        );
         assert!(
             words
                 .structured_content

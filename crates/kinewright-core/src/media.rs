@@ -1638,7 +1638,9 @@ impl MediaEvent {
 }
 
 /// One recognized word. Both boundaries are half-open source-frame positions
-/// in the owning asset's exact frame rate.
+/// in the owning asset's exact frame rate. Recognizer boundaries are approximate
+/// decoder alignments: an end can be one encoder frame after token emission,
+/// not the measured end of speech. Frame precision does not imply acoustic accuracy.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TranscriptWord {

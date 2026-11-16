@@ -615,8 +615,9 @@ mod dialogue_tool_tests {
         );
         assert!(flag_bytes < 2048, "DQ_TOOLS_DEFAULT_SIZE");
         assert!(all_bytes < 32768, "DQ_TOOLS_ALL_SIZE");
-        assert_eq!(core_flags, 93, "DQ_TOOLS_ORIGINAL_CORE_FLAGS");
-        assert_eq!(core_all, 20_260, "DQ_TOOLS_ORIGINAL_CORE_ALL");
+        // The mandatory approximate-interval qualifier adds 48 bytes to each report.
+        assert_eq!(core_flags, 141, "DQ_TOOLS_QUALIFIED_CORE_FLAGS");
+        assert_eq!(core_all, 20_308, "DQ_TOOLS_QUALIFIED_CORE_ALL");
         assert!(content(&flags)["check"]["segments"][0]["report"]["items"].is_null());
         assert_eq!(
             content(&flags)["check"]["segments"][0]["report"]["total"]["joins"],
@@ -661,7 +662,7 @@ mod dialogue_tool_tests {
         ok(&result);
         assert_eq!(
             result.content[0].as_text().unwrap().text,
-            "timeline transcript range=0f/0.000s..400f/4.000s words=1\nclip=1 asset=1 project=20f/0.200s..50f/0.500s source=20f/0.200s..50f/0.500s \"Hello\"",
+            "timeline transcript range=0f/0.000s..400f/4.000s words=1 word_timing=approximate_transcript_intervals (ends are not measured speech boundaries)\nclip=1 asset=1 project=20f/0.200s..50f/0.500s source=20f/0.200s..50f/0.500s \"Hello\"",
             "DQ_TOOLS_SWITCH_OFF_BYTES"
         );
         let hidden = invoke(&s, "cut_dialogue", args(vec![]));

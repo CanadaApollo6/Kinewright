@@ -162,7 +162,7 @@ fn dq1_real_ami_short_keeps_um_and_known_words() {
             result.words
         );
     }
-    assert_eq!(result.timing_source, TimingSource::TokenDurationsLagged);
+    assert_eq!(result.timing_source, TimingSource::DecoderTokenEstimates);
     assert!(
         result
             .words
@@ -307,7 +307,7 @@ fn assert_short(result: &Recognition) {
             result.words
         );
     }
-    assert_eq!(result.timing_source, TimingSource::TokenDurationsLagged);
+    assert_eq!(result.timing_source, TimingSource::DecoderTokenEstimates);
     assert!(
         result
             .words

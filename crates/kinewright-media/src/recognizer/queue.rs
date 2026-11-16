@@ -218,7 +218,7 @@ pub(crate) fn drive(
     drain(session.as_mut(), &mut words, &mut progress)?;
     cancelled(cancel)?;
     Ok(Recognition {
-        timing_source: TimingSource::TokenDurationsLagged,
+        timing_source: TimingSource::DecoderTokenEstimates,
         words,
     })
 }

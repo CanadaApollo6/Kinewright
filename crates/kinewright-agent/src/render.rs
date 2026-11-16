@@ -639,7 +639,7 @@ pub fn render_asset_transcript(asset: AssetId, status: &TranscriptStatus) -> Str
         }
         TranscriptStatus::Ready(transcript) => {
             let mut output = format!(
-                "asset {asset} transcript fps={}/{} words={}\n",
+                "asset {asset} transcript fps={}/{} words={} word_timing=approximate_transcript_intervals (ends are not measured speech boundaries)\n",
                 transcript.source_fps.numerator(),
                 transcript.source_fps.denominator(),
                 transcript.words.len()
@@ -667,7 +667,7 @@ pub fn render_timeline_transcript(
     words: &[TimelineTranscriptWord],
 ) -> String {
     let mut output = format!(
-        "timeline transcript range={}..{} words={}\n",
+        "timeline transcript range={}..{} words={} word_timing=approximate_transcript_intervals (ends are not measured speech boundaries)\n",
         frame_and_seconds(range.start, document.fps),
         frame_and_seconds(range.end, document.fps),
         words.len()
@@ -2180,7 +2180,7 @@ assets:
             transcript.asset,
             &TranscriptStatus::Ready(std::sync::Arc::new(transcript)),
         );
-        let expected = r#"asset 4 transcript fps=30/1 words=3
+        let expected = r#"asset 4 transcript fps=30/1 words=3 word_timing=approximate_transcript_intervals (ends are not measured speech boundaries)
 30f/1.000s..36f/1.200s "Hello"
 39f/1.300s..45f/1.500s "um"
 48f/1.600s..60f/2.000s "world.""#;
@@ -2214,7 +2214,7 @@ assets:
             },
         ];
         let rendered = render_timeline_transcript(&fixture(), TimeCode(0)..TimeCode(30), &words);
-        let expected = r#"timeline transcript range=0f/0.000s..30f/1.000s words=2
+        let expected = r#"timeline transcript range=0f/0.000s..30f/1.000s words=2 word_timing=approximate_transcript_intervals (ends are not measured speech boundaries)
 clip=10 asset=4 project=0f/0.000s..6f/0.200s source=30f/1.000s..36f/1.200s "Hello"
 clip=10 asset=4 project=9f/0.300s..15f/0.500s source=39f/1.300s..45f/1.500s "um""#;
         assert_eq!(rendered, expected);

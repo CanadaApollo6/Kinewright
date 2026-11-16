@@ -70,8 +70,15 @@ commits. Parakeet decodes each bounded piece separately. The streaming adapter
 normalises native stream-global times to window-relative times; the offline
 adapter returns piece-relative times. The session adds the window epoch exactly once. A commit never resets the
 source clock. Word times and audio progress are integer microseconds. Recognition
-is tagged `TokenDurationsLagged`: token-duration starts lag sound by about
-30–250 ms and scatter. **These times are not measured cut edges.** No confidence
+is tagged `DecoderTokenEstimates`. Nemotron EN uses greedy RNN-T token-emission frames:
+its end is the final lexical token's frame plus one 80 ms encoder frame. A
+single-token word therefore has an 80 ms span, not a measured speech duration.
+Parakeet TDT uses predicted token durations. Both are approximate decoder
+alignments that can lag or miss sound; **neither end is a measured speech end or
+safe cut edge**. No longer end is invented from blanks or the next word.
+The check report's `hole_basis: approximate_transcript_intervals` labels both
+`holes` and `sounding_holes`: they depend on those approximate intervals. Sound
+in such a gap may be an aligned word's tail, not missing transcript speech. No confidence
 or speaker information is invented by the recogniser.
 
 A process-wide serial worker serves assets and voice notes. Queued work reuses
@@ -91,7 +98,7 @@ again before its result is published.
 ## Cache and voice notes
 
 Exact microsecond recognition and its timing source are stored under
-`transcripts/v5` and `voice-transcripts/v5`. Keys include source SHA-256, frame
+`transcripts/v6` and `voice-transcripts/v6`. Keys include source SHA-256, frame
 rate, duration, language request and the full recogniser identity: model id and
 file hash, runtime version, native build key, threads, lookahead, feed size,
 punctuation/verbatim settings and pause policy. The identity records the fixed

@@ -191,8 +191,18 @@ fn zero(value: &u64) -> bool {
     *value == 0
 }
 
+/// Hole counts use approximate transcript intervals. Sound within such a gap
+/// may be the tail of an aligned word, rather than omitted speech.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HoleBasis {
+    ApproximateTranscriptIntervals,
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct Report {
+    /// Applies to both total/omitted holes and `sounding_holes`, and hole details.
+    pub hole_basis: HoleBasis,
     pub duration_us: u64,
     /// Audit policy snapshot; each input Dialogue retains its own guard policy.
     #[serde(skip_serializing_if = "default_policy")]
@@ -564,6 +574,7 @@ pub fn audit<D: Borrow<Dialogue>>(
         }
     }
     Ok(Report {
+        hole_basis: HoleBasis::ApproximateTranscriptIntervals,
         hole_groups,
         duration_us: duration,
         settings: *settings,

@@ -8806,7 +8806,14 @@ impl KinewrightMcp {
         requested: Option<TranscriptRangeArgs>,
     ) -> Result<CallToolResult, McpError> {
         if self.dialogue_enabled() {
-            return self.bound_transcript(requested);
+            let mut result = self.bound_transcript(requested)?;
+            if let Some(serde_json::Value::Object(payload)) = &mut result.structured_content {
+                payload.insert(
+                    "word_timing".into(),
+                    serde_json::json!("approximate_transcript_intervals"),
+                );
+            }
+            return Ok(result);
         }
         let document = self.document()?;
         let range = requested.map_or(TimeCode::ZERO..document.duration, |range| {
@@ -14974,19 +14981,19 @@ fn inspector_tools() -> Vec<Tool> {
         .with_annotations(read_only()),
         Tool::new(
             "get_transcript",
-            "Return one asset's word-timestamped transcript in exact source frames and seconds, or its background transcription status.",
+            "Return one asset's transcript in source frames and seconds, or its background transcription status. Word spans are approximate decoder alignments; ends are not measured speech boundaries.",
             schema_object::<TranscriptArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
             "get_transcripts",
-            "Return transcripts for up to 32 assets in one ordered response, avoiding repeated model round trips while preserving exact source-frame word timestamps.",
+            "Return transcripts for up to 32 assets in one ordered response. Word spans use source frames but are approximate decoder alignments; ends are not measured speech boundaries.",
             schema_object::<TranscriptsArgs>(),
         )
         .with_annotations(read_only()),
         Tool::new(
             "get_timeline_transcript",
-            "Return audible words mapped through clips to exact project frames and seconds. Use these boundaries for precise TrimClip, SplitClip, and DeleteClip edits.",
+            "Return audible transcript words mapped through clips to project frames and seconds. Word spans are approximate alignments, not measured speech boundaries. Use measured sound to place cut edges; transcript-gap counts can include aligned word tails.",
             schema_object::<TimelineTranscriptArgs>(),
         )
         .with_annotations(read_only()),

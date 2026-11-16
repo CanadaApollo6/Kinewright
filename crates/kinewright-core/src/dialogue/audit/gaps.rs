@@ -7,6 +7,8 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
+/// A gap between approximate transcript intervals, with measured level evidence.
+/// Its bounds are not measured speech ends; sound here can belong to a word tail.
 pub struct Hole {
     pub location: Location,
     /// One wordless playback interval may have several source portions.

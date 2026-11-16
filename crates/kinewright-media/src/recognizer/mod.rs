@@ -181,11 +181,13 @@ impl Identity {
     }
 }
 
-/// Token-duration times lag sound by 30–250 ms and scatter. They identify words;
-/// they do not identify safe cut edges. DQ2 supplies measured sound boundaries.
+/// Approximate decoder alignment, never measured speech boundaries. RNN-T uses
+/// first/last lexical-token emission frames (one 80 ms frame for a single token);
+/// TDT uses predicted token skips. Neither establishes acoustic word ends.
+/// Measured sound, not these intervals, determines safe cut edges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TimingSource {
-    TokenDurationsLagged,
+    DecoderTokenEstimates,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

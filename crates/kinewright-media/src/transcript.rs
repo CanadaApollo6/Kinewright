@@ -23,7 +23,7 @@ use crate::{
 };
 
 // Zero-start decode retains codec preroll; older word results must be recomputed.
-const CACHE_VERSION: u32 = 5;
+const CACHE_VERSION: u32 = 6;
 use crate::recognizer::{self, ENGLISH_MODEL, Identity, Recognition};
 #[cfg(any(test, feature = "test-util"))]
 type InferenceGate = Arc<std::sync::Mutex<Option<(Sender<()>, crossbeam_channel::Receiver<()>)>>>;
@@ -992,7 +992,7 @@ mod tests {
             source_frames: job.asset.duration,
             language: None,
             recognition: Recognition {
-                timing_source: recognizer::TimingSource::TokenDurationsLagged,
+                timing_source: recognizer::TimingSource::DecoderTokenEstimates,
                 words: vec![recognizer::Word {
                     text: "exact".into(),
                     start_us: 12_345,
@@ -1203,7 +1203,7 @@ mod tests {
             source_frames: TimeCode(240),
             language: Some("en".into()),
             recognition: Recognition {
-                timing_source: recognizer::TimingSource::TokenDurationsLagged,
+                timing_source: recognizer::TimingSource::DecoderTokenEstimates,
                 words: vec![recognizer::Word {
                     text: "Um,".into(),
                     start_us: 1_001_000,
@@ -1643,7 +1643,7 @@ mod measurement_tests {
                     source_frames: job.asset.duration,
                     language: None,
                     recognition: Recognition {
-                        timing_source: recognizer::TimingSource::TokenDurationsLagged,
+                        timing_source: recognizer::TimingSource::DecoderTokenEstimates,
                         words: Vec::new(),
                     },
                 }),

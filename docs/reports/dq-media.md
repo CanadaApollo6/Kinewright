@@ -603,3 +603,128 @@ target size is **25,714,339,913 bytes** (25.714 GB), below the 40 GB cap.
 Protected dialogue-tool files and Core `dialogue/` remain byte-identical to
 `517d7f40`; no cut policy was changed to improve the rehearsal result.
 All started build and test processes completed before this commit.
+
+## Ruling 6: decoder word ends
+
+The pinned runtime already emits the best end alignment its decoders provide;
+no native timestamp arithmetic or word span is changed here. The issue is the
+meaning assigned to those spans. Nemotron EN does **not** expose acoustic word
+ends. Its greedy RNN-T head has token-emission frame positions, not a duration
+prediction. Parakeet's TDT head has predicted token skips, also not acoustic ends.
+
+### Evidence and decision
+
+The inspected source checkout is exactly NeMo-Speech.cpp
+`20999cc921d2b14aa58708f61756a8b2e787ba20`, the repository pin. Source and models
+were read from the probe without writing there. The two GGUF headers independently
+confirm `asr.head_type=rnnt` for EN (no `asr.tdt.durations` entry) and `tdt` for
+Parakeet (durations `[0,1,2,3,4]`). Both have encoder subsampling 8 and 10 ms input
+hops: one encoder frame is 80 ms. The extracted headers are recorded in
+`target/dq-media/word-ends/model-metadata.json`.
+
+At the pinned revision:
+
+- [`RnntModel::make_transducer_decoder`](https://github.com/NVIDIA/NeMo-Speech.cpp/blob/20999cc921d2b14aa58708f61756a8b2e787ba20/src/asr/model.cpp#L2005)
+  selects `TdtGreedyDecoder` only when the duration table is nonempty, otherwise
+  `RnntGreedyDecoder`.
+- [RNN-T `present_token`](https://github.com/NVIDIA/NeMo-Speech.cpp/blob/20999cc921d2b14aa58708f61756a8b2e787ba20/src/asr/decoders/rnnt_greedy_decoder.cpp#L185)
+  records the first token's emission frame and updates the end to the last
+  non-punctuation token's frame plus one. A single token therefore spans exactly
+  one encoder frame. Multiple tokens emitted at that same frame can also have
+  an 80 ms span. Blank frames do not extend the word.
+- [TDT decoding](https://github.com/NVIDIA/NeMo-Speech.cpp/blob/20999cc921d2b14aa58708f61756a8b2e787ba20/src/asr/decoders/rnnt_greedy_decoder.cpp#L425)
+  reads the predicted duration index and uses the final lexical token's frame
+  plus `max(1, skip)` as its end. Those durations already reach the word result.
+- [`RecognitionStream::set_word_time_`](https://github.com/NVIDIA/NeMo-Speech.cpp/blob/20999cc921d2b14aa58708f61756a8b2e787ba20/src/asr/recognizer.cpp#L638)
+  converts these frames to milliseconds and bounds them by input duration.
+  [The C API](https://github.com/NVIDIA/NeMo-Speech.cpp/blob/20999cc921d2b14aa58708f61756a8b2e787ba20/src/asr/c_api.cpp#L499)
+  returns that end directly. Our FFI converts milliseconds to microseconds; it
+  does not insert an 80 ms duration.
+
+The R2 transcript has 758 spans of 80 ms out of 906 words. Its other 148 spans
+range from 160 to 880 ms in 80 ms increments. For example, `remote` is
+4.320–4.480 s, `actually` 8.080–8.240 s, and `that's` 9.680–10.160 s.
+These observations agree with decoder token-frame spans, not a Rust-wide fixed
+word-length rule. The histogram is `target/dq-media/word-ends/r2-widths.json`.
+
+Choice left open by the ruling: retain the existing decoder estimates, rather
+than extend words through blanks, to the next onset, or through a VAD interval.
+None of those would establish the requested word's real end. No model swap,
+forced aligner, or acoustic-policy change is introduced. The recognition
+provenance is now accurately named `DecoderTokenEstimates` for both backends,
+replacing the incorrect blanket `TokenDurationsLagged` tag. Transcript and voice
+transcript caches move to v6 so old payloads cannot retain the misleading tag;
+the independent sound-profile cache is unchanged.
+
+### Consumers and hole counts
+
+Transcript rendering, the three transcript tool descriptions, and the bound
+timeline reply now explicitly label spans as approximate transcript intervals.
+The timeline descriptor no longer recommends these boundaries as precise cut
+edges. The frame coordinates remain exact representations of approximate
+alignments. Core's transcript DTO documentation states this distinction too.
+Captions, search, word selection, multicam grouping, scoring and transcript-only
+fallbacks still use those intervals for their existing temporal/addressing
+purposes; they acquire no claim of measured speech ends. The dialogue resolver
+already uses measured quiet/dips for edges; it is unchanged.
+
+The hole audit **does depend** on the supplied ends:
+`audit/gaps.rs::gaps` subtracts transcript intervals, then `sound_portions`
+measures levels within the remainder. Thus `holes` is a count of sufficiently
+long transcript-interval gaps, and `sounding_holes` counts those portions with
+level evidence. A real word's tail beyond an 80 ms emission-frame span can
+contribute to both. The R2 totals 181 / 89 therefore cannot be interpreted as
+181 missing-speech gaps or 89 recognizer omissions.
+
+The report now always includes
+`hole_basis: "approximate_transcript_intervals"`, applying to total and omitted
+`holes` / `sounding_holes` and their detail rows. This labels the counts rather
+than replacing them with invented ends. The existing bounded-reply copier keeps
+this report metadata, and the real provider/dispatcher regression asserts its
+presence. No edit to worker 1's protected tool files or acoustic/extent policies
+is needed.
+
+`dialogue_audit_stub_ends_label_timing_dependent_hole_counts` holds audio and
+onset fixed: sound is 100–900 ms, onset 100 ms. A supplied 180 ms end yields
+`(holes, sounding_holes) = (1,1)`; a supplied 900 ms end yields `(0,0)`.
+Both wire reports must carry the qualification. Deliberately suppressing that
+serialized field fails `DQ_WORD_END_HOLE_BASIS`; restoring it passes. The real
+provider test also asserts `DQ_WORD_END_DISPATCHED_TRANSCRIPT_BASIS` and
+`DQ_WORD_END_DISPATCHED_HOLE_BASIS` through the real dispatcher.
+
+R2's historical files and measures remain unchanged. This is not R3; that rerun
+and M5 still await the lead's instructions after worker 1's merge.
+
+The unpaid measurement-pin recorder was run to refresh observed source hashes.
+Only four bridge hashes differ: MCP observation plus host, studio and runtime.
+The latter three source files are unchanged from `c7d63a08`: their pinned hashes
+were already stale after the earlier merge. All four now match actual file
+bytes. Model/options choices and limits are unchanged; no provider was launched.
+Decoder/accessor fragments were also checked directly against the pinned Git
+blobs, recorded in `target/dq-media/word-ends/pinned-source-evidence.json`.
+
+### Ruling 6 validation
+
+The full Core suite passed 898 tests (two ignored); media passed
+1,313 tests (83 ignored). The nine real-provider/dispatcher tests and
+23 renderer tests passed, including the new qualifier assertions.
+Workspace all-target clippy and formatting passed, as did workspace build and
+test compilation. All three isolated shipping checks and actual builds passed.
+Windows media and agent library/test Rust cross-checks passed; native Windows
+execution remains CI's responsibility.
+
+The targeted agent/native-linking/protocol/dialogue checks passed 101 tests,
+and app transcript/voice/capture/manual/feedback/exit checks passed 115.
+All four CI self-tests, slow-test lint and actionlint passed. Two exact wire
+expectations were deliberately updated for the qualifier: Core flag/all-report
+sizes increase by 48 bytes (93 → 141 and 20,260 → 20,308), and the legacy transcript
+header now includes the timing warning. The existing 2 KiB / 32 KiB assertions
+and cut/guard behavior assertions remain unchanged. Final clippy, formatting
+and dialogue tests passed after those expectation updates; production code did
+not change during that final test correction.
+
+The largest recorded target snapshot was 38,538,375,459 bytes. After all tests
+finished, inactive generated executables were pruned, preserving `target/dq1/`
+and all `target/dq-media/` evidence. Final target size is 26,147,377,523 bytes
+(26.147 GB). No started build or test remains running. Evidence is under
+`target/dq-media/word-ends/`; no push, R3 rerun or M5 switch was performed.
