@@ -129,6 +129,44 @@ fn rehearsal_filler_preserves_the_longer_pause_air() {
         .unwrap();
     let kept_air = (cut.start.at_micros() - 400_000) + (2_100_000 - cut.end.at_micros());
     assert_eq!(kept_air, 1_000_000, "DQ_REHEARSAL_NATURAL_PAUSE");
+    assert_eq!(
+        (cut.start.at_micros(), cut.end.at_micros()),
+        (430_000, 1_130_000)
+    );
+    // A mirrored take must preserve the longer outgoing flank instead.
+    let mirrored = SoundProfile::from_hops(
+        10_000,
+        3_000_000,
+        (0..d.profile().len())
+            .rev()
+            .map(|i| d.profile().hop(i).unwrap()),
+    )
+    .unwrap();
+    let labels = ["after", "uh", "before"];
+    let words = d
+        .words()
+        .iter()
+        .rev()
+        .enumerate()
+        .map(|(i, w)| Word {
+            text: labels[i].into(),
+            start_micros: 3_000_000 - w.end_micros,
+            end_micros: 3_000_000 - w.start_micros,
+        })
+        .collect();
+    let reversed = Dialogue::new(mirrored, words, Settings::default()).unwrap();
+    let cut = reversed
+        .resolve(CutRequest::RemoveWords {
+            from: 1,
+            to: 1,
+            leave_micros: None,
+        })
+        .unwrap();
+    assert_eq!(
+        (cut.start.at_micros(), cut.end.at_micros()),
+        (1_870_000, 2_570_000)
+    );
+    assert_eq!(cut.air.unwrap().actual_micros, 1_000_000);
 }
 #[test]
 fn rehearsal_pause_chooses_the_longest_of_two_runs() {

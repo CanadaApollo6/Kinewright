@@ -122,6 +122,11 @@ impl Dialogue {
     pub const fn thresholds(&self) -> &Thresholds {
         &self.thresholds
     }
+    /// Canonical non-voice quiet/valley runs used by edge placement.
+    #[must_use]
+    pub fn gap_runs(&self) -> &[Span] {
+        &self.gaps
+    }
     #[must_use]
     pub fn quiet_runs(&self) -> &[Span] {
         &self.quiet

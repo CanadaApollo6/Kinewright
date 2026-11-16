@@ -3,9 +3,10 @@ mod budget;
 mod check;
 mod cut;
 mod retention;
+mod transcript;
 pub(crate) use budget::bound as bound_check;
-pub(crate) use check::{CheckArgs, Detail as CheckDetail, check, check_created, spans};
-pub(crate) use cut::{CutArgs, plan};
+pub(crate) use check::{CheckArgs, Detail as CheckDetail, PlayedSpan, check, check_created, spans};
+pub(crate) use cut::{CutArgs, Outcome, plan};
 use kinewright_core::{
     MediaAsset,
     dialogue::{Dialogue, Settings, SoundProfile, Word},
@@ -16,6 +17,7 @@ use std::{
     fmt::Write as _,
     sync::{Arc, RwLock},
 };
+pub(crate) use transcript::{neighbours, word_frames};
 
 /// Flip only when the Media adapter supplies real, stream-bound measurements.
 pub const SERVE_DIALOGUE_TOOLS: bool = false;
@@ -172,6 +174,11 @@ pub trait DialogueMeasurements: Send + Sync {
 #[derive(Debug, PartialEq, Eq, Serialize, thiserror::Error)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum Refusal {
+    #[error("member conflicts with earlier member {other_index}: {cause}")]
+    Conflict {
+        other_index: usize,
+        cause: ConflictCause,
+    },
     #[error("recording has no measured speech level; no edge was guessed")]
     SpeechLevelUnavailable,
     #[error(
@@ -365,4 +372,13 @@ pub(crate) mod cost {
             OPERATIONS.load(Ordering::Relaxed),
         ]
     }
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictCause {
+    #[error("overlapping removals")]
+    Overlap,
+    #[error("a member word address would be removed")]
+    AddressRemoved,
 }

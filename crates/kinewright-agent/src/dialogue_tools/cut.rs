@@ -12,6 +12,9 @@ use std::{collections::BTreeMap, sync::Arc};
 pub(crate) struct CutArgs {
     pub expected_revision: TimelineRevision,
     pub removals: Vec<Removal>,
+    /// Require every member; by default the ready subset applies as one edit.
+    #[serde(default)]
+    pub atomic: bool,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +56,7 @@ pub(crate) struct Edge(
 )]
 pub(crate) enum Outcome {
     Ready {
+        index: usize,
         clip: u64,
         cut: [i64; 2],
         edges: [Edge; 2],
@@ -62,6 +66,7 @@ pub(crate) enum Outcome {
         other_pauses_micros: Vec<u64>,
     },
     Refused {
+        index: usize,
         #[serde(flatten)]
         reason: Refusal,
     },
@@ -75,7 +80,13 @@ pub(crate) struct Plan {
     pub created: Vec<TimeCode>,
     pub changes: super::retention::Changes,
 }
+#[derive(Clone, Copy)]
+struct AddressSpan {
+    clip: ClipId,
+    source: [ExactMicros; 2],
+}
 struct Cut {
+    addresses: [AddressSpan; 2],
     index: usize,
     track: TrackId,
     clip: ClipId,
@@ -391,6 +402,16 @@ fn resolve(
         Removal::Pause { .. } => value.dialogue.settings().minimum_pause_cut_micros,
     };
     Ok(Cut {
+        addresses: [first, last].map(|a| {
+            let word = &words[a.index];
+            AddressSpan {
+                clip: ClipId(a.clip),
+                source: [
+                    ExactMicros::integer(word.start_micros).max(played.source.start),
+                    ExactMicros::integer(word.end_micros).min(played.source.end),
+                ],
+            }
+        }),
         index,
         track: track.id,
         clip: clip.id,
@@ -487,6 +508,8 @@ fn heard_join(
 }
 #[derive(Clone, Copy)]
 struct CreatedCut {
+    original_start: TimeCode,
+    air: Option<[bool; 2]>,
     index: usize,
     at: TimeCode,
     requested_end: TimeCode,
@@ -615,6 +638,8 @@ fn try_cut(
                 })
                 .collect();
             geometry.push(CreatedCut {
+                original_start: cut.start,
+                air: cut.air.map(|a| [a.left.is_some(), a.right.is_some()]),
                 index: cut.index,
                 at: start,
                 requested_end: TimeCode(cut.end.0 - removed - width),
@@ -623,6 +648,7 @@ fn try_cut(
                 overrule: cut.overrule,
                 minimum: cut.minimum,
             });
+            geometry.sort_by_key(|c| c.original_start);
             let flags = edge_overrules(&geometry, start);
             let heard = match heard_join(
                 &trial,
@@ -639,6 +665,25 @@ fn try_cut(
                 }
             };
             if let Err(reason) = keeps(heard, cut.asset, cut.proposal, cut.minimum) {
+                last = Some(reason);
+                continue;
+            }
+            let prior = geometry
+                .iter()
+                .filter(|c| c.index != cut.index)
+                .try_for_each(|c| {
+                    let flags = edge_overrules(&geometry, c.at);
+                    let heard = heard_join(
+                        &trial,
+                        cut.track,
+                        c.at,
+                        values,
+                        provider,
+                        [!flags[0], !flags[1]],
+                    )?;
+                    keeps(heard, c.asset, c.proposal, c.minimum)
+                });
+            if let Err(reason) = prior {
                 last = Some(reason);
                 continue;
             }
@@ -685,9 +730,138 @@ fn try_cut(
         )
     }))
 }
+
+fn air_side(
+    pieces: &[super::check::PlayedSpan],
+    track: TrackId,
+    at: TimeCode,
+    outgoing: bool,
+    values: &BTreeMap<kinewright_core::AssetId, Arc<BoundDialogue>>,
+    used: &mut std::collections::BTreeSet<kinewright_core::AssetId>,
+) -> Option<ExactMicros> {
+    let mut total = ExactMicros::ZERO;
+    let mut cursor = at;
+    let mut nearby = pieces.iter().filter(|s| {
+        s.track == track
+            && if outgoing {
+                s.project.end <= at
+            } else {
+                s.project.start >= at
+            }
+    });
+    while let Some(span) = if outgoing {
+        nearby.next_back()
+    } else {
+        nearby.next()
+    } {
+        let boundary = if outgoing {
+            span.project.end
+        } else {
+            span.project.start
+        };
+        if boundary != cursor
+            || !span.proven
+            || outgoing && span.source.padding != ExactMicros::ZERO
+        {
+            return None;
+        }
+        let value = values.get(&span.asset)?;
+        used.insert(span.asset);
+        let edge = if outgoing {
+            span.source.end
+        } else {
+            span.source.start
+        };
+        let run = value.dialogue.gap_runs().iter().find(|run| {
+            let start = ExactMicros::integer(run.start_micros());
+            let end = ExactMicros::integer(run.end_micros());
+            if outgoing {
+                start < edge && edge <= end
+            } else {
+                start <= edge && edge < end
+            }
+        });
+        let Some(run) = run else {
+            return Some(total);
+        };
+        let lo = ExactMicros::integer(run.start_micros()).max(span.source.start);
+        let hi = ExactMicros::integer(run.end_micros()).min(span.source.end);
+        total = total.checked_add(hi.checked_sub(lo).ok()?).ok()?;
+        if (outgoing && lo > span.source.start) || (!outgoing && hi < span.source.end) {
+            return Some(total);
+        }
+        if span.source.padding != ExactMicros::ZERO {
+            return None;
+        }
+        cursor = if outgoing {
+            span.project.start
+        } else {
+            span.project.end
+        };
+    }
+    Some(total)
+}
+fn retained_air(
+    mask: Option<[bool; 2]>,
+    pieces: &[super::check::PlayedSpan],
+    track: TrackId,
+    at: TimeCode,
+    values: &BTreeMap<kinewright_core::AssetId, Arc<BoundDialogue>>,
+    used: &mut std::collections::BTreeSet<kinewright_core::AssetId>,
+) -> Option<ExactMicros> {
+    let mask = mask?;
+    let left = if mask[0] {
+        air_side(pieces, track, at, true, values, used)?
+    } else {
+        ExactMicros::ZERO
+    };
+    let right = if mask[1] {
+        air_side(pieces, track, at, false, values, used)?
+    } else {
+        ExactMicros::ZERO
+    };
+    left.checked_add(right).ok()
+}
+
+struct Accepted {
+    asset: kinewright_core::AssetId,
+    index: usize,
+    window: super::retention::Window,
+    addresses: [AddressSpan; 2],
+    width: i64,
+}
+fn removes(window: super::retention::Window, address: AddressSpan) -> bool {
+    window.clip == address.clip
+        && window.source[0] <= address.source[0]
+        && window.source[1] >= address.source[1]
+}
+fn conflict(cut: &Cut, accepted: &[Accepted]) -> Option<Refusal> {
+    let window = super::retention::Window {
+        clip: cut.clip,
+        source: cut.proposal,
+        project: [cut.start, cut.end],
+    };
+    accepted.iter().find_map(|old| {
+        let cause = if window.project[0] < old.window.project[1]
+            && old.window.project[0] < window.project[1]
+        {
+            super::ConflictCause::Overlap
+        } else if old.addresses.iter().any(|&a| removes(window, a))
+            || cut.addresses.iter().any(|&a| removes(old.window, a))
+        {
+            super::ConflictCause::AddressRemoved
+        } else {
+            return None;
+        };
+        Some(Refusal::Conflict {
+            other_index: old.index,
+            cause,
+        })
+    })
+}
 #[allow(
     clippy::too_many_lines,
-    reason = "one atomic plan and final audible geometry"
+    reason = "one snapshot plan with independently admitted members"
 )]
 pub(crate) fn plan(
     doc: &Document,
@@ -698,82 +872,95 @@ pub(crate) fn plan(
         return Err(request("submit 1 to 32 removals"));
     }
     let mut bindings = BTreeMap::new();
-    for removal in &args.removals {
-        let (first, last, _, _) = selected(removal);
-        for address in [first, last] {
-            let clip = doc
-                .clip(ClipId(address.clip))
-                .ok_or(Refusal::Clip { clip: address.clip })?;
-            if !bindings.contains_key(&clip.asset) {
-                let value = cached(
-                    provider,
-                    doc.asset(clip.asset).ok_or(Refusal::Identity)?,
-                    &bindings,
-                )?;
-                bindings.insert(clip.asset, value);
-            }
-            let value = &bindings[&clip.asset];
-            if value.binding != address.binding {
-                return Err(Refusal::BindingChanged);
-            }
-            if address.index >= value.dialogue.words().len() {
-                return Err(Refusal::Word);
-            }
-        }
-    }
-    let mut outcomes = Vec::new();
-    let mut cuts = Vec::new();
-    for (index, r) in args.removals.iter().enumerate() {
-        match resolve(
-            doc,
-            index,
-            r,
-            &bindings[&doc
-                .clip(ClipId(selected(r).0.clip))
-                .ok_or(Refusal::Word)?
-                .asset],
-        ) {
-            Ok(c) => {
-                cuts.push(c);
-                outcomes.push(None);
-            }
-            Err(reason) => outcomes.push(Some(Outcome::Refused { reason })),
-        }
-    }
-    let track = cuts.first().map_or(TrackId(0), |c| c.track);
-    let windows = cuts
+    // Every address and proposal is resolved on the original immutable revision.
+    let proposals: Vec<_> = args
+        .removals
         .iter()
-        .map(|c| super::retention::Window {
-            clip: c.clip,
-            source: c.proposal,
-            project: [c.start, c.end],
+        .enumerate()
+        .map(|(index, removal)| {
+            let (first, last, _, _) = selected(removal);
+            for address in [first, last] {
+                let clip = doc
+                    .clip(ClipId(address.clip))
+                    .ok_or(Refusal::Clip { clip: address.clip })?;
+                if !bindings.contains_key(&clip.asset) {
+                    let value = cached(
+                        provider,
+                        doc.asset(clip.asset).ok_or(Refusal::Identity)?,
+                        &bindings,
+                    )?;
+                    bindings.insert(clip.asset, value);
+                }
+                let value = &bindings[&clip.asset];
+                if value.binding != address.binding {
+                    return Err(Refusal::BindingChanged);
+                }
+                if address.index >= value.dialogue.words().len() {
+                    return Err(Refusal::Word);
+                }
+            }
+            resolve(
+                doc,
+                index,
+                removal,
+                &bindings[&doc.clip(ClipId(first.clip)).ok_or(Refusal::Word)?.asset],
+            )
         })
         .collect();
-    let retention = super::retention::Retention::new(doc, track, windows)?;
-    cuts.sort_by_key(|c| (c.start, c.end));
-    let mut operations = Vec::new();
+    let mut accepted: Vec<Accepted> = Vec::new();
+    let mut outcomes = Vec::new();
     let mut working = doc.clone();
+    let mut operations = Vec::new();
     let mut origins = super::retention::Origins::new();
-    let mut previous_end = None;
-    let mut removed = 0;
     let mut created = Vec::new();
-    for cut in cuts {
-        let result = if cut.track != track || previous_end.is_some_and(|e| cut.start < e) {
-            Err(request("submit disjoint removals on one dialogue track"))
-        } else {
-            try_cut(
-                &working,
-                &cut,
-                &mut bindings,
-                provider,
-                removed,
-                &origins,
-                &created,
-                &retention,
-            )
+    let mut track = None;
+    for (index, proposal) in proposals.into_iter().enumerate() {
+        let cut = match proposal {
+            Ok(c) => c,
+            Err(reason) => {
+                outcomes.push(Outcome::Refused { index, reason });
+                continue;
+            }
         };
-        previous_end = Some(cut.end);
-        outcomes[cut.index] = Some(match result {
+        if track.is_some_and(|t| t != cut.track) {
+            outcomes.push(Outcome::Refused {
+                index,
+                reason: request("submit removals on one dialogue track"),
+            });
+            continue;
+        }
+        if let Some(reason) = conflict(&cut, &accepted) {
+            outcomes.push(Outcome::Refused { index, reason });
+            continue;
+        }
+        let window = super::retention::Window {
+            clip: cut.clip,
+            source: cut.proposal,
+            project: [cut.start, cut.end],
+        };
+        // Refused proposals never exempt source coverage from the extent checks.
+        let windows = accepted
+            .iter()
+            .map(|c| c.window)
+            .chain(std::iter::once(window))
+            .collect();
+        let retention = super::retention::Retention::new(doc, cut.track, windows)?;
+        let removed = accepted
+            .iter()
+            .filter(|c| c.window.project[0] < cut.start)
+            .map(|c| c.width)
+            .sum();
+        let result = try_cut(
+            &working,
+            &cut,
+            &mut bindings,
+            provider,
+            removed,
+            &origins,
+            &created,
+            &retention,
+        );
+        match result {
             Ok(Trial {
                 document,
                 operations: ops,
@@ -786,83 +973,85 @@ pub(crate) fn plan(
                 for edge in &mut edges {
                     edge.0 += removed;
                 }
-                removed += end.0 - start.0;
+                accepted.push(Accepted {
+                    asset: cut.asset,
+                    index,
+                    window,
+                    addresses: cut.addresses,
+                    width: end.0 - start.0,
+                });
+                track = Some(cut.track);
                 working = document;
                 origins = next;
                 created = geometry;
                 operations.extend(ops);
-                let kept_air_micros = cut.air.and_then(|air| {
-                    let left = if let Some(run) = air.left {
-                        edges[0]
-                            .2
-                            .checked_sub(ExactMicros::integer(run.start_micros()))
-                            .ok()?
-                    } else {
-                        ExactMicros::integer(0)
-                    };
-                    let right = if let Some(run) = air.right {
-                        ExactMicros::integer(run.end_micros())
-                            .checked_sub(edges[1].2)
-                            .ok()?
-                    } else {
-                        ExactMicros::integer(0)
-                    };
-                    left.checked_add(right).ok()
-                });
-                Outcome::Ready {
-                    kept_air_micros,
-                    other_pauses_micros: cut.other_pauses_micros,
+                outcomes.push(Outcome::Ready {
+                    index,
                     clip: cut.clip.0,
                     cut: [edges[0].0, edges[1].0],
                     edges,
-                }
+                    kept_air_micros: None,
+                    other_pauses_micros: cut.other_pauses_micros,
+                });
             }
-            Err(reason) => Outcome::Refused { reason },
-        });
+            Err(reason) => outcomes.push(Outcome::Refused { index, reason }),
+        }
     }
-    for cut in &created {
-        let flags = edge_overrules(&created, cut.at);
-        let result = heard_join(
+    let track = track.unwrap_or(TrackId(0));
+    let mut final_spans = spans(&working)?;
+    final_spans.sort_by_key(|s| (s.track, s.project.start));
+    let mut air_assets = std::collections::BTreeSet::new();
+    for c in &created {
+        let flags = edge_overrules(&created, c.at);
+        let heard = heard_join(
             &working,
             track,
-            cut.at,
+            c.at,
             &mut bindings,
             provider,
             [!flags[0], !flags[1]],
-        )
-        .and_then(|heard| {
-            keeps(heard, cut.asset, cut.proposal, cut.minimum)?;
-            Ok(heard)
-        });
-        match result {
-            Ok(heard) => {
-                if let Some(Outcome::Ready { edges, .. }) = &mut outcomes[cut.index] {
-                    for (i, out) in edges.iter_mut().enumerate() {
-                        out.0 = cut.at.0;
-                        if let Some((asset, at)) = heard[i] {
-                            *out = edge(&bindings[&asset], asset, at, cut.at, flags[i]);
-                        }
-                    }
+        )?;
+        keeps(heard, c.asset, c.proposal, c.minimum)?;
+        if let Outcome::Ready {
+            edges,
+            kept_air_micros,
+            ..
+        } = &mut outcomes[c.index]
+        {
+            *kept_air_micros =
+                retained_air(c.air, &final_spans, track, c.at, &bindings, &mut air_assets);
+            for (i, out) in edges.iter_mut().enumerate() {
+                out.0 = c.at.0;
+                if let Some((asset, at)) = heard[i] {
+                    *out = edge(&bindings[&asset], asset, at, c.at, flags[i]);
                 }
             }
-            Err(reason) => outcomes[cut.index] = Some(Outcome::Refused { reason }),
         }
     }
-    let mut changes = match retention.validate(&working, &origins, &mut bindings, provider) {
-        Ok(changes) => changes,
-        Err(reason) => {
-            if let Some(c) = created.last() {
-                outcomes[c.index] = Some(Outcome::Refused { reason });
-            }
-            super::retention::Changes::default()
+    let retention =
+        super::retention::Retention::new(doc, track, accepted.iter().map(|c| c.window).collect())?;
+    let mut changes = retention.validate(&working, &origins, &mut bindings, provider)?;
+    // Refused members are not commit dependencies. Keep only addressed and
+    // newly audible measurements actually used to authorize the ready edit.
+    let mut proof: std::collections::BTreeSet<_> =
+        accepted.iter().map(|c| c.asset).chain(air_assets).collect();
+    for span in final_spans {
+        let edge = |at| {
+            (span.track == track && created.iter().any(|c| c.at == at))
+                || changes
+                    .positions
+                    .get(&span.track)
+                    .is_some_and(|p| p.contains(&at))
+        };
+        if edge(span.project.start) || edge(span.project.end) {
+            proof.insert(span.asset);
         }
-    };
+    }
+    bindings.retain(|id, _| proof.contains(id));
+    // Unchanged neighbours added for readback are not authorization inputs.
     retention.selected_edges(&working, &origins, &mut changes)?;
-    let outcomes: Vec<_> = outcomes
-        .into_iter()
-        .map(|o| o.expect("outcome filled"))
-        .collect();
-    let valid = outcomes.iter().all(|o| matches!(o, Outcome::Ready { .. }));
+    let valid = !created.is_empty()
+        && (!args.atomic || outcomes.iter().all(|o| matches!(o, Outcome::Ready { .. })));
     Ok(Plan {
         outcomes,
         operations,
@@ -948,6 +1137,8 @@ mod tests {
             .unwrap(),
         );
         let make = |index, at, requested_end, overrule| CreatedCut {
+            original_start: TimeCode(at),
+            air: None,
             index,
             at: TimeCode(at),
             requested_end: TimeCode(requested_end),

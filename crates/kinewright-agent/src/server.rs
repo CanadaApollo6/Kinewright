@@ -2183,9 +2183,15 @@ impl KinewrightMcp {
                 self.asset_transcripts(&args.asset_ids)
             }
             "get_timeline_transcript" => {
-                let args: TimelineTranscriptArgs =
-                    decode_args("get_timeline_transcript", arguments)?;
-                self.timeline_transcript(args.range)
+                if self.dialogue_enabled() {
+                    let args: dialogue_dispatch::TranscriptArgs =
+                        decode_args("get_timeline_transcript", arguments)?;
+                    self.bound_transcript_filtered(args)
+                } else {
+                    let args: TimelineTranscriptArgs =
+                        decode_args("get_timeline_transcript", arguments)?;
+                    self.timeline_transcript(args.range)
+                }
             }
             "get_dialogue_pacing" => {
                 let args: DialoguePacingArgs = decode_args("get_dialogue_pacing", arguments)?;

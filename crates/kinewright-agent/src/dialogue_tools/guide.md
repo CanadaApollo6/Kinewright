@@ -7,3 +7,5 @@ A barely audible aside usually goes. A deliberate whisper or a quiet reply neede
 If a cut could change the meaning or lose a reaction, leave the passage. Tell the person what is at stake and what you recommend. Their stated preference overrides these defaults. Use the sounding-cut overrule only when the person asked for that cut.
 
 After cutting, read the check. Deal with each flag, or explain why it should stand.
+
+Use get_timeline_transcript with range (project frames) or word_range {clip,first,end} (end excluded). After cut_dialogue, use its revision and neighbours, up to three kept addresses on each side, instead of re-reading the take. Ready batch members apply together; atomic:true keeps all-or-nothing.

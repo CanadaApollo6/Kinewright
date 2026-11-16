@@ -3,7 +3,7 @@ fn dq_guide_is_bounded_and_pinned() {
     assert!(dq::GUIDE.len() <= 1500);
     assert_eq!(
         kinewright_media::sha256_bytes(dq::GUIDE.as_bytes()),
-        "7ba4b847923bdae403c804b174160640724413f6109f1d421270296fd7649282"
+        "73e3bc9715254c900a709fde405e1f22a620bd33c406a7e8a158358557f201aa"
     );
 }
 #[test]

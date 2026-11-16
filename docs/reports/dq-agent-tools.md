@@ -541,3 +541,112 @@ were removed; `target/` is 24 GiB. The full slow suite, Windows execution,
 renderer conformance and the Media worker's real-recording R3 are NOT RUN.
 No provider, paid or dry launch was run. Evidence is under
 `target/dq-rehearsal/`; the dialogue serve switch remains off.
+
+## Rehearsal rulings 4–5: partial batches and local transcript reads
+
+A batch resolves every proposal and authenticates its word addresses on one
+original revision before trying edits. Ready members apply together with one
+consent and one Undo; refused members carry their zero-based index and typed
+reason. `atomic: true` retains the previous all-or-nothing option. Input order
+breaks conflicts: a later overlapping member, or one whose cut erases another
+member's addressed word, is refused with `conflict`, `other_index` and a typed
+cause. Address coverage means the part audible in that original clip, including
+trimmed words. Refused proposals never exempt retained source from validation.
+The one-dialogue-track restriction and all measured/unmeasured extent guards
+remain. Every additional trial checks the earlier joins in its final geometry;
+reported air is recomputed there rather than copied from an intermediate trial.
+
+The enabled transcript accepts either `range` in project frames or
+`word_range: {clip, first, end}` in half-open recording indices. Returned indices
+and binding keys are the same as in the full read. Invalid ranges are typed
+refusals. The switch-off path and its schema/text/byte golden remain unchanged.
+
+A successful cut reports `neighbours: {bindings, joins}` at its returned revision.
+Each join carries up to three current `[clip, index]` addresses per side; binding
+keys appear once per clip in the dictionary. These addresses come from Core's
+committed document, not a later snapshot. Transcript and neighbour projection
+share one function. The readback shares the immutable authorization values and
+loads only extra nearby cached measurements. It stops at unproven or unavailable
+context and reports its typed cause instead of claiming more distant words are
+nearest. It performs no media decoding or provider command. A regression makes
+the next cut directly from the returned address, revision and binding, with no
+full transcript read, and checks one Undo restores the first cut.
+
+The guide retains its original taste advice and appends the two read options,
+revision/neighbour reuse and partial/atomic batch behaviour. It remains served
+only on capability lookup under the existing, still-off dialogue switch.
+
+Before/after evidence (`target/dq-rehearsal/r45-before*`, `p2-focus*`):
+
+| Regression | Before | After |
+| --- | --- | --- |
+| `dq_rehearsal_batch_applies_ready_members_and_names_conflicts` | `DQ_REHEARSAL_PARTIAL_BATCH`: refused instead of applied | Pass |
+| `dq_rehearsal_transcript_word_range_preserves_addresses` | `DQ_REHEARSAL_TRANSCRIPT_RANGE`: four words instead of two | Pass |
+| `dq_rehearsal_neighbours_are_current_addresses_for_the_next_cut` | `DQ_REHEARSAL_KEPT_NEIGHBOURS`: absent | Pass |
+
+The complete dialogue module passes **57 / 0 / 1 ignored**. It retains the full
+Item 12 unmeasured/provenance tests and Item 13 complete-reply comparisons at
+both binding checks. New controls cover atomic refusal before consent, reversed
+input order, erased-address conflicts, a bad first member on another track,
+a refused member whose unused measurement withdraws, ranges and clip boundaries.
+A combined filler/pause batch checks that both reported air values are the
+200,000 microseconds actually kept, rather than the filler's original 600,000.
+The Core addition for this readback is a borrowed `gap_runs()` accessor; there
+is no copied profile or second acoustic classifier. Air is omitted if its
+context cannot be measured, including padding that the source profile does not
+measure. Unchanged neighbours used only for readback do not become commit
+prerequisites; the addressed, guarded, extent and air measurements do.
+
+The guide is **1,228 bytes**, SHA-256
+`73e3bc9715254c900a709fde405e1f22a620bd33c406a7e8a158358557f201aa`.
+Measured guide lookup overhead is 1,250 bytes. The literal four-word `CallToolResult`
+is 741 bytes in full and 678 for two words. The existing 1,800-word fixture has
+79,267 bytes of structured content, with 87 bytes of addressing overhead (10 index, 77 binding).
+These are synthetic wire measurements, not the Media worker's R3 on the take.
+
+Only private pin leaf `arm_bridge_sha256.mcp_observation` changes from
+`065e39fccbdbe8351e175ba0942978e2d1e933c96907d8fb4a13df803c74d447`
+to `9bbd2ae81c9ca5c62861e51e1bbe8734e6019423b496295d8cff4e32cf6c2535`.
+Both pin tests pass over 8,856 named fields; model-visible leaves are unchanged
+and model/option values remain OPEN.
+
+The four initial calibration tests were red before the implementation and pass
+in the full Core run: `rehearsal_recording_levels_are_stored_and_validate_the_cache`,
+`rehearsal_quiet_take_does_not_call_soft_sound_quiet`,
+`rehearsal_soft_voice_is_never_a_valley_gap` and
+`rehearsal_noise_floor_refuses_instead_of_guessing`.
+Together with `rehearsal_filler_preserves_the_longer_pause_air` and
+`rehearsal_pause_chooses_the_longest_of_two_runs`, these are the Core before/after
+witnesses. Their original red logs are `r1-before.log` and `r23-before.log`.
+
+Final gate for rulings 4–5 (logs and result JSON under `target/dq-rehearsal/`):
+
+| Gate | Result | Wall time |
+| --- | --- | --- |
+| Full Core, after the mirrored longer-flank assertions | 912 passed / 0 failed / 2 ignored | 36.84 s |
+| Full Agent, including integration and doc tests | 1,764 / 0 / 166 | 1,100.11 s |
+| Dialogue module | 57 / 0 / 1 | 26.20 s (0.96 s test execution) |
+| Workspace all-target clippy, default / `te1-eval`, warnings denied | Pass / pass | 16.76 / 15.32 s |
+| Workspace build / test no-run | Pass / pass | 36.60 / 68.51 s |
+| Cargo fmt and explicit included-file rustfmt check | Pass | 3.80 s cargo fmt |
+| Pin tests | 2 / 0 / 0, 8,856 named fields | 67.44 s |
+| Windows cross-clippy and isolated shipping matrix | Four clippy modes, three Linux builds, three MSVC checks pass | 327.86 s |
+
+Slow-test lint agrees (140 slow tests, 161 ignored entries, 27 equipped skip
+sites); parser selftests pass 52 and shard selftests pass 23. The shipping
+matrix retains three existing feature-disabled Agent warnings; neither
+warnings-denied clippy mode has a warning.
+
+The retained `partial-refused-batch` mutation now exercises the explicit
+`atomic: true` option. Red fails at `DQ_TOOLS_WHOLE_BATCH_REFUSED`
+(0 passed / 1 failed); restored green passes (1 / 0). Its restored source
+SHA-256 is `1e41d2686282241d803fcea34284345eb4e5a1aaa0942d22c910ea1e9871a9ce`.
+The pair wrapper took 4,307.75 s, mostly waiting for the shared cargo lock;
+test execution was 0.02 s red and 0.01 s green. The restore was byte-identical.
+The natural-air witness additionally checks the exact edges for both longer
+incoming and longer outgoing flanks, including the guard-margin compensation.
+
+Successful isolated shipping targets were removed; `target/` is 18 GiB.
+No Media source changed. Full slow-suite execution, Windows execution,
+provider/paid/dry launches, renderer conformance and real-recording R3 are
+NOT RUN. R3 and word-end ruling 6 remain with the Media worker. M5 stays off.

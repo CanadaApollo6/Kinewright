@@ -272,15 +272,14 @@ mod dialogue_tool_tests {
         let (s, v) = fixture();
         let before = s.snapshot().unwrap();
         let history = s.core.export_history_identified().unwrap();
-        let result = cut(
-            &s,
-            args(vec![
-                words(&v, 1),
-                json!({"kind":"pause","after":address(&v,3),"leave_micros":250_000}),
-                words(&v, 3),
-            ]),
-            true,
-        );
+        let mut request = args(vec![
+            words(&v, 1),
+            json!({"kind":"pause","after":address(&v,3),"leave_micros":250_000}),
+            words(&v, 3),
+        ]);
+        // This retained whole-batch guard is the explicit atomic option now.
+        request["atomic"] = json!(true);
+        let result = cut(&s, request, true);
         assert_eq!(result.is_error, Some(true), "DQ_TOOLS_WHOLE_BATCH_REFUSED");
         assert_eq!(content(&result)["removals"].as_array().unwrap().len(), 3);
         assert_eq!(content(&result)["removals"][0]["outcome"], "ready");
@@ -923,6 +922,8 @@ mod dialogue_tool_tests {
     include!("dialogue_tools_review_tests.rs");
     include!("dialogue_tools_guide_tests.rs");
     include!("dialogue_tools_rehearsal_core_tests.rs");
+    include!("dialogue_tools_rehearsal_batch_tests.rs");
+    include!("dialogue_tools_rehearsal_read_tests.rs");
     include!("dialogue_tools_item12_tests.rs");
     include!("dialogue_tools_item13_tests.rs");
 }
