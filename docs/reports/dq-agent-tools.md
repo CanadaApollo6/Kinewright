@@ -474,3 +474,70 @@ Successful shipping targets (3.7 GiB and 907 MiB) were removed; `target/` is
 `target/dq-tools-review/pairs/late-binding-*`. The full slow suite, Windows
 execution, renderer conformance for the Item 12 waveform, and provider/paid/dry
 launches are NOT RUN. No provider command or paid entry was used.
+
+## Rehearsal rulings 1–3: calibrated edges and retained air
+
+The profile now stores speech RMS (the median of voice-flagged hops) and the
+unvoiced RMS tenth percentile in centidBFS. Both are authenticated by the binding.
+Strict decoding recomputes them and refuses omitted or forged calibration; no
+old-shape reader exists. All five acoustic thresholds shift by speech minus the
+named −20 dBFS reference. Effective thresholds remain exact even below the
+measurement floor: clamping them there could fabricate dips. A quiet threshold
+less than 6 dB above the floor returns `noise_separation` with all measured levels.
+Voice-flagged hops cannot be valleys. Transcript replies report the two integers
+once per bound recording, with a named column pair.
+
+Choices: an even-sized speech population uses the mean of its two middle
+centidB values, rounded down. The noise percentile uses zero-based rank
+`(count − 1) / 10`. A recording without measured speech refuses explicitly.
+An all-voice profile has no noise-floor value and supplies no quiet or valley.
+These are measured populations, never fallback levels from transcript words.
+
+Interior word removals with two measured flanks keep total air equal to the
+longer pause. The mandatory quiet margins remain; the shorter flank compensates
+for the margin consumed from the longer one. `leave_micros` requests a total
+split by the existing after/before ratio, bounded by available quiet. Actual
+heard air is reported after frame alignment. At a clip/recording boundary the
+cut reaches the boundary, leaving standard air next to the kept word; an
+explicit `leave_micros` applies to that one side. A dip without a second quiet
+flank also uses standard air. Pause trims select the longest measured run,
+break equal-length ties by earliest source time, and list the other lengths.
+
+Before/after evidence is in `target/dq-rehearsal/`: the quiet-take and soft-voice
+valley tests, stored-level and noisy-take tests failed on the original code.
+`rehearsal_filler_preserves_the_longer_pause_air` failed with 250,000 instead
+of 1,000,000 microseconds; `rehearsal_pause_chooses_the_longest_of_two_runs`
+failed with `AmbiguousPause`. Boundary-side tests cover standard and explicit
+air. The independent normal-speech/soft-voice test prevents a threshold shift
+from masking the voice exclusion. The streaming-PCM fixture measures speech
+near −50 dBFS; the full threshold-vector and quantile test uses literal values.
+
+Pause selection is also bounded by the clip's current audible span. The real
+consent/Undo regression trims the longest run, then trims the previously shorter
+run on the next revision, so the listed other pause is actionable after a split.
+
+The final Core suite passes **912 / 0 / 2 ignored** (41.88 s wall), and the
+full Agent suite passes **1,753 / 0 / 166 ignored** (1,097.58 s wall). The dialogue
+module passes **46 / 0 / 1 ignored**, including both current-clip boundary
+controls and the second-pause call. Old geometry controls explicitly retain
+fixed interior air and the standard boundary defaults. Synthetic measurements
+now include a reference speech population; the sounding sync tone stays fully
+sounding, and the padding fixture puts its calibration outside the played span.
+The original Agent extent, padding and clock assertions remain intact.
+
+Workspace all-target clippy passes with `-D warnings`, in default and `te1-eval`
+modes. Outcome headers stay inline: the request cap bounds 32 headers to roughly 9 KiB,
+so a targeted large-variant allowance avoids boxing each successful edge pair.
+Cargo fmt passes; included test files were formatted explicitly. Both pin tests
+pass over 8,856 named fields with the pin unchanged. Slow-test lint reports
+140 / 161 ignored entries / 27 equipped skip sites; parser selftests pass 52.
+
+All four Windows cross-clippy modes, three isolated Linux shipping builds and
+three isolated MSVC shipping checks pass (platform wrapper 661.63 s wall,
+including the shared-lock wait). Shard selftests pass 23. Feature-disabled
+shipping checks emit three warnings from unchanged Agent code; clippy remains
+clean with warnings denied. Successful shipping targets (3.7 GiB and 907 MiB)
+were removed; `target/` is 24 GiB. The full slow suite, Windows execution,
+renderer conformance and the Media worker's real-recording R3 are NOT RUN.
+No provider, paid or dry launch was run. Evidence is under
+`target/dq-rehearsal/`; the dialogue serve switch remains off.

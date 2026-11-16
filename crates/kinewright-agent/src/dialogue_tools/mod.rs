@@ -112,7 +112,21 @@ impl BoundDialogue {
         for b in digest.0.finalize() {
             write!(binding, "{b:02x}").expect("String write");
         }
-        let dialogue = Dialogue::new(profile, words, settings).map_err(|_| Refusal::NotMeasured)?;
+        let dialogue = Dialogue::new(profile, words, settings).map_err(|error| match error {
+            kinewright_core::dialogue::InputError::NoiseSeparation {
+                speech_rms_hundredths,
+                noise_floor_hundredths,
+                quiet_rms_hundredths,
+            } => Refusal::NoiseSeparation {
+                speech_rms_hundredths,
+                noise_floor_hundredths,
+                quiet_rms_hundredths,
+            },
+            kinewright_core::dialogue::InputError::SpeechLevelUnavailable => {
+                Refusal::SpeechLevelUnavailable
+            }
+            _ => Refusal::NotMeasured,
+        })?;
         Ok(Self {
             identity,
             stream,
@@ -158,6 +172,16 @@ pub trait DialogueMeasurements: Send + Sync {
 #[derive(Debug, PartialEq, Eq, Serialize, thiserror::Error)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum Refusal {
+    #[error("recording has no measured speech level; no edge was guessed")]
+    SpeechLevelUnavailable,
+    #[error(
+        "speech level {speech_rms_hundredths} and floor {noise_floor_hundredths} centidBFS are too close to quiet threshold {quiet_rms_hundredths}; use a cleaner recording"
+    )]
+    NoiseSeparation {
+        speech_rms_hundredths: i16,
+        noise_floor_hundredths: i16,
+        quiet_rms_hundredths: i16,
+    },
     #[error("media content identity is missing or differs from the bound measurement")]
     Identity,
     #[error("audio stream differs from the bound measurement")]

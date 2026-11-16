@@ -26,6 +26,7 @@ pub(crate) enum Removal {
     Words {
         first: WordAddress,
         last: WordAddress,
+        leave_micros: Option<u64>,
         overrule: Option<[u64; 2]>,
     },
     Pause {
@@ -46,11 +47,19 @@ pub(crate) struct Edge(
 );
 #[derive(Debug, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "at most 32 inline wire outcomes; boxing each successful edge pair adds an allocation"
+)]
 pub(crate) enum Outcome {
     Ready {
         clip: u64,
         cut: [i64; 2],
         edges: [Edge; 2],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kept_air_micros: Option<ExactMicros>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        other_pauses_micros: Vec<u64>,
     },
     Refused {
         #[serde(flatten)]
@@ -76,12 +85,15 @@ struct Cut {
     proposal: [ExactMicros; 2],
     overrule: bool,
     minimum: u64,
+    air: Option<kinewright_core::dialogue::RetainedAir>,
+    other_pauses_micros: Vec<u64>,
 }
 fn selected(r: &Removal) -> (&WordAddress, &WordAddress, Option<[u64; 2]>, CutRequest) {
     match r {
         Removal::Words {
             first,
             last,
+            leave_micros,
             overrule,
         } => (
             first,
@@ -90,6 +102,7 @@ fn selected(r: &Removal) -> (&WordAddress, &WordAddress, Option<[u64; 2]>, CutRe
             CutRequest::RemoveWords {
                 from: first.index,
                 to: last.index,
+                leave_micros: *leave_micros,
             },
         ),
         Removal::Pause {
@@ -301,7 +314,7 @@ fn resolve(
     } else {
         (false, false)
     };
-    if let CutRequest::RemoveWords { from, to } = &mut req {
+    if let CutRequest::RemoveWords { from, to, .. } = &mut req {
         if head {
             *from = 0;
         }
@@ -309,6 +322,8 @@ fn resolve(
             *to = words.len() - 1;
         }
     }
+    let mut air = None;
+    let mut other_pauses_micros = Vec::new();
     let proposal = if let Some(times) = overrule {
         if times[0] >= times[1] {
             return Err(request("overrule needs two forward source instants"));
@@ -318,7 +333,25 @@ fn resolve(
             ExactMicros::integer(times[1]),
         ]
     } else {
-        let resolved = value.dialogue.resolve(req).map_err(Refusal::from)?;
+        let resolved = match req {
+            CutRequest::TrimPause {
+                after_word,
+                leave_micros,
+            } => {
+                let available = kinewright_core::dialogue::Span::new(
+                    played.source.start.ceil(),
+                    played.source.end.floor(),
+                )
+                .map_err(|e| request(e.to_string()))?;
+                value
+                    .dialogue
+                    .resolve_pause_in(after_word, leave_micros, available)
+            }
+            CutRequest::RemoveWords { .. } => value.dialogue.resolve(req),
+        }
+        .map_err(Refusal::from)?;
+        air = resolved.air;
+        other_pauses_micros = resolved.other_pauses_micros;
         let a = value
             .dialogue
             .frame_edge(resolved.start, asset.fps)
@@ -367,6 +400,8 @@ fn resolve(
         proposal,
         overrule: overrule.is_some(),
         minimum,
+        air,
+        other_pauses_micros,
     })
 }
 fn edge(
@@ -756,7 +791,27 @@ pub(crate) fn plan(
                 origins = next;
                 created = geometry;
                 operations.extend(ops);
+                let kept_air_micros = cut.air.and_then(|air| {
+                    let left = if let Some(run) = air.left {
+                        edges[0]
+                            .2
+                            .checked_sub(ExactMicros::integer(run.start_micros()))
+                            .ok()?
+                    } else {
+                        ExactMicros::integer(0)
+                    };
+                    let right = if let Some(run) = air.right {
+                        ExactMicros::integer(run.end_micros())
+                            .checked_sub(edges[1].2)
+                            .ok()?
+                    } else {
+                        ExactMicros::integer(0)
+                    };
+                    left.checked_add(right).ok()
+                });
                 Outcome::Ready {
+                    kept_air_micros,
+                    other_pauses_micros: cut.other_pauses_micros,
                     clip: cut.clip.0,
                     cut: [edges[0].0, edges[1].0],
                     edges,

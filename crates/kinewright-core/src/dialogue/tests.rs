@@ -16,9 +16,11 @@ fn profile(hop: u32, duration: u64, voice: &[(u64, u64)], dips: &[(usize, i16)])
         duration,
         (0..duration.div_ceil(u64::from(hop))).map(|i| {
             let at = i * u64::from(hop);
-            let voiced = voice
-                .iter()
-                .any(|&(start, end)| start < at + u64::from(hop) && at < end);
+            // A reference voice hop calibrates otherwise ambient-only test profiles.
+            let voiced = voice.is_empty() && i == 0
+                || voice
+                    .iter()
+                    .any(|&(start, end)| start < at + u64::from(hop) && at < end);
             let level = dips
                 .iter()
                 .find(|&&(index, _)| u64::try_from(index).unwrap() == i)
@@ -147,7 +149,11 @@ fn dialogue_word_range_uses_measured_neighbor_gaps() {
     // Scarlet: "resolves a word range to padded edges in the measured gaps beside it".
     let d = fixture();
     let cut = d
-        .resolve(CutRequest::RemoveWords { from: 1, to: 1 })
+        .resolve(CutRequest::RemoveWords {
+            from: 1,
+            to: 1,
+            leave_micros: Some(250_000),
+        })
         .unwrap();
     assert_eq!(
         (cut.start.at_micros, cut.end.at_micros),
@@ -172,17 +178,25 @@ fn dialogue_word_range_uses_measured_neighbor_gaps() {
         }
     ));
     assert_eq!(
-        d.resolve(CutRequest::RemoveWords { from: 0, to: 0 })
-            .unwrap()
-            .start
-            .placement,
+        d.resolve(CutRequest::RemoveWords {
+            from: 0,
+            to: 0,
+            leave_micros: Some(250_000)
+        })
+        .unwrap()
+        .start
+        .placement,
         EdgePlacement::SourceBoundary { at_start: true }
     );
     assert_eq!(
-        d.resolve(CutRequest::RemoveWords { from: 2, to: 2 })
-            .unwrap()
-            .end
-            .at_micros,
+        d.resolve(CutRequest::RemoveWords {
+            from: 2,
+            to: 2,
+            leave_micros: Some(250_000)
+        })
+        .unwrap()
+        .end
+        .at_micros,
         5_000_000
     );
 }
@@ -205,7 +219,11 @@ fn dialogue_internal_valley_does_not_replace_the_whole_pause() {
     )
     .unwrap();
     let cut = d
-        .resolve(CutRequest::RemoveWords { from: 1, to: 1 })
+        .resolve(CutRequest::RemoveWords {
+            from: 1,
+            to: 1,
+            leave_micros: Some(250_000),
+        })
         .unwrap();
     assert_eq!(
         (cut.start.at_micros, cut.end.at_micros),
@@ -272,12 +290,16 @@ fn dialogue_a_single_deep_dip_can_place_a_running_word_boundary() {
             Settings::default(),
         )
         .unwrap();
-        let cut = d.resolve(CutRequest::RemoveWords { from: 1, to: 1 });
+        let cut = d.resolve(CutRequest::RemoveWords {
+            from: 1,
+            to: 1,
+            leave_micros: Some(250_000),
+        });
         if level == -6_000 {
             let cut = cut.unwrap();
             assert_eq!(
                 (cut.start.at_micros, cut.end.at_micros),
-                (1_410_000, 2_400_000)
+                (1_410_000, 2_250_000)
             );
             assert!(matches!(
                 cut.start.placement,
@@ -312,7 +334,11 @@ fn dialogue_two_dip_edges_refuse_a_word_from_running_speech() {
     .unwrap();
     assert!(
         matches!(
-            d.resolve(CutRequest::RemoveWords { from: 1, to: 1 }),
+            d.resolve(CutRequest::RemoveWords {
+                from: 1,
+                to: 1,
+                leave_micros: Some(250_000)
+            }),
             Err(Refusal {
                 reason: RefusalReason::BothDipEdges,
                 ..
@@ -340,9 +366,13 @@ fn dialogue_shared_gap_is_not_used_on_both_sides_of_a_short_word() {
     )
     .unwrap();
     assert_eq!(
-        d.resolve(CutRequest::RemoveWords { from: 1, to: 1 })
-            .unwrap_err()
-            .reason,
+        d.resolve(CutRequest::RemoveWords {
+            from: 1,
+            to: 1,
+            leave_micros: Some(250_000)
+        })
+        .unwrap_err()
+        .reason,
         RefusalReason::NoMeasuredEdge
     );
 }
@@ -371,7 +401,11 @@ fn dialogue_long_recording_profile_reaches_both_kept_words() {
     )
     .unwrap();
     let cut = d
-        .resolve(CutRequest::RemoveWords { from: 1, to: 2 })
+        .resolve(CutRequest::RemoveWords {
+            from: 1,
+            to: 2,
+            leave_micros: Some(250_000),
+        })
         .unwrap();
     assert_eq!(
         (cut.start.at_micros, cut.end.at_micros),
@@ -379,8 +413,8 @@ fn dialogue_long_recording_profile_reaches_both_kept_words() {
     );
 }
 #[test]
-fn dialogue_acoustics_override_stretched_word_times_and_bridged_vad() {
-    // Scarlet: "trusts measured silence over a stretched word timing" and "preserves a repairable edge ... long [trough] is measured silence".
+fn dialogue_stretched_word_times_do_not_override_voice_or_short_gaps() {
+    // A voice flag excludes a valley; a short non-voice gap still cannot bisect a word.
     let d = Dialogue::new(
         profile(
             10_000,
@@ -393,8 +427,11 @@ fn dialogue_acoustics_override_stretched_word_times_and_bridged_vad() {
     )
     .unwrap();
     assert!(d.quiet_runs().is_empty());
-    assert_eq!(d.sound_at(500_000), Sound::Quiet);
-    assert!(d.guard(500_000, AudibleSide::In).is_ok());
+    assert_eq!(d.sound_at(500_000), Sound::Sound);
+    assert!(matches!(
+        d.guard(500_000, AudibleSide::In).unwrap_err().reason,
+        RefusalReason::SoundingWord { .. }
+    ));
     let short = Dialogue::new(
         profile(
             10_000,
@@ -404,7 +441,9 @@ fn dialogue_acoustics_override_stretched_word_times_and_bridged_vad() {
                 .map(|i| {
                     (
                         i,
-                        if (30..38).contains(&i) {
+                        if i >= 80 {
+                            -9_000
+                        } else if (30..38).contains(&i) {
                             -5_000
                         } else {
                             -1_800
@@ -496,9 +535,13 @@ fn dialogue_untranscribed_continuous_sound_is_not_silently_accepted() {
 fn dialogue_frame_rounds_into_measured_support_not_nearest_outside() {
     let d = rounding_fixture();
     let cut = d
-        .resolve(CutRequest::RemoveWords { from: 1, to: 1 })
+        .resolve(CutRequest::RemoveWords {
+            from: 1,
+            to: 1,
+            leave_micros: Some(250_000),
+        })
         .unwrap();
-    assert_eq!(cut.start.at_micros, 64_000);
+    assert_eq!(cut.start.at_micros, 70_000);
     let frame = d
         .frame_edge(cut.start, Rational::new(25, 1).unwrap())
         .unwrap();
@@ -523,7 +566,11 @@ fn dialogue_frame_guard_checks_the_current_profile_and_exact_fraction() {
     // Astra: the frame is 66,733 1/3 us; trusted quiet ends at 66,733.
     let d = rounding_fixture();
     let edge = d
-        .resolve(CutRequest::RemoveWords { from: 1, to: 1 })
+        .resolve(CutRequest::RemoveWords {
+            from: 1,
+            to: 1,
+            leave_micros: Some(250_000),
+        })
         .unwrap()
         .start;
     let other = Dialogue::new(
@@ -563,13 +610,13 @@ proptest! {
     }
     #[test]
     fn dialogue_resolution_is_deterministic(from in 0_usize..3,to in 0_usize..3) {
-        let d=fixture();let request=CutRequest::RemoveWords{from,to};
+        let d=fixture();let request=CutRequest::RemoveWords{from,to, leave_micros: Some(250_000)};
         prop_assert_eq!(d.resolve(request),d.resolve(request));
     }
     #[test]
     fn dialogue_every_returned_frame_passes_the_exact_guard(from in 0_usize..3,to in 0_usize..3,n in prop::sample::select(vec![24,25,30,24_000,30_000]),den in prop::sample::select(vec![1,1_001])) {
         let d=fixture();
-        if let Ok(cut)=d.resolve(CutRequest::RemoveWords{from,to}) {for edge in [cut.start,cut.end] {
+        if let Ok(cut)=d.resolve(CutRequest::RemoveWords{from,to, leave_micros: Some(250_000)}) {for edge in [cut.start,cut.end] {
             if let Ok(frame)=d.frame_edge(edge,Rational::new(n,den).unwrap()) {
                 let actual=frame.instant_numerator;let denominator=u128::from(frame.instant_denominator);
                 prop_assert!(actual>=u128::from(edge.support.start)*denominator);
@@ -582,8 +629,10 @@ proptest! {
     #[test]
     fn dialogue_no_quiet_anywhere_refuses_instead_of_guessing(level in -3_999_i16..=0,from in 0_usize..3,to in 0_usize..3,voice in any::<bool>()) {
         let p=SoundProfile::from_hops(10_000,1_000_000,(0..100).map(|_|Hop{peak_dbfs_hundredths:level,rms_dbfs_hundredths:level,voice})).unwrap();
-        let d=Dialogue::new(p,vec![word("one",0,200_000),word("two",200_000,400_000),word("three",400_000,1_000_000)],Settings::default()).unwrap();
-        if from<=to {prop_assert_eq!(d.resolve(CutRequest::RemoveWords{from,to}).unwrap_err().reason,RefusalReason::NoQuietEvidence);}
+        let prepared=Dialogue::new(p,vec![word("one",0,200_000),word("two",200_000,400_000),word("three",400_000,1_000_000)],Settings::default());
+        if !voice {prop_assert!(matches!(prepared,Err(InputError::SpeechLevelUnavailable)));return Ok(());}
+        let d=prepared.unwrap();
+        if from<=to {prop_assert_eq!(d.resolve(CutRequest::RemoveWords{from,to, leave_micros: Some(250_000)}).unwrap_err().reason,RefusalReason::NoQuietEvidence);}
     }
 }
 
@@ -685,7 +734,11 @@ fn dialogue_frame_can_use_the_safe_dip_beside_the_minimum_hop() {
     )
     .unwrap();
     let edge = d
-        .resolve(CutRequest::RemoveWords { from: 1, to: 1 })
+        .resolve(CutRequest::RemoveWords {
+            from: 1,
+            to: 1,
+            leave_micros: Some(250_000),
+        })
         .unwrap()
         .start;
     assert_eq!(edge.at_micros(), 1_515_000);
@@ -707,7 +760,11 @@ fn dialogue_boundary_dip_reports_the_kept_word_intrusion() {
     )
     .unwrap();
     let cut = d
-        .resolve(CutRequest::RemoveWords { from: 1, to: 1 })
+        .resolve(CutRequest::RemoveWords {
+            from: 1,
+            to: 1,
+            leave_micros: Some(250_000),
+        })
         .unwrap();
     assert_eq!(cut.start.at_micros(), 255_000);
     let expected = DipIntrusion {
@@ -736,7 +793,11 @@ fn dialogue_dip_inside_word_beyond_reach_is_refused() {
     )
     .unwrap();
     let edge = basis
-        .resolve(CutRequest::RemoveWords { from: 1, to: 1 })
+        .resolve(CutRequest::RemoveWords {
+            from: 1,
+            to: 1,
+            leave_micros: Some(250_000),
+        })
         .unwrap()
         .start;
     let d = Dialogue::new(
@@ -756,9 +817,13 @@ fn dialogue_dip_inside_word_beyond_reach_is_refused() {
         "DQ2_DIP_INTRUSION_BOUND"
     );
     assert_eq!(
-        d.resolve(CutRequest::RemoveWords { from: 1, to: 1 })
-            .unwrap_err()
-            .reason,
+        d.resolve(CutRequest::RemoveWords {
+            from: 1,
+            to: 1,
+            leave_micros: Some(250_000)
+        })
+        .unwrap_err()
+        .reason,
         RefusalReason::NoMeasuredEdge
     );
     assert!(matches!(
@@ -833,7 +898,11 @@ fn dialogue_exact_dip_support_end_is_excluded() {
     )
     .unwrap();
     let edge = d
-        .resolve(CutRequest::RemoveWords { from: 1, to: 1 })
+        .resolve(CutRequest::RemoveWords {
+            from: 1,
+            to: 1,
+            leave_micros: Some(250_000),
+        })
         .unwrap()
         .start;
     assert_eq!(
@@ -907,7 +976,11 @@ fn dialogue_word_cut_floor_is_typed_and_boundary_is_inclusive() {
             Settings::default(),
         )
         .unwrap();
-        let result = d.resolve(CutRequest::RemoveWords { from: 0, to: 0 });
+        let result = d.resolve(CutRequest::RemoveWords {
+            from: 0,
+            to: 0,
+            leave_micros: Some(250_000),
+        });
         if duration < 100_000 {
             assert_eq!(
                 result.unwrap_err().reason,
@@ -930,10 +1003,22 @@ fn dialogue_quantized_quiet_threshold_is_on_the_conservative_side() {
             SoundProfile::from_hops(
                 10_000,
                 200_000,
-                (0..20).map(|_| Hop {
-                    peak_dbfs_hundredths: level,
-                    rms_dbfs_hundredths: level,
-                    voice: false,
+                (0..20).map(|i| Hop {
+                    peak_dbfs_hundredths: if i == 0 {
+                        -2_000
+                    } else if i >= 16 {
+                        -8_000
+                    } else {
+                        level
+                    },
+                    rms_dbfs_hundredths: if i == 0 {
+                        -2_000
+                    } else if i >= 16 {
+                        -8_000
+                    } else {
+                        level
+                    },
+                    voice: i == 0,
                 }),
             )
             .unwrap(),
@@ -963,7 +1048,11 @@ fn dialogue_start_side_kept_and_removed_slack_are_not_interchangeable() {
     )
     .unwrap();
     let cut = d
-        .resolve(CutRequest::RemoveWords { from: 1, to: 1 })
+        .resolve(CutRequest::RemoveWords {
+            from: 1,
+            to: 1,
+            leave_micros: Some(250_000),
+        })
         .unwrap();
     assert_eq!(cut.start.at_micros(), 995_000);
     let levels: Vec<_> = (100..120).map(|i| (i, -3_000)).collect();
@@ -987,11 +1076,15 @@ fn dialogue_start_side_kept_and_removed_slack_are_not_interchangeable() {
     )
     .unwrap();
     assert_eq!(
-        d.resolve(CutRequest::RemoveWords { from: 1, to: 1 })
-            .unwrap()
-            .start
-            .at_micros(),
-        1_320_000
+        d.resolve(CutRequest::RemoveWords {
+            from: 1,
+            to: 1,
+            leave_micros: Some(250_000)
+        })
+        .unwrap()
+        .start
+        .at_micros(),
+        1_350_000
     );
 }
 
@@ -1001,7 +1094,7 @@ proptest! {
         let d=Dialogue::new(profile(10_000,1_000_000,&[(0,500_000)],&[(index,-6_000)]),vec![word("keep",0,400_000),word("remove",400_000,500_000)],Settings::default()).unwrap();
         let at=index as u64*10_000+5_000;
         if 50_000<at&&at<350_000 {prop_assert!(d.guard(at,AudibleSide::Out).is_err());}
-        if let Ok(cut)=d.resolve(CutRequest::RemoveWords{from:1,to:1}) {for edge in [cut.start,cut.end] {prop_assert!(d.guard(edge.at_micros(),edge.side()).is_ok());}}
+        if let Ok(cut)=d.resolve(CutRequest::RemoveWords{from:1,to:1, leave_micros: Some(250_000)}) {for edge in [cut.start,cut.end] {prop_assert!(d.guard(edge.at_micros(),edge.side()).is_ok());}}
     }
 }
 
@@ -1022,7 +1115,11 @@ fn dialogue_fractional_dip_reach_refuses_the_extra_third_microsecond() {
     )
     .unwrap();
     let e = basis
-        .resolve(CutRequest::RemoveWords { from: 1, to: 1 })
+        .resolve(CutRequest::RemoveWords {
+            from: 1,
+            to: 1,
+            leave_micros: Some(250_000),
+        })
         .unwrap()
         .start;
     assert_eq!(e.at_micros(), 65_000);
@@ -1073,11 +1170,15 @@ fn dialogue_review_pause_air_comes_from_sound_with_early_and_stretched_word_ends
         assert!(d.guard(450_000, AudibleSide::Out).is_err());
         assert!(d.guard(650_000, AudibleSide::Out).is_ok());
         let removal = d
-            .resolve(CutRequest::RemoveWords { from: 0, to: 0 })
+            .resolve(CutRequest::RemoveWords {
+                from: 0,
+                to: 0,
+                leave_micros: Some(250_000),
+            })
             .unwrap();
         assert_eq!(
             (removal.start.at_micros(), removal.end.at_micros()),
-            (0, 3_500_000),
+            (0, 3_350_000),
             "DQ_WORD_END_MEASURED_EDGES"
         );
         println!("DQ_WORD_END end={end} removal={removal:?}");

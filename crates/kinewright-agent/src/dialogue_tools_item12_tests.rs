@@ -105,7 +105,9 @@ fn item12_service(doc: Document, target: Arc<BoundDialogue>, measured: bool) -> 
                     (0..400).map(|_| Hop {
                         rms_dbfs_hundredths: -1225,
                         peak_dbfs_hundredths: -1225,
-                        voice: false,
+                        // Fully sounding, voice-positive, but untranscribed.
+                        // A measured speech population calibrates this fake value.
+                        voice: true,
                     }),
                 )
                 .unwrap(),

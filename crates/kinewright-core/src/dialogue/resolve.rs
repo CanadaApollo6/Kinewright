@@ -29,6 +29,7 @@ pub enum CutRequest {
     RemoveWords {
         from: usize,
         to: usize,
+        leave_micros: Option<u64>,
     },
     TrimPause {
         after_word: usize,
@@ -106,8 +107,17 @@ impl ResolvedEdge {
         }
     }
 }
+/// Measured quiet supporting the actual join, before frame rounding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RetainedAir {
+    pub left: Option<Span>,
+    pub right: Option<Span>,
+    pub actual_micros: u64,
+}
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct ResolvedCut {
+    pub air: Option<RetainedAir>,
+    pub other_pauses_micros: Vec<u64>,
     pub start: ResolvedEdge,
     pub end: ResolvedEdge,
     pub request: CutRequest,
@@ -120,8 +130,6 @@ pub enum RefusalReason {
     WordRange,
     #[error("no following word names a pause to trim")]
     NoFollowingWord,
-    #[error("more than one measured pause separates these word addresses; choose a narrower cut")]
-    AmbiguousPause,
     #[error("the recording contains no measured quiet pause; no edge was guessed")]
     NoQuietEvidence,
     #[error("no measured quiet or sufficiently deep dip brackets this word boundary")]
@@ -130,6 +138,13 @@ pub enum RefusalReason {
     BothDipEdges,
     #[error("the measured edges do not bracket one forward removal")]
     NotForward,
+    #[error(
+        "requested air {requested_micros} microseconds is below the two quiet margins ({minimum_micros})"
+    )]
+    AirBelowGuardMargin {
+        requested_micros: u64,
+        minimum_micros: u64,
+    },
     #[error("the pause is already too short to leave the requested duration")]
     NothingToTrim,
     #[error(
@@ -236,7 +251,7 @@ impl Dialogue {
             .hop(index)
             .expect("validated index")
             .rms_dbfs_hundredths
-            <= self.settings.dip_dbfs_hundredths;
+            <= self.thresholds.dip_dbfs_hundredths;
         if let Some((index, _, depth)) = self.deepest_intrusion(n, d) {
             if dip && depth <= u128::from(self.settings.dip_reach_micros) * d {
                 return Ok(());
@@ -305,7 +320,7 @@ impl Dialogue {
             return None;
         }
         let index = self.profile.index_at(n, d)?;
-        if self.profile.hop(index)?.rms_dbfs_hundredths > self.settings.dip_dbfs_hundredths {
+        if self.profile.hop(index)?.rms_dbfs_hundredths > self.thresholds.dip_dbfs_hundredths {
             return None;
         }
         let (word, boundary, depth) = self.deepest_intrusion(n, d)?;
@@ -387,7 +402,7 @@ impl Dialogue {
     }
     fn anchor(&self, word: &Word, fallback: u64) -> u64 {
         self.extreme(word.start_micros, word.end_micros, true)
-            .filter(|(_, _, db)| *db > self.settings.quiet_rms_max)
+            .filter(|(_, _, db)| *db > self.thresholds.quiet_rms_max)
             .map_or(fallback, |(at, _, _)| at)
     }
     fn word_edge(
@@ -468,7 +483,7 @@ impl Dialogue {
                 .saturating_add(self.settings.dip_reach_micros)
         });
         if let Some((at, index, db)) = self.extreme(from, to, false).filter(|(at, _, db)| {
-            *db <= self.settings.dip_dbfs_hundredths && self.guard(*at, side).is_ok()
+            *db <= self.thresholds.dip_dbfs_hundredths && self.guard(*at, side).is_ok()
         }) {
             let hop = self.profile.span(index);
             let dip_run = self
@@ -496,14 +511,167 @@ impl Dialogue {
         }
         Err(self.refuse(RefusalReason::NoMeasuredEdge, nominal))
     }
+    fn paired_air(
+        &self,
+        a: &mut ResolvedEdge,
+        b: &mut ResolvedEdge,
+        runs: [Span; 2],
+        nominal: [u64; 2],
+        leave_micros: Option<u64>,
+    ) -> Result<RetainedAir, Refusal> {
+        let [left, right] = runs;
+        let margin = self.settings.quiet_margin_micros;
+        if let Some(requested_micros) = leave_micros
+            && requested_micros < margin * 2
+        {
+            return Err(self.refuse(
+                RefusalReason::AirBelowGuardMargin {
+                    requested_micros,
+                    minimum_micros: margin * 2,
+                },
+                a.at_micros,
+            ));
+        }
+        let target = leave_micros.unwrap_or_else(|| left.duration().max(right.duration()));
+        let total = self.settings.air_after_micros + self.settings.air_before_micros;
+        let preferred = if leave_micros.is_some() {
+            u64::try_from(
+                u128::from(target) * u128::from(self.settings.air_after_micros) / u128::from(total),
+            )
+            .map_err(|_| self.refuse(RefusalReason::TimeOverflow, a.at_micros))?
+        } else if left.duration() >= right.duration() {
+            left.duration() - margin
+        } else {
+            margin
+        };
+        let left_max = left.duration() - margin;
+        let right_max = right.duration() - margin;
+        let target = target
+            .min(left_max.saturating_add(right_max))
+            .max(margin * 2);
+        let mut left_air = preferred.clamp(margin, left_max);
+        let right_air = target.saturating_sub(left_air).clamp(margin, right_max);
+        left_air = target.saturating_sub(right_air).clamp(margin, left_max);
+        *a = self
+            .quiet_edge(
+                left,
+                AudibleSide::Out,
+                left.start_micros + left_air,
+                nominal[0],
+            )
+            .ok_or_else(|| self.refuse(RefusalReason::NoMeasuredEdge, a.at_micros))?;
+        *b = self
+            .quiet_edge(
+                right,
+                AudibleSide::In,
+                right.end_micros - right_air,
+                nominal[1],
+            )
+            .ok_or_else(|| self.refuse(RefusalReason::NoMeasuredEdge, b.at_micros))?;
+        Ok(RetainedAir {
+            left: Some(left),
+            right: Some(right),
+            actual_micros: left_air + right_air,
+        })
+    }
+    fn word_air(
+        &self,
+        a: &mut ResolvedEdge,
+        b: &mut ResolvedEdge,
+        first: &Word,
+        last: &Word,
+        leave_micros: Option<u64>,
+    ) -> Result<Option<RetainedAir>, Refusal> {
+        let left = a.quiet_run();
+        let right = b.quiet_run();
+        if let (Some(l), Some(r)) = (left, right)
+            && l != r
+        {
+            return self
+                .paired_air(
+                    a,
+                    b,
+                    [l, r],
+                    [first.start_micros, last.end_micros],
+                    leave_micros,
+                )
+                .map(Some);
+        }
+        if let Some(run) = left.or(right)
+            && left.is_some() != right.is_some()
+        {
+            let margin = self.settings.quiet_margin_micros;
+            // Natural-pause preservation needs two measured flanks.
+            // A boundary or dip on the other side keeps standard air.
+            let leave = leave_micros.unwrap_or_else(|| {
+                if left.is_some() {
+                    self.settings.air_after_micros
+                } else {
+                    self.settings.air_before_micros
+                }
+            });
+            let leave = leave.clamp(margin, run.duration() - margin);
+            if left.is_some() {
+                let at = run.start_micros + leave;
+                *a = self
+                    .quiet_edge(run, AudibleSide::Out, at, first.start_micros)
+                    .ok_or_else(|| self.refuse(RefusalReason::NoMeasuredEdge, at))?;
+            } else {
+                let at = run.end_micros - leave;
+                *b = self
+                    .quiet_edge(run, AudibleSide::In, at, last.end_micros)
+                    .ok_or_else(|| self.refuse(RefusalReason::NoMeasuredEdge, at))?;
+            }
+            return Ok(Some(RetainedAir {
+                left,
+                right,
+                actual_micros: leave,
+            }));
+        }
+        Ok(None)
+    }
     /// Resolve word-addressed intent without executing an edit or guessing an
     /// unmeasured edge. The same input produces identical integer evidence.
     ///
     /// # Errors
     /// Refuses invalid references, absent quiet, two dip edges, or unsafe ranges.
     pub fn resolve(&self, request: CutRequest) -> Result<ResolvedCut, Refusal> {
+        self.resolve_available(request, None)
+    }
+    /// Trim a pause using only the source span still audible in this clip.
+    /// This lets a later call select a remaining run after an earlier split.
+    /// # Errors
+    /// Refuses unavailable source time or the same measured-edge failures as `resolve`.
+    pub fn resolve_pause_in(
+        &self,
+        after_word: usize,
+        leave_micros: u64,
+        available: Span,
+    ) -> Result<ResolvedCut, Refusal> {
+        if available.end_micros > self.profile.duration_micros() {
+            return Err(self.refuse(RefusalReason::Unmeasured, available.end_micros));
+        }
+        self.resolve_available(
+            CutRequest::TrimPause {
+                after_word,
+                leave_micros,
+            },
+            Some(available),
+        )
+    }
+    fn resolve_available(
+        &self,
+        request: CutRequest,
+        available: Option<Span>,
+    ) -> Result<ResolvedCut, Refusal> {
+        let mut other_pauses_micros = Vec::new();
+        let mut air = None;
         let (start, end) = match request {
-            CutRequest::RemoveWords { from, to } => {
+            CutRequest::RemoveWords {
+                from,
+                to,
+                leave_micros,
+            } => {
                 if from > to || to >= self.words.len() {
                     return Err(self.refuse(RefusalReason::WordRange, 0));
                 }
@@ -538,6 +706,7 @@ impl Dialogue {
                         )?;
                     }
                 }
+                air = self.word_air(&mut a, &mut b, first, last, leave_micros)?;
                 if a.at_micros >= first.end_micros || b.at_micros <= last.start_micros {
                     return Err(self.refuse(RefusalReason::NotForward, a.at_micros));
                 }
@@ -546,7 +715,18 @@ impl Dialogue {
             CutRequest::TrimPause {
                 after_word,
                 leave_micros,
-            } => self.pause_edges(after_word, leave_micros)?,
+            } => {
+                let (a, b, other) = self.pause_edges(after_word, leave_micros, available)?;
+                other_pauses_micros = other;
+                if let Some(run) = a.quiet_run() {
+                    air = Some(RetainedAir {
+                        left: Some(run),
+                        right: Some(run),
+                        actual_micros: run.duration() - (b.at_micros - a.at_micros),
+                    });
+                }
+                (a, b)
+            }
         };
         if start.is_dip() && end.is_dip() {
             return Err(self.refuse(RefusalReason::BothDipEdges, start.at_micros));
@@ -568,6 +748,8 @@ impl Dialogue {
         self.guard(start.at_micros, start.side)?;
         self.guard(end.at_micros, end.side)?;
         Ok(ResolvedCut {
+            air,
+            other_pauses_micros,
             start,
             end,
             request,
@@ -577,7 +759,8 @@ impl Dialogue {
         &self,
         index: usize,
         leave: u64,
-    ) -> Result<(ResolvedEdge, ResolvedEdge), Refusal> {
+        available: Option<Span>,
+    ) -> Result<(ResolvedEdge, ResolvedEdge, Vec<u64>), Refusal> {
         let Some(before) = self.words.get(index) else {
             return Err(self.refuse(RefusalReason::NoFollowingWord, 0));
         };
@@ -591,10 +774,23 @@ impl Dialogue {
         // air. A stretched ASR end must not hide the silence inside that word.
         let mut runs: Vec<Span> = Vec::new();
         for &run in &self.gaps {
-            if run.start_micros < before.start_micros
-                || run.start_micros >= after.start_micros
-                || run.duration() < 2 * self.settings.quiet_margin_micros
-            {
+            if run.start_micros < before.start_micros || run.start_micros >= after.start_micros {
+                continue;
+            }
+            let run = if let Some(span) = available {
+                let start = run.start_micros.max(span.start_micros);
+                let end = run.end_micros.min(span.end_micros);
+                if start >= end {
+                    continue;
+                }
+                Span {
+                    start_micros: start,
+                    end_micros: end,
+                }
+            } else {
+                run
+            };
+            if run.duration() < 2 * self.settings.quiet_margin_micros {
                 continue;
             }
             if let Some(last) = runs
@@ -609,13 +805,19 @@ impl Dialogue {
         if !runs.is_empty() && runs.iter().all(|run| run.duration() <= leave) {
             return Err(self.refuse(RefusalReason::NothingToTrim, before.start_micros));
         }
-        if runs.len() > 1 {
-            return Err(self.refuse(RefusalReason::AmbiguousPause, before.start_micros));
-        }
-        let run = runs
-            .first()
-            .copied()
+        let longest = runs
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, run)| (run.duration(), std::cmp::Reverse(run.start_micros)))
+            .map(|(index, _)| index)
             .ok_or_else(|| self.refuse(RefusalReason::NoMeasuredEdge, before.start_micros))?;
+        let run = runs[longest];
+        let other = runs
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != longest)
+            .map(|(_, run)| run.duration())
+            .collect();
         if run.duration() <= leave {
             return Err(self.refuse(RefusalReason::NothingToTrim, run.start_micros));
         }
@@ -648,6 +850,6 @@ impl Dialogue {
         if b.at_micros.saturating_sub(a.at_micros) < self.settings.minimum_pause_cut_micros {
             return Err(self.refuse(RefusalReason::NothingToTrim, a.at_micros));
         }
-        Ok((a, b))
+        Ok((a, b, other))
     }
 }

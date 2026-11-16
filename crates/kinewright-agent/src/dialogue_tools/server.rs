@@ -273,7 +273,7 @@ impl KinewrightMcp {
             }
         }
         Ok(reply(
-            serde_json::json!({"revision":revision,"word_address":"(clip, first + offset)","word_columns":["text","source_start_us","source_end_us","project_start","project_end"],"segments":segments,"not_measured":unavailable}),
+            serde_json::json!({"revision":revision,"word_address":"(clip, first + offset)","word_columns":["text","source_start_us","source_end_us","project_start","project_end"],"segments":segments,"recording_level_columns":["speech_rms_cdb","noise_floor_cdb"],"recording_levels":values.values().map(|v| {let levels=v.dialogue().profile().levels();(v.binding(),[levels.speech_rms_hundredths,levels.noise_floor_hundredths])}).collect::<BTreeMap<_,_>>(),"not_measured":unavailable}),
             false,
         ))
     }
