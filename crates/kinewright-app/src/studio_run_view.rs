@@ -256,6 +256,71 @@ fn edit_lines(
 mod tests {
     use super::*;
     #[test]
+    fn uncertain_approvals_are_never_in_individual_or_aggregate_removal_claims() {
+        use kinewright_project::{
+            bundle_records::{ObjectRef, RecordKind, SessionId},
+            edit_audit::UncertainApprovedEdit,
+            orchestration_records::TaskId,
+        };
+        let task = TaskId(SessionId::fresh().unwrap());
+        for count in [1, 5, 6, 12] {
+            let uncertain = UncertainApprovedEdit {
+                task: task.clone(),
+                approval: ObjectRef {
+                    sha256: "f".repeat(64),
+                    byte_length: 1,
+                    record_kind: RecordKind::OwnedEvidence,
+                },
+                digest: "uncertain".into(),
+                description: "Remove uncertain clip".into(),
+            };
+            let mut rows = (0..count)
+                .map(|i| kinewright_agent::writer_host::EditApproval {
+                    task: task.clone(),
+                    removed_clips: 1,
+                    removed_tracks: 0,
+                    applied: true,
+                    issue: None,
+                    digest: format!("kept-{i}"),
+                })
+                .collect::<Vec<_>>();
+            // The uncertainty list is authoritative even if a malformed page
+            // also sets the scalar applied bit. It must never inflate a total.
+            rows.push(kinewright_agent::writer_host::EditApproval {
+                task: task.clone(),
+                removed_clips: 999,
+                removed_tracks: 999,
+                applied: true,
+                issue: None,
+                digest: uncertain.digest.clone(),
+            });
+            let lines = edit_lines(&rows, &[], std::slice::from_ref(&uncertain));
+            assert!(
+                !lines
+                    .iter()
+                    .any(|line| line.contains("999") || line.contains("1005")),
+                "UNCERTAIN_APPROVAL_NEVER_COUNTS_AS_REMOVAL"
+            );
+            assert_eq!(
+                lines.last(),
+                Some(&uncertain.disclosure()),
+                "UNCERTAIN_DISCLOSURE_STAYS_SEPARATE"
+            );
+            if count > 5 {
+                assert!(
+                    lines[0].starts_with(&format!("{count} edits removed {count} clips")),
+                    "UNCERTAIN_APPROVAL_EXCLUDED_FROM_AGGREGATE"
+                );
+            } else {
+                assert_eq!(
+                    lines.len(),
+                    count + 1,
+                    "UNCERTAIN_APPROVAL_EXCLUDED_FROM_INDIVIDUAL_CLAIMS"
+                );
+            }
+        }
+    }
+    #[test]
     fn c4_followups_uncertain_and_unconfirmed_edits_keep_their_action_words() {
         use kinewright_project::{
             bundle_records::{ObjectRef, RecordKind, SessionId},

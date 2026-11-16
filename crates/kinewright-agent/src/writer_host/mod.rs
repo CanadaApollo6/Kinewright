@@ -494,7 +494,25 @@ impl WriterHost {
         issuer: Option<HostAuth>,
         #[cfg(target_os = "linux")] ports: studio_runtime::RuntimePorts,
     ) -> Result<Self, HostError> {
-        let mut owner = HostCommandOwner::open(config.clone())?;
+        Self::start_in_pool(
+            config,
+            auth,
+            issuer,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+            #[cfg(target_os = "linux")]
+            ports,
+        )
+    }
+    fn start_in_pool(
+        config: HostConfig,
+        auth: HostAuth,
+        issuer: Option<HostAuth>,
+        pool: &kinewright_project::operation_history::HistoryPool,
+        #[cfg(target_os = "linux")] ports: studio_runtime::RuntimePorts,
+    ) -> Result<Self, HostError> {
+        let mut owner = HostCommandOwner::open_in_pool(config.clone(), pool)?;
         owner.register_attachment(
             auth.clone(),
             "private-bootstrap".into(),
@@ -1461,16 +1479,24 @@ impl VerifiedHostSnapshot {
     }
 }
 impl HostCommandOwner {
-    pub fn open(mut config: HostConfig) -> Result<Self, HostError> {
+    pub fn open(config: HostConfig) -> Result<Self, HostError> {
+        Self::open_in_pool(
+            config,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+    }
+    fn open_in_pool(
+        mut config: HostConfig,
+        pool: &kinewright_project::operation_history::HistoryPool,
+    ) -> Result<Self, HostError> {
         if config.project.is_empty() || config.project.len() > 256 {
             return Err(
                 HostRefusal::new("project_refused", "bounded project identity required").into(),
             );
         }
         config.roots = config.roots.canonicalize()?;
-        let pool = kinewright_project::operation_history::HistoryPool::new(
-            kinewright_project::operation_history::PoolLimits::default(),
-        );
         let bootstrap_snapshot = match &mut config.origin {
             HostOrigin::Gui {
                 initial_snapshot, ..
@@ -1512,7 +1538,7 @@ impl HostCommandOwner {
         let mut pins = Vec::new();
         let owner = if let Some(path) = &config.path {
             let pin = PinnedPath::admit(path, &config.roots, &config.roots, true)?;
-            let mut owner = Ja1EditingSession::open(&pin.io, &pool)?;
+            let mut owner = Ja1EditingSession::open(&pin.io, pool)?;
             if let HostOrigin::Gui {
                 expected_root_sha256,
                 expected_project_id,
@@ -1526,7 +1552,7 @@ impl HostCommandOwner {
                     )
                     .into());
                 }
-                let loaded = kinewright_project::bundle::LoadedBundle::read(&pin.io, &pool)?;
+                let loaded = kinewright_project::bundle::LoadedBundle::read(&pin.io, pool)?;
                 if expected_project_id.as_ref() != Some(&loaded.root()?.project_id) {
                     return Err(HostRefusal::new(
                         "project_refused",
@@ -1545,7 +1571,7 @@ impl HostCommandOwner {
             owner.core().clone()
         } else {
             Core::spawn(
-                &pool,
+                pool,
                 kinewright_project::operation_history::Role::Ordinary,
                 kinewright_project::operation_history::CreationOrigin {
                     branch: BranchId::fresh()?,
@@ -3845,3 +3871,7 @@ fn locked_host_snapshot_for_test(owner: &std::sync::Mutex<HostCommandOwner>) -> 
     let owner = owner.lock().unwrap();
     received_snapshot_for_test(owner.core()).unwrap()
 }
+
+#[cfg(test)]
+#[path = "history_door_audit_tests.rs"]
+mod history_door_audit_tests;

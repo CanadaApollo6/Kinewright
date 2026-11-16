@@ -121,3 +121,21 @@ The foundation commits since the CI-splitting base are `a0348a0f`, `21955fc1`,
 `1e9dcccd`, with the original author and message preserved. `04dce7fe` is the
 previously accepted sizing-scope note. None of these local commits was pushed
 by this worker.
+
+## Reader and installation-door checkpoint
+
+The [reader/door audit](undo-reader-door-audit.md) accounts for all 207 H1 rows
+and records the door-by-door authority and complete-owner witnesses. It ports
+the remaining opt-in TE1 native replay reader, enables the explicit evaluation
+recorder, and pins uncertainty exclusion from removal claims. Four reverted
+wrong changes fail their named assertions. The nine refreshed measurement-pin
+fields are source hashes; every non-hash observation is unchanged.
+
+The final tree passes 5,545 workspace fast tests, 4,381 touched-crate slow tests
+(including all 64 session-model seeds), 54 opt-in TE1 tests, workspace and feature
+clippy, fmt, the workspace build, three separate shipping builds and slow lint.
+The MSVC check stops in native dependencies without a Windows SDK, before
+project-test compilation; the platform sweep and portable-body probes do not
+replace Windows CI. This checkpoint deletes no old proof or record code.
+Legacy deletion, C6 retargeting, the remaining stream/resource mutations and the
+256-cycle maximal-task qualification remain for the next checkpoint.

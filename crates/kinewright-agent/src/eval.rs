@@ -1045,8 +1045,24 @@ impl PreparedFixture {
             .validate()
             .map_err(|error| EvalError::Fixture(error.to_string()))?;
         media.set_document(Arc::new(original_document.clone()));
-        let core = Core::for_test(original_document.clone())
-            .map_err(|error| EvalError::Fixture(error.to_string()))?;
+        // One evaluation owns one fixture actor and its pool. Complete activity
+        // is an explicit evaluation contract, including undone/discarded edits.
+        let pool = kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        );
+        let origin = kinewright_project::operation_history::CreationOrigin {
+            branch: kinewright_project::bundle_records::BranchId::fresh()
+                .map_err(|error| EvalError::Fixture(error.to_string()))?,
+            batch: kinewright_project::bundle_records::BatchId::fresh()
+                .map_err(|error| EvalError::Fixture(error.to_string()))?,
+        };
+        let core = Core::spawn_recording(
+            &pool,
+            kinewright_project::operation_history::Role::Ordinary,
+            origin,
+            original_document.clone(),
+        )
+        .map_err(|error| EvalError::Fixture(error.to_string()))?;
         let playback: Arc<dyn Playback> = media.clone();
         let analysis: Arc<dyn Analysis> = media.clone();
         let exporter: Arc<dyn Export> = media;
@@ -1724,7 +1740,11 @@ pub fn run_eval_with_artifacts(
     session.observations_incomplete |= sizes.incomplete;
     session.serialized_results = sizes;
     let final_document = query_document(&fixture.core)?;
-    let operations = query_operations(&fixture.core)?;
+    // Keep the reader's complete Ordinary lease through scoring. The outcome
+    // owns its independent evidence Vec; both vectors fit that lease's 104 MiB
+    // envelope (2 * 24 MiB decoded operations), without documents or lineage.
+    let operation_reader = query_operations(&fixture.core)?;
+    let operations = operation_reader.operations().to_vec();
     let final_timeline_words = dedup_timeline_words(
         fixture
             .analysis
@@ -9255,16 +9275,11 @@ fn query_document(core: &Core) -> Result<Arc<Document>, EvalError> {
     Ok(document)
 }
 
-fn query_operations(core: &Core) -> Result<Vec<Operation>, EvalError> {
-    let Event::QueryResult(QueryResult::OpLog(operations)) = core
-        .request(Command::Query(Query::OpLog))
-        .map_err(|error| EvalError::Core(error.to_string()))?
-    else {
-        return Err(EvalError::Core(
-            "operation-log query returned the wrong event".to_owned(),
-        ));
-    };
-    Ok((*operations).clone())
+fn query_operations(
+    core: &Core,
+) -> Result<kinewright_project::operation_history::OwnerOperations, EvalError> {
+    core.operations(true)
+        .map_err(|error| EvalError::Core(error.to_string()))
 }
 
 fn restore_original(
@@ -13384,6 +13399,52 @@ mod tests {
                 pixels: [0.5, 0.5, 0.5, 1.0].repeat(16),
             },
         }
+    }
+
+    #[test]
+    fn prepared_fixture_explicitly_records_undone_and_discarded_activity() {
+        let fixture = PreparedFixture::new(
+            Document {
+                tracks: vec![kinewright_core::Track {
+                    id: TrackId(1),
+                    kind: kinewright_core::TrackKind::Video,
+                    sync_lock: false,
+                    clips: vec![],
+                }],
+                ..Document::default()
+            },
+            Arc::new(cc7_stub_media()),
+            FixtureContext::default(),
+            None,
+            vec![],
+        )
+        .unwrap();
+        let first = Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: true,
+        };
+        let second = Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: false,
+        };
+        fixture.core.request(Command::Do(first.clone())).unwrap();
+        fixture.core.request(Command::Undo).unwrap();
+        fixture.core.request(Command::Do(second.clone())).unwrap();
+        let activity = query_operations(&fixture.core);
+        assert!(
+            activity.is_ok(),
+            "EVAL_FIXTURE_OPTS_IN_TO_COMPLETE_RECORDER: {activity:?}"
+        );
+        assert_eq!(
+            &*activity.unwrap(),
+            &[first, second.clone()],
+            "EVAL_RECORDER_KEEPS_DISCARDED_ACTIVITY"
+        );
+        assert_eq!(
+            &*fixture.core.operations(false).unwrap(),
+            &[second],
+            "EVAL_APPLIED_DELTA_EXCLUDES_UNDONE_ACTIVITY"
+        );
     }
 
     /// A 2x2x2 identity `.cube`: the smallest file CC4's parser accepts, so
