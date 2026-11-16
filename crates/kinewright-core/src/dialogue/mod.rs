@@ -234,3 +234,6 @@ mod rehearsal_tests;
 
 #[cfg(test)]
 mod r4_tests;
+
+#[cfg(test)]
+mod r5_tests;

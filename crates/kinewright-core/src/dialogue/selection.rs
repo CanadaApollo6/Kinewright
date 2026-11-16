@@ -4,10 +4,12 @@ use crate::ExactMicros;
 use serde::Serialize;
 use thiserror::Error;
 
-/// Maximum distance from an ASR start to its measured sound-component onset.
-/// Also protects the entire forward window of every unrequested start. Ends of
-/// transcript words are approximate and never establish sound ownership.
+/// Symmetric reach for nearby sound and kept-word protection. An early voiced
+/// onset has the additional bounded rule below. Approximate transcript ends
+/// never establish sound ownership.
 pub const WORD_ATTRIBUTION_MICROS: u64 = 300_000;
+/// R4's voiced, start-containing components began up to 730 ms before ASR.
+const EARLY_VOICE_MICROS: u64 = 750_000;
 
 /// Fixed-size evidence: no copied word text or unbounded diagnostic string.
 #[derive(Debug, PartialEq, Eq, Serialize, Error)]
@@ -22,7 +24,7 @@ pub enum SelectionIssue {
     )]
     UnrequestedSound { word: usize, component: Span },
     #[error(
-        "sound at {component:?} cannot be attributed exclusively to requested word starts within 300 ms; no audio was removed"
+        "sound at {component:?} cannot be attributed exclusively to requested word starts from measured voice and nearby starts; no audio was removed"
     )]
     UnattributedSound { component: Span },
     #[error(
@@ -38,7 +40,9 @@ pub enum SelectionIssue {
 impl Dialogue {
     /// Validate the exact removed source extent, including after frame mapping.
     /// A sound-component onset needs a requested spoken-word start within
-    /// 300 ms. All plausible owners must be requested: any kept start within
+    /// 300 ms, or be a voiced component containing its ASR start up to 750 ms
+    /// after onset, without an intervening word start. Detached transients do
+    /// not get that extension. All plausible owners must be requested: a kept start within
     /// that reach, or whose forward 300 ms window overlaps the component,
     /// vetoes removal. Supplied word ends never establish sound ownership.
     /// Acoustic overrules do not waive this check.
@@ -86,8 +90,9 @@ impl Dialogue {
         }) {
             let mut owned = false;
             for (word, w) in self.words.iter().enumerate() {
-                let candidate =
-                    component.start_micros.abs_diff(w.start_micros) <= WORD_ATTRIBUTION_MICROS;
+                let candidate = component.start_micros.abs_diff(w.start_micros)
+                    <= WORD_ATTRIBUTION_MICROS
+                    || self.early_voice(component, word);
                 let protected = w.start_micros < component.end_micros
                     && component.start_micros
                         < w.start_micros.saturating_add(WORD_ATTRIBUTION_MICROS);
@@ -109,5 +114,26 @@ impl Dialogue {
             }
         }
         Ok(())
+    }
+}
+
+impl Dialogue {
+    fn early_voice(&self, component: Span, word: usize) -> bool {
+        let start = self.words[word].start_micros;
+        if start < component.start_micros
+            || start >= component.end_micros
+            || start - component.start_micros > EARLY_VOICE_MICROS
+            || self.words.iter().enumerate().any(|(i, other)| {
+                i != word
+                    && component.start_micros <= other.start_micros
+                    && other.start_micros <= start
+            })
+        {
+            return false;
+        }
+        let hop = u64::from(self.profile.hop_micros());
+        let first = usize::try_from(component.start_micros / hop).expect("profile index");
+        let end = usize::try_from(component.end_micros.div_ceil(hop)).expect("profile index");
+        (first..end).any(|i| self.profile.hop(i).is_some_and(|h| h.voice))
     }
 }
