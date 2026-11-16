@@ -363,3 +363,65 @@ fn owner_role_policy_and_fold_frontier_follow_accepted_position_order() {
         "TRANSITION_EVIDENCE_CANNOT_EXCEED_ACCEPTED_POSITION"
     );
 }
+
+#[test]
+fn install_publication_view_preserves_its_source_on_refusal_and_unwind() {
+    let pool = super::tests::story_pool();
+    let mut owner = history(&pool);
+    owner
+        .execute(remove(), origin(2), vec![], Some(approval()))
+        .unwrap();
+    owner
+        .execute(Command::Undo, origin(3), vec![], None)
+        .unwrap();
+    owner
+        .execute(Command::Redo, origin(4), vec![], None)
+        .unwrap();
+    let mut capture = owner.capture().unwrap();
+    let original = capture.identity().unwrap();
+    let epoch = owner.history().position().epoch + 1;
+    let leases = pool.lease_counts(Role::Task).unwrap();
+    let projected = capture
+        .with_install_view(epoch, |view| view.identity().unwrap())
+        .unwrap();
+    assert_ne!(projected, original, "INSTALL_VIEW_NAMES_THE_NEW_EPOCH");
+    assert_eq!(
+        capture.identity().unwrap(),
+        original,
+        "INSTALL_VIEW_SUCCESS_PRESERVES_THE_SOURCE_CAPTURE"
+    );
+    let refused = capture
+        .with_install_view(epoch, |_| {
+            Err::<(), _>(Error::Capacity("injected publication"))
+        })
+        .unwrap();
+    assert!(refused.is_err());
+    assert_eq!(
+        capture.identity().unwrap(),
+        original,
+        "INSTALL_VIEW_REFUSAL_PRESERVES_THE_SOURCE_CAPTURE"
+    );
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        capture
+            .with_install_view::<()>(epoch, |_| panic!("injected publication panic"))
+            .unwrap();
+    }));
+    assert!(panic.is_err());
+    assert_eq!(
+        capture.identity().unwrap(),
+        original,
+        "INSTALL_VIEW_UNWIND_PRESERVES_THE_SOURCE_CAPTURE"
+    );
+    assert_eq!(
+        pool.lease_counts(Role::Task).unwrap(),
+        leases,
+        "INSTALL_VIEW_ADMITS_NO_ADDITIONAL_HISTORY"
+    );
+    let selected = owner.capture().unwrap().validate().unwrap();
+    owner.install_snapshot(selected).unwrap();
+    assert_eq!(
+        owner.identity().unwrap(),
+        projected,
+        "INSTALL_VIEW_EQUALS_THE_ACTUAL_INSTALL"
+    );
+}

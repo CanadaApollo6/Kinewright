@@ -8,14 +8,14 @@ use std::{
 };
 
 use kinewright_core::{
-    Analysis, AssetId, AudioChain, ClipId, Core, Document, Event, IncidentId, IncidentLog,
-    IncidentState, IncidentSubject, LutAssetId, LutAvailabilityKind, LutAvailabilityStatus,
-    MarkerId, MediaKind, Operation, RunningInvestigation, TimeCode, TimelineRevision, TrackId,
-    TrackKind,
+    Analysis, AssetId, AudioChain, ClipId, Document, IncidentId, IncidentLog, IncidentState,
+    IncidentSubject, LutAssetId, LutAvailabilityKind, LutAvailabilityStatus, MarkerId, MediaKind,
+    Operation, RunningInvestigation, TimeCode, TimelineRevision, TrackId, TrackKind,
 };
 #[cfg(test)]
 use kinewright_core::{Export, Playback};
 use kinewright_media::{LutLibrary, LutStore};
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     FlushOutcome, RefuseRename, SidecarMode, SidecarSession, SidecarWriter, derive_lut_store,
     sidecar_write_failed_observation,
@@ -119,7 +119,8 @@ pub(crate) struct ProjectSession {
     pub(crate) id: u64,
     pub(crate) name: String,
     pub(crate) core: Core,
-    pub(crate) core_events: crossbeam_channel::Receiver<Event>,
+    pub(crate) core_events:
+        crossbeam_channel::Receiver<kinewright_project::operation_actor::Notification>,
     pub(crate) document: Arc<Document>,
     pub(crate) revision: TimelineRevision,
     pub(crate) project_path: Option<PathBuf>,
@@ -356,9 +357,21 @@ impl ProjectSession {
         sidecar_mode: &SidecarMode,
         sidecar_writer: Option<Arc<SidecarWriter>>,
         refuse_rename: Option<&RefuseRename>,
+        pool: &kinewright_project::operation_history::HistoryPool,
     ) -> Result<Self, String> {
         let name = name.into();
-        let core = Core::spawn(document.clone()).map_err(|error| error.to_string())?;
+        let core = Core::spawn(
+            pool,
+            kinewright_project::operation_history::Role::Ordinary,
+            kinewright_project::operation_history::CreationOrigin {
+                branch: kinewright_project::bundle_records::BranchId::fresh()
+                    .map_err(|e| e.to_string())?,
+                batch: kinewright_project::bundle_records::BatchId::fresh()
+                    .map_err(|e| e.to_string())?,
+            },
+            document.clone(),
+        )
+        .map_err(|error| error.to_string())?;
         let core_events = core.subscribe().map_err(|error| error.to_string())?;
         let chat = vec![ChatEntry::Text(
             "Drop a clip anywhere (or /import), then describe your edit.".to_owned(),
@@ -496,6 +509,7 @@ impl ProjectSession {
         };
         let ports = session.media();
         session.threads.push(AgentThread::new(
+            &session.core,
             "Thread 1",
             agent_harness,
             chat,
@@ -1710,7 +1724,9 @@ mod tests {
         let exporter: Arc<dyn Export> = Arc::new(StubMedia);
         let incidents: IncidentLogHandle =
             std::sync::Arc::new(std::sync::RwLock::new(IncidentLog::default()));
+        let live = Core::for_test(Arc::clone(&document)).unwrap();
         let thread = AgentThread::new(
+            &live,
             "Thread 1",
             AgentHarnessChoice::Codex,
             Vec::new(),
@@ -1781,7 +1797,9 @@ mod tests {
         let playback: Arc<dyn Playback> = Arc::new(StubMedia);
         let analysis: Arc<dyn Analysis> = Arc::new(StubMedia);
         let exporter: Arc<dyn Export> = Arc::new(StubMedia);
+        let live = Core::for_test(Arc::clone(&document)).unwrap();
         let thread = AgentThread::new(
+            &live,
             "Thread 1",
             AgentHarnessChoice::Codex,
             Vec::new(),
@@ -2154,6 +2172,9 @@ mod tests {
             &SidecarMode::None,
             None,
             None,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
         )
         .expect("the dirty-test session builds")
     }
@@ -2369,6 +2390,9 @@ mod tests {
             },
             None,
             None,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
         )
         .expect("the sidecar-test session builds")
     }
@@ -2773,6 +2797,9 @@ mod tests {
             },
             None,
             Some(&failing),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
         )
         .expect("the session builds");
         assert!(

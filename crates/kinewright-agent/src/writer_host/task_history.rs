@@ -389,11 +389,11 @@ impl HostCommandOwner {
                     history.frozen_result.clone()
                 } else {
                     let delta = runtime
-                        .frozen_delta()
+                        .frozen_delta(self.owner()?)?
                         .ok_or_else(|| refused("frozen delta missing"))?;
                     let delta_ref = self
                         .owner_mut()?
-                        .admit_host_grant(&serde_json::to_vec(delta)?)?;
+                        .admit_host_grant(&serde_json::to_vec(delta.operations())?)?;
                     Some(crate::orchestration::orchestration_records::TaskResult {
                         outcome:
                             crate::orchestration::orchestration_records::AttemptOutcome::Completed,
@@ -590,7 +590,7 @@ impl HostCommandOwner {
             if original.id != id {
                 return Err(refused("merge identity changed"));
             }
-            let receipt = self.owner()?.manual_transition_receipt(&original)?;
+            let receipt = self.owner()?.command_receipt(&original)?;
             if receipt != ReceiptLookup::Absent {
                 return Ok(receipt);
             }

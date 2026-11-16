@@ -4,12 +4,20 @@ pub(crate) fn payload(value: &impl serde::Serialize) -> Result<u64, BundleError>
     let bytes = serde_json::to_vec(value).map_err(crate::bundle::encoding_error)?;
     crate::store::preflight_record(&bytes, &crate::storage_budget::StorageLimits::default())
 }
+#[allow(
+    dead_code,
+    reason = "legacy oracle retained until the final H2b deletion checkpoint"
+)]
 pub(crate) fn document_live_bytes(
     document: &kinewright_core::Document,
 ) -> Result<u64, BundleError> {
     kinewright_core::history_size::document_live_bytes(document)
         .map_err(crate::bundle::history_error)
 }
+#[allow(
+    dead_code,
+    reason = "legacy oracle retained until the final H2b deletion checkpoint"
+)]
 pub(crate) fn history_live_bytes(
     history: &kinewright_core::HistorySnapshot,
 ) -> Result<u64, BundleError> {
@@ -70,6 +78,10 @@ pub(crate) fn check_retained_history(
     Ok(retained)
 }
 
+#[allow(
+    dead_code,
+    reason = "legacy oracle retained until the final H2b deletion checkpoint"
+)]
 pub(crate) fn verify_history_lineage(
     history: &kinewright_core::HistorySnapshot,
     lineage: &crate::bundle_records::LineageRecord,

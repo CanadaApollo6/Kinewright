@@ -415,3 +415,78 @@ the preceding build. Decoded step admission charges both inline slots; the
 20,433,822-byte measurement. The merged single batch pays 16 more bytes.
 Kernel validation, duration and identity passes remain unchanged. These are
 admission layout numbers; no new product-path latency measurement is claimed.
+
+## H2b checkpoint 1: shipping actor and owner
+
+The same heavy fixture now runs through `operation_actor`, including its owner,
+before writer publication and acknowledgement. Cold open uses the actual
+`Ja1EditingSession::open` path after releasing the publishing namespace. Cold
+Undo binds the GUI producer outside the timer and uses its three-anchor replay
+window. The old Core control remains an isolated actor. Both sides reconstruct
+the unchanged 2,000-step gesture/walk fixture after the cold-open setup.
+
+Five fixed alternating pairs ran 2026-11-16T02:31:30.573801837Z–2026-11-16T02:33:16.148299081Z.
+One-minute load ranged from 0.84 to 1.96. No owned build or test overlapped timing;
+the gate waited on the same lock. One correctness smoke preceded the pairs;
+no quiet wait, timing selection or repeat followed them. Bash measured process
+time and Linux `VmHWM` supplied peak RSS because `/usr/bin/time` was absent.
+
+Release binary SHA-256 `8cc18ee83e30e0be86c928fc89b68fc0cad257adc9dd6ca523d25ec50bcc4310`.
+[Source and method manifest](measurements/undo-product-checkpoint1-manifest.json),
+[all ten raw lanes](measurements/undo-product-checkpoint1.json.gz),
+[summary and phase counters](measurements/undo-product-checkpoint1-summary.json).
+
+Milliseconds: median of five lane summaries [minimum, maximum]. The H2a column
+is historical; the Core and product columns are paired.
+
+| Lane | H2a owner median | Paired old Core | Product actor + owner | Target / result |
+| --- | ---: | ---: | ---: | --- |
+| Hand edit, 1,000 | 0.244 | 0.205 [0.204, 0.207] | 0.258 [0.257, 0.265] | ≤1.5× paired Core: 5/5 |
+| Hand edit, 10,000 | 0.267 | 0.374 [0.371, 0.394] | 0.271 [0.261, 0.276] | ≤1.5× paired Core: 5/5 |
+| 120-batch apply | 34.193 | 28.171 [27.731, 28.551] | 30.401 [30.191, 30.920] | ≤1.5× paired Core: 5/5 |
+| Gesture Redo | 17.649 | 0.002 [0.001, 0.003] | 16.118 [15.981, 16.227] | <50: 5/5 |
+| Edit at fold bound | 1.461 | 0.229 [0.213, 0.338] | 1.410 [1.408, 1.419] | <2: 160/160; worst 1.458 |
+| Validated open, 2,000 | 312.773 | N/A | 350.408 [347.394, 352.338] | <1,000: 5/5 |
+| Cold Undo | 284.919 | N/A | 250.734 [250.231, 254.176] | Measured product path; no tuning target |
+| Walk p95 | 6.081 | 0.002 [0.001, 0.003] | 5.650 [5.644, 5.698] | <100: 5/5 |
+| Walk worst | 314.174 | 0.066 [0.015, 0.076] | 250.124 [249.755, 254.259] | <1,000: 5/5 |
+
+All five product edit-depth sample ranges overlap. The largest paired ratio
+is 1.290 at 1,000 steps, 0.743 at 10,000, and 1.095 for gesture apply. Cold
+Undo is 250.734 ms versus the historical 284.919 ms; these separate runs do
+not establish a causal improvement. Validated product open includes native
+checkpoint and editing-session validation, beyond the earlier module-only open.
+
+Peak process RSS over all lanes, including 10,000 retained steps, is 8,866.281
+MiB old and 67.469 MiB product. This is not comparable to the earlier
+2,000-step RSS lane. The pool total is admission accounting, not measured RSS.
+
+| Phase per warm command | Product count |
+| --- | ---: |
+| History document copies / exact measurements | 1 / 0 |
+| History document bytes serialized | 0 |
+| History operation/accounting bytes serialized, mean | 188 |
+| Owner payload bytes serialized, mean | 264.5 |
+| Owner document scans / exact measurements / identity hashes | 0 / 0 / 0 |
+| Kernel validation / duration / identity passes | 2 / 1 / 2 |
+
+The permanent `ACTOR_WARM_EDIT_ONE_DOCUMENT_COPY` and
+`ACTOR_WARM_EDIT_ZERO_EXACT_MEASUREMENTS` assertions pin the ordinary edit.
+Kernel passes remain unchanged; history counters do not claim incremental
+kernel validation. Gesture Redo copies one document, measures none, and retains
+the kernel’s 240 validation, 120 duration and 240 identity passes.
+
+Each fold performs two Core document copies and one exact baseline measurement.
+Its owner handles one folded command and three origin lookups, with no document,
+baseline-resource, seed-capacity or ledger scan and no seed copy or identity hash.
+`FOLD_COMMAND_WORK_IS_ONE_STEP`, `FOLD_DOES_NOT_COPY_SEEDS` and the unrelated
+dependency guard remain permanent. The full counters are identical across all
+five product lanes.
+
+Cold Undo replays 1,999 operations: three history copies, two exact measurements,
+490,466 document bytes serialized, 3,998 kernel validation and 1,999 duration
+passes, with zero owner document scans or identity hashes. Validated open uses
+two history copies and five exact measurements, serializes 980,932 document
+bytes, and performs 4,006 kernel validation, 2,000 duration and 4,000 identity
+passes. Its owner scans the document four times and hashes the 617,427-byte
+combined owner once. These are open/replay costs, not warm-command work.

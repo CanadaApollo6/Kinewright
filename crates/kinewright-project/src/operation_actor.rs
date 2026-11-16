@@ -47,6 +47,26 @@ pub enum Error {
     RecorderDisabled,
     System(String),
 }
+impl Error {
+    /// Capacity refusals leave the accepted history unchanged.
+    #[must_use]
+    pub const fn is_capacity(&self) -> bool {
+        matches!(
+            self,
+            Self::History(
+                HistoryError::History(
+                    kinewright_core::undo::Error::StepTooLarge
+                        | kinewright_core::undo::Error::HistoryFull
+                        | kinewright_core::undo::Error::Capacity
+                        | kinewright_core::undo::Error::DocumentCapacity
+                ) | HistoryError::Capacity(_)
+                    | HistoryError::PoolFull(_)
+                    | HistoryError::StoreCapacity(_)
+                    | HistoryError::Reservation
+            )
+        )
+    }
+}
 impl From<HistoryError> for Error {
     fn from(error: HistoryError) -> Self {
         Self::History(error)
@@ -56,6 +76,8 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::History(error) => error.fmt(f),
+            Self::MutationRefused(reason) => reason.fmt(f),
+            Self::Protocol(error) => error.fmt(f),
             other => write!(f, "{other:?}"),
         }
     }
@@ -74,7 +96,56 @@ pub struct ChangeId {
 /// independent lease; the identifier adds no document or history holder.
 pub struct CapturedHistory {
     pub change: ChangeId,
+    pub branch: BranchId,
     pub snapshot: OwnerSnapshot,
+}
+/// One immutable protocol reply owns a captured wire state. Retrying the reply
+/// shares its buffer and its original capture lease; it creates no second copy.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableHistory {
+    pub snapshot: Arc<crate::operation_history::SnapshotTransport>,
+    pub branch: BranchId,
+    pub revision: TimelineRevision,
+}
+impl PartialEq for PortableHistory {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity() == other.identity()
+            && self.branch == other.branch
+            && self.revision == other.revision
+    }
+}
+impl Eq for PortableHistory {}
+impl PortableHistory {
+    #[must_use]
+    pub fn identity(&self) -> SnapshotIdentity {
+        self.snapshot.identity()
+    }
+    #[must_use]
+    pub fn role(&self) -> Role {
+        self.snapshot.role()
+    }
+    pub fn encoded_bytes(&self) -> Result<u64, crate::bundle::BundleError> {
+        let mut counter = crate::store::BoundedCounter {
+            bytes: 0,
+            limit: self.role().envelope().retained,
+        };
+        serde_json::to_writer(&mut counter, self).map_err(crate::bundle::encoding_error)?;
+        Ok(counter.bytes)
+    }
+    pub fn validate(self, pool: &HistoryPool) -> Result<ValidatedOwnerSnapshot, HistoryError> {
+        let role = self.role();
+        self.snapshot.receive(pool, role)
+    }
+}
+impl CapturedHistory {
+    pub fn into_portable(self) -> Result<PortableHistory, HistoryError> {
+        Ok(PortableHistory {
+            snapshot: Arc::new(self.snapshot.into_transport()?),
+            branch: self.branch,
+            revision: self.change.revision,
+        })
+    }
 }
 /// A frozen attachment proof contains no independently retained history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +154,9 @@ pub struct AcceptedCut {
     identity: SnapshotIdentity,
 }
 impl AcceptedCut {
+    pub(crate) const fn committed(change: ChangeId, identity: SnapshotIdentity) -> Self {
+        Self { change, identity }
+    }
     #[must_use]
     pub const fn change(&self) -> ChangeId {
         self.change
@@ -138,10 +212,24 @@ struct CommandMessage {
     permit: Option<u64>,
     reply: Option<Sender<Notification>>,
 }
+enum InstallMode {
+    NewEpoch,
+    AtEpoch(u64),
+    Peer {
+        epoch: u64,
+        branch: BranchId,
+        revision: TimelineRevision,
+    },
+}
+#[expect(
+    clippy::large_enum_variant,
+    reason = "actor messages move the existing store capability without copying it"
+)]
 enum Message {
     Command(Box<CommandMessage>),
     Close(Option<u64>, Sender<Result<Effects, Error>>),
     Producer(Box<producer::BindRequest>),
+    CurrentProducer(u64, Sender<bool>),
     Pending(
         u64,
         Sender<Result<Vec<crate::operation_protocol::EncodedMessage>, Error>>,
@@ -154,12 +242,16 @@ enum Message {
     ),
     Subscribe(Sender<Notification>),
     Change(Sender<Result<ChangeId, Error>>),
+    Branch(Sender<BranchId>),
+    Identity(Sender<Result<SnapshotIdentity, Error>>),
+    Baseline(Sender<Result<Arc<Document>, Error>>),
     AttachmentState(Sender<AttachmentState>),
     Fork(
         Role,
         Sender<Result<(OwnerHistory, TimelineRevision), Error>>,
     ),
     Capture(Sender<Result<CapturedHistory, Error>>),
+    Preview(Command, Sender<Result<OwnerSnapshot, Error>>),
     Approval(
         ObjectRef,
         Sender<Result<Option<crate::operation_history::ApprovalAnswer>, Error>>,
@@ -174,17 +266,45 @@ enum Message {
     ),
     Bind(TypeId, Sender<Result<(), Error>>),
     Freeze(TypeId, Sender<Result<AcceptedCut, Error>>),
+    FreezePublished(TypeId, AcceptedCut, Sender<Result<(), Error>>),
+    AcknowledgeFrozen(
+        TypeId,
+        AcceptedCut,
+        Vec<crate::operation_protocol::Receipt>,
+        Sender<Result<(), Error>>,
+    ),
     Cut(TypeId, Sender<Result<AcceptedCut, Error>>),
     Finish(TypeId, AcceptedCut, bool, Sender<Result<(), Error>>),
     Install(
         Option<TypeId>,
         Option<AcceptedCut>,
         Box<ValidatedOwnerSnapshot>,
-        Option<u64>,
+        InstallMode,
         Sender<Result<ChangeId, Error>>,
     ),
     Retire(TypeId, AcceptedCut, Sender<Result<(), Error>>),
     Prepare(Box<PrepareRequest>),
+    Selection(
+        TypeId,
+        AcceptedCut,
+        Box<ValidatedOwnerSnapshot>,
+        Sender<Result<(OwnerHistory, TimelineRevision), Error>>,
+    ),
+    RetargetSelection(
+        TypeId,
+        AcceptedCut,
+        BranchId,
+        Sender<Result<AcceptedCut, Error>>,
+    ),
+    SealSelection(
+        TypeId,
+        AcceptedCut,
+        crate::store::ProjectStore,
+        crate::storage_budget::StorageReservation<
+            std::collections::BTreeMap<crate::operation_history::Resource, ObjectRef>,
+        >,
+        Sender<Result<crate::operation_history::SealedOwner, Error>>,
+    ),
     CommitPrepared(
         TypeId,
         AcceptedCut,
@@ -209,10 +329,87 @@ impl Core {
         origin: CreationOrigin,
         document: impl Into<Arc<Document>>,
     ) -> Result<Self, Error> {
+        Self::spawn_recording_at_revision(pool, role, origin, document, TimelineRevision::default())
+    }
+    pub fn spawn_recording_at_revision(
+        pool: &HistoryPool,
+        role: Role,
+        origin: CreationOrigin,
+        document: impl Into<Arc<Document>>,
+        revision: TimelineRevision,
+    ) -> Result<Self, Error> {
         let history =
             OwnerHistory::new(pool, role, role.policy(), &origin, || Ok(document.into()))?
                 .recording()?;
+        Self::spawn_owner(history, origin.branch, revision)
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn for_test(document: impl Into<Arc<Document>>) -> Result<Self, Error> {
+        Self::spawn(
+            &HistoryPool::new(crate::operation_history::PoolLimits::default()),
+            Role::Ordinary,
+            CreationOrigin {
+                branch: BranchId::fresh().map_err(|e| Error::System(e.to_string()))?,
+                batch: BatchId::fresh().map_err(|e| Error::System(e.to_string()))?,
+            },
+            document,
+        )
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn for_test_at_revision(
+        document: impl Into<Arc<Document>>,
+        revision: TimelineRevision,
+    ) -> Result<Self, Error> {
+        Self::spawn_at_revision(
+            &HistoryPool::new(crate::operation_history::PoolLimits::default()),
+            Role::Ordinary,
+            CreationOrigin {
+                branch: BranchId::fresh().map_err(|error| Error::System(error.to_string()))?,
+                batch: BatchId::fresh().map_err(|error| Error::System(error.to_string()))?,
+            },
+            document,
+            revision,
+        )
+    }
+    /// A second-process fixture receives and validates the complete wire owner.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn peer_for_test(history: PortableHistory) -> Result<Self, Error> {
+        let pool = HistoryPool::new(crate::operation_history::PoolLimits::default());
+        let branch = history.branch.clone();
+        let revision = history.revision;
+        Self::open(history.validate(&pool)?, branch, revision)
+    }
+    /// Fixture-only downward bounds exercise folds without a production-sized stream.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn for_test_with_bounds(
+        document: impl Into<Arc<Document>>,
+        bounds: kinewright_core::undo::RoleBounds,
+    ) -> Result<Self, Error> {
+        let pool = HistoryPool::new(crate::operation_history::PoolLimits::default());
+        let origin = CreationOrigin {
+            branch: BranchId::fresh().map_err(|error| Error::System(error.to_string()))?,
+            batch: BatchId::fresh().map_err(|error| Error::System(error.to_string()))?,
+        };
+        let history = OwnerHistory::measured(
+            &pool,
+            Role::Ordinary,
+            Role::Ordinary.policy(),
+            &origin,
+            bounds,
+            || Ok(document.into()),
+        )?;
         Self::spawn_owner(history, origin.branch, TimelineRevision::default())
+    }
+    pub fn spawn_at_revision(
+        pool: &HistoryPool,
+        role: Role,
+        origin: CreationOrigin,
+        document: impl Into<Arc<Document>>,
+        revision: TimelineRevision,
+    ) -> Result<Self, Error> {
+        let history =
+            OwnerHistory::new(pool, role, role.policy(), &origin, || Ok(document.into()))?;
+        Self::spawn_owner(history, origin.branch, revision)
     }
     pub fn open(
         snapshot: ValidatedOwnerSnapshot,
@@ -226,6 +423,29 @@ impl Core {
         branch: BranchId,
         revision: TimelineRevision,
     ) -> Result<Self, Error> {
+        Self::spawn_inner(history, branch, revision, None, AttachmentState::Live)
+    }
+    pub(super) fn spawn_staged(
+        history: OwnerHistory,
+        branch: BranchId,
+        revision: TimelineRevision,
+        authority: TypeId,
+    ) -> Result<Self, Error> {
+        Self::spawn_inner(
+            history,
+            branch,
+            revision,
+            Some(authority),
+            AttachmentState::Frozen,
+        )
+    }
+    fn spawn_inner(
+        history: OwnerHistory,
+        branch: BranchId,
+        revision: TimelineRevision,
+        owner: Option<TypeId>,
+        attachment: AttachmentState,
+    ) -> Result<Self, Error> {
         let pool = history.pool();
         let identity = ActorIdentity::fresh().ok_or(Error::CounterExhausted)?;
         let (sender, receiver) = unbounded();
@@ -238,8 +458,8 @@ impl Core {
                     identity,
                     revision,
                     generation: 0,
-                    owner: None,
-                    attachment: AttachmentState::Live,
+                    owner,
+                    attachment,
                     subscribers: vec![],
                     producer: None,
                     permit_generation: 0,
@@ -272,6 +492,11 @@ impl Core {
     #[must_use]
     pub const fn history_pool(&self) -> &HistoryPool {
         &self.pool
+    }
+    /// Share the actor's immutable baseline with a comparison view.
+    /// Comparison views keep their actor alive and share its accounted allocation.
+    pub fn baseline_document(&self) -> Result<Arc<Document>, Error> {
+        self.call(Message::Baseline)?
     }
     /// Make a child from one atomic parent cut. Existing clips retain their
     /// original lineage, and a delta child never inherits Undo or Redo stacks.
@@ -340,11 +565,22 @@ impl Core {
     > {
         self.call(Message::Counters)
     }
+    /// Independently admitted, read-only policy preview. Nothing is installed in
+    /// the source actor and its command counter and approval ledger are unchanged.
+    pub fn preview_command(&self, command: Command) -> Result<OwnerSnapshot, Error> {
+        self.call(|reply| Message::Preview(command, reply))?
+    }
     pub fn operations(&self, recorded: bool) -> Result<OwnerOperations, Error> {
         self.call(|reply| Message::Operations(recorded, reply))?
     }
     pub fn attachment_state(&self) -> Result<AttachmentState, Error> {
         self.call(Message::AttachmentState)
+    }
+    pub fn creation_branch(&self) -> Result<BranchId, Error> {
+        self.call(Message::Branch)
+    }
+    pub fn snapshot_identity(&self) -> Result<SnapshotIdentity, Error> {
+        self.call(Message::Identity)?
     }
     pub fn change_id(&self) -> Result<ChangeId, Error> {
         self.call(Message::Change)?
@@ -354,6 +590,9 @@ impl Core {
     }
     pub fn capture_state(&self) -> Result<CapturedHistory, Error> {
         self.call(Message::Capture)?
+    }
+    pub fn portable_history(&self) -> Result<PortableHistory, Error> {
+        self.capture_state()?.into_portable().map_err(Error::from)
     }
     pub fn approval_answer(
         &self,
@@ -380,7 +619,9 @@ impl Core {
     }
     /// Setup-only installation; a bound actor requires its owner's attachment.
     pub fn install_snapshot(&self, snapshot: ValidatedOwnerSnapshot) -> Result<ChangeId, Error> {
-        self.call(|reply| Message::Install(None, None, Box::new(snapshot), None, reply))?
+        self.call(|reply| {
+            Message::Install(None, None, Box::new(snapshot), InstallMode::NewEpoch, reply)
+        })?
     }
 }
 impl<P: 'static> Attachment<P> {
@@ -411,7 +652,7 @@ impl<P: 'static> Attachment<P> {
                 Some(TypeId::of::<P>()),
                 Some(cut),
                 Box::new(snapshot),
-                None,
+                InstallMode::NewEpoch,
                 reply,
             )
         })?
@@ -430,7 +671,31 @@ impl<P: 'static> Attachment<P> {
                 Some(TypeId::of::<P>()),
                 Some(cut),
                 Box::new(snapshot),
-                Some(epoch),
+                InstallMode::AtEpoch(epoch),
+                reply,
+            )
+        })?
+    }
+    /// Adopt the installing peer's chosen epoch and actor metadata atomically.
+    pub fn install_peer_snapshot(
+        &self,
+        _proof: &P,
+        cut: AcceptedCut,
+        snapshot: ValidatedOwnerSnapshot,
+        branch: BranchId,
+        revision: TimelineRevision,
+    ) -> Result<ChangeId, Error> {
+        let mode = InstallMode::Peer {
+            epoch: snapshot.position().epoch,
+            branch,
+            revision,
+        };
+        self.core.call(|reply| {
+            Message::Install(
+                Some(TypeId::of::<P>()),
+                Some(cut),
+                Box::new(snapshot),
+                mode,
                 reply,
             )
         })?
@@ -499,7 +764,7 @@ impl State {
         owner: Option<TypeId>,
         cut: Option<AcceptedCut>,
         snapshot: ValidatedOwnerSnapshot,
-        epoch: Option<u64>,
+        mode: InstallMode,
     ) -> Result<ChangeId, Error> {
         match (owner, cut) {
             (Some(owner), Some(cut)) => self.check_cut(owner, cut)?,
@@ -511,19 +776,33 @@ impl State {
             .generation
             .checked_add(1)
             .ok_or(Error::CounterExhausted)?;
-        let revision = TimelineRevision(
-            self.revision
-                .0
-                .checked_add(1)
-                .ok_or(Error::CounterExhausted)?,
-        );
+        let revision = match &mode {
+            InstallMode::Peer { revision, .. } => *revision,
+            _ => TimelineRevision(
+                self.revision
+                    .0
+                    .checked_add(1)
+                    .ok_or(Error::CounterExhausted)?,
+            ),
+        };
+        let (epoch, branch) = match mode {
+            InstallMode::NewEpoch => (None, None),
+            InstallMode::AtEpoch(epoch) => (Some(epoch), None),
+            InstallMode::Peer { epoch, branch, .. } => (Some(epoch), Some(branch)),
+        };
         let history = self.history.as_mut().ok_or(Error::Retired)?;
         let position = match epoch {
             Some(epoch) => history.install_snapshot_at_epoch(snapshot, epoch)?,
             None => history.install_snapshot(snapshot)?,
         };
+        if let Some(branch) = branch {
+            self.branch = branch;
+        }
         self.generation = generation;
         self.revision = revision;
+        // Installation replaces the command line. Even continuity on the same
+        // actor needs a fresh stream lease for its new epoch and accepted key.
+        self.producer = None;
         // No fallible action follows installation. A frozen owner obtains a new
         // cut before explicitly resuming; capture backpressure remains retryable.
         Ok(ChangeId {
@@ -562,6 +841,9 @@ impl State {
                     }
                 }
                 Message::Producer(request) => self.bind_producer(*request),
+                Message::CurrentProducer(permit, reply) => {
+                    let _ = reply.send(self.current_producer(permit).is_ok());
+                }
                 Message::Pending(permit, reply) => {
                     let result = self
                         .current_producer(permit)
@@ -594,23 +876,56 @@ impl State {
                 Message::Fork(role, reply) => {
                     let result = self
                         .history()
-                        .and_then(|owner| owner.fork_current(role).map_err(Error::from))
+                        .and_then(|owner| owner.fork_current(role, true).map_err(Error::from))
                         .map(|owner| (owner, self.revision));
                     let _ = reply.send(result);
                 }
                 Message::AttachmentState(reply) => {
                     let _ = reply.send(self.attachment);
                 }
+                Message::Identity(reply) => {
+                    let _ = reply.send(
+                        self.history()
+                            .and_then(|history| history.identity().map_err(Error::from)),
+                    );
+                }
+                Message::Baseline(reply) => {
+                    let _ = reply.send(
+                        self.history()
+                            .map(|owner| Arc::clone(owner.history().baseline())),
+                    );
+                }
+                Message::Branch(reply) => {
+                    let _ = reply.send(self.branch.clone());
+                }
                 Message::Change(reply) => {
                     let _ = reply.send(self.change());
+                }
+                Message::Preview(command, reply) => {
+                    let result = (|| {
+                        let mut preview = self.history()?.private_preview()?;
+                        let origin = CreationOrigin {
+                            branch: self.branch.clone(),
+                            batch: BatchId::fresh()
+                                .map_err(|error| Error::System(error.to_string()))?,
+                        };
+                        preview.execute(command, origin, vec![], None)?;
+                        crate::operation_history::OwnerRead::new(preview)
+                            .into_capture()
+                            .map_err(Error::from)
+                    })();
+                    let _ = reply.send(result);
                 }
                 Message::Capture(reply) => {
                     let result = self
                         .history()
                         .and_then(|history| history.capture().map_err(Error::from))
                         .and_then(|snapshot| {
-                            self.change()
-                                .map(|change| CapturedHistory { change, snapshot })
+                            self.change().map(|change| CapturedHistory {
+                                change,
+                                branch: self.branch.clone(),
+                                snapshot,
+                            })
                         });
                     let _ = reply.send(result);
                 }
@@ -642,9 +957,9 @@ impl State {
                     let _ = reply.send(result);
                 }
                 Message::Bind(owner, reply) => {
-                    let result = if self.owner.is_none_or(|previous| previous == owner)
-                        && self.attachment == AttachmentState::Live
-                        && self.history.is_some()
+                    let result = if self.history.is_some()
+                        && (self.owner == Some(owner)
+                            || (self.owner.is_none() && self.attachment == AttachmentState::Live))
                     {
                         self.owner = Some(owner);
                         Ok(())
@@ -655,6 +970,29 @@ impl State {
                 }
                 Message::Freeze(owner, reply) => {
                     let result = self.freeze(owner);
+                    let _ = reply.send(result);
+                }
+                Message::AcknowledgeFrozen(authority, cut, receipts, reply) => {
+                    let result = self.check_cut(authority, cut).and_then(|()| {
+                        let bound = self.producer.as_mut().ok_or(Error::Protocol(
+                            crate::operation_protocol::Conflict::Detached,
+                        ))?;
+                        bound.stream.acknowledge(&receipts).map_err(Error::Protocol)
+                    });
+                    let _ = reply.send(result);
+                }
+                Message::FreezePublished(owner, cut, reply) => {
+                    let result = (|| {
+                        if self.owner != Some(owner) || self.attachment == AttachmentState::Sealed {
+                            return Err(Error::MutationRefused(CoreMutationRefusal::OwnerRequired));
+                        }
+                        self.check_drained()?;
+                        if self.change()? != cut.change {
+                            return Err(Error::CaptureChanged);
+                        }
+                        self.attachment = AttachmentState::Frozen;
+                        Ok(())
+                    })();
                     let _ = reply.send(result);
                 }
                 Message::Cut(owner, reply) => {
@@ -671,6 +1009,12 @@ impl State {
                             return Err(Error::Protocol(
                                 crate::operation_protocol::Conflict::AcceptedKey,
                             ));
+                        }
+                        if !seal {
+                            self.history
+                                .as_mut()
+                                .ok_or(Error::Retired)?
+                                .promote_live()?;
                         }
                         self.attachment = if seal {
                             AttachmentState::Sealed
@@ -699,6 +1043,40 @@ impl State {
                     let _ = reply.send(result);
                 }
                 Message::Prepare(request) => self.prepare_update(&request),
+                Message::Selection(authority, cut, snapshot, reply) => {
+                    let result = self.prepare_selection(authority, cut, *snapshot);
+                    let _ = reply.send(result);
+                }
+                Message::RetargetSelection(authority, cut, branch, reply) => {
+                    let result = self.check_cut(authority, cut).and_then(|()| {
+                        self.check_drained()?;
+                        if self.producer.is_some() {
+                            return Err(Error::Protocol(
+                                crate::operation_protocol::Conflict::Detached,
+                            ));
+                        }
+                        let generation = self
+                            .generation
+                            .checked_add(1)
+                            .ok_or(Error::CounterExhausted)?;
+                        self.branch = branch;
+                        self.generation = generation;
+                        Ok(AcceptedCut::committed(self.change()?, cut.identity))
+                    });
+                    let _ = reply.send(result);
+                }
+                Message::SealSelection(authority, cut, mut store, bindings, reply) => {
+                    let result = self.check_cut(authority, cut).and_then(|()| {
+                        self.check_drained()?;
+                        let history = self.history()?;
+                        history
+                            .persist_prepared(&mut store, history.creation_sizing(), |resource| {
+                                Ok(bindings.get(resource).cloned())
+                            })
+                            .map_err(Error::from)
+                    });
+                    let _ = reply.send(result);
+                }
                 Message::CommitPrepared(owner, cut, prepared, reply) => {
                     let result = self.commit_update(owner, cut, *prepared);
                     let _ = reply.send(result);

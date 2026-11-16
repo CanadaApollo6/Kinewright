@@ -29,7 +29,7 @@ impl OwnerHistory {
         Ok(())
     }
     pub(crate) fn private_preview(&self) -> Result<Self, Error> {
-        self.preview_sized(self.reservation.sizing())
+        self.preview_sized(self.reservation.sizing(), self.core.bounds())
     }
     pub(crate) fn merge_preview(
         &self,
@@ -50,9 +50,13 @@ impl OwnerHistory {
                 .flat_map(kinewright_core::undo::Step::operations)
                 .chain(incoming),
         )?;
-        self.preview_sized(sizing)
+        self.preview_sized(sizing, sizing.limits()?.bounds)
     }
-    fn preview_sized(&self, sizing: CreationSizing) -> Result<Self, Error> {
+    fn preview_sized(
+        &self,
+        sizing: CreationSizing,
+        bounds: kinewright_core::undo::RoleBounds,
+    ) -> Result<Self, Error> {
         let reservation = self.reservation.pool().admit_sized(sizing)?;
         let _window = reservation.workspace()?;
         let limits = reservation.limits();
@@ -61,7 +65,9 @@ impl OwnerHistory {
         {
             return Err(Error::Capacity("preview owner metadata"));
         }
-        let core = self.core.fork_with_bounds(limits.bounds)?;
+        let core = self
+            .core
+            .fork_with_bounds(bounds.intersect(limits.bounds))?;
         let seeds = self.seeds();
         let fold = self
             .fold
@@ -103,6 +109,7 @@ impl OwnerHistory {
     pub(crate) fn seal_preview(
         mut self,
         destination: CreationSizing,
+        bounds: kinewright_core::undo::RoleBounds,
     ) -> Result<PreparedOwner, Error> {
         let limits = destination.limits()?;
         if destination.kind.role() != self.reservation.role()
@@ -113,7 +120,7 @@ impl OwnerHistory {
         {
             return Err(Error::Capacity("prepared destination"));
         }
-        self.core = self.core.into_bounds(limits.bounds)?;
+        self.core = self.core.into_bounds(bounds.intersect(limits.bounds))?;
         Ok(PreparedOwner {
             history: self,
             destination,
@@ -135,6 +142,14 @@ impl OwnerHistory {
     }
 }
 impl PreparedOwner {
+    pub(crate) fn input_contexts(&self) -> impl Iterator<Item = &crate::bundle_records::ObjectRef> {
+        self.history
+            .origins
+            .0
+            .iter()
+            .flat_map(|origin| &origin.origin.inputs)
+    }
+
     pub(crate) fn identity(&self) -> Result<super::SnapshotIdentity, Error> {
         let _window = self.history.reservation.workspace()?;
         self.history.identity_unreserved(self.destination)

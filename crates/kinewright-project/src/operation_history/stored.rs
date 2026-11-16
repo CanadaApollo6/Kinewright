@@ -86,12 +86,14 @@ fn digest_text(bytes: &[u8; 32]) -> String {
     }
     text
 }
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "map_err transfers the store error into the owner error boundary"
-)]
 fn store_error(error: BundleError) -> Error {
-    Error::Store(error.to_string())
+    match error {
+        BundleError::Capacity(reason) => Error::StoreCapacity(reason),
+        BundleError::Corrupt(reason) => Error::StoreCorrupt(reason),
+        BundleError::Unsettled => Error::StoreUnsettled,
+        BundleError::RunLimit => Error::StoreRunLimit,
+        other => Error::Store(other.to_string()),
+    }
 }
 #[derive(Serialize)]
 struct BorrowedBody<'a> {
@@ -154,6 +156,21 @@ impl OwnerSnapshot {
             identity.digest(),
         )?;
         let object = store.admit_record(&record).map_err(store_error)?;
+        store
+            .remember_owner(
+                object.reference.clone(),
+                crate::bundle_recovery::OwnerProof {
+                    identity,
+                    position: kinewright_core::undo::CommandKey {
+                        epoch: data.history.epoch,
+                        position: data.history.position,
+                    },
+                    sizing: data.sizing,
+                    document: crate::bundle_recovery::ProjectionRef::new(&document)
+                        .map_err(store_error)?,
+                },
+            )
+            .map_err(store_error)?;
         Ok(SealedOwner {
             object,
             document,
@@ -165,8 +182,8 @@ impl OwnerSnapshot {
             },
         })
     }
-    #[cfg(test)]
-    fn stored_record(
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) fn stored_record(
         &self,
         baseline: ObjectRef,
         document: ObjectRef,
@@ -254,7 +271,7 @@ impl super::OwnerHistory {
     /// Publish the sealed prospective destination view. The working state
     /// remains in its own creation-sized preview holder; this writes bytes
     /// under scratch and creates no extra retained capture or lease.
-    pub(super) fn persist_prepared(
+    pub(crate) fn persist_prepared(
         &self,
         store: &mut ProjectStore,
         sizing: super::CreationSizing,
@@ -320,6 +337,19 @@ impl super::OwnerHistory {
             identity.digest(),
         )?;
         let object = store.admit_record(&record).map_err(store_error)?;
+        store
+            .remember_owner(
+                object.reference.clone(),
+                crate::bundle_recovery::OwnerProof {
+                    identity,
+                    position,
+                    sizing,
+                    document: crate::bundle_recovery::ProjectionRef::new(&current_document)
+                        .map_err(store_error)?,
+                },
+            )
+            .map_err(store_error)?;
+
         Ok(SealedOwner {
             object,
             document: current_document,
@@ -339,24 +369,30 @@ fn binding_matches(
         let manifest = store
             .read_record::<crate::owned_inputs::OwnedInputManifest>(reference)
             .map_err(store_error)?;
-        return Ok(manifest.entries.iter().any(|entry| match resource {
-            Resource::Media {
-                asset,
-                sha256: Some(hash),
-                byte_len: Some(len),
-            } => {
-                entry.object.record_kind == RecordKind::OwnedMedia
-                    && &entry.object.sha256 == hash
-                    && entry.object.byte_length == *len
-                    && entry.entry_id.starts_with(&format!("media:{asset}:"))
-                    && entry.chunk_table_ref().is_ok()
-            }
-            _ => blob_matches(resource, &entry.object),
-        }));
+        return Ok(manifest_matches(resource, &manifest));
     }
     // Media keeps its manifest and chunk/profile dependencies, not just a
     // naked byte object. LUTs and the embedded font also admit direct blobs.
     Ok(!matches!(resource, Resource::Media { .. }) && blob_matches(resource, reference))
+}
+fn manifest_matches(
+    resource: &Resource,
+    manifest: &crate::owned_inputs::OwnedInputManifest,
+) -> bool {
+    manifest.entries.iter().any(|entry| match resource {
+        Resource::Media {
+            asset,
+            sha256: Some(hash),
+            byte_len: Some(len),
+        } => {
+            entry.object.record_kind == RecordKind::OwnedMedia
+                && &entry.object.sha256 == hash
+                && entry.object.byte_length == *len
+                && entry.entry_id.starts_with(&format!("media:{asset}:"))
+                && entry.chunk_table_ref().is_ok()
+        }
+        _ => blob_matches(resource, &entry.object),
+    })
 }
 fn blob_matches(resource: &Resource, reference: &ObjectRef) -> bool {
     match resource {
@@ -404,7 +440,134 @@ impl SnapshotSource for ProjectStore {
         binding_matches(self, resource, reference)
     }
 }
+struct NamespaceSource<'a> {
+    namespace: &'a crate::namespace::ProjectNamespace,
+    usage: &'a std::sync::Arc<std::sync::Mutex<crate::storage_budget::StorageUsage>>,
+    limits: &'a StorageLimits,
+}
+impl NamespaceSource<'_> {
+    fn read<T: BundleRecord>(&self, reference: &ObjectRef) -> Result<T, Error> {
+        crate::bundle_recovery::read_retained_record::<T>(
+            self.namespace,
+            reference,
+            self.usage,
+            self.limits,
+        )
+        .map(crate::storage_budget::StorageReservation::take)
+        .map_err(store_error)
+    }
+}
+impl SnapshotSource for NamespaceSource<'_> {
+    fn limits(&self) -> &StorageLimits {
+        self.limits
+    }
+    fn document(&self, reference: &ObjectRef) -> Result<kinewright_core::Document, Error> {
+        self.read(reference)
+    }
+    fn binding_matches(&self, resource: &Resource, reference: &ObjectRef) -> Result<bool, Error> {
+        if reference.record_kind == RecordKind::InputManifest {
+            return self
+                .read(reference)
+                .map(|manifest| manifest_matches(resource, &manifest));
+        }
+        Ok(!matches!(resource, Resource::Media { .. }) && blob_matches(resource, reference))
+    }
+}
 impl StoredOwnerRecord {
+    pub(crate) fn binding_count(&self) -> Result<u64, BundleError> {
+        struct Count(u64);
+        impl<'de> Deserialize<'de> for Count {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                struct Visitor;
+                impl<'de> serde::de::Visitor<'de> for Visitor {
+                    type Value = Count;
+                    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        f.write_str("resource bindings")
+                    }
+                    fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                        self,
+                        mut seq: A,
+                    ) -> Result<Count, A::Error> {
+                        let mut count = 0_u64;
+                        while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                            count = count
+                                .checked_add(1)
+                                .ok_or_else(|| serde::de::Error::custom("binding count"))?;
+                        }
+                        Ok(Count(count))
+                    }
+                }
+                d.deserialize_seq(Visitor)
+            }
+        }
+        #[derive(Deserialize)]
+        struct View {
+            bindings: Count,
+        }
+        let view: View =
+            serde_json::from_str(self.body.get()).map_err(crate::bundle::encoding_error)?;
+        if view.bindings.0
+            > self
+                .sizing
+                .limits()
+                .map_err(|_| BundleError::Capacity("creation sizing"))?
+                .envelope
+                .owners
+                / 256
+        {
+            return Err(BundleError::Capacity("resource bindings"));
+        }
+        Ok(view.bindings.0)
+    }
+    /// The publication caller reserves the counted reference storage first.
+    pub(crate) fn binding_refs(&self) -> Result<Vec<(Resource, ObjectRef)>, BundleError> {
+        #[derive(Deserialize)]
+        struct View {
+            bindings: Vec<(Resource, ObjectRef)>,
+        }
+        let view: View =
+            serde_json::from_str(self.body.get()).map_err(crate::bundle::encoding_error)?;
+        Ok(view.bindings)
+    }
+}
+impl StoredOwnerRecord {
+    pub(crate) fn read_namespace(
+        namespace: &crate::namespace::ProjectNamespace,
+        checkpoint: &crate::operation_checkpoint::Checkpoint,
+        pool: &HistoryPool,
+        usage: &std::sync::Arc<std::sync::Mutex<crate::storage_budget::StorageUsage>>,
+        limits: &StorageLimits,
+    ) -> Result<ValidatedOwnerSnapshot, Error> {
+        checkpoint.validate(limits).map_err(store_error)?;
+        if checkpoint.owner_ref.byte_length > checkpoint.role.persisted_shell_cap() {
+            return Err(Error::Capacity("persisted owner shell"));
+        }
+        let window = pool.workspace(checkpoint.role)?;
+        let source = NamespaceSource {
+            namespace,
+            usage,
+            limits,
+        };
+        let record: Self = source.read(&checkpoint.owner_ref)?;
+        if record.role != checkpoint.role || record.sizing.kind.role() != checkpoint.role {
+            return Err(Error::Reservation);
+        }
+        if record.document != checkpoint.document_ref
+            || record.identity != digest_text(&checkpoint.identity.digest())
+        {
+            return Err(Error::IdentityMismatch);
+        }
+        let reservation = pool.admit_sized(record.sizing)?;
+        let bounds = reservation.limits().bounds;
+        let validated =
+            record.resolve_reserved(&source, checkpoint.role, reservation, window, bounds)?;
+        if validated.identity() != checkpoint.identity
+            || validated.position() != checkpoint.position
+        {
+            return Err(Error::IdentityMismatch);
+        }
+        Ok(validated)
+    }
     /// Reserve an owner and workspace before reading or decoding its shell.
     pub fn read(
         store: &ProjectStore,
@@ -457,11 +620,27 @@ impl StoredOwnerRecord {
         }
         let reservation = pool.admit_sized(record.sizing)?;
         let bounds = reservation.limits().bounds;
+        let projection =
+            crate::bundle_recovery::ProjectionRef::new(&record.document).map_err(store_error)?;
         let validated =
             record.resolve_reserved(store, expected_role, reservation, window, bounds)?;
         if expected.is_some_and(|(_, identity)| validated.identity() != identity) {
             return Err(Error::IdentityMismatch);
         }
+        // Every cold query proved the same full owner invariants as open.
+        // Preserve that fixed proof for later publication; retaining its raw
+        // transport must not force a second reader alongside a private update.
+        store
+            .remember_owner(
+                reference.clone(),
+                crate::bundle_recovery::OwnerProof {
+                    identity: validated.identity(),
+                    position: validated.position(),
+                    sizing: validated.creation_sizing(),
+                    document: projection,
+                },
+            )
+            .map_err(store_error)?;
         Ok(validated)
     }
     #[cfg(all(test, target_os = "linux"))]
@@ -506,6 +685,8 @@ impl StoredOwnerRecord {
         {
             return Err(Error::Capacity("owner decode"));
         }
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::note_history_decode();
         let body = self.decode_body()?;
         let baseline = store.document(&self.baseline)?;
         if kinewright_core::undo::document_capacity_bytes(&baseline)? > bounds.document_live_bytes {

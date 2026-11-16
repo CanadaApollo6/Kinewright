@@ -2,10 +2,11 @@
 #![cfg(feature = "test-util")]
 #![allow(clippy::too_many_lines)]
 use kinewright_core::{
-    Command, Core, CoreMutationRefusal, Document, Event, Operation, Track, TrackId, TrackKind,
+    Command, CoreMutationRefusal, Document, Event, Operation, Track, TrackId, TrackKind,
 };
 #[cfg(target_os = "linux")]
 use kinewright_project::editing_session::Ja1EditingSession;
+use kinewright_project::operation_actor::Core;
 #[cfg(target_os = "linux")]
 #[path = "support/ja_s2_c3.rs"]
 mod c3;
@@ -15,7 +16,7 @@ mod c3;
 fn c3_unsupported_new_context_refuses_before_source_mutation() {
     use kinewright_media::test_support::TempDirectory;
     let temp = TempDirectory::new("c3-unsupported");
-    let core = Core::spawn(document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
     let (result, trace) = kinewright_project::io_observer::observe(|| {
         kinewright_project::editing_session::Ja1EditingSession::new(
             temp.root(),
@@ -62,8 +63,8 @@ fn apply(core: &Core, command: Command) {
 #[test]
 fn w01_separate_actor_and_eager_binding_control() {
     struct ForeignProof;
-    let a = Core::spawn(document()).unwrap();
-    let b = Core::spawn(document()).unwrap();
+    let a = Core::for_test(document()).unwrap();
+    let b = Core::for_test(document()).unwrap();
     assert_ne!(a.actor_identity(), b.actor_identity());
     assert_eq!(a.actor_identity(), a.clone().actor_identity());
     #[cfg(target_os = "linux")]
@@ -77,46 +78,56 @@ fn w01_separate_actor_and_eager_binding_control() {
         let owner_a = ProjectBundle::activate(
             &temp.path("a.kinewright"),
             BundleWriteAdmission::new_document(),
+            a.history_pool(),
         )
         .unwrap();
         let owner_b = ProjectBundle::activate(
             &temp.path("b.kinewright"),
             BundleWriteAdmission::new_document(),
+            b.history_pool(),
         )
         .unwrap();
         assert_ne!(owner_a.project_id(), owner_b.project_id());
         let attachment_a = owner_a.attach_core(&a).unwrap();
         let attachment_b = owner_b.attach_core(&b).unwrap();
-        assert!(a.clone().history_save_owner(&ForeignProof).is_err());
-        assert!(b.clone().history_save_owner(&ForeignProof).is_err());
+        assert!(a.clone().attach(&ForeignProof).is_err());
+        assert!(b.clone().attach(&ForeignProof).is_err());
         edit(&a, false);
-        let captured = a.export_history().unwrap();
-        attachment_b.restore_history(captured.clone()).unwrap();
+        let captured = a.snapshot_identity().unwrap();
+        let selected = a
+            .portable_history()
+            .unwrap()
+            .validate(b.history_pool())
+            .unwrap();
+        let cut_b = attachment_b.freeze().unwrap();
+        attachment_b
+            .install_snapshot(&cut_b, selected, None)
+            .unwrap();
+        let selected_b = attachment_b.freeze().unwrap();
+        attachment_b.resume(&selected_b).unwrap();
         let cut = attachment_a.freeze().unwrap();
         attachment_a.seal(&cut).unwrap();
         edit(&b, true);
-        assert_eq!(a.export_history().unwrap(), captured);
+        assert_eq!(a.snapshot_identity().unwrap(), captured);
         assert_ne!(a.export_history().unwrap(), b.export_history().unwrap());
         assert!(matches!(
-            a.request(Command::Undo).unwrap(),
-            Event::MutationRefused {
-                reason: CoreMutationRefusal::Sealed,
-                ..
-            }
+            a.request(Command::Undo).unwrap_err().error,
+            kinewright_project::operation_actor::Error::MutationRefused(
+                CoreMutationRefusal::Sealed
+            )
         ));
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let authority = a.history_save_owner(&ForeignProof).unwrap();
+        let authority = a.attach(&ForeignProof).unwrap();
         edit(&a, false);
         let cut = authority.freeze(&ForeignProof).unwrap();
-        authority.seal(&ForeignProof, &cut).unwrap();
+        authority.seal(&ForeignProof, cut).unwrap();
         assert!(matches!(
-            a.request(Command::Undo).unwrap(),
-            Event::MutationRefused {
-                reason: CoreMutationRefusal::Sealed,
-                ..
-            }
+            a.request(Command::Undo).unwrap_err().error,
+            kinewright_project::operation_actor::Error::MutationRefused(
+                CoreMutationRefusal::Sealed
+            )
         ));
         assert_ne!(a.export_history().unwrap(), b.export_history().unwrap());
     }
@@ -128,7 +139,6 @@ mod linux {
     use kinewright_media::test_support::TempDirectory;
     use kinewright_project::{
         bundle::{BundleError, BundleWriteAdmission, LoadedBundle, ProjectBundle},
-        bundle_commit::bound_history_probe,
         bundle_copy::{BundleCopy, CopyStatus, SessionStore},
         bundle_records::ObjectRef,
         io_observer,
@@ -168,7 +178,7 @@ mod linux {
             .unwrap()
             .reference
             .clone();
-        let mut copy = io_observer::fail_once(
+        let copy = io_observer::fail_once(
             if landed {
                 "root_parent_sync"
             } else {
@@ -178,16 +188,15 @@ mod linux {
         )
         .unwrap();
         assert!(matches!(copy.status(), CopyStatus::DurabilityUnknown));
-        assert!(core.pending_history_save().unwrap().unwrap().ready);
-        // Control: unrelated destination reconciliation is receipt-only by default.
         assert_eq!(
-            copy.pending_attempt().unwrap().actor(),
-            core.actor_identity()
+            core.attachment_state().unwrap(),
+            kinewright_core::AttachmentState::Live,
+            "COPY_UNCERTAINTY_DOES_NOT_INSTALL_OR_FLOOR_ITS_SOURCE"
         );
-        let before = core.export_history().unwrap();
-        copy.reconcile_destination(None).unwrap();
-        assert_eq!(core.export_history().unwrap(), before);
-        assert!(core.pending_history_save().unwrap().is_some());
+        assert!(
+            copy.pending_attempt().is_none(),
+            "FIRST_SAVE_OWNS_A_COPY_PUBLICATION_NOT_A_NATIVE_COMMAND_TICKET"
+        );
         (session, copy)
     }
     #[test]
@@ -199,9 +208,7 @@ mod linux {
                 let (core, mut owner, inputs) = setup(&path);
                 owner.restrict_limits_probe(limits()).unwrap();
                 grow(&core);
-                let original = core.export_history().unwrap();
-                let selected = bound_history_probe(&original, &limits()).unwrap();
-                assert!(selected.floor_offset > 0);
+                assert_eq!(core.export_history().unwrap().history().undo.len(), 40);
                 assert!(matches!(
                     io_observer::fail_once(
                         if landed {
@@ -230,44 +237,48 @@ mod linux {
                 } else {
                     apply(&core, Command::Undo);
                 }
-                let before = core.export_history().unwrap();
+                let before = core.snapshot_identity().unwrap();
                 owner.reconcile_destination(Some(&core)).unwrap();
-                assert!(core.pending_history_save().unwrap().is_none());
-                let settled = core.export_history().unwrap();
-                let expected = if landed {
-                    kinewright_core::HistoryTransition::floor(
-                        before.clone(),
-                        usize::try_from(selected.floor_offset).unwrap(),
-                    )
-                    .unwrap()
-                    .after()
-                    .clone()
-                } else {
-                    before.clone()
-                };
-                assert_eq!(settled, expected);
+                assert!(owner.pending_attempt().is_none());
+                assert_eq!(
+                    core.snapshot_identity().unwrap(),
+                    before,
+                    "ORDINARY_SETTLEMENT_PRESERVES_LATER_ACCEPTED_OWNER"
+                );
                 owner.reconcile_destination(Some(&core)).unwrap();
-                assert_eq!(core.export_history().unwrap(), settled);
+                assert_eq!(core.snapshot_identity().unwrap(), before);
                 let attachment = owner.attach_core(&core).unwrap();
                 grow(&core);
-                let result =
-                    io_observer::fail_once("root_parent_sync", || owner.save(&core, &inputs));
-                assert!(matches!(result, Err(BundleError::DurabilityUnknown)));
-                let newer = core.pending_history_save().unwrap().unwrap();
-                assert_ne!(newer.id, attempt.ticket().id);
-                let history = core.export_history().unwrap();
-                assert!(attachment.settle_attempt(&attempt).is_err());
-                assert_eq!(core.pending_history_save().unwrap(), Some(newer));
-                assert_eq!(core.export_history().unwrap(), history);
+                assert!(matches!(
+                    io_observer::fail_once("root_parent_sync", || owner.save(&core, &inputs)),
+                    Err(BundleError::DurabilityUnknown)
+                ));
+                let newer = owner.pending_attempt().unwrap();
+                assert_ne!(
+                    newer.tag(),
+                    attempt.tag(),
+                    "NEW_PUBLICATION_HAS_ITS_OWN_IMMUTABLE_ROOT_TAG"
+                );
+                let history = core.snapshot_identity().unwrap();
+                let _ = attachment.settle_attempt(&attempt);
+                assert_eq!(
+                    owner.pending_attempt(),
+                    Some(newer),
+                    "OLD_DESTINATION_PROOF_CANNOT_CONSUME_NEWER_ATTEMPT"
+                );
+                assert_eq!(core.snapshot_identity().unwrap(), history);
                 owner.reconcile_destination(Some(&core)).unwrap();
-                assert!(core.pending_history_save().unwrap().is_none());
+                assert!(owner.pending_attempt().is_none());
                 grow(&core);
                 owner.save(&core, &inputs).unwrap();
-                let reopened = Core::spawn(Document::default()).unwrap();
-                LoadedBundle::read(&path)
-                    .unwrap()
-                    .restore_manual(&reopened)
-                    .unwrap();
+                let mut loaded = LoadedBundle::read(
+                    &path,
+                    &kinewright_project::operation_history::HistoryPool::new(
+                        kinewright_project::operation_history::PoolLimits::default(),
+                    ),
+                )
+                .unwrap();
+                let reopened = loaded.open_manual().unwrap();
                 assert_eq!(
                     reopened.export_history().unwrap(),
                     core.export_history().unwrap()
@@ -278,17 +289,28 @@ mod linux {
     #[test]
     fn w09_destination_proof_and_exact_own_ticket_settlement() {
         let temp = temp("s2-proof");
-        let a = Core::spawn(document()).unwrap();
-        let b = Core::spawn(document()).unwrap();
-        grow(&a);
-        grow(&b);
         let path_a = temp.path("a.kinewright");
         let path_b = temp.path("b.kinewright");
-        let (_sa, mut copy_a) = new_copy(&temp, &path_a, &a, true);
-        let (_sb, mut copy_b) = new_copy(&temp, &path_b, &b, true);
+        let (a, mut copy_a, inputs_a) = setup(&path_a);
+        let (b, mut copy_b, inputs_b) = setup(&path_b);
+        grow(&a);
+        grow(&b);
+        assert!(matches!(
+            io_observer::fail_once("root_parent_sync", || copy_a.save(&a, &inputs_a)),
+            Err(BundleError::DurabilityUnknown)
+        ));
+        assert!(matches!(
+            io_observer::fail_once("root_parent_sync", || copy_b.save(&b, &inputs_b)),
+            Err(BundleError::DurabilityUnknown)
+        ));
         let attempt_a = copy_a.pending_attempt().unwrap();
         let attempt_b = copy_b.pending_attempt().unwrap();
-        assert_eq!(attempt_a.ticket().id, attempt_b.ticket().id);
+        assert_eq!(attempt_a.change().position, attempt_b.change().position);
+        assert_ne!(
+            attempt_a.actor(),
+            attempt_b.actor(),
+            "EQUAL_COUNTERS_NEVER_ALIAS_DIFFERENT_ACTOR_ATTEMPTS"
+        );
         edit(&a, true);
         edit(&b, true);
         let ha = a.export_history().unwrap();
@@ -304,27 +326,24 @@ mod linux {
         fs::write(&path_a, b"damaged root").unwrap();
         assert!(copy_a.reconcile_destination(Some(&a)).is_err());
         assert_eq!(a.export_history().unwrap(), ha);
-        assert!(a.pending_history_save().unwrap().is_some());
+        assert!(copy_a.pending_attempt().is_some());
         fs::write(&path_a, &original).unwrap();
         let attachment = copy_a.attach_core(&a).unwrap();
         let cut = attachment.freeze().unwrap();
         attachment.seal(&cut).unwrap();
         copy_a.reconcile_destination(Some(&a)).unwrap();
         assert_eq!(a.export_history().unwrap(), ha);
-        assert_eq!(
-            a.pending_history_save().unwrap(),
-            Some(attempt_a.ticket().clone())
-        );
+        assert_eq!(a.snapshot_identity().unwrap(), ha.identity().unwrap());
         copy_b.reconcile_destination(Some(&b)).unwrap();
-        assert!(b.pending_history_save().unwrap().is_none());
+        assert!(copy_b.pending_attempt().is_none());
         // A never-published first-save root may be proved absent under the same parent.
-        let absent = Core::spawn(document()).unwrap();
+        let absent = Core::for_test(document()).unwrap();
         grow(&absent);
         let (_source, mut absent_copy) =
             new_copy(&temp, &temp.path("absent.kinewright"), &absent, false);
         let before = absent.export_history().unwrap();
         absent_copy.reconcile_destination(Some(&absent)).unwrap();
-        assert!(absent.pending_history_save().unwrap().is_none());
+        assert!(absent_copy.pending_attempt().is_none());
         assert_eq!(absent.export_history().unwrap(), before);
         // Missing acknowledged bytes still refuse the owner. That is distinct from
         // losslessly releasing this exact ticket after proving its root absent.
@@ -339,9 +358,16 @@ mod linux {
         let before = vanished.export_history().unwrap();
         fs::remove_file(&path).unwrap();
         assert!(owner.reconcile_destination(None).is_err());
-        assert!(vanished.pending_history_save().unwrap().is_some());
+        assert!(
+            owner.pending_attempt().is_none(),
+            "ABSENT_EXACT_TICKET_SETTLES_BEFORE_OWNER_REPAIR"
+        );
         assert!(owner.reconcile_destination(Some(&vanished)).is_err());
-        assert!(vanished.pending_history_save().unwrap().is_none());
+        assert!(
+            owner.pending_attempt().is_none(),
+            "EXACT_ABSENT_TICKET_RELEASED_WITHOUT_REPAIRING_MISSING_ACKNOWLEDGED_ROOT"
+        );
+        assert!(owner.save(&vanished, &inputs).is_err());
         assert_eq!(vanished.export_history().unwrap(), before);
     }
     #[test]
@@ -380,20 +406,22 @@ mod linux {
             Err(BundleError::DurabilityUnknownAt(_))
         ));
         assert_eq!(core.export_history().unwrap(), before);
-        assert_eq!(
-            core.pending_history_save().unwrap(),
-            Some(attempt.ticket().clone())
-        );
+        assert_eq!(owner.pending_attempt(), Some(attempt.clone()));
         // Restore our own namespace so teardown never leaves a modeled detached root.
         fs::remove_dir_all(&parent).unwrap();
         fs::rename(original, parent).unwrap();
         attachment.settle_attempt(&attempt).unwrap();
-        assert!(core.pending_history_save().unwrap().is_none());
+        owner.reconcile_destination(Some(&core)).unwrap();
+        assert!(owner.pending_attempt().is_none());
     }
     fn setup(path: &Path) -> (Core, ProjectBundle, ObjectRef) {
-        let core = Core::spawn(document()).unwrap();
-        let mut owner =
-            ProjectBundle::activate(path, BundleWriteAdmission::new_document()).unwrap();
+        let core = Core::for_test(document()).unwrap();
+        let mut owner = ProjectBundle::activate(
+            path,
+            BundleWriteAdmission::new_document(),
+            core.history_pool(),
+        )
+        .unwrap();
         let inputs = owner.empty_inputs().unwrap().reference.clone();
         owner.save(&core, &inputs).unwrap();
         (core, owner, inputs)
@@ -411,10 +439,12 @@ mod linux {
                     .unwrap()
                     .capture()
                     .unwrap()
-                    .revision();
+                    .change()
+                    .revision;
                 let command = CommandEnvelope {
                     switch: None,
                     manual: None,
+                    context: None,
                     version: 1,
                     action: "edit".into(),
                     id: CommandId {
@@ -449,20 +479,37 @@ mod linux {
                     ),
                     Err(BundleError::DurabilityUnknown)
                 ));
-                assert!(core.pending_history_save().unwrap().is_none());
+                assert_eq!(
+                    core.attachment_state().unwrap(),
+                    kinewright_core::AttachmentState::Frozen
+                );
+                let pending = core.snapshot_identity().unwrap();
+                assert!(
+                    core.request(Command::Undo).is_err(),
+                    "UNSETTLED_NATIVE_UPDATE_FENCES_ITS_SHADOW"
+                );
+                assert_eq!(core.snapshot_identity().unwrap(), pending);
+                owner.reconcile_command(&core).unwrap();
+                assert_eq!(
+                    core.export_history().unwrap().history().document.tracks[0].sync_lock,
+                    !landed,
+                    "NATIVE_SETTLEMENT_APPLIES_ONLY_THE_PUBLISHED_UPDATE"
+                );
                 edit(&core, true);
                 edit(&core, false);
                 apply(&core, Command::Undo);
-                let before = core.export_history().unwrap();
+                let before = core.snapshot_identity().unwrap();
                 if sealed {
                     let attachment = owner.attach_core(&core).unwrap();
                     let cut = attachment.freeze().unwrap();
                     attachment.seal(&cut).unwrap();
                 }
                 owner.reconcile_command(&core).unwrap();
-                owner.reconcile_command(&core).unwrap();
-                assert_eq!(core.export_history().unwrap(), before);
-                assert!(core.pending_history_save().unwrap().is_none());
+                assert_eq!(
+                    core.snapshot_identity().unwrap(),
+                    before,
+                    "REPEATED_RECEIPT_RECONCILIATION_NEVER_REPLAYS_THE_EDIT"
+                );
                 let result = owner.receipt_lookup(&command).unwrap();
                 assert!(if landed {
                     matches!(result, ReceiptLookup::Committed(_))
@@ -476,16 +523,25 @@ mod linux {
     #[test]
     fn w16_reconcile_floor_error_preserves_proven_publication() {
         fn exhausted_core() -> Core {
-            let core = Core::spawn_at(document(), kinewright_core::TimelineRevision(u64::MAX - 40))
-                .unwrap();
+            let core = Core::for_test_at_revision(
+                document(),
+                kinewright_core::TimelineRevision(u64::MAX - 40),
+            )
+            .unwrap();
             grow(&core);
             core
         }
         let temp = temp("s2-reconcile-phase");
         let path = temp.path("named.kinewright");
-        let (_, mut owner, inputs) = setup(&path);
-        owner.restrict_limits_probe(limits()).unwrap();
         let core = exhausted_core();
+        let mut owner = ProjectBundle::activate(
+            &path,
+            BundleWriteAdmission::new_document(),
+            core.history_pool(),
+        )
+        .unwrap();
+        let inputs = owner.empty_inputs().unwrap().reference.clone();
+        owner.restrict_limits_probe(limits()).unwrap();
         let before = core.export_history().unwrap();
         assert!(matches!(
             io_observer::fail_once("root_parent_sync", || owner.save(&core, &inputs)),
@@ -495,23 +551,28 @@ mod linux {
             owner.publication_state(),
             kinewright_project::bundle::PublicationState::Unknown
         );
-        assert!(matches!(
-            owner.reconcile_destination(Some(&core)),
-            Err(BundleError::HistoryCommitInvariant)
-        ));
+        owner.reconcile_destination(Some(&core)).unwrap();
         assert_eq!(
             owner.publication_state(),
             kinewright_project::bundle::PublicationState::Committed
         );
         assert_eq!(core.export_history().unwrap(), before);
-        assert!(core.pending_history_save().unwrap().is_none());
+        assert_eq!(
+            core.attachment_state().unwrap(),
+            kinewright_core::AttachmentState::Live
+        );
         owner.reconcile_destination(None).unwrap();
         assert_eq!(
-            LoadedBundle::read(&path)
-                .unwrap()
-                .admission()
-                .inspection_document(),
-            Some(&*before.document)
+            LoadedBundle::read(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            )
+            .unwrap()
+            .admission()
+            .inspection_document(),
+            Some(&*before.history().document)
         );
 
         let path = temp.path("first.kinewright");
@@ -528,24 +589,20 @@ mod linux {
             .clone();
         let core = exhausted_core();
         let before = core.export_history().unwrap();
-        let mut copy = io_observer::fail_once("root_parent_sync", || {
-            session.first_save_with_limits(&path, &core, &input, limits())
-        })
-        .unwrap();
-        assert!(matches!(copy.status(), CopyStatus::DurabilityUnknown));
-        assert!(matches!(
-            copy.reconcile_destination(Some(&core)),
-            Err(BundleError::HistoryCommitInvariant)
-        ));
-        assert!(matches!(
-            copy.status(),
-            CopyStatus::CommittedWithError { .. }
-        ));
+        let result = session.first_save_with_limits(&path, &core, &input, limits());
+        assert!(
+            matches!(result, Err(BundleError::Capacity("install revision"))),
+            "EXHAUSTED_INSTALL_REVISION_REFUSES_BEFORE_PUBLICATION"
+        );
+        assert!(
+            !path.exists(),
+            "REVISION_REFUSAL_PUBLISHES_NO_UNINSTALLABLE_ROOT"
+        );
         assert_eq!(core.export_history().unwrap(), before);
-        assert!(core.pending_history_save().unwrap().is_none());
-        copy.reconcile_destination(None).unwrap();
-        assert!(matches!(copy.status(), CopyStatus::Committed(_)));
-        assert_eq!(core.export_history().unwrap(), before);
+        assert_eq!(
+            core.attachment_state().unwrap(),
+            kinewright_core::AttachmentState::Live
+        );
     }
 }
 

@@ -49,7 +49,8 @@ pub struct SnapshotDescriptor {
     pub key: SnapshotKey,
     pub checkpoint_ref: ObjectRef,
     pub document_ref: ObjectRef,
-    pub lineage_ref: ObjectRef,
+    pub owner_ref: ObjectRef,
+    pub identity: crate::operation_history::SnapshotIdentity,
     pub input_manifest_ref: ObjectRef,
     pub revision_refs: Vec<ObjectRef>,
     pub parent_version: Option<VersionId>,
@@ -61,7 +62,7 @@ impl SnapshotDescriptor {
         let mut refs = vec![
             self.checkpoint_ref.clone(),
             self.document_ref.clone(),
-            self.lineage_ref.clone(),
+            self.owner_ref.clone(),
             self.input_manifest_ref.clone(),
         ];
         refs.extend(self.revision_refs.clone());

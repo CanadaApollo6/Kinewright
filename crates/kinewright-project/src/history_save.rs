@@ -1,189 +1,277 @@
-//! The project owner is the only constructor of its Core persistence proof.
+//! A namespace owner grants the actor's attachment capability. Publications
+//! retain their immutable captured state; they do not cut or protect a prefix.
 #![allow(clippy::missing_errors_doc)]
-use kinewright_core::{Core, HistoryError, HistorySaveTag, HistoryTransition, PendingHistorySave};
+use crate::{
+    operation_actor::{
+        AcceptedCut, ActorIdentity, Attachment, ChangeId, CommandContext, Core, Error,
+        ManualPermit, PreparedUpdate,
+    },
+    operation_history::{SnapshotIdentity, ValidatedOwnerSnapshot},
+    operation_inputs::ManualInputs,
+    operation_protocol::{Action, Lease, Receipt},
+};
+use kinewright_core::HistorySaveTag;
+use std::sync::{Arc, atomic::AtomicBool};
 
 struct ProjectHistoryProof;
-pub(crate) struct FloorBarrier(kinewright_core::HistoryFloorBarrier<ProjectHistoryProof>);
-impl FloorBarrier {
-    pub(crate) fn retain_until_reconcile(&mut self) -> Result<(), HistoryError> {
-        self.0.retain_until_reconcile(&ProjectHistoryProof)
-    }
-    pub(crate) fn tag_publication(&mut self, tag: HistorySaveTag) -> Result<(), HistoryError> {
-        self.0.tag_publication(&ProjectHistoryProof, tag)
-    }
-    pub(crate) fn commit(&mut self) -> Result<(), HistoryError> {
-        self.0.commit(&ProjectHistoryProof)
-    }
-    pub(crate) fn release(&mut self) -> Result<(), HistoryError> {
-        self.0.release()
-    }
-}
-pub(crate) fn bind(core: &Core) -> Result<(), HistoryError> {
-    core.history_save_owner(&ProjectHistoryProof).map(|_| ())
-}
-pub(crate) fn begin(
-    core: &Core,
-    transition: HistoryTransition,
-) -> Result<FloorBarrier, HistoryError> {
-    core.history_save_owner(&ProjectHistoryProof)?
-        .begin_history_floor(&ProjectHistoryProof, transition)
-        .map(FloorBarrier)
-}
-pub(crate) fn settle(
-    core: &Core,
-    pending: &PendingHistorySave,
-    commit: bool,
-) -> Result<(), HistoryError> {
-    core.history_save_owner(&ProjectHistoryProof)?
-        .settle_history_save(&ProjectHistoryProof, pending, commit)
+
+pub(crate) fn bind(core: &Core) -> Result<(), Error> {
+    core.attach(&ProjectHistoryProof).map(|_| ())
 }
 
-/// Opaque actor/attempt binding captured by the original publication owner.
+/// The source actor and exact immutable state bound to one namespace outcome.
+/// No independent document, history, or pool reservation is kept by this value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttemptBinding {
-    ticket: PendingHistorySave,
+    change: ChangeId,
+    identity: SnapshotIdentity,
+    tag: HistorySaveTag,
 }
 impl AttemptBinding {
-    #[must_use]
-    pub const fn actor(&self) -> kinewright_core::ActorIdentity {
-        self.ticket.actor
-    }
-    #[must_use]
-    pub const fn ticket(&self) -> &PendingHistorySave {
-        &self.ticket
-    }
-}
-impl FloorBarrier {
-    pub(crate) fn attempt(&self) -> AttemptBinding {
-        AttemptBinding {
-            ticket: self.0.ticket(),
+    pub(crate) const fn new(
+        change: ChangeId,
+        identity: SnapshotIdentity,
+        tag: HistorySaveTag,
+    ) -> Self {
+        Self {
+            change,
+            identity,
+            tag,
         }
+    }
+    #[must_use]
+    pub const fn actor(&self) -> ActorIdentity {
+        self.change.actor
+    }
+    #[must_use]
+    pub const fn change(&self) -> ChangeId {
+        self.change
+    }
+    #[must_use]
+    pub const fn identity(&self) -> SnapshotIdentity {
+        self.identity
+    }
+    #[must_use]
+    pub const fn tag(&self) -> &HistorySaveTag {
+        &self.tag
     }
 }
 
-/// Authorized project attachment; constructors require a validated project/session owner.
+/// Constructors require an actual validated project/session owner. A plain
+/// actor handle cannot install or resume that owner's frozen state.
 pub struct ProjectAttachment {
     core: Core,
-    authority: kinewright_core::CoreAttachment<ProjectHistoryProof>,
+    authority: Attachment<ProjectHistoryProof>,
 }
 impl ProjectAttachment {
-    pub(crate) fn new(core: &Core) -> Result<Self, HistoryError> {
-        core.history_save_owner(&ProjectHistoryProof)
-            .map(|authority| Self {
-                core: core.clone(),
-                authority,
-            })
+    pub(crate) fn new(core: &Core) -> Result<Self, Error> {
+        let authority = core.attach(&ProjectHistoryProof)?;
+        Ok(Self {
+            core: core.clone(),
+            authority,
+        })
     }
     pub fn manual_permit(
         &self,
-        encoder: Box<dyn kinewright_core::ManualHistoryEncoder>,
-    ) -> Result<kinewright_core::ManualPermit, HistoryError> {
-        self.authority.manual_permit(&ProjectHistoryProof, encoder)
+        lease: Lease,
+        inputs: ManualInputs,
+        live: Arc<AtomicBool>,
+    ) -> Result<ManualPermit, Error> {
+        self.authority
+            .manual_permit(&ProjectHistoryProof, None, lease, inputs, live)
     }
     pub(crate) fn resume_manual(
         &self,
-        cut: &kinewright_core::AcceptedCut,
-        encoder: Box<dyn kinewright_core::ManualHistoryEncoder>,
-        live: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<kinewright_core::ManualPermit, HistoryError> {
+        cut: &AcceptedCut,
+        lease: Lease,
+        inputs: ManualInputs,
+        live: Arc<AtomicBool>,
+    ) -> Result<ManualPermit, Error> {
         self.authority
-            .resume_manual(&ProjectHistoryProof, cut, encoder, live)
+            .manual_permit(&ProjectHistoryProof, Some(*cut), lease, inputs, live)
+    }
+    pub(crate) fn acknowledge_frozen(
+        &self,
+        cut: &AcceptedCut,
+        receipts: Vec<Receipt>,
+    ) -> Result<(), Error> {
+        self.authority
+            .acknowledge_frozen(&ProjectHistoryProof, *cut, receipts)
     }
     pub fn acknowledge_manual(
         &self,
-        permit: &kinewright_core::ManualPermit,
-        prefix: Vec<kinewright_core::AcceptedHistory>,
-    ) -> Result<(), HistoryError> {
+        permit: &ManualPermit,
+        receipts: Vec<Receipt>,
+    ) -> Result<(), Error> {
         self.authority
-            .acknowledge_manual(&ProjectHistoryProof, permit, prefix)
+            .acknowledge_manual(&ProjectHistoryProof, permit, receipts)
     }
-    pub fn capture(&self) -> Result<kinewright_core::AcceptedCut, HistoryError> {
+    pub fn capture(&self) -> Result<AcceptedCut, Error> {
         self.authority.capture(&ProjectHistoryProof)
     }
-    pub fn freeze(&self) -> Result<kinewright_core::AcceptedCut, HistoryError> {
+    /// The writer has already proved this actor at install/publication and is
+    /// its sole mutator. Freeze that committed cut without rehashing a warm edit.
+    pub(crate) fn freeze_published(
+        &self,
+        identity: SnapshotIdentity,
+        position: kinewright_core::undo::CommandKey,
+        revision: kinewright_core::TimelineRevision,
+    ) -> Result<AcceptedCut, Error> {
+        self.authority
+            .freeze_published(&ProjectHistoryProof, identity, position, revision)
+    }
+    pub fn freeze(&self) -> Result<AcceptedCut, Error> {
         self.authority.freeze(&ProjectHistoryProof)
     }
-    pub fn resume(&self, cut: &kinewright_core::AcceptedCut) -> Result<(), HistoryError> {
-        self.authority.resume(&ProjectHistoryProof, cut)
+    pub fn resume(&self, cut: &AcceptedCut) -> Result<(), Error> {
+        self.authority.resume(&ProjectHistoryProof, *cut)
     }
-    pub fn seal(&self, cut: &kinewright_core::AcceptedCut) -> Result<(), HistoryError> {
-        self.authority.seal(&ProjectHistoryProof, cut)
+    pub fn seal(&self, cut: &AcceptedCut) -> Result<(), Error> {
+        self.authority.seal(&ProjectHistoryProof, *cut)
     }
-    pub fn restore_history(
+    pub fn retire(&self, cut: &AcceptedCut) -> Result<(), Error> {
+        self.authority.retire(&ProjectHistoryProof, *cut)
+    }
+    pub fn install_snapshot(
         &self,
-        history: kinewright_core::HistorySnapshot,
-    ) -> Result<(), HistoryError> {
-        self.authority
-            .restore_history(&ProjectHistoryProof, history)
+        cut: &AcceptedCut,
+        snapshot: ValidatedOwnerSnapshot,
+        epoch: Option<u64>,
+    ) -> Result<ChangeId, Error> {
+        match epoch {
+            Some(epoch) => self.authority.install_snapshot_at_epoch(
+                &ProjectHistoryProof,
+                *cut,
+                snapshot,
+                epoch,
+            ),
+            None => self
+                .authority
+                .install_snapshot(&ProjectHistoryProof, *cut, snapshot),
+        }
     }
-    pub fn install_checkpoint(
+    pub(crate) fn install_peer_snapshot(
         &self,
-        before: kinewright_core::HistorySnapshot,
-        after: kinewright_core::HistorySnapshot,
-    ) -> Result<(), HistoryError> {
+        cut: &crate::operation_actor::AcceptedCut,
+        snapshot: crate::operation_history::ValidatedOwnerSnapshot,
+        branch: crate::bundle_records::BranchId,
+        revision: kinewright_core::TimelineRevision,
+    ) -> Result<crate::operation_actor::ChangeId, crate::operation_actor::Error> {
         self.authority
-            .install_checkpoint(&ProjectHistoryProof, before, after)
+            .install_peer_snapshot(&ProjectHistoryProof, *cut, snapshot, branch, revision)
     }
-    pub(crate) fn install_frozen_transition(
+
+    pub(crate) fn prepare_selection(
         &self,
-        cut: &kinewright_core::AcceptedCut,
-        after: kinewright_core::HistorySnapshot,
-        pending: Vec<kinewright_core::AcceptedHistory>,
-    ) -> Result<kinewright_core::AcceptedCut, HistoryError> {
+        cut: &AcceptedCut,
+        snapshot: ValidatedOwnerSnapshot,
+        branch: crate::bundle_records::BranchId,
+    ) -> Result<Core, Error> {
         self.authority
-            .install_frozen_transition(&ProjectHistoryProof, cut, after, pending)
+            .prepare_selection(&ProjectHistoryProof, *cut, snapshot, branch)
     }
-    pub(crate) fn install_frozen_checkpoint(
+    pub(crate) fn open_validated_selection(
         &self,
-        cut: &kinewright_core::AcceptedCut,
-        after: kinewright_core::HistorySnapshot,
-    ) -> Result<kinewright_core::AcceptedCut, HistoryError> {
-        self.authority
-            .install_frozen_checkpoint(&ProjectHistoryProof, cut, after)
+        cut: &AcceptedCut,
+        snapshot: ValidatedOwnerSnapshot,
+        branch: crate::bundle_records::BranchId,
+        revision: kinewright_core::TimelineRevision,
+    ) -> Result<Core, Error> {
+        self.authority.open_validated_selection(
+            &ProjectHistoryProof,
+            *cut,
+            snapshot,
+            branch,
+            revision,
+        )
     }
-    pub fn install_history_transition(
+    pub(crate) fn retarget_selection(
         &self,
-        transition: HistoryTransition,
-    ) -> Result<(), HistoryError> {
+        cut: &AcceptedCut,
+        branch: crate::bundle_records::BranchId,
+    ) -> Result<AcceptedCut, Error> {
         self.authority
-            .install_history_transition(&ProjectHistoryProof, transition)
+            .retarget_selection(&ProjectHistoryProof, *cut, branch)
     }
-    /// Settle only the original attempt, after proof of its own destination's durable outcome.
-    /// Sealed actors receive no settlement message. Callers supply the active attachment only.
+    pub(crate) fn seal_selection(
+        &self,
+        cut: &AcceptedCut,
+        store: &crate::store::ProjectStore,
+        bindings: crate::storage_budget::StorageReservation<
+            std::collections::BTreeMap<
+                crate::operation_history::Resource,
+                crate::bundle_records::ObjectRef,
+            >,
+        >,
+    ) -> Result<crate::operation_history::SealedOwner, Error> {
+        self.authority
+            .seal_selection(&ProjectHistoryProof, *cut, store, bindings)
+    }
+    pub(crate) fn prepare_install(
+        &self,
+        cut: &AcceptedCut,
+        action: Action,
+        context: CommandContext,
+    ) -> Result<PreparedUpdate, Error> {
+        self.authority
+            .prepare_install(&ProjectHistoryProof, *cut, action, context)
+    }
+    pub(crate) fn prepare(
+        &self,
+        cut: &AcceptedCut,
+        action: Action,
+        context: CommandContext,
+    ) -> Result<PreparedUpdate, Error> {
+        self.authority
+            .prepare(&ProjectHistoryProof, *cut, action, context)
+    }
+    pub(crate) fn prepare_reinstall(
+        &self,
+        cut: &AcceptedCut,
+        context: CommandContext,
+    ) -> Result<PreparedUpdate, Error> {
+        self.authority
+            .prepare_reinstall(&ProjectHistoryProof, *cut, context)
+    }
+    pub(crate) fn prepare_merge(
+        &self,
+        cut: &AcceptedCut,
+        operations: Vec<kinewright_core::Operation>,
+        context: CommandContext,
+    ) -> Result<PreparedUpdate, Error> {
+        self.authority
+            .prepare_merge(&ProjectHistoryProof, *cut, operations, context)
+    }
+    pub(crate) fn commit_prepared(
+        &self,
+        cut: &AcceptedCut,
+        update: PreparedUpdate,
+        published: SnapshotIdentity,
+    ) -> Result<AcceptedCut, Error> {
+        let change = self
+            .authority
+            .commit_prepared(&ProjectHistoryProof, *cut, update)?;
+        // The immutable update's identity was already computed for this exact
+        // durable root. Finishing the actor needs no fallible post-commit hash.
+        Ok(AcceptedCut::committed(change, published))
+    }
+    /// Verify the original destination outcome; the publication owner applies
+    /// its retained update. No save settlement mutates an executor prefix.
     pub fn settle_attempt(
         &self,
         attempt: &AttemptBinding,
     ) -> Result<bool, crate::bundle::BundleError> {
-        let core = &self.core;
-        if core.actor_identity() != attempt.actor() {
+        if self.core.actor_identity() != attempt.actor() {
             return Err(crate::bundle::BundleError::HistoryBarrierInvariant);
         }
-        if core
+        if self
+            .core
             .attachment_state()
-            .map_err(crate::bundle::history_error)?
+            .map_err(crate::bundle::operation_error)?
             == kinewright_core::AttachmentState::Sealed
         {
             return Ok(false);
         }
-        let Some(pending) = core
-            .pending_history_save()
-            .map_err(crate::bundle::history_error)?
-        else {
-            return Ok(false);
-        };
-        if pending != attempt.ticket {
-            return Err(crate::bundle::BundleError::HistoryBarrierInvariant);
-        }
-        if !pending.ready {
-            return Err(crate::bundle::BundleError::SaveInProgress);
-        }
-        let tag = attempt
-            .ticket
-            .tag
-            .as_ref()
-            .ok_or(crate::bundle::BundleError::HistoryBarrierInvariant)?;
-        let commit = crate::bundle::reconcile_save_tag_continuous(tag)?;
-        settle(core, &attempt.ticket, commit).map_err(crate::bundle::history_error)?;
-        Ok(true)
+        crate::bundle::reconcile_save_tag_continuous(attempt.tag(), self.core.history_pool())
     }
 }

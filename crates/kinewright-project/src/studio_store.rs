@@ -68,7 +68,7 @@ record!(
             }
             kind(&d.checkpoint_ref, RecordKind::BranchCheckpoint)?;
             kind(&d.document_ref, RecordKind::Document)?;
-            kind(&d.lineage_ref, RecordKind::Lineage)?;
+            kind(&d.owner_ref, RecordKind::OperationHistory)?;
             kind(&d.input_manifest_ref, RecordKind::InputManifest)?;
             if d.revision_refs.len() as u64 > l.comments {
                 return Err(BundleError::Capacity("snapshot revision refs"));
@@ -525,6 +525,7 @@ impl MetadataEnvelope {
         Ok(CommandEnvelope {
             switch: None,
             manual: None,
+            context: None,
             version: 1,
             action: "metadata".into(),
             id: self.id.clone(),
@@ -619,9 +620,10 @@ impl ProjectBundle {
             .store
             .read_record::<BranchCheckpoint>(&d.checkpoint_ref)?;
         if c.head_id != d.key.head
-            || c.document_hash != d.key.document_hash
+            || c.document_ref.sha256 != d.key.document_hash
             || c.document_ref != d.document_ref
-            || c.lineage_ref != d.lineage_ref
+            || c.owner_ref != d.owner_ref
+            || c.identity != d.identity
             || c.input_manifest_ref != d.input_manifest_ref
         {
             return Err(BundleError::Corrupt("snapshot checkpoint binding".into()));
@@ -1167,14 +1169,15 @@ impl ProjectBundle {
                     project: self.project_id.clone(),
                     version: p.version.clone(),
                     head: checkpoint.head_id.clone(),
-                    document_hash: checkpoint.document_hash.clone(),
+                    document_hash: checkpoint.document_ref.sha256.clone(),
                     input_manifest_ref: checkpoint.input_manifest_ref.clone(),
                 };
                 let descriptor = SnapshotDescriptor {
                     key: key.clone(),
                     checkpoint_ref: p.checkpoint_ref.clone(),
                     document_ref: checkpoint.document_ref.clone(),
-                    lineage_ref: checkpoint.lineage_ref.clone(),
+                    owner_ref: checkpoint.owner_ref.clone(),
+                    identity: checkpoint.identity,
                     input_manifest_ref: checkpoint.input_manifest_ref.clone(),
                     revision_refs: p.revision_refs.clone(),
                     parent_version: p.parent_version.clone(),
@@ -2227,9 +2230,10 @@ impl crate::store::ProjectStore {
         self.check_read_authority()?;
         let c = self.read_record::<BranchCheckpoint>(&descriptor.checkpoint_ref)?;
         if c.head_id != descriptor.key.head
-            || c.document_hash != descriptor.key.document_hash
+            || c.document_ref.sha256 != descriptor.key.document_hash
             || c.document_ref != descriptor.document_ref
-            || c.lineage_ref != descriptor.lineage_ref
+            || c.owner_ref != descriptor.owner_ref
+            || c.identity != descriptor.identity
             || c.input_manifest_ref != descriptor.input_manifest_ref
             || descriptor.key.document_hash != descriptor.document_ref.sha256
             || descriptor.key.input_manifest_ref != descriptor.input_manifest_ref

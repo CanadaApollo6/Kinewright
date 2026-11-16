@@ -1400,7 +1400,13 @@ mod tests {
         let mut old = std::mem::replace(app, replacement);
         in1_shutdown(&mut old);
         drop(old);
-        let owner = kinewright_project::editing_session::Ja1EditingSession::open(&path).unwrap();
+        let owner = kinewright_project::editing_session::Ja1EditingSession::open(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         let mut attachment = crate::ja1_attachment::Ja1Attachment::new(owner).unwrap();
         attachment
             .launch_host(

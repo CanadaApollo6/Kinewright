@@ -10,20 +10,20 @@ fn fixture() -> (
     let parent = kinewright_media::test_support::workspace_target_dir();
     std::fs::create_dir_all(&parent).unwrap();
     let temp = kinewright_media::test_support::TempDirectory::new_in(&parent, "s2h-host");
-    let core = Core::spawn(Document {
-        tracks: vec![Track {
-            id: TrackId(1),
-            kind: TrackKind::Video,
-            sync_lock: true,
-            clips: vec![],
-        }],
-        ..Document::default()
-    })
-    .unwrap();
-    if let Some(path) = std::env::var_os("JA_S2H_STATUS_HISTORY") {
-        let history = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        core.restore_history(history).unwrap();
-    }
+    let core = if let Some(path) = std::env::var_os("JA_S2H_STATUS_HISTORY") {
+        Core::peer_for_test(serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()).unwrap()
+    } else {
+        Core::for_test(Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Document::default()
+        })
+        .unwrap()
+    };
     let mut owner = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
     owner
         .first_save(&temp.path("a.kinewright"), StorageLimits::default())
@@ -44,7 +44,7 @@ fn fixture() -> (
     (temp, host)
 }
 fn run(host: &mut HostCommandOwner, command: HostCommand) -> HostReply {
-    host.execute(command, host.config.roots.clone())
+    received_reply_for_test(host.execute(command, host.config.roots.clone()))
 }
 fn checked(host: &mut HostCommandOwner, command: HostCommand) -> HostReply {
     let reply = run(host, command);
@@ -79,13 +79,13 @@ fn s3_fix1_admitted_extension_recovers_after_host_restart() {
                 },
             );
         }
-        let before = HostSnapshot::capture(host.core()).unwrap();
+        let before = received_snapshot_for_test(host.core()).unwrap();
         let command = if colour {
             HostCommand::PrepareMediaInterpretation {
                 client: client.clone(),
                 operation: kinewright_core::assume_rec709_operation(
                     kinewright_core::AssetId(1),
-                    &before.history.document.media_pool[0].color_description,
+                    &document_for_test(host.core()).media_pool[0].color_description,
                 ),
                 snapshot: before.clone(),
             }
@@ -98,13 +98,13 @@ fn s3_fix1_admitted_extension_recovers_after_host_restart() {
             }
         };
         let prepared = checked(&mut host, command);
-        let gui = Core::spawn(Document::default()).unwrap();
-        gui.restore_history(before.history).unwrap();
+        let gui = kinewright_project::operation_actor::Core::peer_for_test(before.history).unwrap();
         let replica = Ja1EditingSession::new(temp.root(), &gui, StorageLimits::default()).unwrap();
         let permit = replica
             .bind_manual_producer(
                 prepared.manual_lease.unwrap(),
                 prepared.manual_inputs.unwrap(),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             )
             .unwrap();
         let operation = prepared
@@ -117,7 +117,7 @@ fn s3_fix1_admitted_extension_recovers_after_host_restart() {
             Event::DocumentChanged { .. }
         ));
         let pending = permit.pending().unwrap();
-        let frozen = HostSnapshot::capture(&gui).unwrap();
+        let frozen = received_snapshot_for_test(&gui).unwrap();
         let mut config = host.config.clone();
         config.path = Some(temp.path("a.kinewright"));
         drop(host);
@@ -138,21 +138,47 @@ fn s3_fix1_admitted_extension_recovers_after_host_restart() {
             recovered.error
         );
         let barrier = recovered.recovery.unwrap();
+        let installed = barrier.after.history.identity();
         checked(
             &mut host,
             HostCommand::PublishBarrier {
                 barrier: Box::new(barrier),
             },
         );
-        let restored = Core::spawn(Document::default()).unwrap();
-        kinewright_project::bundle::LoadedBundle::read(&temp.path("a.kinewright"))
-            .unwrap()
-            .restore_manual(&restored)
-            .unwrap();
+        let mut loaded = kinewright_project::bundle::LoadedBundle::read(
+            &temp.path("a.kinewright"),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
+        let restored = loaded.open_manual().unwrap();
+        let expected = gui.export_history().unwrap();
+        let actual = restored.export_history().unwrap();
         assert_eq!(
-            restored.export_history().unwrap(),
-            frozen.history,
-            "C0_FIX1_RESTART_SUFFIX"
+            actual.history().document,
+            expected.history().document,
+            "C0_FIX1_RESTART_SUFFIX_DOCUMENT"
+        );
+        assert!(
+            serde_json::to_value(&actual.history().undo).unwrap()
+                == serde_json::to_value(&expected.history().undo).unwrap(),
+            "C0_FIX1_RESTART_SUFFIX_UNDO"
+        );
+        assert!(
+            serde_json::to_value(&actual.history().redo).unwrap()
+                == serde_json::to_value(&expected.history().redo).unwrap(),
+            "C0_FIX1_RESTART_SUFFIX_REDO"
+        );
+        assert_eq!(
+            actual.resources(),
+            expected.resources(),
+            "C0_FIX1_RESTART_SUFFIX_RESOURCES"
+        );
+        assert_eq!(
+            restored.snapshot_identity().unwrap(),
+            installed,
+            "C0_FIX1_RESTART_PUBLISHED_EPOCH"
         );
     }
 }
@@ -177,17 +203,20 @@ fn s3_host_owned_input_admission_rebinds_only_the_exact_editor_cut() {
             client: client.clone(),
         },
     );
-    let snapshot = HostSnapshot::capture(host.core()).unwrap();
-    let original_lease = host.manual.clone();
+    let snapshot = received_snapshot_for_test(host.core()).unwrap();
+    let original_lease = host
+        .manual
+        .as_ref()
+        .map(|authority| authority.lease().clone());
     let before_refusal_root = host.owner().unwrap().root_sha256().unwrap();
-    let altered = Core::spawn(Document::default()).unwrap();
-    altered.restore_history(snapshot.history.clone()).unwrap();
+    let altered =
+        kinewright_project::operation_actor::Core::peer_for_test(snapshot.history.clone()).unwrap();
     edit(&altered, false);
     for (request_client, request_snapshot, code) in [
         ("x".repeat(64), snapshot.clone(), "manual_lease"),
         (
             client.clone(),
-            HostSnapshot::capture(&altered).unwrap(),
+            received_snapshot_for_test(&altered).unwrap(),
             "history_changed",
         ),
     ] {
@@ -204,7 +233,12 @@ fn s3_host_owned_input_admission_rebinds_only_the_exact_editor_cut() {
             refused.error.as_ref().map(|error| error.code.as_str()),
             Some(code)
         );
-        assert_eq!(host.manual, original_lease);
+        assert_eq!(
+            host.manual
+                .as_ref()
+                .map(kinewright_project::editing_session::ManualAuthority::lease),
+            original_lease.as_ref()
+        );
         assert_eq!(
             host.owner().unwrap().root_sha256().unwrap(),
             before_refusal_root
@@ -220,7 +254,7 @@ fn s3_host_owned_input_admission_rebinds_only_the_exact_editor_cut() {
     let prepared = host.execute_operation(command.clone(), roots.clone(), Some(&client), Some(1));
     assert!(prepared.error.is_none(), "{:?}", prepared.error);
     assert_eq!(
-        HostSnapshot::capture(host.core()).unwrap(),
+        received_snapshot_for_test(host.core()).unwrap(),
         snapshot,
         "admission cannot publish the asset"
     );
@@ -232,16 +266,15 @@ fn s3_host_owned_input_admission_rebinds_only_the_exact_editor_cut() {
         serde_json::to_vec(&replay).unwrap()
     );
     assert_eq!(host.owner().unwrap().root_sha256().unwrap(), root);
-    let replica_core = Core::spawn(Document::default()).unwrap();
-    replica_core
-        .restore_history(snapshot.history.clone())
-        .unwrap();
+    let replica_core =
+        kinewright_project::operation_actor::Core::peer_for_test(snapshot.history.clone()).unwrap();
     let replica =
         Ja1EditingSession::new(temp.root(), &replica_core, StorageLimits::default()).unwrap();
     let permit = replica
         .bind_manual_producer(
             prepared.manual_lease.unwrap(),
             prepared.manual_inputs.unwrap(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         )
         .unwrap();
     let asset = prepared.owned_media.unwrap();
@@ -260,14 +293,7 @@ fn s3_host_owned_input_admission_rebinds_only_the_exact_editor_cut() {
             messages: permit.pending().unwrap(),
         },
     );
-    assert_eq!(
-        HostSnapshot::capture(host.core())
-            .unwrap()
-            .history
-            .document
-            .media_pool,
-        vec![asset]
-    );
+    assert_eq!(document_for_test(host.core()).media_pool, vec![asset]);
     assert!(
         run(
             &mut host,
@@ -298,9 +324,9 @@ fn s3_gui_owned_input_forwarded_scope_refuses_before_admission() {
             client: client.clone(),
         },
     );
-    let snapshot = HostSnapshot::capture(host.core()).unwrap();
+    let snapshot = received_snapshot_for_test(host.core()).unwrap();
     host.config.origin = HostOrigin::Gui {
-        initial_snapshot: snapshot.clone(),
+        initial_snapshot: Some(snapshot.clone()),
         retention: HostSourceBinding {
             source: None,
             inputs: None,
@@ -318,7 +344,10 @@ fn s3_gui_owned_input_forwarded_scope_refuses_before_admission() {
         expected_project_id: None,
     };
     let before = host.owner().unwrap().root_sha256().unwrap();
-    let lease = host.manual.clone();
+    let lease = host
+        .manual
+        .as_ref()
+        .map(|authority| authority.lease().clone());
     let refusal = host
         .prepare_owned_media(
             &client,
@@ -336,7 +365,12 @@ fn s3_gui_owned_input_forwarded_scope_refuses_before_admission() {
         "forwarded input scope must refuse before admission"
     );
     assert_eq!(host.owner().unwrap().root_sha256().unwrap(), before);
-    assert_eq!(host.manual, lease);
+    assert_eq!(
+        host.manual
+            .as_ref()
+            .map(kinewright_project::editing_session::ManualAuthority::lease),
+        lease.as_ref()
+    );
     assert!(host.prepared_owned_media.is_none());
     let mut reply = HostReply::default();
     host.prepare_owned_media(
@@ -352,7 +386,7 @@ fn s3_gui_owned_input_forwarded_scope_refuses_before_admission() {
     )
     .unwrap();
     assert!(reply.owned_media.is_some());
-    assert_eq!(HostSnapshot::capture(host.core()).unwrap(), snapshot);
+    assert_eq!(received_snapshot_for_test(host.core()).unwrap(), snapshot);
 }
 
 fn edit(core: &Core, locked: bool) {
@@ -379,7 +413,7 @@ fn s2h_confirm_inputs_failure_revokes_partial_grant_and_refreezes() {
         .remove(0);
     let client = "a".repeat(64);
     host.acquire_manual(client.clone()).unwrap();
-    let snapshot = HostSnapshot::capture(host.core()).unwrap();
+    let snapshot = received_snapshot_for_test(host.core()).unwrap();
     let prepared = checked(
         &mut host,
         HostCommand::PreviewRecovery {
@@ -516,7 +550,8 @@ fn s2h_status_disclosures_cache_and_invalidate_actual_histories() {
             .iter()
             .filter(|event| event.operation == "studio_dirty_history_hash")
             .count(),
-        1
+        0,
+        "CHANGED_STATUS_USES_CHANGE_IDS_WITHOUT_HASHING_HISTORY"
     );
     edit(second.core(), false);
     assert!(
@@ -528,10 +563,11 @@ fn s2h_status_disclosures_cache_and_invalidate_actual_histories() {
     edit(host.core(), false);
     let (_, changed) = io_observer::observe(|| checked(&mut host, HostCommand::Status));
     assert!(
-        changed
-            .events
-            .iter()
-            .any(|event| event.operation == "studio_save_disclosure_select")
+        !changed.events.iter().any(|event| matches!(
+            event.operation,
+            "studio_save_disclosure_select" | "studio_dirty_history_hash"
+        )),
+        "MANUAL_STATUS_USES_CHANGE_IDS_WITHOUT_HISTORY_SELECTION"
     );
 }
 
@@ -562,7 +598,7 @@ fn s2h_status_and_save_cost_observer() {
     }
     let mut save_ms = Vec::new();
     for _ in 0..3 {
-        let snapshot = HostSnapshot::capture(host.core()).unwrap();
+        let snapshot = received_snapshot_for_test(host.core()).unwrap();
         let start = std::time::Instant::now();
         checked(&mut host, HostCommand::Save { snapshot });
         save_ms.push(start.elapsed().as_secs_f64() * 1000.0);
@@ -570,7 +606,7 @@ fn s2h_status_and_save_cost_observer() {
     assert_eq!(host.core().export_history().unwrap(), history);
     println!(
         "STATUS_COST {}",
-        serde_json::json!({"history_commands":history.batches.len(), "registered_sessions":2, "status_ms":status_ms, "save_ms":save_ms})
+        serde_json::json!({"history_commands":history.history().position, "registered_sessions":2, "status_ms":status_ms, "save_ms":save_ms})
     );
 }
 
@@ -585,7 +621,7 @@ fn s2h_post_grant_identity_failure_revokes_and_retries_one_lease() {
         .list_recovery_points()
         .unwrap()
         .remove(0);
-    let snapshot = HostSnapshot::capture(host.core()).unwrap();
+    let snapshot = received_snapshot_for_test(host.core()).unwrap();
     let prepared = checked(
         &mut host,
         HostCommand::PreviewRecovery {
@@ -624,7 +660,7 @@ fn s2h_post_grant_identity_failure_revokes_and_retries_one_lease() {
 #[test]
 fn s2h_recovery_plan_retries_bind_original_client_cut_and_chain() {
     let (_temp, mut host) = fixture();
-    let frozen = HostSnapshot::capture(host.core()).unwrap();
+    let frozen = received_snapshot_for_test(host.core()).unwrap();
     let begin = HostCommand::BeginRecovery {
         client: "r".repeat(64),
         frozen: Some(frozen.clone()),
@@ -659,12 +695,12 @@ fn s2h_recovery_plan_retries_bind_original_client_cut_and_chain() {
     let changed_chain = HostCommand::BeginRecovery {
         client: "r".repeat(64),
         frozen: Some(original.before.clone()),
-        pending: vec![kinewright_core::AcceptedHistory {
-            sequence: 1,
-            batch_id: "changed-chain".into(),
-            digest: "0".repeat(64),
-            envelope: vec![],
-        }],
+        pending: vec![
+            serde_json::from_value(serde_json::json!(
+                serde_json::json!({"sequence":1,"predecessor":vec![0;32]}).to_string()
+            ))
+            .unwrap(),
+        ],
         discard_batches: None,
     };
     assert!(run(&mut host, changed_chain).error.is_some());
@@ -672,11 +708,35 @@ fn s2h_recovery_plan_retries_bind_original_client_cut_and_chain() {
 }
 
 #[test]
+fn a_new_foreground_operation_releases_the_acknowledged_reply_before_capturing() {
+    let (_temp, mut host) = fixture();
+    let roots = host.config.roots.clone();
+    let client = "g".repeat(64);
+    let save = HostCommand::Save {
+        snapshot: received_snapshot_for_test(host.core()).unwrap(),
+    };
+    let saved = host.execute_operation(save, roots.clone(), Some(&client), Some(1));
+    assert!(saved.error.is_none(), "{:?}", saved.error);
+    drop(saved);
+    let current = host.execute_operation(HostCommand::ReadHistory, roots, Some(&client), Some(2));
+    assert!(current.error.is_none(), "{:?}", current.error);
+    assert!(
+        host.core()
+            .history_pool()
+            .lease_counts(kinewright_project::operation_history::Role::Ordinary)
+            .unwrap()
+            .1
+            <= 2,
+        "ACKNOWLEDGED_FOREGROUND_REPLY_IS_RELEASED_BEFORE_NEXT_CAPTURE"
+    );
+}
+
+#[test]
 fn s2h_foreground_result_replay_is_exact_bounded_and_client_bound() {
     let (_temp, mut host) = fixture();
     let roots = host.config.roots.clone();
     let client = "g".repeat(64);
-    let snapshot = HostSnapshot::capture(host.core()).unwrap();
+    let snapshot = received_snapshot_for_test(host.core()).unwrap();
     let save = HostCommand::Save { snapshot };
     let reply = host.execute_operation(save.clone(), roots.clone(), Some(&client), Some(1));
     assert!(reply.error.is_none(), "{:?}", reply.error);
@@ -702,7 +762,7 @@ fn s2h_foreground_result_replay_is_exact_bounded_and_client_bound() {
     let current_status = serde_json::to_value(host.status()).unwrap();
     let cached_result = host.execute_operation(
         HostCommand::Save {
-            snapshot: HostSnapshot::capture(host.core()).unwrap(),
+            snapshot: received_snapshot_for_test(host.core()).unwrap(),
         },
         roots.clone(),
         Some(&client),
@@ -748,7 +808,7 @@ fn s2h_lost_rescue_result_returns_original_activation_without_second_copy() {
     let temp = kinewright_media::test_support::TempDirectory::new_in(&parent, "fix3-rescue-result");
     let drive = temp.path("drive");
     std::fs::create_dir(&drive).unwrap();
-    let core = Core::spawn(Document {
+    let core = Core::for_test(Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -764,7 +824,7 @@ fn s2h_lost_rescue_result_returns_original_activation_without_second_copy() {
         .unwrap();
     edit(&core, false);
     assert!(io_observer::fail_once("root_parent_sync", || owner.save_active()).is_err());
-    let expected = core.export_history().unwrap();
+    let expected = document_for_test(&core);
     std::fs::rename(&drive, temp.path("hidden-drive")).unwrap();
     let roots = SessionRoots {
         read: vec![temp.root().into()],
@@ -783,7 +843,7 @@ fn s2h_lost_rescue_result_returns_original_activation_without_second_copy() {
     checked(
         &mut host,
         HostCommand::PreviewRescue {
-            snapshot: HostSnapshot::capture(&core).unwrap(),
+            snapshot: received_snapshot_for_test(&core).unwrap(),
         },
     );
     let destination = temp.path("rescue.kinewright");
@@ -806,16 +866,22 @@ fn s2h_lost_rescue_result_returns_original_activation_without_second_copy() {
     assert_eq!(host.owner().unwrap().root_sha256().unwrap(), root);
     assert_eq!(host.core().actor_identity(), actor);
     assert_eq!(
-        host.core().export_history().unwrap().document,
-        expected.document
+        host.core().export_history().unwrap().history().document,
+        expected
     );
     drop(host);
-    let restored = Core::spawn(Document::default()).unwrap();
-    LoadedBundle::read(&destination)
-        .unwrap()
-        .restore_manual(&restored)
-        .unwrap();
-    assert_eq!(restored.export_history().unwrap(), lost.history.unwrap());
+    let mut loaded = LoadedBundle::read(
+        &destination,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let restored = loaded.open_manual().unwrap();
+    assert_eq!(
+        restored.snapshot_identity().unwrap(),
+        lost.history.unwrap().identity()
+    );
 }
 
 /// S3 C7 fix 1: the reply that confirms a rescue names the rescue copy's
@@ -827,7 +893,7 @@ fn c7_fix1_rescue_status_names_the_rescue_copy() {
     let temp = kinewright_media::test_support::TempDirectory::new_in(&parent, "c7-fix1-rescue");
     let drive = temp.path("drive");
     std::fs::create_dir(&drive).unwrap();
-    let core = Core::spawn(Document {
+    let core = Core::for_test(Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -862,7 +928,7 @@ fn c7_fix1_rescue_status_names_the_rescue_copy() {
     checked(
         &mut host,
         HostCommand::PreviewRescue {
-            snapshot: HostSnapshot::capture(&core).unwrap(),
+            snapshot: received_snapshot_for_test(&core).unwrap(),
         },
     );
     let destination = temp.path("rescue.kinewright");
@@ -876,10 +942,15 @@ fn c7_fix1_rescue_status_names_the_rescue_copy() {
     );
     assert!(reply.error.is_none(), "{:?}", reply.error);
     drop(host);
-    let rescued = Ja1EditingSession::open(&destination)
-        .unwrap()
-        .project_id()
-        .unwrap();
+    let rescued = Ja1EditingSession::open(
+        &destination,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .project_id()
+    .unwrap();
     println!(
         "C7_RESCUE_IDENTITY original={} rescued={} status={:?}",
         original.as_str(),

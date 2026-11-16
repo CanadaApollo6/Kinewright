@@ -1,4 +1,5 @@
-use kinewright_core::{Command, Core, Event, Operation, TrackId};
+use kinewright_core::Core;
+use kinewright_core::{Command, Event, Operation, TrackId};
 
 #[test]
 fn c3_real_shaped_task_history_cost_and_undo_redo_growth() {

@@ -15,6 +15,7 @@ pub(crate) use preview::PreparedOwner;
 pub use read::OwnerRead;
 mod reservation;
 mod sizing;
+pub(crate) use sizing::OWNER_ALLOWANCE;
 pub use sizing::{CreationKind, CreationSizing, FixedLimits};
 mod resources;
 mod snapshot;
@@ -56,11 +57,17 @@ pub enum Error {
     IdentityMismatch,
     Reservation,
     PoolFull(Role),
+    StoreCapacity(&'static str),
+    StoreCorrupt(String),
+    StoreUnsettled,
+    StoreRunLimit,
     Store(String),
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::History(kinewright_core::undo::Error::HistoryFull) => f.write_str("This task or candidate has reached its history limit. Finish it and continue in a new task or run."),
+            Self::History(error) => error.fmt(f),
             Self::PoolFull(Role::Ordinary) => f.write_str("History memory is in use. Finish saving or close a project, then retry."),
             Self::PoolFull(Role::Task) => f.write_str("History memory is in use. Finish a task so it can be checkpointed and released, then retry."),
             Self::PoolFull(Role::Candidate) => f.write_str("History memory is in use. Finish and checkpoint a run so its candidate can be released, then retry."),

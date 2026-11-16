@@ -13,17 +13,26 @@ use kinewright_project::{
 mod c6_admission;
 #[test]
 fn w14_local_headless_admission_precedes_mutation() {
-    #[cfg(target_os = "linux")]
-    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright");
-    #[cfg(target_os = "linux")]
-    let loaded = kinewright_project::bundle::LoadedBundle::read(&source).unwrap();
     let mut cores = (0..12)
         .map(|_| {
-            let core = kinewright_core::Core::spawn(kinewright_core::Document::default()).unwrap();
             #[cfg(target_os = "linux")]
-            loaded.restore_manual(&core).unwrap();
-            core
+            {
+                let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright");
+                let pool = kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                );
+                let mut loaded =
+                    kinewright_project::bundle::LoadedBundle::read(&source, &pool).unwrap();
+                loaded.open_manual().unwrap()
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                kinewright_project::operation_actor::Core::for_test(
+                    kinewright_core::Document::default(),
+                )
+                .unwrap()
+            }
         })
         .collect::<Vec<_>>();
     c6_admission::matrix(|path| {
@@ -65,6 +74,7 @@ fn record(project: ProjectId) -> RescueCopyV1 {
         omissions: vec![],
         attempts: vec![],
         summary: ProvenanceSummary::default(),
+        capture_checkpoints: vec![],
     }
 }
 #[test]
@@ -125,9 +135,10 @@ fn w11_warning_provenance_compaction_and_recopy() {
 mod durable {
     use super::*;
     use kinewright_core::{
-        AttachmentState, Command, Core, Document, Event, Operation, Track, TrackId, TrackKind,
+        AttachmentState, Command, Document, Event, Operation, Track, TrackId, TrackKind,
     };
     use kinewright_media::test_support::TempDirectory;
+    use kinewright_project::operation_actor::Core;
     use kinewright_project::{
         bundle::{BundleWriteAdmission, LoadedBundle, ProjectBundle},
         bundle_records::{ObjectRef, RecordKind},
@@ -138,7 +149,7 @@ mod durable {
     use std::{io::Read as _, path::Path};
     fn fixture() -> (TempDirectory, Core, ProjectBundle, ObjectRef) {
         let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "s2-c4");
-        let core = Core::spawn(Document {
+        let core = Core::for_test(Document {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
@@ -151,6 +162,7 @@ mod durable {
         let mut bundle = ProjectBundle::activate(
             &temp.path("b.kinewright"),
             BundleWriteAdmission::new_document(),
+            core.history_pool(),
         )
         .unwrap();
         let input = bundle.empty_inputs().unwrap().reference.clone();
@@ -186,7 +198,13 @@ mod durable {
             root["studio"]["manual_switch_generation"] = serde_json::json!(0);
             std::fs::write(path, serde_json::to_vec(&root).unwrap()).unwrap();
             assert!(
-                LoadedBundle::read(path).is_ok(),
+                LoadedBundle::read(
+                    path,
+                    &kinewright_project::operation_history::HistoryPool::new(
+                        kinewright_project::operation_history::PoolLimits::default()
+                    )
+                )
+                .is_ok(),
                 "supported fresh-project wrapper with an archived switch"
             );
         }
@@ -219,7 +237,14 @@ mod durable {
             changed["studio"]["store_manifest_ref"]["byte_length"] =
                 serde_json::json!(mutated.len());
             std::fs::write(path, serde_json::to_vec(&changed).unwrap()).unwrap();
-            let (result, trace) = io_observer::observe(|| LoadedBundle::read(path));
+            let (result, trace) = io_observer::observe(|| {
+                LoadedBundle::read(
+                    path,
+                    &kinewright_project::operation_history::HistoryPool::new(
+                        kinewright_project::operation_history::PoolLimits::default(),
+                    ),
+                )
+            });
             assert!(result.is_err());
             assert!(trace.events.is_empty());
             std::fs::write(path, &original).unwrap();
@@ -247,7 +272,7 @@ mod durable {
         ] {
             let (temp, core, mut bundle, input) = fixture();
             let left = bundle.manual_branch_id().clone();
-            let original = core.export_history().unwrap();
+            let original = super::c5::state(&core);
             let target = checkpoint_root(&mut bundle);
             edit(&core, true);
             bundle.save(&core, &input).unwrap();
@@ -306,25 +331,20 @@ mod durable {
                     assert!(bundle.save(&core, &input).is_err());
                     assert!(bundle.save_branch(&left, &core).is_err());
                     assert!(matches!(
-                        core.clone().request(Command::Undo).unwrap(),
-                        Event::MutationRefused {
-                            reason: kinewright_core::CoreMutationRefusal::Frozen,
+                        core.request(Command::Undo),
+                        Err(kinewright_project::operation_actor::Refusal {
+                            error: kinewright_project::operation_actor::Error::MutationRefused(
+                                kinewright_core::CoreMutationRefusal::Frozen
+                            ),
                             ..
-                        }
+                        })
                     ));
-                    assert!(
-                        bundle
-                            .attach_core(&core)
-                            .unwrap()
-                            .install_history_transition(
-                                kinewright_core::HistoryTransition::floor(
-                                    core.export_history().unwrap(),
-                                    1
-                                )
-                                .unwrap()
-                            )
-                            .is_err()
-                    );
+                    assert!(matches!(
+                        core.close_gesture(),
+                        Err(kinewright_project::operation_actor::Error::MutationRefused(
+                            kinewright_core::CoreMutationRefusal::Frozen
+                        ))
+                    ));
                     match bundle.publish_project_selection(&mut prepared, &core) {
                         ProjectSelectionResult::Activated(_) => {}
                         ProjectSelectionResult::Refused(_) => {
@@ -352,17 +372,37 @@ mod durable {
                     ));
                 }
             }
-            assert_eq!(prepared.core().export_history().unwrap(), original);
+            assert_eq!(super::c5::state(&prepared.core()), original);
             assert_eq!(bundle.manual_branch_id(), &right);
             assert_eq!(bundle.root().unwrap().manual_switch_generation, 1);
             assert_eq!(core.attachment_state().unwrap(), AttachmentState::Sealed);
             assert_eq!(
-                bundle.branch_history(&right).unwrap().batches,
-                original.batches
+                super::c5::contents(
+                    &bundle
+                        .branch_history(&right)
+                        .unwrap()
+                        .into_capture()
+                        .unwrap()
+                )["history"]["undo"],
+                original["history"]["undo"]
             );
-            assert_eq!(
-                bundle.checkpoint(&right).unwrap().batch_ids,
-                bundle.checkpoint(&left).unwrap().batch_ids[..original.batches.len()]
+            let keys = |branch: &_| {
+                bundle
+                    .branch_history(branch)
+                    .unwrap()
+                    .history()
+                    .undo()
+                    .iter()
+                    .flat_map(|step| {
+                        step.commands()
+                            .iter()
+                            .map(|command| (command.id, command.payload_digest))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert!(
+                keys(&left).starts_with(&keys(&right)),
+                "SELECTION_PRESERVES_THE_TARGET_PREFIX_AND_THE_LONGER_SAVED_SOURCE"
             );
             assert!(matches!(
                 bundle.publish_project_selection(&mut prepared, &core),
@@ -386,7 +426,13 @@ mod durable {
                     copied,
                     kinewright_project::bundle_copy::SaveAsOutcome::Copied(_)
                 ));
-                let read = LoadedBundle::read(&temp.path("selected-copy.kinewright")).unwrap();
+                let read = LoadedBundle::read(
+                    &temp.path("selected-copy.kinewright"),
+                    &kinewright_project::operation_history::HistoryPool::new(
+                        kinewright_project::operation_history::PoolLimits::default(),
+                    ),
+                )
+                .unwrap();
                 assert_eq!(read.root().unwrap().manual_switch_generation, 1);
                 assert_eq!(read.root().unwrap().manual_branch_id, right);
                 drop(read);
@@ -396,11 +442,20 @@ mod durable {
                     true,
                 );
             }
-            let loaded = LoadedBundle::read(&temp.path("b.kinewright")).unwrap();
+            let loaded = LoadedBundle::read(
+                &temp.path("b.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap();
             assert_eq!(loaded.root().unwrap().manual_branch_id, right);
             assert!(
                 without_api_probe("manual-switch", || LoadedBundle::read(
-                    &temp.path("b.kinewright")
+                    &temp.path("b.kinewright"),
+                    &kinewright_project::operation_history::HistoryPool::new(
+                        kinewright_project::operation_history::PoolLimits::default()
+                    )
                 ))
                 .is_err()
             );
@@ -408,9 +463,14 @@ mod durable {
             assert_api_declarations(&temp.path("b.kinewright"), "manual-switch", false);
             drop(prepared);
             drop(bundle);
-            let loaded = LoadedBundle::read(&temp.path("b.kinewright")).unwrap();
-            let fresh = Core::spawn(Document::default()).unwrap();
-            loaded.restore_manual(&fresh).unwrap();
+            let mut loaded = LoadedBundle::read(
+                &temp.path("b.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap();
+            let fresh = loaded.open_manual().unwrap();
             assert_eq!(
                 fresh.export_history().unwrap(),
                 active.export_history().unwrap()
@@ -420,10 +480,21 @@ mod durable {
     #[test]
     fn w14_raw_role_schema_api_and_checkpoint_edges_are_required() {
         let (temp, core, mut bundle, input) = fixture();
-        assert!(LoadedBundle::read(&temp.path("b.kinewright")).is_ok());
+        assert!(
+            LoadedBundle::read(
+                &temp.path("b.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            )
+            .is_ok()
+        );
         assert!(
             without_api_probe("manual-switch", || LoadedBundle::read(
-                &temp.path("b.kinewright")
+                &temp.path("b.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
             ))
             .is_ok()
         );
@@ -434,24 +505,37 @@ mod durable {
         r.acknowledged_absence = None;
         bundle.retain_rescue_record(&r).unwrap();
         bundle.save(&core, &input).unwrap();
-        assert!(LoadedBundle::read(&temp.path("b.kinewright")).is_ok());
+        assert!(
+            LoadedBundle::read(
+                &temp.path("b.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            )
+            .is_ok()
+        );
         assert!(
             without_api_probe("rescue-copy", || LoadedBundle::read(
-                &temp.path("b.kinewright")
+                &temp.path("b.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
             ))
             .is_err()
         );
         let restore = bundle
-            .prepare_checkpoint_restore(&RecoverySelection::Checkpoint {
-                root: ack,
-                branch: bundle.manual_branch_id().clone(),
-            })
+            .prepare_checkpoint_restore(
+                &core,
+                &RecoverySelection::Checkpoint {
+                    root: ack,
+                    branch: bundle.manual_branch_id().clone(),
+                },
+                bundle.manual_branch_id().clone(),
+            )
             .unwrap();
         assert_ne!(restore.core().actor_identity(), core.actor_identity());
-        assert_eq!(
-            restore.core().export_history().unwrap(),
-            core.export_history().unwrap()
-        );
+        assert_eq!(super::c5::state(&restore.core()), super::c5::state(&core));
+        drop(restore);
         let path = temp.path("b.kinewright");
         let original_root = std::fs::read(&path).unwrap();
         let root: serde_json::Value = serde_json::from_slice(&original_root).unwrap();
@@ -508,7 +592,13 @@ mod durable {
             changed["studio"]["store_manifest_ref"]["byte_length"] = serde_json::json!(bytes.len());
             std::fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
             assert_eq!(
-                LoadedBundle::read(&path).is_err(),
+                LoadedBundle::read(
+                    &path,
+                    &kinewright_project::operation_history::HistoryPool::new(
+                        kinewright_project::operation_history::PoolLimits::default()
+                    )
+                )
+                .is_err(),
                 mutation != "extra-supported-api",
                 "{mutation}"
             );
@@ -541,13 +631,32 @@ mod durable {
         assert!(!roots(&bundle).contains(&ack));
         let left = bundle.manual_branch_id().clone();
         let restored = bundle
-            .prepare_checkpoint_restore(&RecoverySelection::Checkpoint {
-                root: ack,
-                branch: left,
-            })
+            .prepare_checkpoint_restore(
+                &core,
+                &RecoverySelection::Checkpoint {
+                    root: ack,
+                    branch: left.clone(),
+                },
+                left,
+            )
             .unwrap();
-        assert_eq!(restored.core().export_history().unwrap().batches.len(), 1);
-        let loaded = LoadedBundle::read(&temp.path("b.kinewright")).unwrap();
+        assert_eq!(
+            restored
+                .core()
+                .export_history()
+                .unwrap()
+                .history()
+                .undo
+                .len(),
+            1
+        );
+        let loaded = LoadedBundle::read(
+            &temp.path("b.kinewright"),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         assert!(loaded.root().is_ok());
         drop(loaded);
         let copy = bundle.save_as(&temp.path("copy.kinewright")).unwrap();
@@ -555,7 +664,15 @@ mod durable {
             copy,
             kinewright_project::bundle_copy::SaveAsOutcome::Copied(_)
         ));
-        assert!(LoadedBundle::read(&temp.path("copy.kinewright")).is_ok());
+        assert!(
+            LoadedBundle::read(
+                &temp.path("copy.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            )
+            .is_ok()
+        );
     }
     #[test]
     fn w11_independent_roots_survive_provenance_compaction() {
@@ -589,7 +706,15 @@ mod durable {
         bundle.retain_rescue_record(&r).unwrap();
         bundle.save(&core, &input).unwrap();
         assert!(bundle.evidence_refs().contains(&reference));
-        assert!(LoadedBundle::read(&temp.path("b.kinewright")).is_ok());
+        assert!(
+            LoadedBundle::read(
+                &temp.path("b.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            )
+            .is_ok()
+        );
     }
     #[test]
     fn w10_pending_command_exclusion_and_original_id_lookup() {
@@ -602,6 +727,7 @@ mod durable {
         let envelope = CommandEnvelope {
             switch: None,
             manual: None,
+            context: None,
             version: 1,
             action: "edit".into(),
             id: CommandId {
@@ -727,7 +853,15 @@ mod durable {
             next.recovery_origin = Some(origin);
             bundle.retain_rescue_record(&next).unwrap();
             bundle.save(&core, &input).unwrap();
-            assert!(LoadedBundle::read(&temp.path("b.kinewright")).is_ok());
+            assert!(
+                LoadedBundle::read(
+                    &temp.path("b.kinewright"),
+                    &kinewright_project::operation_history::HistoryPool::new(
+                        kinewright_project::operation_history::PoolLimits::default()
+                    )
+                )
+                .is_ok()
+            );
             let changed_input = if kind == "input" {
                 let mut inputs = (*bundle
                     .store()
@@ -747,7 +881,13 @@ mod durable {
             let changed = checkpoint_root(&mut bundle);
             bundle.save(&core, &changed_input).unwrap();
             assert!(
-                LoadedBundle::read(&temp.path("b.kinewright")).is_ok(),
+                LoadedBundle::read(
+                    &temp.path("b.kinewright"),
+                    &kinewright_project::operation_history::HistoryPool::new(
+                        kinewright_project::operation_history::PoolLimits::default()
+                    )
+                )
+                .is_ok(),
                 "mutant graph must be valid: {kind}"
             );
             assert!(
@@ -812,8 +952,14 @@ mod durable {
             ..StorageLimits::default()
         };
         assert!(
-            LoadedBundle::read_with_limits_probe(&temp.path("b.kinewright"), limits.clone())
-                .is_ok()
+            LoadedBundle::read_with_limits_probe(
+                &temp.path("b.kinewright"),
+                limits.clone(),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            )
+            .is_ok()
         );
         bundle.restrict_limits_probe(limits).unwrap();
         let (result, trace) = io_observer::observe(|| {
@@ -875,6 +1021,9 @@ mod durable {
     }
     #[test]
     fn w13_selection_fresh_open_exact_and_one_byte_over() {
+        use kinewright_project::operation_history::{HistoryPool, PoolLimits, Role};
+        const ORDINARY_LEASE: u64 = 104 << 20;
+        assert_eq!(Role::Ordinary.envelope().retained, ORDINARY_LEASE);
         let (temp, core, mut initial, input) = fixture();
         let target = checkpoint_root(&mut initial);
         for n in 0..8 {
@@ -884,11 +1033,7 @@ mod durable {
         let branch = initial.manual_branch_id().clone();
         drop(initial);
         drop(core);
-        // Same exact source IDs and bytes: random BranchId order otherwise changes reader decode peaks.
         let mut exact = 0;
-        let target_id: kinewright_project::bundle_records::BranchId =
-            serde_json::from_value(serde_json::json!("00000000000000000000000000000000")).unwrap();
-        assert!(target_id < branch);
         for lane in 0..3 {
             let folder = temp.path(&format!("lane-{lane}"));
             std::fs::create_dir(&folder).unwrap();
@@ -898,64 +1043,85 @@ mod durable {
                 &temp.path("b.kinewright-assets"),
                 &folder.join("b.kinewright-assets"),
             );
-            let limit = if lane == 0 {
-                StorageLimits::default()
-            } else {
-                StorageLimits {
-                    live_history_bytes: exact - u64::from(lane == 2),
-                    ..StorageLimits::default()
+            let mut limits = PoolLimits::default();
+            if lane != 0 {
+                limits.retained[0] = exact - u64::from(lane == 2);
+            }
+            let pool = HistoryPool::new(limits);
+            let mut loaded = LoadedBundle::read(&path, &pool).unwrap();
+            let core = match loaded.open_manual() {
+                Ok(core) => core,
+                Err(error) if lane == 2 => {
+                    assert!(
+                        matches!(
+                            error,
+                            kinewright_project::bundle::BundleError::Operation(
+                                kinewright_project::operation_actor::Error::History(
+                                    kinewright_project::operation_history::Error::PoolFull(
+                                        Role::Ordinary
+                                    )
+                                )
+                            )
+                        ),
+                        "ONE_BYTE_BELOW_LIVE_ADMISSION_REFUSES {error:?}"
+                    );
+                    assert!(
+                        LoadedBundle::read(&path, &HistoryPool::new(PoolLimits::default())).is_ok()
+                    );
+                    continue;
                 }
+                Err(error) => panic!("EXACT_LIVE_ADMISSION_ACCEPTS {error}"),
             };
-            let loaded = LoadedBundle::read_with_limits_probe(&path, limit.clone()).unwrap();
-            let core = Core::spawn(Document::default()).unwrap();
-            loaded.restore_manual(&core).unwrap();
             let mut bundle = loaded.into_writer().unwrap();
             let before = std::fs::read(&path).unwrap();
-            let mut prepared = bundle
-                .prepare_project_selection(
-                    &core,
-                    RecoverySelection::Checkpoint {
-                        root: target.clone(),
-                        branch: branch.clone(),
-                    },
-                )
-                .unwrap();
-            prepared.reuse_new_target_id_probe(target_id.clone());
-            let result = bundle.publish_project_selection(&mut prepared, &core);
-            eprintln!(
-                "lane={lane} limit={} publication={} writer={} result={result:?}",
-                limit.live_history_bytes,
-                io_observer::publication_usage().peak_live_history_bytes,
-                bundle.store().usage().unwrap().peak_live_history_bytes
+            let identity = core.snapshot_identity().unwrap();
+            let prepared = bundle.prepare_project_selection(
+                &core,
+                RecoverySelection::Checkpoint {
+                    root: target.clone(),
+                    branch: branch.clone(),
+                },
             );
+            let result = match prepared {
+                Ok(mut prepared) => bundle.publish_project_selection(&mut prepared, &core),
+                Err(error) => ProjectSelectionResult::Refused(error),
+            };
             if lane == 2 {
                 assert!(
                     matches!(
                         result,
                         ProjectSelectionResult::Refused(
-                            kinewright_project::bundle::BundleError::Capacity(_)
+                            kinewright_project::bundle::BundleError::Operation(
+                                kinewright_project::operation_actor::Error::History(
+                                    kinewright_project::operation_history::Error::PoolFull(
+                                        Role::Ordinary
+                                    )
+                                )
+                            )
                         )
                     ),
-                    "exact={exact}, result={result:?}"
+                    "ONE_BYTE_BELOW_SELECTION_POOL_REFUSES_WITHOUT_MUTATION {result:?}"
                 );
                 assert_eq!(std::fs::read(&path).unwrap(), before);
+                assert_eq!(core.snapshot_identity().unwrap(), identity);
                 assert_eq!(core.attachment_state().unwrap(), AttachmentState::Live);
             } else {
                 assert!(
                     matches!(result, ProjectSelectionResult::Activated(_)),
-                    "{result:?}"
+                    "EXACT_SELECTION_POOL_ACCEPTS {result:?}"
                 );
-                let loaded = LoadedBundle::read_with_limits_probe(&path, limit.clone()).unwrap();
+                let peak = pool.lease_counts(Role::Ordinary).unwrap().1;
+                assert!(peak <= 3, "SELECTION_USES_AT_MOST_THREE_FULL_LEASES");
                 if lane == 0 {
-                    exact = loaded.usage_probe().unwrap().peak_live_history_bytes;
-                    eprintln!("reader={exact}");
+                    exact = peak as u64 * ORDINARY_LEASE;
                 } else {
-                    assert_eq!(loaded.usage_probe().unwrap().peak_live_history_bytes, exact);
+                    assert_eq!(peak as u64 * ORDINARY_LEASE, exact);
                 }
             }
-            assert!(LoadedBundle::read_with_limits_probe(&path, limit).is_ok());
+            assert!(LoadedBundle::read(&path, &HistoryPool::new(PoolLimits::default())).is_ok());
         }
     }
+
     #[test]
     fn w13_checkpoint_restore_uses_b_identity_without_rewriting_inputs() {
         let (temp, a_core, mut a, input) = fixture();
@@ -984,7 +1150,7 @@ mod durable {
             });
         let input = a.admit_inputs(&manifest).unwrap().reference.clone();
         a.save(&a_core, &input).unwrap();
-        let original = a_core.export_history().unwrap();
+        let original = super::c5::state(&a_core);
         let a_id = a.project_id().clone();
         let branch = a.manual_branch_id().clone();
         let source_root = checkpoint_root(&mut a);
@@ -998,11 +1164,13 @@ mod durable {
             panic!("definite copy");
         };
         assert_ne!(b.project_id(), &a_id);
-        let live = Core::spawn(Document::default()).unwrap();
-        b.attach_core(&live)
-            .unwrap()
-            .restore_history((*b.branch_history(b.manual_branch_id()).unwrap()).clone())
-            .unwrap();
+        let checkpoint = b.checkpoint(b.manual_branch_id()).unwrap().clone();
+        let live = Core::open(
+            checkpoint.open(b.store(), b.history_pool()).unwrap(),
+            checkpoint.branch_id,
+            checkpoint.revision,
+        )
+        .unwrap();
         let mut prepared = b
             .prepare_project_selection(
                 &live,
@@ -1029,10 +1197,16 @@ mod durable {
                 .input_manifest_ref,
             source_input
         );
-        assert_eq!(prepared.core().export_history().unwrap(), original);
+        assert_eq!(super::c5::state(&prepared.core()), original);
         edit(&prepared.core(), true);
         b.save(&prepared.core(), &source_input).unwrap();
-        let loaded = LoadedBundle::read(&temp.path("fresh-b.kinewright")).unwrap();
+        let loaded = LoadedBundle::read(
+            &temp.path("fresh-b.kinewright"),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         assert_ne!(loaded.root().unwrap().project_id, a_id);
         assert_eq!(loaded.root().unwrap().input_manifest_ref, source_input);
         let b_id = b.project_id().clone();
@@ -1044,19 +1218,26 @@ mod durable {
         drop(a_core);
         std::fs::remove_file(temp.path("b.kinewright")).unwrap();
         std::fs::remove_dir_all(temp.path("b.kinewright-assets")).unwrap();
-        let loaded = LoadedBundle::read(&temp.path("fresh-b.kinewright")).unwrap();
+        let mut loaded = LoadedBundle::read(
+            &temp.path("fresh-b.kinewright"),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         assert_eq!(loaded.root().unwrap().project_id, b_id);
-        let fresh = Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&fresh).unwrap();
+        let fresh = loaded.open_manual().unwrap();
         assert_eq!(
-            fresh.export_history().unwrap().batches.len(),
-            original.batches.len() + 1
+            fresh.export_history().unwrap().history().undo.len(),
+            original["history"]["undo"].as_array().unwrap().len() + 1
         );
         let writer = loaded.into_writer().unwrap();
         let mut restored = writer
-            .prepare_checkpoint_restore(&RecoverySelection::WorkingBranch(
+            .prepare_checkpoint_restore(
+                &fresh,
+                &RecoverySelection::WorkingBranch(writer.manual_branch_id().clone()),
                 writer.manual_branch_id().clone(),
-            ))
+            )
             .unwrap();
         let mut owned = Vec::new();
         restored

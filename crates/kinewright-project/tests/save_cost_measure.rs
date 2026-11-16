@@ -16,8 +16,9 @@
 
 use std::{path::Path, time::Instant};
 
-use kinewright_core::{Command, Core, Document, Event, Operation, Track, TrackId, TrackKind};
+use kinewright_core::{Command, Document, Event, Operation, Track, TrackId, TrackKind};
 use kinewright_media::test_support::TempDirectory;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{BundleWriteAdmission, ProjectBundle},
     io_observer,
@@ -66,11 +67,16 @@ fn point(edits: u64, saves: u64) {
             .collect(),
         ..Document::default()
     };
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     for i in 0..edits {
         edit(&core, i);
     }
-    let mut owner = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let mut owner = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let inputs = owner.empty_inputs().unwrap().reference.clone();
     owner.save(&core, &inputs).unwrap();
     let mut next = edits;
@@ -99,7 +105,7 @@ fn point(edits: u64, saves: u64) {
         walks.push(millis(started));
         assert!(!fields.is_empty());
     }
-    let batches = core.export_history().unwrap().batches.len();
+    let batches = core.export_history().unwrap().history().undo.len();
     let low = totals.iter().copied().fold(f64::MAX, f64::min);
     let high = totals.iter().copied().fold(0.0, f64::max);
     println!(

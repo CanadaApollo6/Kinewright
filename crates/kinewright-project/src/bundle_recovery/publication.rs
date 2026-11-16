@@ -4,10 +4,10 @@ use super::{
     decoded_reservations, inspect_checkpoints, read_record, validate_archived_root,
     validate_evidence, validate_manifest_apis, walk,
 };
-use crate::history_record::{HistoryRecord, HistoryRole};
+use crate::history_record::HistoryRole;
 use crate::{
     bundle::{BundleError, BundleWriteAdmission},
-    bundle_records::{BranchCheckpoint, BranchId, LineageRecord, ObjectRef, RecordKind},
+    bundle_records::{BranchCheckpoint, BranchId, ObjectRef, RecordKind},
     namespace::ProjectNamespace,
     owned_inputs::OwnedInputManifest,
     storage_budget::{StorageLimits, StorageReservation, StorageUsage},
@@ -22,7 +22,40 @@ use std::{
 #[derive(Default)]
 pub(crate) struct VerifiedIdentityMemo {
     profile: Option<StorageLimits>,
+    owners: BTreeMap<ObjectRef, OwnerProof>,
     records: BTreeMap<ObjectRef, RecordCost>,
+}
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OwnerProof {
+    pub identity: crate::operation_history::SnapshotIdentity,
+    pub position: kinewright_core::undo::CommandKey,
+    pub sizing: crate::operation_history::CreationSizing,
+    pub document: ProjectionRef,
+}
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProjectionRef {
+    sha256: [u8; 64],
+    bytes: u64,
+    kind: RecordKind,
+}
+impl ProjectionRef {
+    pub(crate) fn new(reference: &ObjectRef) -> Result<Self, BundleError> {
+        reference.validate()?;
+        Ok(Self {
+            sha256: reference
+                .sha256
+                .as_bytes()
+                .try_into()
+                .map_err(|_| BundleError::Corrupt("projection hash".into()))?,
+            bytes: reference.byte_length,
+            kind: reference.record_kind,
+        })
+    }
+    pub(crate) fn matches(self, reference: &ObjectRef) -> bool {
+        self.sha256.as_slice() == reference.sha256.as_bytes()
+            && self.bytes == reference.byte_length
+            && self.kind == reference.record_kind
+    }
 }
 struct RecordCost {
     resolved_history: Option<(u64, HistoryRole)>,
@@ -78,6 +111,20 @@ struct VerifiedRunOwnership {
     base: Option<ObjectRef>,
 }
 impl VerifiedIdentityMemo {
+    pub(crate) fn owner_proof(&self, reference: &ObjectRef) -> Option<OwnerProof> {
+        self.owners.get(reference).copied()
+    }
+    pub(crate) fn remember_owner(
+        &mut self,
+        reference: ObjectRef,
+        proof: OwnerProof,
+        limits: &StorageLimits,
+    ) {
+        self.bind(limits);
+        if (self.owners.len() as u64) < limits.objects || self.owners.contains_key(&reference) {
+            self.owners.insert(reference, proof);
+        }
+    }
     pub(super) fn verify_identity(
         &mut self,
         namespace: &ProjectNamespace,
@@ -116,6 +163,10 @@ impl VerifiedIdentityMemo {
         }
         Ok(())
     }
+    #[allow(
+        dead_code,
+        reason = "legacy oracle retained until the final H2b deletion checkpoint"
+    )]
     pub(crate) fn remember_resolved_history(
         &mut self,
         reference: &ObjectRef,
@@ -128,6 +179,10 @@ impl VerifiedIdentityMemo {
             cost.resolved_history = Some((bytes, role));
         }
     }
+    #[allow(
+        dead_code,
+        reason = "legacy oracle retained until the final H2b deletion checkpoint"
+    )]
     fn resolved_history(
         &mut self,
         reference: &ObjectRef,
@@ -140,6 +195,8 @@ impl VerifiedIdentityMemo {
     }
     pub(crate) fn clear(&mut self) {
         self.records.clear();
+        // Semantic owner proofs depend on immutable content, not the raw-read
+        // memo or a storage profile. Keep these fixed-size facts until GC.
         self.profile = None;
     }
     fn bind(&mut self, limits: &StorageLimits) {
@@ -151,14 +208,20 @@ impl VerifiedIdentityMemo {
     #[cfg(any(test, feature = "test-util"))]
     pub(crate) fn misbind_probe(&mut self, reference: &ObjectRef, wrong: ObjectRef) {
         if let Some(cost) = self.records.remove(reference) {
-            self.records.insert(wrong, cost);
+            self.records.insert(wrong.clone(), cost);
+        }
+        if let Some(proof) = self.owners.remove(reference) {
+            self.owners.insert(wrong, proof);
         }
     }
     pub(crate) fn forget(&mut self, reference: &ObjectRef) {
         self.records.remove(reference);
+        self.owners.remove(reference);
     }
     pub(crate) fn retain(&mut self, references: &BTreeSet<ObjectRef>) {
         self.records
+            .retain(|reference, _| references.contains(reference));
+        self.owners
             .retain(|reference, _| references.contains(reference));
     }
     pub(crate) fn remember<T: BundleRecord>(
@@ -335,6 +398,7 @@ pub(super) fn validate(
     bytes: &[u8],
     limits: &StorageLimits,
     memo: &mut VerifiedIdentityMemo,
+    pool: &crate::operation_history::HistoryPool,
 ) -> Result<(), BundleError> {
     limits.validate()?;
     let admission = BundleWriteAdmission::from_bytes_with_limits(
@@ -419,7 +483,7 @@ pub(super) fn validate(
     let retained: BTreeSet<_> = objects.into_values().collect();
     memo.retain(&retained);
     #[cfg(any(test, feature = "test-util"))]
-    let initially_verified: BTreeSet<_> = memo.records.keys().cloned().collect();
+    let _initially_verified: BTreeSet<_> = memo.records.keys().cloned().collect();
     let mut checkpoints = BTreeMap::new();
     let mut indexes = BTreeMap::new();
     let mut inputs = Vec::new();
@@ -559,23 +623,17 @@ pub(super) fn validate(
             RecordKind::Document => {
                 payload!(Document);
             }
-            RecordKind::History => {
-                payload!(HistoryRecord);
+            RecordKind::History
+            | RecordKind::Lineage
+            | RecordKind::HistoryFloor
+            | RecordKind::RecoveryClose => {
+                return Err(BundleError::Unsupported("retired history record".into()));
             }
             RecordKind::OperationHistory => {
                 payload!(crate::operation_history::StoredOwnerRecord);
             }
-            RecordKind::Lineage => {
-                payload!(LineageRecord);
-            }
             RecordKind::SpecialistBase => {
                 payload!(crate::bundle_records::SpecialistBaseRecord);
-            }
-            RecordKind::HistoryFloor => {
-                payload!(crate::bundle_records::HistoryFloorCheckpoint);
-            }
-            RecordKind::RecoveryClose => {
-                payload!(crate::bundle_records::RecoveryCloseCheckpoint);
             }
             RecordKind::ReceiptIndex => {
                 let value = control!(crate::receipts::ReceiptLedger);
@@ -675,138 +733,42 @@ pub(super) fn validate(
             "candidate branch inventory mismatch".into(),
         ));
     }
-    let mut histories: BTreeMap<String, Arc<StorageReservation>> = BTreeMap::new();
-    let mut lineages: BTreeMap<String, Arc<StorageReservation>> = BTreeMap::new();
-    let inspect = |id: &BranchId,
-                   checkpoint: StorageReservation<BranchCheckpoint>,
-                   active: bool| {
-        let _ = id;
-        #[cfg(any(test, feature = "test-util"))]
-        let _ = &initially_verified;
-        let history = if active && let Some(value) = histories.get(&checkpoint.history_ref.sha256) {
-            Arc::clone(value)
+    let inspect = |_: &BranchId, checkpoint: StorageReservation<BranchCheckpoint>, _: bool| {
+        let proof = if let Some(proof) = memo.owners.get(&checkpoint.owner_ref) {
+            *proof
         } else {
-            let _wire = memo.read::<HistoryRecord>(
+            let token = crate::operation_history::StoredOwnerRecord::read_namespace(
                 namespace,
-                &checkpoint.history_ref,
+                &checkpoint,
+                pool,
                 usage,
-                &mut fields,
-                &manifest,
                 limits,
             )?;
-            let (charge, role) = if let Some(cost) =
-                memo.resolved_history(&checkpoint.history_ref, limits)
-            {
-                // This is the empty-reader admission model, not the writer's
-                // physical ledger. A proof avoids replaying the bytes, but
-                // must still model the cold reader's full replay overlap.
-                let _replay_baseline = memo.read::<Document>(
-                    namespace,
-                    &checkpoint.baseline_ref,
-                    usage,
-                    &mut fields,
-                    &manifest,
-                    limits,
-                )?;
-                let _replay_document = memo.read::<Document>(
-                    namespace,
-                    &checkpoint.document_ref,
-                    usage,
-                    &mut fields,
-                    &manifest,
-                    limits,
-                )?;
-                let window = cost.1.replay_limit(limits);
-                drop(StorageReservation::reserve(
-                    usage,
-                    limits,
-                    0,
-                    window,
-                    if cost.1 == HistoryRole::Ordinary || (active && id == &root.manual_branch_id) {
-                        window
-                    } else {
-                        0
-                    },
-                    false,
-                    u64::MAX,
-                )?);
-                cost
-            } else {
-                let record = read_record::<HistoryRecord>(
-                    namespace,
-                    &checkpoint.history_ref,
-                    usage,
-                    &mut fields,
-                    limits,
-                )?;
-                let resolved = crate::history_record::resolve_namespace_history(
-                    namespace,
-                    &checkpoint.history_ref,
-                    usage,
-                    &mut fields,
-                    limits,
-                    active && id == &root.manual_branch_id,
-                )?;
-                let cost = (resolved.decoded_charge(), record.role);
-                memo.remember_resolved_history(&checkpoint.history_ref, cost.0, cost.1, limits);
-                cost
+            let proof = OwnerProof {
+                identity: token.identity(),
+                position: token.position(),
+                sizing: token.creation_sizing(),
+                document: ProjectionRef::new(&checkpoint.document_ref)?,
             };
-            Arc::new(StorageReservation::reserve(
-                usage,
-                limits,
-                0,
-                charge,
-                if role == HistoryRole::Ordinary || (active && id == &root.manual_branch_id) {
-                    charge
-                } else {
-                    0
-                },
-                false,
-                u64::MAX,
-            )?)
+            drop(token);
+            memo.remember_owner(checkpoint.owner_ref.clone(), proof, limits);
+            proof
         };
-        let lineage = if active && let Some(value) = lineages.get(&checkpoint.lineage_ref.sha256) {
-            Arc::clone(value)
-        } else {
-            Arc::new(memo.read::<LineageRecord>(
-                namespace,
-                &checkpoint.lineage_ref,
-                usage,
-                &mut fields,
-                &manifest,
-                limits,
-            )?)
-        };
-        let _document = memo.read::<Document>(
-            namespace,
-            &checkpoint.document_ref,
-            usage,
-            &mut fields,
-            &manifest,
-            limits,
-        )?;
-        let _baseline = memo.read::<Document>(
-            namespace,
-            &checkpoint.baseline_ref,
-            usage,
-            &mut fields,
-            &manifest,
-            limits,
-        )?;
-        let retain = active
-            && (id == &root.manual_branch_id
-                || checkpoint.history_role == crate::history_record::HistoryRole::Ordinary);
-        if retain {
-            histories.insert(checkpoint.history_ref.sha256.clone(), Arc::clone(&history));
-            lineages.insert(checkpoint.lineage_ref.sha256.clone(), Arc::clone(&lineage));
+        if proof.identity != checkpoint.identity
+            || !proof.document.matches(&checkpoint.document_ref)
+            || proof.position != checkpoint.position
+            || proof.sizing.kind.role() != checkpoint.role
+        {
+            return Err(BundleError::Corrupt("checkpoint owner projection".into()));
         }
-        Ok((
-            checkpoint,
-            retain.then_some(history),
-            retain.then_some(lineage),
-        ))
+        // A cold open admits one reader at a time; it retains only the manual
+        // token after every archived reader is dropped. This immutable proof
+        // includes replay and every reachable state's derived fixed bounds.
+        let _limits = proof.sizing.limits()?;
+        Ok(checkpoint)
     };
-    let _resident_checkpoints = inspect_checkpoints(index, checkpoints, inspect)?;
+    let _resident_checkpoints =
+        inspect_checkpoints(index, checkpoints, inspect, Some(&root.manual_branch_id))?;
     let _receipts = root
         .receipt_index_ref
         .as_ref()

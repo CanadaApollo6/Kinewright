@@ -4,9 +4,10 @@ use super::{
     revised::Adapter,
 };
 use kinewright_core::{
-    ClipId, Command, Core, Document, Event, HistorySnapshot, LutAsset, LutAssetId, LutAssetKind,
-    LutAssetSource, Operation, TimeCode, Title, Track, TrackId, TrackKind, title_font_bytes,
+    ClipId, Command, Document, Event, LutAsset, LutAssetId, LutAssetKind, LutAssetSource,
+    Operation, TimeCode, Title, Track, TrackId, TrackKind, title_font_bytes,
 };
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::LoadedBundle,
     bundle_copy::SessionStore,
@@ -56,7 +57,7 @@ impl Adapter {
                 source_path: "/unavailable/locator.cube".into(),
             },
         });
-        let core = Core::spawn(document).map_err(error)?;
+        let core = Core::for_test(document).map_err(error)?;
         for command in [
             Command::Do(Operation::AddTitle {
                 track: TrackId(1),
@@ -77,7 +78,7 @@ impl Adapter {
                 return Err("fixture command rejected".into());
             }
         }
-        let frozen = core.export_history().map_err(error)?;
+        let frozen = serde_json::to_value(core.export_history().map_err(error)?).map_err(error)?;
         let mut session =
             SessionStore::create(&self.baseline.root, StorageLimits::default()).map_err(error)?;
         let session_id = session.session_id().clone();
@@ -131,7 +132,8 @@ impl Adapter {
         });
         let failure_preserved = failed.is_err()
             && !path.exists()
-            && core.export_history().map_err(error)? == frozen
+            && serde_json::to_value(core.export_history().map_err(error)?).map_err(error)?
+                == frozen
             && monitor().map_err(error)?.reserved_copy_bytes == 0;
         let (copy, trace) =
             io_observer::observe(|| session.first_save(&path, &core, &sealed.reference));
@@ -178,18 +180,23 @@ impl Adapter {
             font_bytes == title_font_bytes() && retained.physical_bytes == before.physical_bytes;
         drop(reader);
         let retired = monitor().map_err(error)?;
+        let saved_identity = destination
+            .checkpoint(destination.manual_branch_id())
+            .map_err(error)?
+            .identity
+            .to_string();
         drop(destination);
-        let loaded = LoadedBundle::read(&path).map_err(error)?;
-        let restored = Core::spawn(Document::default()).map_err(error)?;
-        loaded.restore_manual(&restored).map_err(error)?;
+        let mut loaded = LoadedBundle::read(&path, &self.baseline.pool).map_err(error)?;
+        let restored = loaded.open_manual().map_err(error)?;
         let actual = restored.export_history().map_err(error)?;
-        let digest = |value: &HistorySnapshot| {
-            serde_json::to_vec(value)
-                .map(|bytes| kinewright_media::sha256_bytes(&bytes))
-                .map_err(error)
-        };
+        let reopened_identity = actual.identity().map_err(error)?.to_string();
+        let mut selected_history = serde_json::to_value(actual.history()).map_err(error)?;
+        selected_history["epoch"] = frozen["history"]["epoch"].clone();
+        // Installation changes only the capture epoch in Core's selected state.
+        // Input certificates are checked above against the new namespace owner.
+        let history_exact = selected_history == frozen["history"];
         Ok(
-            json!({"backend":"linux-local-complete-bundle-copy","stored_bytes_equal":copied_lut==*lut && font_bytes==title_font_bytes(),"copy_before_root":copied_before_root,"failure_preserves_undo":failure_preserved,"reader_survives_handoff":reader_after_handoff,"retired_exactly_once":retired.physical_bytes==0 && retired.objects==0 && retired.reserved_copy_bytes==0 && !retired.damaged_accounting && !retired.unsettled,"new_owner_binding":fresh_identity && stale_ref_refused,"history_reopened_exactly":actual==frozen,"history_sha256":digest(&frozen)?,"reopened_history_sha256":digest(&actual)?,"project_id":project,"source_session_id":session_id,"source_physical_bytes":before.physical_bytes,"handoff_overlap_reservation_bytes":overlap,"decoder_certification_unavailable":decoder_unavailable,"io":trace}),
+            json!({"backend":"linux-local-complete-bundle-copy","stored_bytes_equal":copied_lut==*lut && font_bytes==title_font_bytes(),"copy_before_root":copied_before_root,"failure_preserves_undo":failure_preserved,"reader_survives_handoff":reader_after_handoff,"retired_exactly_once":retired.physical_bytes==0 && retired.objects==0 && retired.reserved_copy_bytes==0 && !retired.damaged_accounting && !retired.unsettled,"new_owner_binding":fresh_identity && stale_ref_refused,"history_reopened_exactly":history_exact && reopened_identity == saved_identity,"history_sha256":saved_identity,"reopened_history_sha256":reopened_identity,"project_id":project,"source_session_id":session_id,"source_physical_bytes":before.physical_bytes,"handoff_overlap_reservation_bytes":overlap,"decoder_certification_unavailable":decoder_unavailable,"io":trace}),
         )
     }
 }

@@ -16,8 +16,16 @@ pub struct PreparedUpdate {
     owner: PreparedOwner,
     effects: Effects,
     event: Event,
+    batch: Option<crate::bundle_records::BatchId>,
 }
 impl PreparedUpdate {
+    pub(crate) fn accepted_batch(&self) -> Option<&crate::bundle_records::BatchId> {
+        self.batch.as_ref()
+    }
+    pub(crate) fn input_contexts(&self) -> impl Iterator<Item = &ObjectRef> {
+        self.owner.input_contexts()
+    }
+
     #[must_use]
     pub const fn effects(&self) -> &Effects {
         &self.effects
@@ -63,8 +71,80 @@ enum Preparation {
     Command,
     Merge,
     Install,
+    Reinstall,
 }
 impl<P: 'static> Attachment<P> {
+    pub(crate) fn freeze_published(
+        &self,
+        _proof: &P,
+        identity: SnapshotIdentity,
+        position: CommandKey,
+        revision: TimelineRevision,
+    ) -> Result<AcceptedCut, Error> {
+        let change = self.core.change_id()?;
+        if change.position != position || change.revision != revision {
+            return Err(Error::CaptureChanged);
+        }
+        let cut = AcceptedCut::committed(change, identity);
+        self.core
+            .call(|reply| Message::FreezePublished(TypeId::of::<P>(), cut, reply))??;
+        Ok(cut)
+    }
+    pub(crate) fn retarget_selection(
+        &self,
+        _proof: &P,
+        cut: AcceptedCut,
+        branch: crate::bundle_records::BranchId,
+    ) -> Result<AcceptedCut, Error> {
+        self.core
+            .call(|reply| Message::RetargetSelection(TypeId::of::<P>(), cut, branch, reply))?
+    }
+    pub(crate) fn seal_selection(
+        &self,
+        _proof: &P,
+        cut: AcceptedCut,
+        store: &crate::store::ProjectStore,
+        bindings: crate::storage_budget::StorageReservation<
+            std::collections::BTreeMap<crate::operation_history::Resource, ObjectRef>,
+        >,
+    ) -> Result<crate::operation_history::SealedOwner, Error> {
+        let store = store.actor_object_store();
+        self.core
+            .call(|reply| Message::SealSelection(TypeId::of::<P>(), cut, store, bindings, reply))?
+    }
+    /// A person's selected saved state is prepared under the incoming capture's
+    /// already admitted full lease. The frozen source is kept until publication.
+    pub fn prepare_selection(
+        &self,
+        _proof: &P,
+        cut: AcceptedCut,
+        snapshot: crate::operation_history::ValidatedOwnerSnapshot,
+        branch: crate::bundle_records::BranchId,
+    ) -> Result<super::Core, Error> {
+        let (history, revision) = self.core.call(|reply| {
+            Message::Selection(TypeId::of::<P>(), cut, Box::new(snapshot), reply)
+        })??;
+        super::Core::spawn_staged(history, branch, revision, TypeId::of::<P>())
+    }
+    /// Materialise a validated state whose install epoch is already chosen.
+    pub(crate) fn open_validated_selection(
+        &self,
+        proof: &P,
+        cut: AcceptedCut,
+        snapshot: crate::operation_history::ValidatedOwnerSnapshot,
+        branch: crate::bundle_records::BranchId,
+        revision: TimelineRevision,
+    ) -> Result<super::Core, Error> {
+        if self.capture(proof)? != cut {
+            return Err(Error::CaptureChanged);
+        }
+        super::Core::spawn_staged(
+            snapshot.into_reader()?.into_history(),
+            branch,
+            revision,
+            TypeId::of::<P>(),
+        )
+    }
     pub fn prepare(
         &self,
         _proof: &P,
@@ -84,6 +164,15 @@ impl<P: 'static> Attachment<P> {
         context: CommandContext,
     ) -> Result<PreparedUpdate, Error> {
         self.prepare_inner(cut, action, context, Preparation::Install)
+    }
+    pub(crate) fn prepare_reinstall(
+        &self,
+        _proof: &P,
+        cut: AcceptedCut,
+        context: CommandContext,
+    ) -> Result<PreparedUpdate, Error> {
+        // No accepted command is minted for an installation of the same state.
+        self.prepare_inner(cut, Action::Close, context, Preparation::Reinstall)
     }
     pub fn prepare_merge(
         &self,
@@ -134,6 +223,34 @@ impl<P: 'static> Attachment<P> {
     }
 }
 impl State {
+    pub(super) fn prepare_selection(
+        &self,
+        authority: TypeId,
+        cut: AcceptedCut,
+        snapshot: crate::operation_history::ValidatedOwnerSnapshot,
+    ) -> Result<(crate::operation_history::OwnerHistory, TimelineRevision), Error> {
+        self.check_cut(authority, cut)?;
+        self.check_drained()?;
+        let current = self.history()?;
+        if current.creation_sizing().kind != crate::operation_history::CreationKind::Ordinary {
+            return Err(HistoryError::InvalidPolicy.into());
+        }
+        let epoch = current
+            .history()
+            .position()
+            .epoch
+            .max(snapshot.position().epoch)
+            .checked_add(1)
+            .ok_or(Error::CounterExhausted)?;
+        let revision = TimelineRevision(
+            self.revision
+                .0
+                .checked_add(1)
+                .ok_or(Error::CounterExhausted)?,
+        );
+        let selected = current.prepare_selection(snapshot, epoch)?;
+        Ok((selected, revision))
+    }
     pub(super) fn prepare_update(&self, request: &PrepareRequest) {
         let result = self.prepare_state(
             request.authority,
@@ -167,7 +284,7 @@ impl State {
             Action::Close => false,
             Action::Do { .. } => true,
         };
-        let revision = if changed || kind == Preparation::Install {
+        let revision = if changed || matches!(kind, Preparation::Install | Preparation::Reinstall) {
             TimelineRevision(
                 self.revision
                     .0
@@ -193,8 +310,19 @@ impl State {
         } else {
             current.private_preview()?
         };
-        let effects = action.apply(context, &mut preview)?;
-        if kind == Preparation::Install {
+        let effects = if kind == Preparation::Reinstall {
+            Effects {
+                accepted: preview.history().position(),
+                to_undo: vec![],
+                to_redo: vec![],
+                discarded: vec![],
+                folded: vec![],
+                applied: vec![],
+            }
+        } else {
+            action.apply(context, &mut preview)?
+        };
+        if matches!(kind, Preparation::Install | Preparation::Reinstall) {
             preview.prepare_peer_install(current)?;
         }
         let position = preview.history().position();
@@ -205,7 +333,7 @@ impl State {
             journal_command: None,
             token: None,
         };
-        let owner = preview.seal_preview(current.creation_sizing())?;
+        let owner = preview.seal_preview(current.creation_sizing(), current.history().bounds())?;
         Ok(PreparedUpdate {
             before: cut.change,
             revision,
@@ -214,6 +342,7 @@ impl State {
             owner,
             effects,
             event,
+            batch: matches!(action, Action::Do { .. }).then(|| context.creation.batch.clone()),
         })
     }
     pub(super) fn commit_update(
@@ -234,6 +363,9 @@ impl State {
         // lease is unchanged; the working lease and old state are already gone.
         self.revision = prepared.revision;
         self.generation = prepared.generation;
+        if cut.change.position.epoch != prepared.position.epoch {
+            self.producer = None;
+        }
         self.broadcast(&Ok(prepared.event));
         Ok(ChangeId {
             actor: self.identity,

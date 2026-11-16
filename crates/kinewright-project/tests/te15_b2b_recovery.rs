@@ -41,9 +41,24 @@ fn unpack(name: &str) -> kinewright_media::test_support::TempDirectory {
 fn te15_b2b_open_valid_consent_and_audits() {
     let temp = unpack("good");
     let path = temp.path("project.kinewright");
-    assert!(LoadedBundle::read(&path).is_ok(), "B2B_VALID_STORED_CUTS");
+    assert!(
+        LoadedBundle::read(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default()
+            )
+        )
+        .is_ok(),
+        "B2B_VALID_STORED_CUTS"
+    );
     assert!(matches!(
-        assess(&path).unwrap(),
+        assess(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default()
+            )
+        )
+        .unwrap(),
         RecoveryAssessment::Verified(_)
     ));
 }
@@ -51,16 +66,28 @@ fn refuses(name: &str) {
     let temp = unpack(name);
     let path = temp.path("project.kinewright");
     let before = std::fs::read(&path).unwrap();
-    let error = LoadedBundle::read(&path)
-        .err()
-        .expect("B2B_OPEN_REFUSES_CHANGED_CONSENT_OR_AUDIT");
+    let error = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .err()
+    .expect("B2B_OPEN_REFUSES_CHANGED_CONSENT_OR_AUDIT");
     assert!(
         error
             .to_string()
             .contains("stored run consent or append-only audit changed"),
         "B2B_CROSS_CUT_REFUSAL {error}"
     );
-    match assess(&path).unwrap() {
+    match assess(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    {
         RecoveryAssessment::Quarantined { reason, .. } => assert!(
             reason.contains("stored run consent or append-only audit changed"),
             "B2B_RECOVERY_QUARANTINES_CROSS_CUT"

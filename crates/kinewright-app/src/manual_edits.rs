@@ -1,8 +1,7 @@
 //! The person's latest desired value survives a temporarily full manual door.
 use crate::joined_thread::JoinedThread;
-use kinewright_core::{
-    Command, CoreDisconnected, CoreMutationRefusal, Event, ManualPermit, TimelineRevision,
-};
+use kinewright_core::{Command, CoreDisconnected, CoreMutationRefusal, Event, TimelineRevision};
+use kinewright_project::operation_actor::{ManualPermit, Refusal};
 use std::collections::VecDeque;
 
 pub(crate) const PENDING_ACTIONS: usize = 16;
@@ -29,6 +28,11 @@ impl From<CoreDisconnected> for ManualSendError {
     }
 }
 
+impl From<kinewright_project::operation_actor::Error> for ManualSendError {
+    fn from(_: kinewright_project::operation_actor::Error) -> Self {
+        Self::Disconnected
+    }
+}
 struct PendingAction {
     // The identity stays here while Core owns a copy of the command.
     gesture: Option<String>,
@@ -42,7 +46,7 @@ struct PendingAction {
 struct InFlight {
     command: PendingValue,
     acknowledgement: u64,
-    worker: JoinedThread<Result<Event, CoreDisconnected>>,
+    worker: JoinedThread<Result<Event, Refusal>>,
     disposition: Disposition,
 }
 struct PendingValue {
@@ -300,7 +304,16 @@ impl ManualEdits {
                         self.accepted_revision = Some(revision);
                     }
                     Ok(Ok(_)) if count_if_refused => self.note_unapplied(1),
-                    Ok(Err(CoreDisconnected)) => self.note_unconfirmed(
+                    Ok(Err(Refusal {
+                        error: kinewright_project::operation_actor::Error::MutationRefused(_)
+                            | kinewright_project::operation_actor::Error::Protocol(_),
+                        ..
+                    })) => {
+                        if count_if_refused {
+                            self.note_unapplied(1);
+                        }
+                    }
+                    Ok(Err(_)) => self.note_unconfirmed(
                         "The Core actor stopped. Check the document; this edit's outcome could not be confirmed."
                     ),
                     Err(_) => self.note_unconfirmed(
@@ -312,10 +325,19 @@ impl ManualEdits {
             }
             let action = self.actions.front_mut().expect("in-flight action retained");
             match result {
-                Ok(Ok(Event::MutationRefused {
-                    reason: CoreMutationRefusal::ManualBackpressure,
-                    ..
-                })) => {
+                Ok(
+                    Ok(Event::MutationRefused {
+                        reason: CoreMutationRefusal::ManualBackpressure,
+                        ..
+                    })
+                    | Err(Refusal {
+                        error:
+                            kinewright_project::operation_actor::Error::Protocol(
+                                kinewright_project::operation_protocol::Conflict::Backpressure,
+                            ),
+                        ..
+                    }),
+                ) => {
                     // Only acknowledgement can cure this refusal. A newer gesture value wins.
                     if action.latest.is_none() {
                         action.latest = Some(flight.command);
@@ -334,7 +356,7 @@ impl ManualEdits {
                         Ok(Ok(Event::BatchRejected { error, .. })) => error.to_string(),
                         Ok(Ok(Event::RevisionConflict { .. })) => "The document changed before this edit could be applied. Check its current value and try again.".into(),
                         Ok(Ok(Event::UndoBlockedBySave { .. })) => "Undo is waiting for the save to finish. Retry after the destination is reconciled.".into(),
-                        Ok(Err(CoreDisconnected)) => "The Core actor stopped. Check the document; this edit's outcome could not be confirmed.".into(),
+                        Ok(Err(error)) => error.to_string(),
                         Err(_) => "The edit worker panicked. Check the document; this edit's outcome could not be confirmed.".into(),
                         _ => "The Core actor returned an unexpected reply. Check the document before trying this edit again.".into(),
                     }));

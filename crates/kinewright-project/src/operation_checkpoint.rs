@@ -32,6 +32,17 @@ pub struct Checkpoint {
     pub command_cut: Option<CommandId>,
     pub take_map_revision_ref: Option<ObjectRef>,
     pub stream: Option<StreamState>,
+    pub install: Option<InstallRecord>,
+}
+/// The immediately preceding install's bounded receipt window lets a lost
+/// recovery reply be reconstructed after a writer restart without reapplying it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallRecord {
+    pub publisher: crate::operation_protocol::Publisher,
+    pub source: SnapshotIdentity,
+    pub source_position: CommandKey,
+    pub stream: Option<StreamState>,
 }
 /// Publication scope comes from the actual frozen actor cut or prepared
 /// update, rather than from a second observation of the live endpoint.
@@ -66,6 +77,7 @@ impl Checkpoint {
             command_cut: header.command_cut,
             take_map_revision_ref: header.take_map,
             stream: header.stream,
+            install: None,
         };
         checkpoint.validate(&StorageLimits::default())?;
         Ok(checkpoint)
@@ -130,6 +142,35 @@ impl BundleRecord for Checkpoint {
             command.issuer.validate()?;
             if command.sequence == 0 {
                 return Err(BundleError::Corrupt("checkpoint command cut".into()));
+            }
+        }
+        if let Some(install) = &self.install {
+            if !matches!(
+                install.publisher,
+                crate::operation_protocol::Publisher::Native(_)
+            ) {
+                return Err(BundleError::Corrupt("install publisher namespace".into()));
+            }
+            if install.source_position.epoch >= self.position.epoch
+                || install.source_position.position > self.position.position
+            {
+                return Err(BundleError::Corrupt("install source position".into()));
+            }
+            if let Some(stream) = &install.stream {
+                stream
+                    .validate()
+                    .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+                if stream.seed().branch != self.branch_id
+                    || stream.seed().attachment_epoch != install.source_position.epoch
+                    || (stream.sequence() == 0 && stream.seed().installed != install.source)
+                    || stream.receipts().last().is_some_and(|receipt| {
+                        receipt.accepted.epoch != install.source_position.epoch
+                            || receipt.accepted.position.checked_add(1)
+                                != Some(install.source_position.position)
+                    })
+                {
+                    return Err(BundleError::Corrupt("install source stream".into()));
+                }
             }
         }
         if let Some(stream) = &self.stream {

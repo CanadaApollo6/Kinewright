@@ -287,6 +287,7 @@ impl ManualHistoryEncoder for AdmittedManualEncoder {
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?
                 .or_else(|| self.predecessor.clone());
             let envelope = CommandEnvelope {
+                context: None,
                 switch: None,
                 manual: Some(ManualHistoryIdentity {
                     recovery_origin: None,

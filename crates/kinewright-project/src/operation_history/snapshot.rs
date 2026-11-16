@@ -13,10 +13,163 @@ pub struct OwnerSnapshot {
     pub(super) data: SnapshotData,
     pub(super) reservation: super::HistoryReservation,
 }
+impl serde::Serialize for OwnerSnapshot {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.data.serialize(serializer)
+    }
+}
+impl std::fmt::Debug for OwnerSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.data.fmt(f)
+    }
+}
+impl PartialEq for OwnerSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        // Allocation capacities and replay charges can tighten on open. State
+        // agreement names the combined canonical Core and owner identity.
+        matches!((self.identity(), other.identity()), (Ok(left), Ok(right)) if left == right)
+    }
+}
 impl OwnerSnapshot {
+    /// Write a fresh-install projection without changing the retained source
+    /// capture. Only its epoch and Redone ledger spelling differ. The guard
+    /// restores them on success, refusal, and unwinding; payloads stay borrowed.
+    pub(crate) fn with_install_view<R>(
+        &mut self,
+        epoch: u64,
+        action: impl FnOnce(&Self) -> R,
+    ) -> Result<R, Error> {
+        struct Restore<'a> {
+            snapshot: &'a mut OwnerSnapshot,
+            epoch: u64,
+            fates: Vec<(Fate, Option<u64>)>,
+        }
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                self.snapshot.data.history.epoch = self.epoch;
+                for (entry, (fate, install)) in self
+                    .snapshot
+                    .data
+                    .ledger
+                    .commands
+                    .values_mut()
+                    .zip(&self.fates)
+                {
+                    entry.fate = *fate;
+                    entry.install_epoch = *install;
+                }
+            }
+        }
+        if epoch <= self.data.history.epoch {
+            return Err(Error::InvalidOrigin);
+        }
+        let previous = self.data.history.epoch;
+        // At most one fixed pair per bounded approval; no document or command
+        // payload is copied to prepare this publication view.
+        let fates = self
+            .data
+            .ledger
+            .commands
+            .values()
+            .map(|entry| (entry.fate, entry.install_epoch))
+            .collect();
+        let restore = Restore {
+            snapshot: self,
+            epoch: previous,
+            fates,
+        };
+        restore.snapshot.data.history.epoch = epoch;
+        for entry in restore.snapshot.data.ledger.commands.values_mut() {
+            if entry.fate == Fate::Redone {
+                entry.fate = Fate::Applied;
+                entry.install_epoch = Some(epoch);
+            }
+        }
+        Ok(action(restore.snapshot))
+    }
+    /// Prepare the selected trusted capture for a fresh installation line.
+    /// Command keys are immutable; only the capture epoch and Redone spelling
+    /// change, exactly as installation of this same selected history does.
+    pub(crate) fn into_install(self) -> Result<Self, Error> {
+        let epoch = self
+            .data
+            .history
+            .epoch
+            .checked_add(1)
+            .ok_or(Error::InvalidOrigin)?;
+        self.into_install_at(epoch)
+    }
+    pub(crate) fn into_install_at(mut self, epoch: u64) -> Result<Self, Error> {
+        if epoch <= self.data.history.epoch {
+            return Err(Error::InvalidOrigin);
+        }
+        self.data.history.epoch = epoch;
+        for entry in self.data.ledger.commands.values_mut() {
+            if entry.fate == Fate::Redone {
+                entry.fate = Fate::Applied;
+                entry.install_epoch = Some(epoch);
+            }
+        }
+        Ok(self)
+    }
+    pub(crate) fn encoded_bytes(&self) -> Result<u64, Error> {
+        let mut count = crate::store::BoundedCounter {
+            bytes: 0,
+            limit: self.reservation.limits().envelope.retained,
+        };
+        serde_json::to_writer(&mut count, &self.data)
+            .map_err(|_| Error::Capacity("capture bytes"))?;
+        Ok(count.bytes)
+    }
+    pub(crate) fn record_references(
+        &self,
+    ) -> impl Iterator<Item = &crate::bundle_records::ObjectRef> {
+        self.data
+            .origins
+            .iter()
+            .flat_map(|origin| &origin.inputs)
+            .chain(
+                self.data
+                    .ledger
+                    .entries()
+                    .map(|entry| &entry.approval.reference),
+            )
+            .chain(self.data.ledger.transition_entries().map(|entry| &entry.id))
+    }
+    /// A person may adopt retained task/candidate work as the live project.
+    /// Admit its independent fixed Ordinary holder before releasing the cold
+    /// source reader. Original commands and their origins are never re-keyed.
+    pub fn into_ordinary(self, pool: &super::HistoryPool) -> Result<Self, Error> {
+        if !self.reservation.pool().same_pool(pool) {
+            return Err(Error::Reservation);
+        }
+        if self.data.role == Role::Ordinary {
+            return Ok(self);
+        }
+        let sizing = super::CreationSizing {
+            kind: super::CreationKind::Ordinary,
+            initial_batch: kinewright_core::undo::Charge::default(),
+            ..self.data.sizing
+        };
+        let reservation = pool.admit_sized(sizing)?;
+        let _window = reservation.workspace()?;
+        let Self {
+            mut data,
+            reservation: source,
+        } = self;
+        data.role = Role::Ordinary;
+        data.sizing = sizing;
+        data.history.policy = kinewright_core::undo::RetentionPolicy::Fold;
+        drop(source);
+        Ok(Self { data, reservation })
+    }
     #[must_use]
     pub const fn history(&self) -> &Record {
         &self.data.history
+    }
+    #[must_use]
+    pub const fn fold_frontier(&self) -> Option<CommandKey> {
+        self.data.fold_frontier
     }
     #[must_use]
     pub const fn ledger(&self) -> &ApprovalLedger {
@@ -58,6 +211,14 @@ pub struct ValidatedOwnerSnapshot {
 }
 impl ValidatedOwnerSnapshot {
     #[must_use]
+    pub(crate) fn creation_sizing(&self) -> super::CreationSizing {
+        self.reservation.sizing()
+    }
+    #[must_use]
+    pub fn document(&self) -> &kinewright_core::Document {
+        self.core.document()
+    }
+    #[must_use]
     pub const fn identity(&self) -> super::SnapshotIdentity {
         self.identity
     }
@@ -97,7 +258,7 @@ impl ValidatedOwnerSnapshot {
         })
     }
 }
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SnapshotData {
     pub role: Role,
@@ -150,13 +311,13 @@ impl OwnerHistory {
     }
     #[expect(
         clippy::too_many_lines,
-        reason = "validate all merged approval evidence before replacing either Core or owner state"
+        reason = "reconcile every ledger entry before selecting or replacing a history line"
     )]
-    pub(crate) fn install_snapshot_at_epoch(
-        &mut self,
+    fn reconcile_snapshot(
+        &self,
         mut snapshot: ValidatedOwnerSnapshot,
         install_epoch: u64,
-    ) -> Result<CommandKey, Error> {
+    ) -> Result<ValidatedOwnerSnapshot, Error> {
         if install_epoch <= self.core.position().epoch || install_epoch < snapshot.core.epoch() {
             return Err(Error::History(
                 kinewright_core::undo::Error::InvalidMetadata,
@@ -320,6 +481,24 @@ impl OwnerHistory {
         if snapshot.owner_bytes > snapshot.reservation.limits().envelope.owners {
             return Err(Error::Capacity("owner metadata"));
         }
+        Ok(snapshot)
+    }
+    pub(crate) fn prepare_selection(
+        &self,
+        snapshot: ValidatedOwnerSnapshot,
+        install_epoch: u64,
+    ) -> Result<OwnerHistory, Error> {
+        let snapshot = self.reconcile_snapshot(snapshot, install_epoch)?;
+        let mut selected = snapshot.open_reader()?;
+        selected.core.begin_install_epoch_at(install_epoch)?;
+        Ok(selected)
+    }
+    pub(crate) fn install_snapshot_at_epoch(
+        &mut self,
+        snapshot: ValidatedOwnerSnapshot,
+        install_epoch: u64,
+    ) -> Result<CommandKey, Error> {
+        let mut snapshot = self.reconcile_snapshot(snapshot, install_epoch)?;
         snapshot
             .reservation
             .promote_replacing(Some(&self.reservation))?;

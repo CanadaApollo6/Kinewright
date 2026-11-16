@@ -17,7 +17,7 @@ fn s4b_c3_fix2_session_commands_refuse_unpaired_task_checkpoint() {
         }
         core.request(Command::Undo).unwrap();
         let expected = core.export_history().unwrap();
-        assert!(!expected.cursor.redo.is_empty());
+        assert!(!expected.history().redo.is_empty());
         let producer = f.producer(&run);
         let saved = f
             .host
@@ -99,7 +99,7 @@ fn s4b_c3_fix2_session_commands_refuse_unpaired_task_checkpoint() {
             );
         }
         restored.request(Command::Redo).unwrap();
-        assert_eq!(restored.export_history().unwrap().cursor.redo.len(), 0);
+        assert_eq!(restored.export_history().unwrap().history().redo.len(), 0);
         drop(restored);
         drop(host);
         claim.finish().unwrap();

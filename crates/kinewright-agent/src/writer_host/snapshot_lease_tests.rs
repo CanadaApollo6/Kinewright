@@ -301,7 +301,7 @@ mod tests {
         let snapshot = {
             let owner = host.owner.upgrade().unwrap();
             let owner = owner.lock().unwrap();
-            HostSnapshot::capture(owner.core()).unwrap()
+            received_snapshot_for_test(owner.core()).unwrap()
         };
         accepted(
             client
@@ -676,7 +676,7 @@ mod tests {
                 let snapshot = {
                     let owner = host.owner.upgrade().unwrap();
                     let owner = owner.lock().unwrap();
-                    HostSnapshot::capture(owner.core()).unwrap()
+                    received_snapshot_for_test(owner.core()).unwrap()
                 };
                 accepted(
                     client
@@ -799,13 +799,7 @@ mod tests {
         let client = host.client();
         let status = accepted(client.request(HostCommand::Status).unwrap()).status;
         let owner = host.owner.upgrade().unwrap();
-        let document = owner
-            .lock()
-            .unwrap()
-            .core()
-            .export_history()
-            .unwrap()
-            .document;
+        let document = document_for_test(owner.lock().unwrap().core());
         (status.playback_scope.expect("C11_SCOPE"), document)
     }
     fn lease_current(
@@ -944,7 +938,7 @@ mod tests {
         let snapshot = {
             let owner = host.owner.upgrade().unwrap();
             let owner = owner.lock().unwrap();
-            HostSnapshot::capture(owner.core()).unwrap()
+            received_snapshot_for_test(owner.core()).unwrap()
         };
         let copy = root.path("c11-copy.kinewright");
         accepted(

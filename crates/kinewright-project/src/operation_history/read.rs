@@ -10,8 +10,15 @@ use crate::bundle_records::ObjectRef;
 #[derive(Debug)]
 pub struct OwnerRead(OwnerHistory);
 impl OwnerRead {
-    pub(super) const fn new(history: OwnerHistory) -> Self {
+    pub(crate) fn into_history(self) -> OwnerHistory {
+        self.0
+    }
+    pub(crate) const fn new(history: OwnerHistory) -> Self {
         Self(history)
+    }
+    #[must_use]
+    pub fn pool(&self) -> super::HistoryPool {
+        self.0.pool()
     }
     #[must_use]
     pub const fn history(&self) -> &kinewright_core::undo::History {
@@ -32,8 +39,28 @@ impl OwnerRead {
     pub fn creation_sizing(&self) -> super::CreationSizing {
         self.0.creation_sizing()
     }
+    pub fn input_contexts(&self) -> impl Iterator<Item = &ObjectRef> {
+        self.0.origins.0.iter().flat_map(|row| &row.origin.inputs)
+    }
     pub fn approval_answer(&self, reference: &ObjectRef) -> Result<Option<ApprovalAnswer>, Error> {
         self.0.approval_answer(reference)
+    }
+    pub(crate) fn fork(&self, role: super::Role) -> Result<OwnerHistory, Error> {
+        self.0.fork_current(role, false)
+    }
+    #[must_use]
+    pub fn occurrence_in_redo(&self, occurrence: &crate::bundle_records::OccurrenceId) -> bool {
+        self.0
+            .core
+            .redo()
+            .iter()
+            .flat_map(kinewright_core::undo::Step::commands)
+            .any(|command| {
+                self.0.origins.get(&command.id).is_some_and(|origin| {
+                    origin.origin.creation.branch == occurrence.branch_origin
+                        && origin.origin.creation.batch == occurrence.creation_batch_id
+                })
+            })
     }
     pub fn into_boundary(self, depth: usize) -> Result<OwnerBoundary, Error> {
         self.0.into_boundary(depth)

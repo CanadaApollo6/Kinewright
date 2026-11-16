@@ -1,4 +1,5 @@
 use super::*;
+use crate::operation_actor::Core;
 use crate::{
     editing_session::Ja1EditingSession,
     orchestration_accounting::AccountingRecord,
@@ -7,7 +8,7 @@ use crate::{
     receipts::{CommandId, IssuerId},
     storage_budget::StorageLimits,
 };
-use kinewright_core::{Core, Document};
+use kinewright_core::Document;
 use kinewright_media::test_support::TempDirectory;
 fn id<T: serde::de::DeserializeOwned>(n: u64) -> T {
     serde_json::from_value(serde_json::json!(format!("{n:032x}"))).unwrap()
@@ -120,7 +121,7 @@ impl Fixture {
             &kinewright_media::test_support::workspace_target_dir(),
             "linear-run",
         );
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         let mut owner =
             Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
         owner
@@ -321,11 +322,15 @@ impl Fixture {
         seal
     }
     fn reopen(&mut self) {
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         let replacement =
             Ja1EditingSession::new(self.temp.root(), &core, StorageLimits::default()).unwrap();
         drop(std::mem::replace(&mut self.owner, replacement));
-        self.owner = Ja1EditingSession::open(&self.temp.path("linear.kinewright")).unwrap();
+        self.owner = Ja1EditingSession::open(
+            &self.temp.path("linear.kinewright"),
+            self.owner.core().history_pool(),
+        )
+        .unwrap();
     }
 }
 #[test]
@@ -493,8 +498,6 @@ fn linear_run_each_publication_write_and_root_boundary_is_replayable() {
         .collect::<Vec<_>>();
     boundaries.extend([
         ("root_before_publish", 1),
-        ("floor_tag_prepare", 1),
-        ("floor_tag_complete", 1),
         ("root_file_sync", 1),
         ("root_rename_io", 1),
         ("root_parent_sync", 1),
@@ -727,8 +730,6 @@ fn linear_run_cumulative_writes_and_root_retry_preserve_exact_projection() {
         .collect::<Vec<_>>();
     boundaries.extend([
         ("root_before_publish", 1),
-        ("floor_tag_prepare", 1),
-        ("floor_tag_complete", 1),
         ("root_file_sync", 1),
         ("root_rename_io", 1),
         ("root_parent_sync", 1),

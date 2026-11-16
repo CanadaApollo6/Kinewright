@@ -1,9 +1,8 @@
 //! H2 exercises the existing owner and sealed publisher with a dirty manual producer.
 #![cfg(all(target_os = "linux", feature = "test-util"))]
-use kinewright_core::{
-    Command, Core, Document, Event, Operation, TimeCode, Track, TrackId, TrackKind,
-};
+use kinewright_core::{Command, Document, Event, Operation, TimeCode, Track, TrackId, TrackKind};
 use kinewright_media::test_support::TempDirectory;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::LoadedBundle,
     editing_session::Ja1EditingSession,
@@ -35,7 +34,7 @@ fn run_case(drop_ack: bool) {
     let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("h2-roots");
     let temp = TempDirectory::new_in(&root, "candidate");
     let path = temp.path("project.kinewright");
-    let core = Core::spawn(Document {
+    let core = Core::for_test(Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -74,7 +73,11 @@ fn run_case(drop_ack: bool) {
         .issue_manual_lease("person".into(), "manual-private".into())
         .unwrap();
     let permit = owner
-        .bind_manual_producer(lease.clone(), owner.manual_input_context().unwrap())
+        .bind_manual_producer(
+            lease.clone(),
+            owner.manual_input_context().unwrap(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        )
         .unwrap();
     assert!(matches!(
         permit
@@ -86,8 +89,8 @@ fn run_case(drop_ack: bool) {
         Event::DocumentChanged { .. }
     ));
     let pending = permit.pending().unwrap();
-    let manual = core.export_history().unwrap();
-    let attachment = owner.current_switch_attachment().unwrap();
+    let manual = core.snapshot_identity().unwrap();
+    let attachment = owner.current_switch_identity().unwrap();
     let flattened = flattened_document(&path);
     let binding = owner.candidate_binding(candidate.branch_id()).unwrap();
     let mut specialist = owner
@@ -115,8 +118,13 @@ fn run_case(drop_ack: bool) {
                 }),
             ] {
                 assert!(matches!(
-                    retained.request(command).unwrap(),
-                    Event::MutationRefused { .. }
+                    retained.request(command),
+                    Err(kinewright_project::operation_actor::Refusal {
+                        error: kinewright_project::operation_actor::Error::MutationRefused(
+                            kinewright_core::CoreMutationRefusal::Frozen
+                        ),
+                        ..
+                    })
                 ));
             }
         },
@@ -124,8 +132,13 @@ fn run_case(drop_ack: bool) {
     )
     .unwrap();
     assert!(matches!(
-        specialist.core().request(Command::Undo).unwrap(),
-        Event::MutationRefused { .. }
+        specialist.core().request(Command::Undo),
+        Err(kinewright_project::operation_actor::Refusal {
+            error: kinewright_project::operation_actor::Error::MutationRefused(
+                kinewright_core::CoreMutationRefusal::Frozen
+            ),
+            ..
+        })
     ));
     let envelope = owner
         .candidate_merge_envelope(
@@ -154,7 +167,7 @@ fn run_case(drop_ack: bool) {
             result,
             Err(kinewright_project::bundle::BundleError::DurabilityUnknown)
         ));
-        assert_eq!(core.export_history().unwrap(), manual);
+        assert_eq!(core.snapshot_identity().unwrap(), manual);
         assert_eq!(permit.pending().unwrap(), pending);
         for command in [
             Command::Undo,
@@ -164,13 +177,24 @@ fn run_case(drop_ack: bool) {
             }),
         ] {
             assert!(matches!(
-                candidate.core().request(command).unwrap(),
-                Event::MutationRefused { .. }
+                candidate.core().request(command),
+                Err(kinewright_project::operation_actor::Refusal {
+                    error: kinewright_project::operation_actor::Error::MutationRefused(
+                        kinewright_core::CoreMutationRefusal::Frozen
+                    ),
+                    ..
+                })
             ));
         }
         owner.reconcile_active().unwrap();
         assert_eq!(
-            candidate.core().export_history().unwrap().document.tracks[0]
+            candidate
+                .core()
+                .export_history()
+                .unwrap()
+                .history()
+                .document
+                .tracks[0]
                 .clips
                 .len(),
             2
@@ -191,10 +215,13 @@ fn run_case(drop_ack: bool) {
         panic!("candidate receipt {receipt:?}")
     };
     let after = owner.durable_branch_history(&candidate).unwrap();
-    assert_eq!(after.document.tracks[0].clips.len(), 2);
-    assert_eq!(candidate.core().export_history().unwrap(), *after);
+    assert_eq!(after.history().document().tracks[0].clips.len(), 2);
     assert_eq!(
-        after.cursor.undo.len(),
+        candidate.core().snapshot_identity().unwrap(),
+        after.identity().unwrap()
+    );
+    assert_eq!(
+        after.history().undo().len(),
         2,
         "one merge undo entry follows candidate's own edit"
     );
@@ -210,22 +237,43 @@ fn run_case(drop_ack: bool) {
     let ReceiptResult::Edit { batch_id, .. } = &record.result else {
         panic!("edit result")
     };
-    assert_eq!(batch_id.as_ref(), checkpoint.batch_ids.last());
+    let command = after
+        .history()
+        .undo()
+        .back()
+        .unwrap()
+        .commands()
+        .last()
+        .unwrap();
+    let capture = checkpoint
+        .open(owner.store().unwrap(), owner.core().history_pool())
+        .unwrap()
+        .into_reader()
+        .unwrap()
+        .into_capture()
+        .unwrap();
+    let origin = capture
+        .origins()
+        .iter()
+        .find(|origin| origin.key == command.id && origin.payload_digest == command.payload_digest)
+        .unwrap();
+    assert_eq!(batch_id.as_ref(), Some(&origin.creation.batch));
+    drop(capture);
     drop(checkpoint);
     assert!(
         batch_id.is_some(),
         "candidate batch identity must be retained"
     );
-    assert_eq!(core.export_history().unwrap(), manual);
+    assert_eq!(core.snapshot_identity().unwrap(), manual);
     assert_eq!(permit.pending().unwrap(), pending);
     assert_eq!(
         owner.current_switch_attachment().unwrap().current,
         attachment.current
     );
     assert_eq!(flattened_document(&path), flattened);
-    let accepted: kinewright_project::receipts::CommandEnvelope =
-        serde_json::from_slice(&pending[0].envelope).unwrap();
-    assert_eq!(accepted.manual.unwrap().binding, lease);
+    let accepted = pending[0].decode().unwrap();
+    assert_eq!(accepted.accepted, lease.next_key);
+    assert_eq!(accepted.predecessor, lease.state.tip());
     assert_eq!(owner.commit_candidate(&frozen, &envelope).unwrap(), receipt);
     let head_after_merge = owner.root_sha256().unwrap();
     assert!(
@@ -254,20 +302,37 @@ fn run_case(drop_ack: bool) {
     let candidate_id = candidate.branch_id().clone();
     drop(after);
     drop(owner);
-    let loaded = LoadedBundle::read(&path).unwrap();
-    let fresh = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&fresh).unwrap();
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let fresh = loaded.open_manual().unwrap();
     assert_eq!(
-        fresh.export_history().unwrap().document.as_ref(),
+        fresh.export_history().unwrap().history().document.as_ref(),
         &flattened
     );
     drop(loaded);
-    let mut reopened = Ja1EditingSession::open(&path).unwrap();
+    let mut reopened = Ja1EditingSession::open(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     let registered = reopened
         .reopen_registered_candidate(candidate_id, &candidate_base)
         .unwrap();
     assert_eq!(
-        registered.core().export_history().unwrap().document.tracks[0]
+        registered
+            .core()
+            .export_history()
+            .unwrap()
+            .history()
+            .document
+            .tracks[0]
             .clips
             .len(),
         2
@@ -296,12 +361,12 @@ fn fu1_refused_candidate_commit_does_not_block_unknown_manual_save() {
     clippy::too_many_lines,
     reason = "one exact manual floor ticket and candidate refusal across reconciliation"
 )]
-fn run_manual_refusal(fault: &'static str, landed: bool, earlier_refusal: bool) {
+fn run_manual_refusal(fault: &'static str, _landed: bool, earlier_refusal: bool) {
     use kinewright_project::{bundle::BundleError, io_observer};
     let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("fu1-roots");
     let temp = TempDirectory::new_in(&root, "manual-settlement");
     let path = temp.path("project.kinewright");
-    let core = Core::spawn(Document {
+    let core = Core::for_test(Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -312,15 +377,7 @@ fn run_manual_refusal(fault: &'static str, landed: bool, earlier_refusal: bool) 
     })
     .unwrap();
     let mut owner = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
-    let limits = StorageLimits {
-        branch_history_bytes: kinewright_project::bundle_commit::history_cost_probe(
-            &core.export_history().unwrap(),
-            &StorageLimits::default(),
-        )
-        .unwrap()
-            * 3,
-        ..StorageLimits::default()
-    };
+    let limits = StorageLimits::default();
     owner.first_save(&path, limits.clone()).unwrap();
     owner.save_active().unwrap();
     let mut candidate = owner
@@ -342,6 +399,13 @@ fn run_manual_refusal(fault: &'static str, landed: bool, earlier_refusal: bool) 
         }))
         .unwrap();
     let frozen = owner.freeze_registered_candidate(&mut specialist).unwrap();
+    for n in 0..64 {
+        core.request(Command::Do(Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: n % 2 == 0,
+        }))
+        .unwrap();
+    }
     let issuer = owner
         .issue_manual_lease("candidate".into(), "candidate-private".into())
         .unwrap()
@@ -360,28 +424,17 @@ fn run_manual_refusal(fault: &'static str, landed: bool, earlier_refusal: bool) 
         refused.id.sequence += 1;
         assert!(matches!(
             owner.commit_candidate(&frozen, &refused),
-            Err(BundleError::Unsupported(_))
+            Err(BundleError::HistoryChanged)
         ));
     }
-    for n in 0..64 {
-        core.request(Command::Do(Operation::SetTrackSyncLock {
-            track: TrackId(1),
-            locked: n % 2 == 0,
-        }))
-        .unwrap();
-    }
-    let manual = core.export_history().unwrap();
-    let expected =
-        kinewright_project::bundle_commit::bound_history_probe(&manual, &limits).unwrap();
+    let manual = core.snapshot_identity().unwrap();
+    let manual_document = std::sync::Arc::clone(&core.export_history().unwrap().history().document);
+    let pending = io_observer::fail_once(fault, || owner.save_active());
     assert!(
-        expected.floor_offset > manual.floor_offset,
-        "the unknown save must own a floor ticket"
+        matches!(pending, Err(BundleError::DurabilityUnknown)),
+        "MANUAL_PUBLICATION_OWNS_ITS_UNCERTAIN_CUT {pending:?}"
     );
-    assert!(matches!(
-        io_observer::fail_once(fault, || owner.save_active()),
-        Err(BundleError::DurabilityUnknown)
-    ));
-    assert!(core.pending_history_save().unwrap().is_some());
+    assert!(owner.pending_publication_cut().unwrap().is_some());
     assert!(matches!(
         owner.commit_candidate(&frozen, &envelope),
         Err(BundleError::Unsettled)
@@ -389,18 +442,15 @@ fn run_manual_refusal(fault: &'static str, landed: bool, earlier_refusal: bool) 
     owner
         .reconcile_active()
         .expect("the manual attempt must settle with its own Core");
-    assert!(core.pending_history_save().unwrap().is_none());
+    assert!(owner.pending_publication_cut().unwrap().is_none());
     assert_eq!(
-        core.export_history().unwrap(),
-        if landed {
-            expected.clone()
-        } else {
-            manual.clone()
-        }
+        core.snapshot_identity().unwrap(),
+        manual,
+        "PUBLICATION_SETTLEMENT_NEVER_REWRITES_ACCEPTED_HISTORY"
     );
     owner.save_active().unwrap();
-    assert_eq!(core.export_history().unwrap(), expected);
-    assert_eq!(flattened_document(&path), *manual.document);
+    assert_eq!(core.snapshot_identity().unwrap(), manual);
+    assert_eq!(flattened_document(&path), *manual_document);
     assert_eq!(
         candidate.core().attachment_state().unwrap(),
         kinewright_core::AttachmentState::Live
@@ -415,7 +465,7 @@ fn run_manual_refusal(fault: &'static str, landed: bool, earlier_refusal: bool) 
 fn fu1_definite_candidate_refusal_releases_the_frozen_cut() {
     let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("fu1-roots");
     let temp = TempDirectory::new_in(&root, "candidate-refusal");
-    let core = Core::spawn(Document {
+    let core = Core::for_test(Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -462,18 +512,29 @@ fn fu1_definite_candidate_refusal_releases_the_frozen_cut() {
         )
         .unwrap();
     let root = owner.root_sha256().unwrap();
-    assert!(matches!(
-        owner.commit_candidate(&frozen, &envelope),
-        Err(kinewright_project::bundle::BundleError::Unsupported(_))
-    ));
+    let refusal = owner.commit_candidate(&frozen, &envelope);
+    assert!(
+        matches!(
+            refusal,
+            Err(kinewright_project::bundle::BundleError::HistoryChanged)
+        ),
+        "CANDIDATE_SEQUENCE_REFUSAL {refusal:?}"
+    );
     assert_eq!(
         candidate.core().attachment_state().unwrap(),
         kinewright_core::AttachmentState::Live
     );
     owner.reconcile_active().unwrap();
     assert_eq!(owner.root_sha256().unwrap(), root);
-    let mut valid = envelope;
-    valid.id.sequence = 1;
+    let valid = owner
+        .candidate_merge_envelope(
+            &frozen,
+            CommandId {
+                issuer: envelope.id.issuer,
+                sequence: 1,
+            },
+        )
+        .unwrap();
     assert!(matches!(
         owner.commit_candidate(&frozen, &valid).unwrap(),
         ReceiptLookup::Committed(_)

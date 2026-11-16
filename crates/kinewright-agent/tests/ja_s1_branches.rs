@@ -2,6 +2,7 @@
 use kinewright_agent::{BranchApplyOutcome, DurableTimelineBranch, TimelineBranch};
 use kinewright_core::*;
 use kinewright_media::test_support::TempDirectory;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{BundleError, BundleWriteAdmission, LoadedBundle, ProjectBundle},
     bundle_records::ObjectRef,
@@ -31,7 +32,7 @@ fn revision(core: &Core) -> TimelineRevision {
     revision
 }
 fn setup(path: &Path) -> (Core, ProjectBundle, ObjectRef) {
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     apply(
         &core,
         Command::Do(Operation::AddTrack {
@@ -47,16 +48,26 @@ fn setup(path: &Path) -> (Core, ProjectBundle, ObjectRef) {
     apply(&core, Command::Undo);
     apply(&core, Command::Redo);
     assert_eq!(revision(&core), TimelineRevision(4));
-    let mut bundle = ProjectBundle::activate(path, BundleWriteAdmission::new_document()).unwrap();
+    let mut bundle = ProjectBundle::activate(
+        path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let inputs = bundle.empty_inputs().unwrap();
     let reference = inputs.reference.clone();
     bundle.save(&core, &reference).unwrap();
     (core, bundle, reference)
 }
 fn reopen(path: &Path) -> (Core, ProjectBundle, ObjectRef) {
-    let loaded = LoadedBundle::read(path).unwrap();
-    let core = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&core).unwrap();
+    let mut loaded = LoadedBundle::read(
+        path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let core = loaded.open_manual().unwrap();
     let inputs = loaded.root().unwrap().input_manifest_ref.clone();
     (core, loaded.into_writer().unwrap(), inputs)
 }
@@ -76,6 +87,7 @@ fn command(
     CommandEnvelope {
         switch: None,
         manual: None,
+        context: None,
         version: 1,
         action: "edit".into(),
         id: CommandId {
@@ -123,20 +135,28 @@ fn reopened_exact_base_merges_once_with_fresh_runtime_revision() {
     let path = temp.path("edit.kinewright");
     let (core, mut bundle, inputs) = setup(&path);
     let original = core.export_history().unwrap();
-    let legacy =
-        TimelineBranch::new("counter-only", revision(&core), original.document.clone()).unwrap();
+    let legacy = TimelineBranch::new(
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+        "counter-only",
+        revision(&core),
+        original.history().document.clone(),
+    )
+    .unwrap();
     apply(&legacy.core(), Command::Do(lock(true)));
     let mut branch = DurableTimelineBranch::fork_probe(&mut bundle, &core, "durable").unwrap();
     apply(&branch.core(), Command::Do(lock(true)));
     apply(&branch.core(), Command::Do(lock(false)));
     apply(&branch.core(), Command::Undo);
-    let proposed = branch.core().export_history().unwrap().document;
+    let proposed =
+        serde_json::to_value(&branch.core().export_history().unwrap().history().document).unwrap();
     let branch_id = branch.branch_id().clone();
     let base_ref = branch.persist(&mut bundle).unwrap();
-    let frozen_delta = branch.base().full_applied_delta.clone();
+    let frozen_delta = vec![lock(true)];
     assert_eq!(
+        &*branch.core().operations(false).unwrap(),
         frozen_delta,
-        vec![lock(true)],
         "undone work is not a merge delta"
     );
     drop(branch);
@@ -144,10 +164,17 @@ fn reopened_exact_base_merges_once_with_fresh_runtime_revision() {
     drop(core);
     let (core, mut bundle, reopened_inputs) = reopen(&path);
     assert_eq!(inputs, reopened_inputs);
-    assert_eq!(revision(&core), TimelineRevision(1));
+    assert_eq!(
+        revision(&core),
+        TimelineRevision(4),
+        "COLD_OPEN_PRESERVES_STORED_REVISION"
+    );
+    let fresh_runtime =
+        Core::for_test_at_revision(original.history().document.clone(), TimelineRevision(1))
+            .unwrap();
     assert!(
         matches!(
-            legacy.merge_into(&core).unwrap(),
+            legacy.merge_into(&fresh_runtime).unwrap(),
             BranchApplyOutcome::Conflict {
                 expected: TimelineRevision(4),
                 actual: TimelineRevision(1)
@@ -158,18 +185,26 @@ fn reopened_exact_base_merges_once_with_fresh_runtime_revision() {
     assert_eq!(core.export_history().unwrap(), original);
     let branch =
         DurableTimelineBranch::reopen_probe(&bundle, branch_id, &base_ref, "durable").unwrap();
-    assert_eq!(branch.base().full_applied_delta, frozen_delta);
+    assert_eq!(&*branch.core().operations(false).unwrap(), &frozen_delta);
     let envelope = prepare_merge(&branch, &mut bundle, &core, &inputs);
     assert_eq!(envelope.expected_revision, revision(&core));
     committed(branch.merge(&mut bundle, &core, &envelope).unwrap());
-    assert_eq!(core.export_history().unwrap().document, proposed);
     assert_eq!(
-        core.export_history().unwrap().cursor.undo.len(),
-        original.cursor.undo.len() + 1
+        serde_json::to_value(&core.export_history().unwrap().history().document).unwrap(),
+        proposed
     );
-    let loaded = LoadedBundle::read(&path).unwrap();
-    let restored = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&restored).unwrap();
+    assert_eq!(
+        core.export_history().unwrap().history().undo.len(),
+        original.history().undo.len() + 1
+    );
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let restored = loaded.open_manual().unwrap();
     assert_eq!(
         restored.export_history().unwrap(),
         core.export_history().unwrap()
@@ -201,15 +236,25 @@ fn equal_bytes_new_head_and_equal_counter_other_head_conflict() {
         .unwrap()
         .clone();
     let old_counter = revision(&core);
-    let same_document = core.export_history().unwrap().document;
-    let legacy = TimelineBranch::new("counter-only", old_counter, same_document.clone()).unwrap();
+    let same_document_capture = core.export_history().unwrap();
+    let same_document = same_document_capture.history().document.clone();
+    drop(same_document_capture);
+    let legacy = TimelineBranch::new(
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+        "counter-only",
+        old_counter,
+        same_document.clone(),
+    )
+    .unwrap();
     apply(&legacy.core(), Command::Do(lock(true)));
     apply(&core, Command::Do(lock(false)));
     bundle.save(&core, &inputs).unwrap();
     let current = bundle.checkpoint(bundle.manual_branch_id()).unwrap();
-    assert_eq!(current.document_hash, original.document_hash);
+    assert_eq!(current.document_ref.sha256, original.document_ref.sha256);
     assert_ne!(current.head_id, original.head_id);
-    let other_runtime = Core::spawn_at((*same_document).clone(), old_counter).unwrap();
+    let other_runtime = Core::for_test_at_revision(same_document, old_counter).unwrap();
     assert_eq!(revision(&other_runtime), envelope.expected_revision);
     assert!(
         matches!(
@@ -227,11 +272,14 @@ fn equal_bytes_new_head_and_equal_counter_other_head_conflict() {
     assert!(trace.events.is_empty());
     assert_eq!(core.export_history().unwrap(), before);
     assert_eq!(std::fs::read(&path).unwrap(), root);
-    let fresh = Core::spawn(Document::default()).unwrap();
-    LoadedBundle::read(&path)
-        .unwrap()
-        .restore_manual(&fresh)
-        .unwrap();
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let fresh = loaded.open_manual().unwrap();
     assert!(
         branch
             .merge_envelope(&bundle, &fresh, envelope.id.clone())
@@ -246,6 +294,10 @@ fn equal_bytes_new_head_and_equal_counter_other_head_conflict() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the cold branch witness checks complete native history and the first edit in one lifecycle"
+)]
 fn restored_lineage_tracks_siblings_reuse_and_undone_splits() {
     let temp = TempDirectory::new_in(
         std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
@@ -262,36 +314,49 @@ fn restored_lineage_tracks_siblings_reuse_and_undone_splits() {
     apply(&core, Command::Do(add.clone()));
     bundle.save(&core, &inputs).unwrap();
     let manual = bundle.manual_branch_id().clone();
-    let origin = bundle.branch_lineage(&manual).unwrap().current[&ClipId(1)].clone();
+    let origin = bundle
+        .branch_lineage(&manual)
+        .unwrap()
+        .lineage()
+        .occurrences[&ClipId(1)]
+        .clone();
     let a = bundle
         .fork_branch(
             &manual,
-            kinewright_project::history_record::HistoryRole::Ordinary,
+            kinewright_project::operation_history::Role::Ordinary,
         )
         .unwrap();
     let b = bundle
         .fork_branch(
             &manual,
-            kinewright_project::history_record::HistoryRole::Ordinary,
+            kinewright_project::operation_history::Role::Ordinary,
         )
         .unwrap();
     let c = bundle
         .fork_branch(
             &manual,
-            kinewright_project::history_record::HistoryRole::Ordinary,
+            kinewright_project::operation_history::Role::Ordinary,
         )
         .unwrap();
     let d = bundle
         .fork_branch(
             &manual,
-            kinewright_project::history_record::HistoryRole::Ordinary,
+            kinewright_project::operation_history::Role::Ordinary,
         )
         .unwrap();
+    let source_attachment = bundle.attach_core(&core).unwrap();
+    let source_cut = source_attachment.freeze().unwrap();
+    source_attachment.retire(&source_cut).unwrap();
     let make = |id: &_| {
-        let core = Core::spawn(Document::default()).unwrap();
-        core.restore_history((*bundle.branch_history(id).unwrap()).clone())
-            .unwrap();
-        core
+        let checkpoint = bundle.checkpoint(id).unwrap();
+        Core::open(
+            checkpoint
+                .open(bundle.store(), bundle.history_pool())
+                .unwrap(),
+            checkpoint.branch_id.clone(),
+            checkpoint.revision,
+        )
+        .unwrap()
     };
     let first = make(&a);
     let second = make(&b);
@@ -300,7 +365,7 @@ fn restored_lineage_tracks_siblings_reuse_and_undone_splits() {
         Command::DoBatch(vec![Operation::DeleteClip { clip: ClipId(1) }, add]),
     );
     bundle.save_branch(&a, &first).unwrap();
-    let reused = bundle.branch_lineage(&a).unwrap().current[&ClipId(1)].clone();
+    let reused = bundle.branch_lineage(&a).unwrap().lineage().occurrences[&ClipId(1)].clone();
     assert_ne!(reused, origin);
     let split = Command::Do(Operation::SplitClip {
         clip: ClipId(1),
@@ -308,38 +373,44 @@ fn restored_lineage_tracks_siblings_reuse_and_undone_splits() {
     });
     apply(&first, split.clone());
     bundle.save_branch(&a, &first).unwrap();
-    let child = bundle.branch_lineage(&a).unwrap().current[&ClipId(2)].clone();
+    let child = bundle.branch_lineage(&a).unwrap().lineage().occurrences[&ClipId(2)].clone();
     apply(&second, split);
     bundle.save_branch(&b, &second).unwrap();
     assert_ne!(
         child,
-        bundle.branch_lineage(&b).unwrap().current[&ClipId(2)]
+        bundle.branch_lineage(&b).unwrap().lineage().occurrences[&ClipId(2)]
     );
     apply(&first, Command::Undo);
     bundle.save_branch(&a, &first).unwrap();
     let undone = bundle.branch_lineage(&a).unwrap();
-    assert_eq!(undone.current[&ClipId(1)], reused);
-    assert!(undone.split_ancestry.is_empty());
+    assert_eq!(undone.lineage().occurrences[&ClipId(1)], reused);
+    assert!(undone.lineage().split_ancestry.is_empty());
     drop(undone);
     drop(bundle);
     let (_, mut bundle, _) = reopen(&path);
     assert_eq!(
-        *bundle.branch_history(&c).unwrap(),
-        *bundle.branch_history(&d).unwrap(),
+        bundle.branch_history(&c).unwrap().into_capture().unwrap(),
+        bundle.branch_history(&d).unwrap().into_capture().unwrap(),
         "shared immutable history decodes once"
     );
-    let before = bundle.branch_lineage(&a).unwrap().current.clone();
+    let before = bundle
+        .branch_lineage(&a)
+        .unwrap()
+        .lineage()
+        .occurrences
+        .clone();
     assert_eq!(before[&ClipId(1)], reused);
     apply(&first, Command::Redo);
     bundle.save_branch(&a, &first).unwrap();
     assert_eq!(
-        bundle.branch_lineage(&a).unwrap().current[&ClipId(2)],
+        bundle.branch_lineage(&a).unwrap().lineage().occurrences[&ClipId(2)],
         child
     );
     let lineage = bundle.branch_lineage(&a).unwrap();
-    assert_eq!(lineage.split_ancestry.len(), 2);
+    assert_eq!(lineage.lineage().split_ancestry.len(), 2);
     assert!(
         lineage
+            .lineage()
             .split_ancestry
             .iter()
             .all(|(_, parent, _)| *parent == reused)
@@ -363,7 +434,7 @@ fn merge_lost_reply_preserves_one_undo_entry() {
     let id = branch.branch_id().clone();
     let envelope = prepare_merge(&branch, &mut bundle, &core, &inputs);
     let original = committed(branch.merge(&mut bundle, &core, &envelope).unwrap());
-    assert_eq!(core.export_history().unwrap().cursor.undo.len(), 3);
+    assert_eq!(core.export_history().unwrap().history().undo.len(), 3);
     drop(branch);
     drop(bundle);
     drop(core);
@@ -395,130 +466,64 @@ fn exercise_floor_and_close(path: &Path) {
     committed(bundle.command(&b, &core, &inputs, &[]).unwrap());
     let c = command(&mut bundle, &core, &inputs, drag(false));
     let committed_c = committed(bundle.command(&c, &core, &inputs, &[]).unwrap());
-    assert_eq!(core.export_history().unwrap().cursor.undo.len(), 3);
-    assert_eq!(
-        core.export_history().unwrap().cursor.undo[2]
-            .operations
-            .len(),
-        2
-    );
-    let mut floor = command(&mut bundle, &core, &inputs, JournalCommand::Undo);
-    let previous = bundle
-        .checkpoint(bundle.manual_branch_id())
-        .unwrap()
-        .clone();
-    floor.action = "floor".into();
-    floor.command = None;
-    floor.transition = Some(HistoryRequest::Floor {
+    let before = core.export_history().unwrap();
+    assert_eq!(before.history().undo.len(), 3);
+    assert_eq!(before.history().undo[2].commands().len(), 2);
+    let mut obsolete_floor = command(&mut bundle, &core, &inputs, JournalCommand::Undo);
+    obsolete_floor.action = "floor".into();
+    obsolete_floor.command = None;
+    obsolete_floor.transition = Some(HistoryRequest::Floor {
         discard_batches: 4,
-        preceding_checkpoint_generation: previous.checkpoint_generation,
-        preceding_floor_generation: previous.floor_generation,
-        command_cut: previous.command_cut.clone().unwrap(),
-    });
-    let floor_receipt = committed(bundle.command(&floor, &core, &inputs, &[]).unwrap());
-    assert_ne!(floor_receipt.head_id, committed_c.head_id);
-    assert_eq!(
-        bundle
+        preceding_checkpoint_generation: 0,
+        preceding_floor_generation: 0,
+        command_cut: bundle
             .checkpoint(bundle.manual_branch_id())
             .unwrap()
-            .floor_generation,
-        1
+            .command_cut
+            .clone()
+            .unwrap(),
+    });
+    assert!(
+        bundle
+            .command(&obsolete_floor, &core, &inputs, &[])
+            .is_err()
     );
-    assert_eq!(core.export_history().unwrap().cursor.undo.len(), 1);
     assert_eq!(
-        core.export_history().unwrap().cursor.undo[0]
-            .coalesce_key
-            .as_deref(),
-        Some("K")
+        core.export_history().unwrap(),
+        before,
+        "CALLER_CANNOT_CUT_THE_EXECUTORS_HISTORY"
+    );
+    drop(before);
+    core.close_gesture().unwrap();
+    bundle.save(&core, &inputs).unwrap();
+    assert!(
+        core.export_history().unwrap().history().undo[2]
+            .coalesce_key()
+            .is_none()
     );
     let (retried, trace) = io_observer::observe(|| bundle.command(&c, &core, &inputs, &[]));
     assert_eq!(committed(retried.unwrap()), committed_c);
     assert!(trace.events.is_empty());
-    assert_eq!(core.export_history().unwrap().cursor.undo.len(), 1);
-    let mut close = command(&mut bundle, &core, &inputs, JournalCommand::Undo);
-    let previous = bundle
-        .checkpoint(bundle.manual_branch_id())
-        .unwrap()
-        .clone();
-    close.action = "recovery_close".into();
-    close.command = None;
-    close.transition = Some(HistoryRequest::RecoveryClose {
-        preceding_checkpoint_generation: previous.checkpoint_generation,
-        reconciled_cut: previous.command_cut.clone(),
-        suffix_digest: previous.history_ref.sha256.clone(),
-    });
-    let closed = committed(bundle.command(&close, &core, &inputs, &[]).unwrap());
-    assert_eq!(core.export_history().unwrap().cursor.undo.len(), 1);
-    assert_eq!(
-        core.export_history().unwrap().cursor.undo[0].coalesce_key,
-        None
-    );
+    let expected = core.snapshot_identity().unwrap();
     drop(bundle);
     drop(core);
     let (core, mut bundle, inputs) = reopen(path);
-    let (retried, trace) = io_observer::observe(|| bundle.command(&close, &core, &inputs, &[]));
-    assert_eq!(committed(retried.unwrap()), closed);
-    assert!(trace.events.is_empty());
-    assert_eq!(core.export_history().unwrap().cursor.undo.len(), 1);
-    let edit = command(&mut bundle, &core, &inputs, JournalCommand::Do(lock(true)));
-    committed(bundle.command(&edit, &core, &inputs, &[]).unwrap());
-    let mut invalid = command(&mut bundle, &core, &inputs, JournalCommand::Undo);
-    let previous = bundle
-        .checkpoint(bundle.manual_branch_id())
-        .unwrap()
-        .clone();
-    invalid.action = "floor".into();
-    invalid.command = None;
-    let mut cut = previous.command_cut.clone().unwrap();
-    cut.sequence += 1;
-    invalid.transition = Some(HistoryRequest::Floor {
-        discard_batches: 4,
-        preceding_checkpoint_generation: previous.checkpoint_generation,
-        preceding_floor_generation: previous.floor_generation,
-        command_cut: cut,
-    });
-    let before = core.export_history().unwrap();
-    assert!(
-        HistoryTransition::floor(before.clone(), 4).is_ok(),
-        "the proposed floor itself is valid; only its cut is wrong"
-    );
-    let (result, trace) = io_observer::observe(|| bundle.command(&invalid, &core, &inputs, &[]));
-    assert!(result.is_err());
-    assert!(trace.events.is_empty());
-    assert_eq!(core.export_history().unwrap(), before);
-    let mut valid = invalid.clone();
-    valid.transition = Some(HistoryRequest::Floor {
-        discard_batches: 4,
-        preceding_checkpoint_generation: previous.checkpoint_generation,
-        preceding_floor_generation: previous.floor_generation,
-        command_cut: previous.command_cut.clone().unwrap(),
-    });
-    let mut wrong_generation = valid.clone();
-    if let Some(HistoryRequest::Floor {
-        preceding_floor_generation,
-        ..
-    }) = &mut wrong_generation.transition
-    {
-        *preceding_floor_generation += 1;
-    }
-    assert!(
-        bundle
-            .command(&wrong_generation, &core, &inputs, &[])
-            .is_err()
-    );
-    committed(bundle.command(&valid, &core, &inputs, &[]).unwrap());
+    assert_eq!(core.snapshot_identity().unwrap(), expected);
+    let d = command(&mut bundle, &core, &inputs, drag(true));
+    committed(bundle.command(&d, &core, &inputs, &[]).unwrap());
     assert_eq!(
-        bundle
-            .checkpoint(bundle.manual_branch_id())
-            .unwrap()
-            .floor_generation,
-        2
+        core.export_history().unwrap().history().undo.len(),
+        4,
+        "EXPLICIT_CLOSE_SURVIVES_COLD_OPEN"
     );
-    assert_eq!(core.export_history().unwrap().cursor.undo.len(), 1);
 }
 
 #[test]
-fn floored_specialist_reopens_original_full_delta_and_merges_once() {
+#[allow(
+    clippy::too_many_lines,
+    reason = "the cold branch witness checks complete native history and the first edit in one lifecycle"
+)]
+fn never_fold_specialist_reopens_original_full_delta_and_merges_once() {
     let temp = TempDirectory::new_in(
         Path::new(env!("CARGO_TARGET_TMPDIR")),
         "r2-specialist-floor",
@@ -535,8 +540,13 @@ fn floored_specialist_reopens_original_full_delta_and_merges_once() {
             .collect(),
         ..Document::default()
     };
-    let live = Core::spawn(document).unwrap();
-    let mut owner = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let live = Core::for_test(document).unwrap();
+    let mut owner = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        live.history_pool(),
+    )
+    .unwrap();
     let inputs = owner.empty_inputs().unwrap().reference.clone();
     owner.save(&live, &inputs).unwrap();
     owner
@@ -550,17 +560,32 @@ fn floored_specialist_reopens_original_full_delta_and_merges_once() {
     for i in 0..40 {
         apply(&specialist.core(), Command::Do(lock(i % 2 == 0)));
     }
-    let proposal = specialist.core().export_history().unwrap().document;
+    let proposal = serde_json::to_value(
+        &specialist
+            .core()
+            .export_history()
+            .unwrap()
+            .history()
+            .document,
+    )
+    .unwrap();
     let reference = specialist.persist(&mut owner).unwrap();
     let branch = specialist.branch_id().clone();
     let history = specialist.core().export_history().unwrap();
     assert!(
-        history.floor_offset > 0,
-        "specialist did not cross the history bound"
+        history.fold_frontier().is_none(),
+        "NEVER_FOLD_SPECIALIST_HAS_NO_FOLD_FRONTIER"
     );
-    assert_eq!(history, *owner.branch_history(&branch).unwrap());
     assert_eq!(
-        specialist.base().full_applied_delta.len(),
+        history,
+        owner
+            .branch_history(&branch)
+            .unwrap()
+            .into_capture()
+            .unwrap()
+    );
+    assert_eq!(
+        specialist.core().operations(false).unwrap().len(),
         40,
         "floor truncated the merge delta"
     );
@@ -575,9 +600,17 @@ fn floored_specialist_reopens_original_full_delta_and_merges_once() {
     apply(&specialist.core(), Command::Do(lock(true)));
     apply(&specialist.core(), Command::Undo);
     let reference = specialist.persist(&mut owner).unwrap();
-    assert_eq!(specialist.base().full_applied_delta.len(), 40);
+    assert_eq!(specialist.core().operations(false).unwrap().len(), 40);
     assert_eq!(
-        specialist.core().export_history().unwrap().document,
+        serde_json::to_value(
+            &specialist
+                .core()
+                .export_history()
+                .unwrap()
+                .history()
+                .document
+        )
+        .unwrap(),
         proposal
     );
     let issuer = owner.issue_issuer(&live, &inputs, 1).unwrap();
@@ -596,7 +629,10 @@ fn floored_specialist_reopens_original_full_delta_and_merges_once() {
         committed(specialist.merge(&mut owner, &live, &envelope).unwrap()),
         result
     );
-    assert_eq!(live.export_history().unwrap().document, proposal);
-    assert_eq!(live.export_history().unwrap().cursor.undo.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&live.export_history().unwrap().history().document).unwrap(),
+        proposal
+    );
+    assert_eq!(live.export_history().unwrap().history().undo.len(), 1);
     owner.store().verify(&reference).unwrap();
 }

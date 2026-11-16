@@ -12,16 +12,16 @@ use crate::{
 impl Ja1EditingSession {
     pub fn preview_rescue(
         &self,
-        capture: StorageReservation<FrozenRescueCapture>,
+        capture: std::sync::Arc<StorageReservation<FrozenRescueCapture>>,
         limits: StorageLimits,
     ) -> Result<RescueSelection, BundleError> {
         let was_frozen = capture.was_frozen;
-        let cut = capture.cut.clone();
+        let cut = capture.cut;
         let result = self.preview_rescue_inner(capture, limits);
         if result.is_err() && !was_frozen {
             self.attachment
                 .resume(&cut)
-                .map_err(crate::bundle::history_error)?;
+                .map_err(crate::bundle::operation_error)?;
         }
         result
     }
@@ -36,7 +36,8 @@ impl Ja1EditingSession {
     ) -> Result<RescueOutcome, BundleError> {
         self.rescue_with_activation(selection, consent, inspection, |_| Ok(()))
     }
-    /// The caller prepares its attachment before any destination mutation or actor seal.
+    /// The receiving attachment is prepared after B is durable and before A's actor is sealed.
+    /// A preparation refusal leaves B as a capture copy and preserves A.
     pub fn rescue_with_activation(
         &mut self,
         selection: RescueSelection,
@@ -52,16 +53,16 @@ impl Ja1EditingSession {
             && self
                 .core
                 .attachment_state()
-                .map_err(crate::bundle::history_error)?
+                .map_err(crate::bundle::operation_error)?
                 == kinewright_core::AttachmentState::Frozen
         {
             let current = self
                 .attachment
                 .capture()
-                .map_err(crate::bundle::history_error)?;
+                .map_err(crate::bundle::operation_error)?;
             self.attachment
                 .resume(&current)
-                .map_err(crate::bundle::history_error)?;
+                .map_err(crate::bundle::operation_error)?;
         }
         result
     }
@@ -85,7 +86,7 @@ impl Ja1EditingSession {
         if self
             .attachment
             .capture()
-            .map_err(crate::bundle::history_error)?
+            .map_err(crate::bundle::operation_error)?
             != selection.capture.cut
             || self.active_bundle()?.publication_tag.as_ref() != Some(&selection.capture.tag)
             || self.active_bundle()?.publication_state() != PublicationState::Unknown
@@ -106,18 +107,8 @@ impl Ja1EditingSession {
                 "rescue destination must be fresh".into(),
             ));
         }
-        let b_core = Core::spawn(std::sync::Arc::clone(&selection.history.baseline))
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let b_attachment = ProjectAttachment::new(&b_core).map_err(crate::bundle::history_error)?;
-        b_attachment
-            .restore_history(selection.history.clone())
-            .map_err(crate::bundle::history_error)?;
-        let b_cut = b_attachment
-            .freeze()
-            .map_err(crate::bundle::history_error)?;
-        prepare(&b_core)?;
         let old_core = self.core.clone();
-        let old_cut = selection.capture.cut.clone();
+        let old_cut = selection.capture.cut;
         let was_frozen = selection.capture.was_frozen;
         let disclosure = self.rescue_handoff_disclosure(&selection)?;
         let tag = selection.capture.tag.clone();
@@ -164,9 +155,10 @@ impl Ja1EditingSession {
             project_id: bundle.project_id().clone(),
             originating_session: self.originating_session.clone(),
             full_capture_sha256: selection.capture.digest.clone(),
+            capture_checkpoints: vec![],
             selected_capture_sha256: selection.selected_digest,
-            old_floor: old_cut.history().floor_offset,
-            new_floor: selection.history.floor_offset,
+            old_floor: 0,
+            new_floor: 0,
             removed_undo: selection.removed_undo,
             redo_preserved: true,
             gesture_preserved: true,
@@ -194,7 +186,23 @@ impl Ja1EditingSession {
             .map(|e| e.digest().map(|d| (e.id.clone(), d)))
             .transpose()?;
         let mut reservation = None;
-        let mut capture = Some(std::sync::Arc::new(selection.capture));
+        let selected_capture = selection.capture;
+        let mut captures = Vec::new();
+        for attempt in &self.rescue.attempts {
+            if !captures
+                .iter()
+                .any(|prior| std::sync::Arc::ptr_eq(prior, &attempt.capture))
+            {
+                captures.push(std::sync::Arc::clone(&attempt.capture));
+            }
+        }
+        if !captures
+            .iter()
+            .any(|prior| std::sync::Arc::ptr_eq(prior, &selected_capture))
+        {
+            captures.push(std::sync::Arc::clone(&selected_capture));
+        }
+        let mut capture = Some(std::sync::Arc::clone(&selected_capture));
         let unsaved =
             self.association.as_ref().is_some_and(|a| a.saved.is_none()) && self.source.is_some();
         let owner = self.destination.as_ref().ok_or(BundleError::Unsettled)?;
@@ -217,7 +225,7 @@ impl Ja1EditingSession {
                     rescue.attempts.push(RetainedAttempt {
                         state: PublicationState::Unknown,
                         tag: tag.clone(),
-                        core: original_attempt_core.clone(),
+                        core: Some(original_attempt_core.clone()),
                         capture: capture.take().ok_or(BundleError::HistoryBarrierInvariant)?,
                         ticket: ticket.clone(),
                         project_id: project_id.clone(),
@@ -235,7 +243,9 @@ impl Ja1EditingSession {
             inspection,
             &mut on_mutation,
             selection.limits,
-            &selection.history,
+            &old_core,
+            &selected_capture,
+            &captures,
             &record,
         );
         let mut copy = match publication {
@@ -247,7 +257,7 @@ impl Ja1EditingSession {
                 if !was_frozen {
                     self.attachment
                         .resume(&old_cut)
-                        .map_err(crate::bundle::history_error)?;
+                        .map_err(crate::bundle::operation_error)?;
                 }
                 return Err(error);
             }
@@ -274,7 +284,7 @@ impl Ja1EditingSession {
             self.rescue.attempts.push(RetainedAttempt {
                 state: PublicationState::Unknown,
                 tag: destination_tag,
-                core: b_core.clone(),
+                core: None,
                 capture: source_capture,
                 ticket: None,
                 project_id: copy.destination_owner()?.project_id().clone(),
@@ -282,19 +292,102 @@ impl Ja1EditingSession {
             });
         }
         let status = copy.status().clone();
+        if matches!(
+            status,
+            CopyStatus::Committed(_) | CopyStatus::DurabilityUnknown
+        ) {
+            for capture in &captures {
+                capture.release_snapshot(copy.destination_owner()?.store())?;
+            }
+        }
         let immediate = matches!(status, CopyStatus::Committed(_));
         if immediate {
+            let materialised = (|| {
+                let bundle = copy.destination_owner()?;
+                let checkpoint = bundle.checkpoint(bundle.manual_branch_id())?;
+                let selected = checkpoint.open(bundle.store(), self.core.history_pool())?;
+                self.attachment
+                    .open_validated_selection(
+                        &old_cut,
+                        selected,
+                        checkpoint.branch_id.clone(),
+                        checkpoint.revision,
+                    )
+                    .map_err(crate::bundle::operation_error)
+            })();
+            let b_core = match materialised {
+                Ok(core) => core,
+                Err(error) => {
+                    self.retained_destinations
+                        .push((RetainedDestination::FirstSave(Box::new(copy)), None));
+                    if !was_frozen {
+                        self.attachment
+                            .resume(&old_cut)
+                            .map_err(crate::bundle::operation_error)?;
+                    }
+                    return Ok(RescueOutcome {
+                        status,
+                        activated: false,
+                        disclosure: format!(
+                            "B was saved at {} but its editing view could not be opened: {error}. A remains intact. {disclosure}",
+                            inspection.path().display()
+                        ),
+                    });
+                }
+            };
+            let b_attachment =
+                ProjectAttachment::new(&b_core).map_err(crate::bundle::operation_error)?;
+            let b_cut = b_attachment
+                .freeze()
+                .map_err(crate::bundle::operation_error)?;
+            let prepared = prepare(&b_core).and_then(|()| {
+                if b_attachment
+                    .capture()
+                    .map_err(crate::bundle::operation_error)?
+                    != b_cut
+                {
+                    return Err(BundleError::HistoryChanged);
+                }
+                Ok(())
+            });
+            if let Err(error) = prepared {
+                // The durable B cut is retained cold. Its failed, never exposed
+                // editing view owns no accepted work and needs no live lease.
+                let resident = if let Ok(cut) = b_attachment.freeze()
+                    && b_attachment.retire(&cut).is_ok()
+                {
+                    None
+                } else {
+                    Some(b_core)
+                };
+                self.retained_destinations
+                    .push((RetainedDestination::FirstSave(Box::new(copy)), resident));
+                if !was_frozen {
+                    self.attachment
+                        .resume(&old_cut)
+                        .map_err(crate::bundle::operation_error)?;
+                }
+                return Ok(RescueOutcome {
+                    status,
+                    activated: false,
+                    disclosure: format!(
+                        "B was saved at {} but its editing attachment was not prepared: {error}. A remains intact; B is retained. {disclosure}",
+                        inspection.path().display()
+                    ),
+                });
+            }
             let inputs = copy.rebound_manifest(&inputs)?;
-            let saved = kinewright_media::sha256_bytes(
-                &serde_json::to_vec(&selection.history)
-                    .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-            );
+            let CopyStatus::Committed(report) = &status else {
+                unreachable!()
+            };
+            let saved = report.history_sha256.clone();
+            let saved_position = report.position;
             let path = copy.destination_owner()?.store().resolved_root()?;
-            // Every fallible preparation precedes the seal. A changed cut leaves a capture copy.
-            if self.attachment.seal(&old_cut).is_ok() {
+            // The new owner is validated and the receiving view is ready before A is sealed.
+            if self.attachment.retire(&old_cut).is_ok() {
                 if let Err(error) = b_attachment.resume(&b_cut) {
                     self.retained_destinations
-                        .push((RetainedDestination::FirstSave(Box::new(copy)), b_core));
+                        .push((RetainedDestination::FirstSave(Box::new(copy)), Some(b_core)));
                     return Ok(RescueOutcome {
                         status,
                         activated: false,
@@ -308,7 +401,7 @@ impl Ja1EditingSession {
                     .destination
                     .take()
                     .ok_or(BundleError::HistoryBarrierInvariant)?;
-                self.retained_destinations.push((original, old_core));
+                self.retained_destinations.push((original, Some(old_core)));
                 self.destination = Some(RetainedDestination::FirstSave(Box::new(copy)));
                 self.core = b_core;
                 self.attachment = b_attachment;
@@ -317,6 +410,7 @@ impl Ja1EditingSession {
                 self.association = Some(ActiveAssociation {
                     path,
                     saved: Some(saved),
+                    saved_position: Some(saved_position),
                 });
                 self.prepared = None;
                 self.recovery_save_pending = false;
@@ -327,15 +421,19 @@ impl Ja1EditingSession {
                     disclosure,
                 });
             }
+            b_attachment
+                .retire(&b_cut)
+                .map_err(crate::bundle::operation_error)?;
         }
-        // Unknown/late copies never have activation permission, even if the histories later match.
+        // Unknown/late copies retain their namespace and cold state, without
+        // manufacturing an unused Core or permission for a late activation.
         let _ = copy.destination_owner_mut()?;
         self.retained_destinations
-            .push((RetainedDestination::FirstSave(Box::new(copy)), b_core));
+            .push((RetainedDestination::FirstSave(Box::new(copy)), None));
         if !was_frozen {
             self.attachment
                 .resume(&old_cut)
-                .map_err(crate::bundle::history_error)?;
+                .map_err(crate::bundle::operation_error)?;
         }
         Ok(RescueOutcome {
             status,

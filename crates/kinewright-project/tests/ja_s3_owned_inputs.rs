@@ -5,6 +5,7 @@
     reason = "fault controls and independent identity oracles stay together"
 )]
 use kinewright_media::test_support::TempDirectory;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::LoadedBundle,
     bundle_copy::{CopyStatus, SaveAsOutcome},
@@ -29,11 +30,12 @@ fn cancel() -> Arc<AtomicBool> {
 
 #[test]
 fn s3_fix1_recovery_carries_the_exact_unpublished_extension() {
-    use kinewright_core::{AssetId, Command, Core, Document, Operation};
+    use kinewright_core::{AssetId, Command, Document, Operation};
     use kinewright_project::bundle::BundleWriteAdmission;
+    use kinewright_project::operation_actor::Core;
     let temp = temp("c0-fix1-live-extension");
     let path = temp.path("live.kinewright");
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     let mut owner =
         Ja1EditingSession::activate(&path, BundleWriteAdmission::new_document(), &core, None)
             .unwrap();
@@ -50,11 +52,16 @@ fn s3_fix1_recovery_carries_the_exact_unpublished_extension() {
         .unwrap();
     assert_ne!(lease.inputs, prepared.inputs_ref);
     lease.inputs = prepared.inputs_ref.clone();
-    let gui = Core::spawn(Document::default()).unwrap();
-    gui.restore_history(core.export_history().unwrap()).unwrap();
+    let gui =
+        kinewright_project::operation_actor::Core::peer_for_test(core.portable_history().unwrap())
+            .unwrap();
     let replica = Ja1EditingSession::new(temp.root(), &gui, StorageLimits::default()).unwrap();
     let permit = replica
-        .bind_manual_producer(lease, prepared.manifest.clone())
+        .bind_manual_producer(
+            lease,
+            prepared.manifest.clone(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        )
         .unwrap();
     permit
         .request(Command::Do(Operation::AddAsset {
@@ -65,27 +72,34 @@ fn s3_fix1_recovery_carries_the_exact_unpublished_extension() {
     let expected_inputs = prepared.inputs_ref.clone();
     drop(prepared);
     owner
-        .reconcile_manual_chain(&"r".repeat(64), &permit.pending().unwrap(), Some(&expected))
+        .reconcile_manual_chain(
+            &"r".repeat(64),
+            &permit.pending().unwrap(),
+            Some(expected.identity().unwrap()),
+        )
         .expect("C0_FIX1_EXACT_EXTENSION_RECOVERED");
     assert_eq!(owner.current_inputs_ref(), &expected_inputs);
-    let restored = Core::spawn(Document::default()).unwrap();
-    LoadedBundle::read(&path)
-        .unwrap()
-        .restore_manual(&restored)
-        .unwrap();
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let restored = loaded.open_manual().unwrap();
     assert_eq!(restored.export_history().unwrap(), expected);
 }
 
 #[test]
 fn s3_fix1_same_length_torn_import_refuses() {
-    use kinewright_core::{Core, Document};
+    use kinewright_core::Document;
     use kinewright_project::bundle::BundleWriteAdmission;
     use std::io::Write;
     let temp = temp("c0-fix1-torn-import");
     let source = temp.path("changing.wav");
     let bytes = kinewright_media::test_support::wav_f32(&vec![0.25; 600_000], 48_000, 1);
     std::fs::write(&source, &bytes).unwrap();
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     let path = temp.path("unchanged.kinewright");
     let mut edit =
         Ja1EditingSession::activate(&path, BundleWriteAdmission::new_document(), &core, None)
@@ -122,7 +136,7 @@ fn s3_fix1_same_length_torn_import_refuses() {
 
 #[test]
 fn s3_owned_import_refuses_dynamic_mpegps_before_probe() {
-    use kinewright_core::{Core, Document};
+    use kinewright_core::Document;
     use kinewright_media::{owned_io::observe_stream_info_probes, test_support::run_ffmpeg};
     use kinewright_project::bundle::{BundleError, BundleWriteAdmission};
     let temp = temp("c0-mpegps-import-refusal");
@@ -158,7 +172,7 @@ fn s3_owned_import_refuses_dynamic_mpegps_before_probe() {
         ],
         &mpeg,
     );
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     let root = temp.path("refusal.kinewright");
     let mut edit =
         Ja1EditingSession::activate(&root, BundleWriteAdmission::new_document(), &core, None)
@@ -214,7 +228,13 @@ fn s3_owned_input_identity() {
                 "video_luma": fixture.expected_video_plane0, "audio_hz": fixture.audio_frequency
             })
         );
-        let loaded = LoadedBundle::read(&fixture.path).unwrap();
+        let loaded = LoadedBundle::read(
+            &fixture.path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         let mut owner = loaded.into_writer().unwrap();
         let manifest = owner
             .store()
@@ -306,7 +326,15 @@ fn s3_owned_input_identity() {
         };
         let rebound = copy.rebound_input(&fixture.media).unwrap();
         assert_eq!(rebound.entry.chunk_table_ref().unwrap(), &fixture.table_ref);
-        assert!(LoadedBundle::read(&copy_path).is_ok());
+        assert!(
+            LoadedBundle::read(
+                &copy_path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            )
+            .is_ok()
+        );
         let Ok(destination) = copy.into_destination() else {
             panic!("copy committed");
         };
@@ -326,10 +354,15 @@ fn s3_owned_input_identity() {
 fn s3_table_fingerprint_binding_refuses_a_valid_hashed_conflict() {
     let temp = temp("c0-table-conflict");
     let [fixture, _] = build_c0_fixture_pair(temp.root()).unwrap();
-    let mut owner = LoadedBundle::read(&fixture.path)
-        .unwrap()
-        .into_writer()
-        .unwrap();
+    let mut owner = LoadedBundle::read(
+        &fixture.path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
     let original = owner
         .store()
         .read_record::<InputChunkTable>(&fixture.table_ref)
@@ -378,7 +411,9 @@ fn s3_unsaved_frozen_import_and_first_save_retains_table() {
         &source_path,
     )
     .unwrap();
-    let local_core = kinewright_core::Core::spawn(kinewright_core::Document::default()).unwrap();
+    let local_core =
+        kinewright_project::operation_actor::Core::for_test(kinewright_core::Document::default())
+            .unwrap();
     let mut local =
         Ja1EditingSession::new(temp.root(), &local_core, StorageLimits::default()).unwrap();
     local.import_owned_media(&source_path).unwrap();
@@ -387,7 +422,15 @@ fn s3_unsaved_frozen_import_and_first_save_retains_table() {
         local.first_save(&first, StorageLimits::default()).unwrap(),
         CopyStatus::Committed(_)
     ));
-    assert!(LoadedBundle::read(&first).is_ok());
+    assert!(
+        LoadedBundle::read(
+            &first,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default()
+            )
+        )
+        .is_ok()
+    );
     let first_inputs = local
         .store()
         .unwrap()
@@ -401,16 +444,23 @@ fn s3_unsaved_frozen_import_and_first_save_retains_table() {
     );
     drop(first_inputs);
     drop(local);
-    let core = kinewright_core::Core::spawn(kinewright_core::Document::default()).unwrap();
+    let core =
+        kinewright_project::operation_actor::Core::for_test(kinewright_core::Document::default())
+            .unwrap();
     let mut session = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
     let launch = session.prepare_host_attachment().unwrap();
     assert!(launch.source.is_some());
     let (asset, report) = session.import_owned_media(&source_path).unwrap();
     assert!(report.is_none());
-    assert_eq!(
-        session.core().export_history().unwrap().document.media_pool,
-        vec![asset]
-    );
+    let kinewright_core::Event::QueryResult(kinewright_core::QueryResult::Document(document)) =
+        core.request(kinewright_core::Command::Query(
+            kinewright_core::Query::Document,
+        ))
+        .unwrap()
+    else {
+        panic!("document");
+    };
+    assert_eq!(document.media_pool, vec![asset]);
     let refreshed = session.refresh_unsaved_host_source().unwrap();
     assert_eq!(&refreshed.inputs, session.current_inputs_ref());
     assert!(
@@ -428,7 +478,13 @@ fn s3_rescue_preserves_owned_table_and_lut() {
     let drive = temp.path("drive");
     std::fs::create_dir(&drive).unwrap();
     let [fixture, _] = build_c0_fixture_pair(&drive).unwrap();
-    let mut session = Ja1EditingSession::open(&fixture.path).unwrap();
+    let mut session = Ja1EditingSession::open(
+        &fixture.path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     assert!(io_observer::fail_once("root_parent_sync", || session.save_active()).is_err());
     std::fs::rename(&drive, temp.path("hidden-drive")).unwrap();
     let offer = session.probe_active().unwrap().unwrap();
@@ -442,7 +498,13 @@ fn s3_rescue_preserves_owned_table_and_lut() {
     let outcome = session.rescue(selected, &consent, &destination).unwrap();
     assert!(outcome.activated);
     assert!(matches!(outcome.status, CopyStatus::Committed(_)));
-    let loaded = LoadedBundle::read(&path).unwrap();
+    let loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     let root = loaded.root().unwrap().clone();
     drop(loaded);
     let inputs = session
@@ -484,7 +546,7 @@ fn s3_rescue_preserves_owned_table_and_lut() {
 
 #[test]
 fn s3_certified_input_through_use() {
-    use kinewright_core::{ColorContext, ColorProvenance, Core, Document};
+    use kinewright_core::{ColorContext, ColorProvenance, Document};
     use kinewright_media::test_support::{GeneratedMedia, ffprobe_executable};
     use kinewright_project::bundle::BundleWriteAdmission;
     use std::{io::Write, process::Command, sync::Barrier};
@@ -513,7 +575,7 @@ fn s3_certified_input_through_use() {
         "avi",
     );
     assert!(input.path().metadata().unwrap().len() > 4 * 1_048_576);
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     let path = temp.path("long.kinewright");
     let mut session =
         Ja1EditingSession::activate(&path, BundleWriteAdmission::new_document(), &core, None)
@@ -641,7 +703,7 @@ fn s3_certified_input_through_use() {
 
 #[test]
 fn s3_duplicate_publication_full_digest_refuses_late_corruption_with_warm_memo() {
-    use kinewright_core::{ColorContext, ColorProvenance, Core, Document};
+    use kinewright_core::{ColorContext, ColorProvenance, Document};
     use kinewright_media::test_support::GeneratedMedia;
     use kinewright_project::bundle::{BundleError, BundleWriteAdmission};
     use std::io::Write;
@@ -663,7 +725,7 @@ fn s3_duplicate_publication_full_digest_refuses_late_corruption_with_warm_memo()
         ],
         "avi",
     );
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     let mut edit = Ja1EditingSession::activate(
         &temp.path("duplicate.kinewright"),
         BundleWriteAdmission::new_document(),
@@ -763,7 +825,7 @@ fn s3_duplicate_publication_full_digest_refuses_late_corruption_with_warm_memo()
 
 #[test]
 fn s3_default_budget_hd_import_probe_decode_and_reopen() {
-    use kinewright_core::{ColorContext, ColorProvenance, Core, Document};
+    use kinewright_core::{ColorContext, ColorProvenance, Document};
     use kinewright_media::test_support::GeneratedMedia;
     use kinewright_project::bundle::BundleWriteAdmission;
 
@@ -795,7 +857,7 @@ fn s3_default_budget_hd_import_probe_decode_and_reopen() {
             "mkv",
         );
         let path = temp.path(&format!("hd-{height}.kinewright"));
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         let mut edit =
             Ja1EditingSession::activate(&path, BundleWriteAdmission::new_document(), &core, None)
                 .unwrap();
@@ -860,7 +922,15 @@ fn s3_default_budget_hd_import_probe_decode_and_reopen() {
         );
         drop(manifest);
         drop(edit);
-        let owner = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
+        let owner = LoadedBundle::read(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap()
+        .into_writer()
+        .unwrap();
         let reopened = owner.store().certify_media_input(&reference).unwrap();
         assert!(
             reopened
@@ -876,16 +946,21 @@ fn s3_default_budget_hd_import_probe_decode_and_reopen() {
 
 #[test]
 fn s3_colour_override_save_undo_save_and_relink_preserve_exact_source() {
-    use kinewright_core::{ColorProvenance, Command, Core, Event, Operation, RelinkCandidate};
+    use kinewright_core::{ColorProvenance, Command, Event, Operation, RelinkCandidate};
     let temp = temp("c0-colour-undo");
     let [fixture, _] = build_c0_fixture_pair(temp.root()).unwrap();
-    let loaded = LoadedBundle::read(&fixture.path).unwrap();
-    let core = Core::spawn((*fixture.history.baseline).clone()).unwrap();
-    loaded.restore_manual(&core).unwrap();
+    let mut loaded = LoadedBundle::read(
+        &fixture.path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let core = loaded.open_manual().unwrap();
     let bundle = loaded.into_writer().unwrap();
     let mut edit =
         Ja1EditingSession::from_bundle(bundle, &core, fixture.media.manifest_ref.clone()).unwrap();
-    let original = core.export_history().unwrap().document.media_pool[0].clone();
+    let original = core.export_history().unwrap().history().document.media_pool[0].clone();
     let mut changed = original.clone();
     changed.color_description.provenance = ColorProvenance::UserOverride;
     changed.color_description.confidence_basis_points = 9999;
@@ -930,7 +1005,7 @@ fn s3_colour_override_save_undo_save_and_relink_preserve_exact_source() {
     ));
     edit.save_active().expect("C0_OVERRIDE_UNDO_SAVE_SUCCEEDS");
     assert_eq!(
-        core.export_history().unwrap().document.media_pool[0],
+        core.export_history().unwrap().history().document.media_pool[0],
         original,
         "C0_OVERRIDE_UNDO_RESTORES_ORIGINAL"
     );
@@ -953,7 +1028,7 @@ fn s3_colour_override_save_undo_save_and_relink_preserve_exact_source() {
     ));
     edit.save_active()
         .expect("C0_SAME_FINGERPRINT_RELINK_SAVES");
-    let mut relabelled = core.export_history().unwrap().document.media_pool[0].clone();
+    let mut relabelled = core.export_history().unwrap().history().document.media_pool[0].clone();
     relabelled.name = "new display name".into();
     let neutral = edit.prepare_media_interpretation(&relabelled).unwrap();
     assert_eq!(
@@ -1003,7 +1078,7 @@ fn s3_colour_override_save_undo_save_and_relink_preserve_exact_source() {
 
 #[test]
 fn s3_committed_import_retains_inputs_when_following_save_fails() {
-    use kinewright_core::{Core, Document};
+    use kinewright_core::Document;
     use kinewright_media::test_support::GeneratedMedia;
     use kinewright_project::bundle::BundleWriteAdmission;
     let temp = temp("c0-import-save-failure");
@@ -1019,7 +1094,7 @@ fn s3_committed_import_retains_inputs_when_following_save_fails() {
         ],
         "wav",
     );
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     let mut edit = Ja1EditingSession::activate(
         &temp.path("failure.kinewright"),
         BundleWriteAdmission::new_document(),
@@ -1028,13 +1103,16 @@ fn s3_committed_import_retains_inputs_when_following_save_fails() {
     )
     .unwrap();
     let previous = edit.current_inputs_ref().clone();
-    let failed = io_observer::fail_nth("root_before_publish", 3, || {
-        edit.import_owned_media(input.path())
-    });
+    let (_, report) = edit.import_owned_media(input.path()).unwrap();
+    assert!(
+        report.is_some(),
+        "IMPORT_RETURNS_ITS_COMMITTED_NATIVE_RECEIPT"
+    );
+    let failed = io_observer::fail_once("root_before_publish", || edit.save_active());
     assert!(failed.is_err(), "C0_IMPORT_FOLLOWING_SAVE_FAULT_REACHED");
     let history = core.export_history().unwrap();
     assert_eq!(
-        history.document.media_pool.len(),
+        history.history().document.media_pool.len(),
         1,
         "C0_IMPORT_COMMAND_ALREADY_COMMITTED"
     );
@@ -1048,7 +1126,7 @@ fn s3_committed_import_retains_inputs_when_following_save_fails() {
         .unwrap()
         .read_input_manifest(edit.current_inputs_ref())
         .unwrap();
-    let asset = &history.document.media_pool[0];
+    let asset = &history.history().document.media_pool[0];
     assert!(
         manifest
             .entries
@@ -1070,8 +1148,8 @@ fn s3_committed_import_retains_inputs_when_following_save_fails() {
 #[test]
 fn compact_history_redo_keeps_owned_lut_after_collection_reopen_and_save_as() {
     use kinewright_core::{
-        Command, Core, Document, Effect, EffectId, Event, LutAssetId, Operation, ParamValue,
-        SolidColor, TimeCode, Track, TrackId, TrackKind,
+        Command, Document, Effect, EffectId, Event, LutAssetId, Operation, ParamValue, SolidColor,
+        TimeCode, Track, TrackId, TrackKind,
     };
     use kinewright_media::{LutStore, parse_cube_lut_bytes};
     use kinewright_project::{
@@ -1084,7 +1162,7 @@ fn compact_history_redo_keeps_owned_lut_after_collection_reopen_and_save_as() {
     let external = temporary.path("look.cube");
     let cube = b"LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n";
     std::fs::write(&external, cube).unwrap();
-    let core = Core::spawn(Document {
+    let core = Core::for_test(Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -1104,8 +1182,12 @@ fn compact_history_redo_keeps_owned_lut_after_collection_reopen_and_save_as() {
         duration: TimeCode(30),
         color: SolidColor { r: 0, g: 0, b: 0 },
     }));
-    let mut owner =
-        ProjectBundle::activate(&project, BundleWriteAdmission::new_document()).unwrap();
+    let mut owner = ProjectBundle::activate(
+        &project,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let empty = owner.empty_inputs().unwrap();
     owner.save(&core, &empty.reference).unwrap();
     let imported = LutStore::for_project(&project)
@@ -1140,9 +1222,24 @@ fn compact_history_redo_keeps_owned_lut_after_collection_reopen_and_save_as() {
             entries: vec![entry.clone()],
         })
         .unwrap();
-    apply(Command::Do(Operation::AddLutAsset { asset: imported }));
+    let apply_owned = |command| {
+        let context = kinewright_project::operation_actor::CommandContext {
+            creation: kinewright_project::operation_history::CreationOrigin {
+                branch: core.creation_branch().unwrap(),
+                batch: kinewright_project::bundle_records::BatchId::fresh().unwrap(),
+            },
+            inputs: vec![inputs.reference.clone()],
+            approval: None,
+            transition: None,
+        };
+        assert!(matches!(
+            core.request_with_context(command, context).unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+    };
+    apply_owned(Command::Do(Operation::AddLutAsset { asset: imported }));
     owner.save(&core, &inputs.reference).unwrap();
-    apply(Command::Do(Operation::AddEffect {
+    apply_owned(Command::Do(Operation::AddEffect {
         clip: kinewright_core::ClipId(1),
         effect: Effect {
             id: EffectId(1),
@@ -1155,11 +1252,34 @@ fn compact_history_redo_keeps_owned_lut_after_collection_reopen_and_save_as() {
     }));
     owner.save(&core, &inputs.reference).unwrap();
     let applied = core.export_history().unwrap();
+    let applied = (
+        serde_json::to_value(&applied.history().document).unwrap(),
+        serde_json::to_value(
+            applied
+                .history()
+                .undo
+                .iter()
+                .map(kinewright_core::undo::Step::commands)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap(),
+        serde_json::to_value(
+            applied
+                .history()
+                .redo
+                .iter()
+                .map(kinewright_core::undo::Step::commands)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap(),
+    );
     apply(Command::Undo);
     apply(Command::Undo);
     let undone = core.export_history().unwrap();
-    assert!(undone.document.lut_assets.is_empty());
-    assert_eq!(undone.cursor.redo.len(), 2);
+    assert!(undone.history().document.lut_assets.is_empty());
+    assert_eq!(undone.history().redo.len(), 2);
+    let undone_identity = undone.identity().unwrap();
+    drop(undone);
     drop(blob);
     drop(inputs);
     for _ in 0..4 {
@@ -1170,10 +1290,15 @@ fn compact_history_redo_keeps_owned_lut_after_collection_reopen_and_save_as() {
     owner.collect_after_ack().unwrap();
     std::fs::remove_file(external).unwrap();
     drop(owner);
-    let loaded = LoadedBundle::read(&project).unwrap();
-    let original = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&original).unwrap();
-    assert_eq!(original.export_history().unwrap(), undone);
+    let mut loaded = LoadedBundle::read(
+        &project,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let original = loaded.open_manual().unwrap();
+    assert_eq!(original.snapshot_identity().unwrap(), undone_identity);
     let mut owner = loaded.into_writer().unwrap();
     let copy = match owner.save_as(&copy_path).unwrap() {
         SaveAsOutcome::Copied(copy) => copy,
@@ -1182,18 +1307,37 @@ fn compact_history_redo_keeps_owned_lut_after_collection_reopen_and_save_as() {
     let destination = copy
         .into_destination()
         .unwrap_or_else(|_| panic!("copy did not commit"));
+    let copied_identity = destination
+        .checkpoint(destination.manual_branch_id())
+        .unwrap()
+        .identity;
     drop(destination);
     drop(owner);
     for path in [&project, &copy_path] {
-        let loaded = LoadedBundle::read(path).unwrap();
+        let mut loaded = LoadedBundle::read(
+            path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         let checkpoint = loaded.manual_checkpoint().unwrap();
-        let manifests: Vec<_> = std::iter::once(&checkpoint.input_manifest_ref)
-            .chain(&checkpoint.history_input_manifest_refs)
+        let current_inputs = checkpoint.input_manifest_ref.clone();
+        let restored = loaded.open_manual().unwrap();
+        let capture = restored.export_history().unwrap();
+        let manifests: Vec<_> = std::iter::once(&current_inputs)
+            .chain(capture.origins().iter().flat_map(|origin| &origin.inputs))
             .cloned()
             .collect();
-        let restored = Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&restored).unwrap();
-        assert_eq!(restored.export_history().unwrap(), undone);
+        drop(capture);
+        assert_eq!(
+            restored.snapshot_identity().unwrap(),
+            if path == &project {
+                undone_identity
+            } else {
+                copied_identity
+            }
+        );
         let mut owner = loaded.into_writer().unwrap();
         owner.collect_after_ack().unwrap();
         let manifest_ref = manifests
@@ -1228,8 +1372,54 @@ fn compact_history_redo_keeps_owned_lut_after_collection_reopen_and_save_as() {
             ));
         }
         let redone = restored.export_history().unwrap();
-        assert_eq!(redone.document, applied.document);
-        assert_eq!(redone.cursor, applied.cursor);
-        assert_eq!(redone.applied_operations(), applied.applied_operations());
+        assert_eq!(
+            serde_json::to_value(&redone.history().document).unwrap(),
+            applied.0
+        );
+        assert_eq!(
+            serde_json::to_value(
+                redone
+                    .history()
+                    .undo
+                    .iter()
+                    .map(kinewright_core::undo::Step::commands)
+                    .collect::<Vec<_>>()
+            )
+            .unwrap(),
+            applied.1
+        );
+        assert_eq!(
+            serde_json::to_value(
+                redone
+                    .history()
+                    .redo
+                    .iter()
+                    .map(kinewright_core::undo::Step::commands)
+                    .collect::<Vec<_>>()
+            )
+            .unwrap(),
+            applied.2
+        );
+        drop(redone);
+        drop(resource);
+        restored.request(Command::Undo).unwrap();
+        restored.request(Command::Undo).unwrap();
+        restored
+            .request(Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: false,
+            }))
+            .unwrap();
+        for _ in 0..4 {
+            owner.save(&restored, &current_inputs).unwrap();
+            owner.collect_after_ack().unwrap();
+        }
+        assert!(
+            owner
+                .store()
+                .closure(std::slice::from_ref(&entry.object))
+                .is_err(),
+            "DISCARDED_REDO_LUT_IS_COLLECTABLE_AFTER_OLD_ROOTS_RETIRE"
+        );
     }
 }

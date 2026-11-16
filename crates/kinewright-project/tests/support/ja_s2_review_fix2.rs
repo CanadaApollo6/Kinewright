@@ -1,8 +1,9 @@
 //! S2-R accepted-review regressions. Each oracle reads the independent durable destination.
 use kinewright_core::{
-    AttachmentState, Command, Core, Document, Event, Operation, Track, TrackId, TrackKind,
+    AttachmentState, Command, Document, Event, Operation, Track, TrackId, TrackKind,
 };
 use kinewright_media::test_support::TempDirectory;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{BundleError, BundleWriteAdmission, LoadedBundle, ProjectBundle},
     bundle_copy::CopyStatus,
@@ -39,16 +40,19 @@ fn edit(core: &Core, locked: bool) {
         Event::DocumentChanged { .. }
     ));
 }
-fn reopen(path: &Path) -> kinewright_core::HistorySnapshot {
-    let reader = Core::spawn(Document::default()).unwrap();
-    LoadedBundle::read(path)
-        .unwrap()
-        .restore_manual(&reader)
-        .unwrap();
-    reader.export_history().unwrap()
+fn reopen(path: &Path) -> kinewright_project::operation_history::OwnerSnapshot {
+    let mut loaded = LoadedBundle::read(
+        path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    loaded.open_manual().unwrap().export_history().unwrap()
 }
+
 fn named(temp: &TempDirectory) -> Ja1EditingSession {
-    let core = Core::spawn(document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
     let mut owner = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
     assert!(matches!(
         owner
@@ -60,15 +64,16 @@ fn named(temp: &TempDirectory) -> Ja1EditingSession {
 }
 fn save_race(mode: &str) {
     let temp = temp();
-    let core = Core::spawn(document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
     let mut owner = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
     let a = temp.path("drive/a.kinewright");
     if mode != "first" {
         owner.first_save(&a, StorageLimits::default()).unwrap();
     }
     edit(&core, false);
-    let cut = core.export_history().unwrap();
+    let cut = super::c5::state(&core);
     let raced = core.clone();
+    let may_edit = mode == "save";
     let path = if mode == "as" {
         temp.path("b.kinewright")
     } else {
@@ -80,7 +85,27 @@ fn save_race(mode: &str) {
         } else {
             "copy_before_publish"
         },
-        move || edit(&raced, true),
+        move || {
+            if may_edit {
+                edit(&raced, true);
+            } else {
+                assert!(
+                    matches!(
+                        raced.request(Command::Do(Operation::SetTrackSyncLock {
+                            track: TrackId(1),
+                            locked: true,
+                        })),
+                        Err(kinewright_project::operation_actor::Refusal {
+                            error: kinewright_project::operation_actor::Error::MutationRefused(
+                                kinewright_core::CoreMutationRefusal::Frozen
+                            ),
+                            ..
+                        })
+                    ),
+                    "COPY_INSTALL_FENCES_THE_SOURCE_UNTIL_ITS_NEW_EPOCH_IS_INSTALLED"
+                );
+            }
+        },
         || match mode {
             "first" => {
                 owner.first_save(&path, StorageLimits::default()).unwrap();
@@ -94,11 +119,14 @@ fn save_race(mode: &str) {
         },
     );
     assert_eq!(
-        reopen(&path),
+        super::c5::contents(&reopen(&path)),
         cut,
         "independent reopen excludes the post-cut suffix"
     );
-    assert_ne!(core.export_history().unwrap(), cut);
+    if !may_edit {
+        edit(&core, true);
+    }
+    assert_ne!(super::c5::state(&core), cut);
     assert!(
         owner.dirty().unwrap(),
         "an accepted post-cut suffix must remain dirty"
@@ -135,9 +163,14 @@ fn comment_rescue(landed: bool) {
     let temp = temp();
     let a = temp.path("drive/a.kinewright");
     let b = temp.path("b.kinewright");
-    let core = Core::spawn(document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
     std::fs::create_dir(temp.path("drive")).unwrap();
-    let mut bundle = ProjectBundle::activate(&a, BundleWriteAdmission::new_document()).unwrap();
+    let mut bundle = ProjectBundle::activate(
+        &a,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let input = bundle.empty_inputs().unwrap().reference.clone();
     bundle.save(&core, &input).unwrap();
     // Independently committed content remains selected even when pending comment content is excluded.
@@ -155,6 +188,7 @@ fn comment_rescue(landed: bool) {
     let envelope = CommandEnvelope {
         switch: None,
         manual: None,
+        context: None,
         version: 1,
         action: "comment".into(),
         id: CommandId {
@@ -223,7 +257,13 @@ fn comment_rescue(landed: bool) {
     );
     assert!(owner.pending_agent_command_at(&a));
     drop(owner);
-    let loaded = LoadedBundle::read(&b).unwrap();
+    let loaded = LoadedBundle::read(
+        &b,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     let manifest_ref = loaded.root().unwrap().store_manifest_ref.clone();
     let b_owner = loaded.into_writer().unwrap();
     let manifest = b_owner
@@ -257,7 +297,15 @@ fn comment_rescue(landed: bool) {
     drop(manifest);
     drop(b_owner);
     std::fs::rename(temp.path("hidden-drive"), temp.path("drive")).unwrap();
-    let a_owner = LoadedBundle::read(&a).unwrap().into_writer().unwrap();
+    let a_owner = LoadedBundle::read(
+        &a,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
     assert_eq!(
         matches!(
             a_owner.receipt_lookup(&envelope).unwrap(),
@@ -301,7 +349,13 @@ fn records(
     owner: &Ja1EditingSession,
     path: &Path,
 ) -> Vec<kinewright_project::rescue_record::RescueCopyV1> {
-    let loaded = LoadedBundle::read(path).unwrap();
+    let loaded = LoadedBundle::read(
+        path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     let manifest = owner
         .store()
         .unwrap()
@@ -388,7 +442,13 @@ fn r5_refused_branch_retirement_survives_later_save() {
     assert_eq!(owner.list_working_branches().unwrap(), before);
     owner.save_active().unwrap();
     drop(owner);
-    let reopened = Ja1EditingSession::open(&temp.path("drive/a.kinewright")).unwrap();
+    let reopened = Ja1EditingSession::open(
+        &temp.path("drive/a.kinewright"),
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     assert_eq!(reopened.list_working_branches().unwrap(), before);
 }
 #[test]
@@ -441,9 +501,14 @@ fn r7_registered_and_manual_branches_refuse_second_writer() {
 fn r9_a_seal_failure_never_retains_live_b() {
     let temp = temp();
     let a = temp.path("drive/a.kinewright");
-    let core = Core::spawn(document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
     std::fs::create_dir(temp.path("drive")).unwrap();
-    let mut bundle = ProjectBundle::activate(&a, BundleWriteAdmission::new_document()).unwrap();
+    let mut bundle = ProjectBundle::activate(
+        &a,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let attachment = bundle.attach_core(&core).unwrap();
     let inputs = bundle.empty_inputs().unwrap().reference.clone();
     bundle.save(&core, &inputs).unwrap();
@@ -475,7 +540,7 @@ fn r9_a_seal_failure_never_retains_live_b() {
 }
 
 #[test]
-fn n2_sealed_a_failed_b_resume_returns_committed_capture() {
+fn n2_changed_prepared_b_keeps_a_intact_and_returns_committed_capture() {
     for frozen in [false, true] {
         let temp = temp();
         let mut owner = named(&temp);
@@ -488,7 +553,7 @@ fn n2_sealed_a_failed_b_resume_returns_committed_capture() {
         }
         let offer = owner.probe_active().unwrap().unwrap();
         let capture = owner.prepare_rescue(&offer).unwrap().unwrap();
-        let expected = original.export_history().unwrap();
+        let expected = super::c5::state(&original);
         let selection = owner
             .preview_rescue(capture, StorageLimits::default())
             .unwrap();
@@ -498,6 +563,7 @@ fn n2_sealed_a_failed_b_resume_returns_committed_capture() {
         let binder = ProjectBundle::activate(
             &temp.path("cut-authority.kinewright"),
             BundleWriteAdmission::new_document(),
+            original.history_pool(),
         )
         .unwrap();
         let mut candidate = None;
@@ -511,31 +577,39 @@ fn n2_sealed_a_failed_b_resume_returns_committed_capture() {
                 candidate = Some(core.clone());
                 Ok(())
             })
-            .expect(
-                "a committed capture must be returned after A seals, rather than resuming sealed A",
-            );
+            .expect("a committed B remains available when its prepared view changes");
         assert!(!outcome.activated);
         assert!(matches!(outcome.status, CopyStatus::Committed(_)));
-        assert!(outcome.disclosure.contains("A is sealed"));
+        assert!(outcome.disclosure.contains("A remains intact"));
         assert!(outcome.disclosure.contains(&b.display().to_string()));
-        assert!(outcome.disclosure.contains("Open B"));
+        assert!(outcome.disclosure.contains("B is retained"));
         assert_eq!(
             original.attachment_state().unwrap(),
-            AttachmentState::Sealed
+            if frozen {
+                AttachmentState::Frozen
+            } else {
+                AttachmentState::Live
+            }
         );
         assert_eq!(
             candidate.unwrap().attachment_state().unwrap(),
-            AttachmentState::Frozen
+            AttachmentState::Sealed
         );
-        assert_eq!(original.export_history().unwrap(), expected);
+        assert_eq!(super::c5::state(&original), expected);
         assert!(owner.is_capture_destination(&b));
         assert!(
-            Ja1EditingSession::open(&b).is_err(),
+            Ja1EditingSession::open(
+                &b,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            )
+            .is_err(),
             "B remains owned until explicit release or Close"
         );
-        assert_eq!(reopen(&b), expected);
+        assert_eq!(super::c5::contents(&reopen(&b)), expected);
         drop(owner);
-        assert_eq!(reopen(&b), expected);
+        assert_eq!(super::c5::contents(&reopen(&b)), expected);
     }
 }
 
@@ -551,7 +625,7 @@ fn r1_ordinary_floor_committed_identity_excludes_suffix() {
             clips: vec![],
         })
         .collect();
-    let core = Core::spawn(doc).unwrap();
+    let core = Core::for_test(doc).unwrap();
     let mut owner = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
     let path = temp.path("a.kinewright");
     owner.first_save(&path, StorageLimits::default()).unwrap();
@@ -564,18 +638,18 @@ fn r1_ordinary_floor_committed_identity_excludes_suffix() {
     };
     owner.restrict_limits_probe(limits.clone()).unwrap();
     let before = core.export_history().unwrap();
-    let selected =
-        kinewright_project::bundle_commit::bound_history_probe(&before, &limits).unwrap();
-    assert!(selected.floor_offset > before.floor_offset);
     let suffix = core.clone();
     io_observer::at_barrier(
-        "before_floor_commit",
+        "history_selected",
         move || edit(&suffix, true),
         || owner.save_active(),
     )
     .unwrap();
-    assert_eq!(reopen(&path), selected);
-    assert!(core.export_history().unwrap().floor_offset > before.floor_offset);
+    assert_eq!(reopen(&path), before);
+    assert_eq!(
+        core.export_history().unwrap().history().undo.len(),
+        before.history().undo.len() + 1
+    );
     assert!(
         owner.dirty().unwrap(),
         "committing an ordinary floor cannot mark the later suffix Saved"

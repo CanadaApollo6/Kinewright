@@ -78,7 +78,7 @@ fn c5_fix14_archive(f: &Fixture, state: &RunProjection) -> Vec<AttemptReservatio
 }
 
 /// C5 fix 14: a manual history with one undone edit, so redo state is kept too.
-fn c5_fix14_seed_manual(f: &Fixture) -> kinewright_core::HistorySnapshot {
+fn c5_fix14_seed_manual(f: &Fixture) -> kinewright_project::operation_history::OwnerSnapshot {
     let host = f.host.owner.upgrade().unwrap();
     let mut owner = host.lock().unwrap();
     for id in [60, 61] {
@@ -95,7 +95,7 @@ fn c5_fix14_seed_manual(f: &Fixture) -> kinewright_core::HistorySnapshot {
     owner.core().export_history().unwrap()
 }
 
-fn c5_fix14_manual(f: &Fixture) -> kinewright_core::HistorySnapshot {
+fn c5_fix14_manual(f: &Fixture) -> kinewright_project::operation_history::OwnerSnapshot {
     f.host
         .owner
         .upgrade()
@@ -113,14 +113,14 @@ struct C5Fix14Before {
     settled: RunProjection,
     prefix: Vec<AttemptReservation>,
     accounting: kinewright_project::orchestration_accounting::AccountingRecord,
-    manual: kinewright_core::HistorySnapshot,
+    manual: kinewright_project::operation_history::OwnerSnapshot,
 }
 
 impl C5Fix14Before {
     fn capture(
         f: &Fixture,
         settled: RunProjection,
-        manual: kinewright_core::HistorySnapshot,
+        manual: kinewright_project::operation_history::OwnerSnapshot,
     ) -> Self {
         Self {
             prefix: c5_fix14_archive(f, &settled),

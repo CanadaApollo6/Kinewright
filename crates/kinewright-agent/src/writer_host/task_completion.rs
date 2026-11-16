@@ -191,7 +191,7 @@ impl HostCommandOwner {
                 }
                 if let Some(envelope) = &history.merge_envelope
                     && !matches!(
-                        self.owner()?.manual_transition_receipt(envelope)?,
+                        self.owner()?.command_receipt(envelope)?,
                         ReceiptLookup::Committed(_) | ReceiptLookup::Retired(_)
                     )
                 {

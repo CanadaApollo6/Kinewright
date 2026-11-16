@@ -74,7 +74,8 @@ use axum::{
     routing::post,
 };
 pub use continuation::{DetachOutcome, HostOwnedInputClosure};
-use kinewright_core::{AgentDriver, AgentEvent, AttachmentState, Core, Document, SessionConfig};
+use kinewright_core::{AgentDriver, AgentEvent, AttachmentState, Document, SessionConfig};
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{BundleError, BundleSaveReport},
     bundle_copy::{BundleCopy, CopyStatus},
@@ -559,6 +560,21 @@ impl WriterHost {
         fixture: &ProtocolFixture,
     ) -> Result<Self, HostError> {
         Self::start_inner(config, HostAuth::generate()?, None, fixture.ports())
+    }
+    #[cfg(all(target_os = "linux", feature = "test-util"))]
+    pub fn start_protocol_fixture_with_issuer(
+        config: HostConfig,
+        fixture: &ProtocolFixture,
+    ) -> Result<(Self, HostIssuer), HostError> {
+        let issuer = HostAuth::generate()?;
+        let host = Self::start_inner(
+            config,
+            HostAuth::generate()?,
+            Some(issuer.clone()),
+            fixture.ports(),
+        )?;
+        let capability = HostIssuer::new(host.endpoint.clone(), issuer, host.roots.clone())?;
+        Ok((host, capability))
     }
     /// Trusted local issuance. This method is never exposed as an HTTP or MCP command.
     pub fn attach(
@@ -1404,20 +1420,19 @@ pub struct HostCommandOwner {
     retention_proven: bool,
     choice: Option<Choice>,
     recovery_choice: bool,
-    foreground_history: Option<kinewright_core::HistorySnapshot>,
+    foreground_history: Option<kinewright_project::operation_history::SnapshotIdentity>,
     floor_disclosure: String,
     admitted: BTreeMap<std::path::PathBuf, PinnedPath>,
     message: String,
     sessions: BTreeMap<u64, HostOwnedSession>,
     next_session: u64,
-    manual: Option<kinewright_project::manual_history::ManualLease>,
+    manual: Option<kinewright_project::editing_session::ManualAuthority>,
     next_manual_generation: u64,
     recovering: bool,
     recovery: Option<RecoveryBarrier>,
     recovery_request: Option<String>,
     foreground_reply: Option<(String, u64, String, HostReply)>,
-    recovery_handoff: Option<(RecoveryBarrier, RecoveryBarrier)>,
-    confirmed_recovery: Option<(RecoveryBarrier, HostReply)>,
+    confirmed_recovery: Option<([u8; 32], HostReply)>,
 }
 enum Choice {
     Rescue {
@@ -1438,14 +1453,11 @@ enum Choice {
 }
 // Only the checked, immutable snapshot may skip repeated digest and capacity scans.
 struct VerifiedHostSnapshot(HostSnapshot);
+struct BootstrapRetirement;
 impl VerifiedHostSnapshot {
     fn new(snapshot: HostSnapshot) -> Result<Self, HostError> {
         snapshot.verify()?;
         Ok(Self(snapshot))
-    }
-    fn copy_from(snapshot: &HostSnapshot) -> Result<Self, HostError> {
-        snapshot.verify()?;
-        Ok(Self(snapshot.clone()))
     }
 }
 impl HostCommandOwner {
@@ -1456,10 +1468,17 @@ impl HostCommandOwner {
             );
         }
         config.roots = config.roots.canonicalize()?;
-        let bootstrap_snapshot = match &config.origin {
+        let pool = kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        );
+        let bootstrap_snapshot = match &mut config.origin {
             HostOrigin::Gui {
                 initial_snapshot, ..
-            } => Some(VerifiedHostSnapshot::copy_from(initial_snapshot)?),
+            } => Some(VerifiedHostSnapshot::new(
+                initial_snapshot
+                    .take()
+                    .ok_or_else(|| HostError::Protocol("GUI bootstrap snapshot required".into()))?,
+            )?),
             HostOrigin::Headless => None,
         };
         let mut nonce = [0_u8; 16];
@@ -1493,7 +1512,7 @@ impl HostCommandOwner {
         let mut pins = Vec::new();
         let owner = if let Some(path) = &config.path {
             let pin = PinnedPath::admit(path, &config.roots, &config.roots, true)?;
-            let mut owner = Ja1EditingSession::open(&pin.io)?;
+            let mut owner = Ja1EditingSession::open(&pin.io, &pool)?;
             if let HostOrigin::Gui {
                 expected_root_sha256,
                 expected_project_id,
@@ -1507,7 +1526,7 @@ impl HostCommandOwner {
                     )
                     .into());
                 }
-                let loaded = kinewright_project::bundle::LoadedBundle::read(&pin.io)?;
+                let loaded = kinewright_project::bundle::LoadedBundle::read(&pin.io, &pool)?;
                 if expected_project_id.as_ref() != Some(&loaded.root()?.project_id) {
                     return Err(HostRefusal::new(
                         "project_refused",
@@ -1525,7 +1544,16 @@ impl HostCommandOwner {
         let initial_core = if let Some(owner) = &owner {
             owner.core().clone()
         } else {
-            Core::spawn(Document::default()).map_err(|e| HostError::Protocol(e.to_string()))?
+            Core::spawn(
+                &pool,
+                kinewright_project::operation_history::Role::Ordinary,
+                kinewright_project::operation_history::CreationOrigin {
+                    branch: BranchId::fresh()?,
+                    batch: kinewright_project::bundle_records::BatchId::fresh()?,
+                },
+                Document::default(),
+            )
+            .map_err(|e| HostError::Protocol(e.to_string()))?
         };
         let switch_frozen = owner
             .as_ref()
@@ -1591,7 +1619,6 @@ impl HostCommandOwner {
             recovery: None,
             recovery_request: None,
             foreground_reply: None,
-            recovery_handoff: None,
             confirmed_recovery: None,
         };
         // Initial attachment seeds the one validation shadow before it can serve sessions.
@@ -1639,34 +1666,61 @@ impl HostCommandOwner {
     }
     fn install_verified(&mut self, snapshot: VerifiedHostSnapshot) -> Result<(), HostError> {
         let VerifiedHostSnapshot(snapshot) = snapshot;
-        if self.manual.is_some()
+        let branch = snapshot.history.branch.clone();
+        let revision = snapshot.history.revision;
+        // A wire identity is a claim until the body has crossed semantic replay.
+        // Consume that token once; comparing peers never needs a local capture.
+        let validated = snapshot
+            .history
+            .validate(self.core().history_pool())
+            .map_err(BundleError::from)?;
+        let identity = validated.identity();
+        let matches = self
+            .core()
+            .snapshot_identity()
+            .map_err(|e| HostError::Protocol(e.to_string()))?
+            == identity
             && self
                 .core()
-                .export_history()
+                .creation_branch()
                 .map_err(|e| HostError::Protocol(e.to_string()))?
-                != snapshot.history
-        {
+                == branch
+            && self
+                .core()
+                .change_id()
+                .map_err(|e| HostError::Protocol(e.to_string()))?
+                .revision
+                == revision;
+        if self.manual.is_some() && !matches {
             return Err(HostRefusal::new(
                 "manual_stream_required",
                 "accepted edits must arrive through the manual history stream",
             )
             .into());
         }
-        self.foreground_history = Some(snapshot.history.clone());
         if let Some(owner) = &mut self.owner {
-            if owner
-                .core()
-                .export_history()
-                .map_err(|e| HostError::Protocol(e.to_string()))?
-                != snapshot.history
-            {
-                owner.install_host_snapshot(snapshot.history)?;
+            if !matches {
+                owner.install_validated_host_snapshot(validated, branch, revision)?;
             }
         } else {
-            self.initial_core
-                .restore_history(snapshot.history)
+            let installed = Core::open(validated, branch, revision)
                 .map_err(|e| HostError::Protocol(e.to_string()))?;
+            // Dropping the placeholder's last handle only queues actor exit.
+            // Release its complete lease before first-save admission can need
+            // the live Core, a selected capture and its installation candidate.
+            let attachment = self
+                .initial_core
+                .attach(&BootstrapRetirement)
+                .map_err(|error| HostError::Protocol(error.to_string()))?;
+            let previous = attachment
+                .freeze(&BootstrapRetirement)
+                .map_err(|error| HostError::Protocol(error.to_string()))?;
+            attachment
+                .retire(&BootstrapRetirement, previous)
+                .map_err(|error| HostError::Protocol(error.to_string()))?;
+            self.initial_core = installed;
         }
+        self.foreground_history = Some(identity);
         Ok(())
     }
     fn snapshot_read_owner(&self) -> Option<(kinewright_project::bundle_records::ProjectId, u64)> {
@@ -1773,7 +1827,7 @@ impl HostCommandOwner {
             self.voice_jobs.clear();
         }
         if reply.activation.is_some()
-            || matches!(reply.saved.as_ref(), Some(saved) if self.manual.as_ref().is_some_and(|lease| self.owner().ok().and_then(|o| o.active_manual_project().ok()).as_ref() != Some(&lease.project)) && !saved.root_sha256.is_empty())
+            || matches!(reply.saved.as_ref(), Some(saved) if self.manual.as_ref().is_some_and(|lease| self.owner().ok().and_then(|o| o.active_manual_project().ok()).as_ref() != Some(&lease.state.seed().project)) && !saved.root_sha256.is_empty())
         {
             self.manual = None;
         }
@@ -1794,40 +1848,26 @@ impl HostCommandOwner {
         reply: &mut HostReply,
         foreground: bool,
     ) -> Result<(), HostError> {
+        if self
+            .manual
+            .as_ref()
+            .is_some_and(|authority| authority.lease().next_key.epoch != report.position.epoch)
+        {
+            self.manual = None;
+        }
         let mut published: HostSaveReport = report.into();
         if foreground {
             // Exact publisher history, never a post-IO live Core read.
             let history = self.owner()?.published_history(report)?;
-            published.history_floor_offset = Some(history.floor_offset);
-            if let Some(before) = &self.foreground_history {
-                let discarded = history.floor_offset.saturating_sub(before.floor_offset);
-                let ordinary = before == &history
-                    || (discarded > 0
-                        && usize::try_from(discarded)
-                            .ok()
-                            .and_then(|n| {
-                                kinewright_core::HistoryTransition::floor(before.clone(), n).ok()
-                            })
-                            .is_some_and(|t| t.after() == &history));
-                if ordinary {
-                    published.removed_undo = before
-                        .cursor
-                        .undo
-                        .len()
-                        .saturating_sub(history.cursor.undo.len())
-                        as u64;
-                    published.floor_disclosure = if published.removed_undo > 0 {
-                        format!(
-                            "Saved with Undo floor {}. {} oldest Undo entries were removed; current content and Redo are retained.",
-                            history.floor_offset, published.removed_undo
-                        )
-                    } else {
-                        "Saved without removing Undo entries.".into()
-                    };
-                    self.floor_disclosure
-                        .clone_from(&published.floor_disclosure);
-                }
+            if self
+                .foreground_history
+                .is_some_and(|identity| identity != history.identity())
+            {
+                // Save is a state-agreement boundary. Core alone owns folding.
+                self.foreground_history = Some(history.identity());
             }
+            published.removed_undo = 0;
+            published.floor_disclosure.clear();
             reply.history = Some(history);
         }
         reply.saved = Some(published);
@@ -2063,9 +2103,9 @@ impl HostCommandOwner {
             } => {
                 self.begin_recovery(client, frozen.as_ref(), &pending, discard_batches, reply)?;
             }
-            HostCommand::PublishBarrier { barrier } => self.publish_barrier(*barrier, reply)?,
+            HostCommand::PublishBarrier { barrier } => self.publish_barrier(&barrier, reply)?,
             HostCommand::ConfirmBarrier { barrier, installed } => {
-                self.confirm_barrier(*barrier, installed, reply)?;
+                self.confirm_barrier(&barrier, &installed, reply)?;
             }
             HostCommand::AcquireManual { client } => {
                 let inputs = self.owner()?.manual_input_context()?;
@@ -2102,7 +2142,7 @@ impl HostCommandOwner {
             HostCommand::ReadHistory => {
                 reply.history = Some(
                     self.core()
-                        .export_history()
+                        .portable_history()
                         .map_err(|e| HostError::Protocol(e.to_string()))?,
                 );
             }
@@ -2181,7 +2221,7 @@ impl HostCommandOwner {
                 self.install(snapshot)?;
                 let history = self
                     .initial_core
-                    .export_history()
+                    .portable_history()
                     .map_err(|e| HostError::Protocol(e.to_string()))?;
                 let remote = self
                     .remote
@@ -2199,7 +2239,9 @@ impl HostCommandOwner {
                     &history,
                     &inputs,
                     StorageLimits::default(),
+                    self.initial_core.history_pool(),
                 )?;
+                drop(history);
                 let status = copy.status().clone();
                 let mut owner =
                     Ja1EditingSession::from_borrowed_copy(copy, &self.initial_core, inputs)?;
@@ -2207,8 +2249,14 @@ impl HostCommandOwner {
                 self.owner = Some(owner);
                 self.keep_pin(pin);
                 self.copy_status(&status, reply)?;
-                if let Some(history) = &reply.history {
-                    self.owner_mut()?.install_host_snapshot(history.clone())?;
+                if let Some(history) = &reply.history
+                    && self
+                        .core()
+                        .snapshot_identity()
+                        .map_err(|error| HostError::Protocol(error.to_string()))?
+                        != history.identity()
+                {
+                    return Err(BundleError::HistoryChanged.into());
                 }
                 self.message = format!("Saved {}.", destination.display());
             }
@@ -2685,6 +2733,9 @@ impl HostCommandOwner {
                 .map(|store| (store.owner_epoch(), owner.current_inputs_ref().clone()));
             status.manual_checkpoint = owner.manual_checkpoint_ref().ok();
             status.association = owner.association().map(|a| a.path().to_path_buf());
+            status.saved_position = owner
+                .association()
+                .and_then(kinewright_project::editing_session::ActiveAssociation::saved_position);
             status.saved_digest = owner
                 .association()
                 .and_then(|a| a.saved_digest())
@@ -2919,11 +2970,16 @@ impl HostCommandOwner {
             };
             (guard.core().clone(), Some(guard.branch_id().clone()))
         } else {
-            let history = self
+            let (core, _) = self
                 .initial_core
-                .export_history()
-                .map_err(|e| HostError::Protocol(e.to_string()))?;
-            let core = Core::spawn(std::sync::Arc::clone(&history.document))
+                .fork(
+                    kinewright_project::operation_history::Role::Task,
+                    kinewright_project::operation_history::CreationOrigin {
+                        branch: BranchId::fresh()?,
+                        batch: kinewright_project::bundle_records::BatchId::fresh()?,
+                    },
+                    false,
+                )
                 .map_err(|e| HostError::Protocol(e.to_string()))?;
             (core, None)
         };
@@ -3065,7 +3121,7 @@ impl HostCommandOwner {
         state.bytes = 0;
         let history = session
             .core
-            .export_history()
+            .portable_history()
             .map_err(|e| HostError::Protocol(e.to_string()))?;
         Ok(HostSessionStatus {
             branch,
@@ -3340,6 +3396,45 @@ pub(crate) async fn guard_mcp(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bootstrap_replacement_releases_the_placeholder_lease_synchronously() {
+        let temp = kinewright_media::test_support::TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "bootstrap-history-lease",
+        );
+        let mut owner = HostCommandOwner::open(HostConfig {
+            scheduler_settings: Some(temp.path("scheduler")),
+            project: "bootstrap-history-lease".into(),
+            path: None,
+            roots: SessionRoots::default(),
+            origin: HostOrigin::Headless,
+        })
+        .unwrap();
+        let placeholder = owner.core().clone();
+        let selected = Core::for_test(Document::default()).unwrap();
+        owner
+            .install(HostSnapshot::capture(&selected).unwrap())
+            .unwrap();
+        assert_eq!(
+            owner
+                .core()
+                .history_pool()
+                .lease_counts(kinewright_project::operation_history::Role::Ordinary)
+                .unwrap()
+                .0,
+            1,
+            "BOOTSTRAP_REPLACEMENT_HAS_ONE_LIVE_LEASE"
+        );
+        assert_eq!(
+            placeholder.attachment_state().unwrap(),
+            AttachmentState::Sealed,
+            "BOOTSTRAP_PLACEHOLDER_IS_RETIRED_WITH_ESCAPED_HANDLES"
+        );
+        assert_eq!(
+            owner.core().snapshot_identity().unwrap(),
+            selected.snapshot_identity().unwrap()
+        );
+    }
     /// C5 fix 5: a direct adapter whose provider writes a credential-looking
     /// value to stderr and exits 1 reports a fixed message. The value reaches
     /// neither the error event nor the host's retained session state.
@@ -3529,7 +3624,18 @@ mod tests {
             .unwrap()
             .history
             .unwrap();
-        assert!(history.batches.is_empty());
+        assert!(
+            history
+                .validate(&kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                ))
+                .unwrap()
+                .into_reader()
+                .unwrap()
+                .history()
+                .undo()
+                .is_empty()
+        );
         let bad = HostClient::connect(
             client.endpoint().clone(),
             HostAuth::generate().unwrap(),
@@ -3542,7 +3648,7 @@ mod tests {
     #[test]
     fn fu3_bootstrap_checks_snapshot_before_retention_and_installs_exact_history() {
         use kinewright_core::{Command, Event, Operation, Track, TrackId, TrackKind};
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         assert!(matches!(
             core.request(Command::Do(Operation::AddTrack {
                 track: Track {
@@ -3555,7 +3661,7 @@ mod tests {
             .unwrap(),
             Event::DocumentChanged { .. }
         ));
-        let expected = core.export_history().unwrap();
+        let expected = core.portable_history().unwrap();
         for corrupt in [true, false] {
             let proved = Arc::new(AtomicBool::new(false));
             let called = Arc::clone(&proved);
@@ -3584,7 +3690,7 @@ mod tests {
                         inputs: None,
                         callback: source.bootstrap(),
                     },
-                    initial_snapshot: snapshot,
+                    initial_snapshot: Some(snapshot),
                     expected_root_sha256: None,
                     expected_project_id: None,
                 },
@@ -3598,8 +3704,8 @@ mod tests {
             } else {
                 let mut owner = result.unwrap();
                 assert!(proved.load(Ordering::Acquire));
-                assert_eq!(owner.core().export_history().unwrap(), expected);
-                let empty = Core::spawn(Document::default()).unwrap();
+                assert_eq!(owner.core().portable_history().unwrap(), expected);
+                let empty = Core::for_test(Document::default()).unwrap();
                 let mut invalid = HostSnapshot::capture(&empty).unwrap();
                 invalid.history_sha256 = "0".repeat(64);
                 let reply = owner.execute(
@@ -3607,13 +3713,13 @@ mod tests {
                     SessionRoots::default(),
                 );
                 assert_eq!(reply.error.unwrap().code, "history_changed");
-                assert_eq!(owner.core().export_history().unwrap(), expected);
+                assert_eq!(owner.core().portable_history().unwrap(), expected);
             }
         }
     }
     #[test]
     fn snapshot_digest_refusal_precedes_any_owner_install() {
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         let mut snapshot = HostSnapshot::capture(&core).unwrap();
         snapshot.history_sha256 = "0".repeat(64);
         let mut owner = HostCommandOwner::open(HostConfig {
@@ -3629,7 +3735,15 @@ mod tests {
         .unwrap();
         let reply = owner.execute(HostCommand::Save { snapshot }, SessionRoots::default());
         assert_eq!(reply.error.unwrap().code, "history_changed");
-        assert!(owner.core().export_history().unwrap().batches.is_empty());
+        assert!(
+            owner
+                .core()
+                .export_history()
+                .unwrap()
+                .history()
+                .undo
+                .is_empty()
+        );
     }
 }
 
@@ -3692,3 +3806,42 @@ pub(crate) mod te1_eval_surface;
 pub mod task_preparation_words;
 
 pub use task_mcp::consent::EditApproval;
+
+#[cfg(test)]
+fn document_for_test(core: &Core) -> Arc<Document> {
+    let kinewright_core::Event::QueryResult(kinewright_core::QueryResult::Document(document)) =
+        core.request(kinewright_core::Command::Query(
+            kinewright_core::Query::Document,
+        ))
+        .unwrap()
+    else {
+        panic!("document query")
+    };
+    document
+}
+
+#[cfg(test)]
+fn received_reply_for_test(reply: HostReply) -> HostReply {
+    let bytes = serde_json::to_vec(&reply).unwrap();
+    drop(reply);
+    serde_json::from_slice(&bytes).unwrap()
+}
+#[cfg(test)]
+fn received_snapshot_for_test(core: &Core) -> Result<HostSnapshot, HostError> {
+    // These fixtures stand in for a separate GUI process. Its sender lease
+    // must not become an extra history holder inside the writer's pool.
+    let capture = HostSnapshot::capture(core)?;
+    let bytes = serde_json::to_vec(&capture)?;
+    drop(capture);
+    Ok(serde_json::from_slice(&bytes)?)
+}
+#[cfg(test)]
+fn host_snapshot_for_test(host: &WriterHost) -> HostSnapshot {
+    let owner = host.owner.upgrade().unwrap();
+    locked_host_snapshot_for_test(&owner)
+}
+#[cfg(test)]
+fn locked_host_snapshot_for_test(owner: &std::sync::Mutex<HostCommandOwner>) -> HostSnapshot {
+    let owner = owner.lock().unwrap();
+    received_snapshot_for_test(owner.core()).unwrap()
+}

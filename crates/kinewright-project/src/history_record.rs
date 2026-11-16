@@ -43,6 +43,10 @@ impl HistoryRole {
     /// Retain the policy that a completed replay proved. The shared pool's
     /// total is checked by each reservation and by cold-root admission; the
     /// history proof depends on its effective role limit.
+    #[allow(
+        dead_code,
+        reason = "legacy oracle retained until the final H2b deletion checkpoint"
+    )]
     pub(crate) fn admission_profile(self, limits: &StorageLimits) -> StorageLimits {
         let mut profile = limits.clone();
         profile.live_history_bytes = self.live_limit(limits);
@@ -74,8 +78,12 @@ pub struct HistoryRecord {
 }
 
 impl HistoryRecord {
+    #[allow(
+        dead_code,
+        reason = "legacy oracle retained until the final H2b deletion checkpoint"
+    )]
     pub(crate) fn verify_checkpoint(
-        checkpoint: &crate::bundle_records::BranchCheckpoint,
+        checkpoint: &crate::bundle_records::LegacyBranchCheckpoint,
         history: &HistorySnapshot,
     ) -> Result<(), BundleError> {
         let record = Self::capture(history, checkpoint.history_role)?;
@@ -186,6 +194,10 @@ impl ProjectStore {
         })?
     }
 
+    #[allow(
+        dead_code,
+        reason = "legacy oracle retained until the final H2b deletion checkpoint"
+    )]
     pub(crate) fn reserve_history_anchor(
         &self,
         anchor: &kinewright_core::HistoryTransport,
@@ -202,6 +214,10 @@ impl ProjectStore {
             .ok_or(BundleError::Capacity("anchor memory overflow"))?;
         self.reserve_copy_read(0, bytes, 0, false, true)
     }
+    #[allow(
+        dead_code,
+        reason = "legacy oracle retained until the final H2b deletion checkpoint"
+    )]
     pub(crate) fn reserve_history_capture(
         &self,
         history: &HistorySnapshot,
@@ -209,6 +225,10 @@ impl ProjectStore {
     ) -> Result<StorageReservation, BundleError> {
         self.reserve_role_history_shadow(crate::history_size::history_live_bytes(history)?, role)
     }
+    #[allow(
+        dead_code,
+        reason = "legacy oracle retained until the final H2b deletion checkpoint"
+    )]
     pub(crate) fn reserve_history_replay(
         &self,
         live: u64,
@@ -265,6 +285,10 @@ impl ProjectStore {
             .with(|| self.resolve_copy_history_serial(reference, cleanup, false))?
     }
 
+    #[allow(
+        dead_code,
+        reason = "legacy oracle retained until the final H2b deletion checkpoint"
+    )]
     pub(crate) fn resolve_manual_history(
         &self,
         reference: &ObjectRef,
@@ -306,6 +330,10 @@ impl ProjectStore {
 }
 
 impl crate::bundle::ProjectBundle {
+    #[allow(
+        dead_code,
+        reason = "legacy oracle retained until the final H2b deletion checkpoint"
+    )]
     pub(crate) fn history_role(
         &self,
         branch: &crate::bundle_records::BranchId,
@@ -317,19 +345,23 @@ impl crate::bundle::ProjectBundle {
         if let Some(reference) = specialist {
             let base = self
                 .store()
-                .read_record::<crate::bundle_records::SpecialistBaseRecord>(reference)?;
+                .read_record::<crate::bundle_records::LegacySpecialistBaseRecord>(reference)?;
             return Ok(base.history_role);
         }
         match self.branches.get(branch) {
             Some(checkpoint) => Ok(self
                 .store()
-                .read_record::<HistoryRecord>(&checkpoint.history_ref)?
+                .read_record::<HistoryRecord>(&checkpoint.owner_ref)?
                 .role),
             None => Ok(HistoryRole::Ordinary),
         }
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "legacy oracle retained until the final H2b deletion checkpoint"
+)]
 pub(crate) fn resolve_namespace_history(
     namespace: &crate::namespace::ProjectNamespace,
     reference: &ObjectRef,

@@ -603,3 +603,54 @@ fn empty_owner_batch_precedes_workspace_capacity() {
         );
     }
 }
+
+#[test]
+fn forked_baseline_without_parent_approval_facts_never_claims_a_newer_epoch_is_missing() {
+    let pool = story_pool();
+    let mut parent = OwnerHistory::new(
+        &pool,
+        Role::Ordinary,
+        RetentionPolicy::Fold,
+        &origin(1),
+        || Ok(document()),
+    )
+    .unwrap();
+    parent.core.begin_install_epoch_at(3).unwrap();
+    let approved = parent
+        .execute(remove(), origin(2), vec![], Some(approval()))
+        .unwrap()
+        .accepted;
+    let child = parent.fork_current(Role::Ordinary, true).unwrap();
+    let selected = child.capture().unwrap().validate().unwrap();
+    parent
+        .execute(Command::Undo, origin(3), vec![], None)
+        .unwrap();
+    parent
+        .execute(
+            Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(81),
+                locked: true,
+            }),
+            origin(4),
+            vec![],
+            None,
+        )
+        .unwrap();
+    parent.install_snapshot(selected).unwrap();
+    assert_eq!(
+        parent.approval_answer(&approval().reference).unwrap(),
+        Some(ApprovalAnswer::Uncertain),
+        "FORKED_BASELINE_WITHOUT_FOLD_FACT_IS_UNCERTAIN_NOT_MISSING"
+    );
+    assert!(
+        child.history().position().epoch > approved.epoch,
+        "FORK_CAPTURE_EPOCH_IS_AFTER_ITS_PARENT_LINE"
+    );
+    let capture = parent.capture().unwrap();
+    let restored = capture.validate().unwrap().open().unwrap();
+    assert_eq!(
+        restored.approval_answer(&approval().reference).unwrap(),
+        Some(ApprovalAnswer::Uncertain),
+        "FORK_BASELINE_UNCERTAINTY_SURVIVES_REOPEN"
+    );
+}

@@ -1,11 +1,12 @@
 //! A1 read-only observations and bounded admission; rescue publication lands separately.
 #![allow(clippy::missing_errors_doc)]
+use crate::operation_actor::AcceptedCut;
 use crate::{
     AttemptBinding,
     bundle::{BundleError, PublicationState},
     bundle_records::ObjectRef,
 };
-use kinewright_core::{AcceptedCut, HistorySaveTag};
+use kinewright_core::HistorySaveTag;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReconcilePhase {
@@ -272,15 +273,51 @@ impl std::fmt::Display for RescueMissingOwnedBytes {
 }
 impl std::error::Error for RescueMissingOwnedBytes {}
 
-/// No new durable record: this owns one actor cut and the exact admitted source reads.
+/// One frozen cut retains its full owner until a synced, pinned cold archive
+/// covers that exact cut; its originating source reads remain admitted.
 pub struct FrozenRescueCapture {
     pub(crate) cut: AcceptedCut,
+    pub(crate) snapshot: std::sync::Mutex<Option<crate::operation_history::OwnerSnapshot>>,
+    pub(crate) archive: std::sync::Mutex<Option<ObjectRef>>,
+    pub(crate) archive_store: std::sync::Mutex<Option<crate::store::ProjectStore>>,
+    pub(crate) archive_pin: std::sync::Mutex<Option<crate::store::StorePin>>,
     pub(crate) tag: HistorySaveTag,
     pub(crate) digest: String,
     pub(crate) reads: crate::store::RetainedReadAdmission,
     pub(crate) was_frozen: bool,
 }
 impl FrozenRescueCapture {
+    pub(crate) fn with_snapshot<T>(
+        &self,
+        use_snapshot: impl FnOnce(&crate::operation_history::OwnerSnapshot) -> Result<T, BundleError>,
+    ) -> Result<T, BundleError> {
+        let guard = self.snapshot.lock().map_err(|_| BundleError::Unsettled)?;
+        use_snapshot(guard.as_ref().ok_or(BundleError::Unsettled)?)
+    }
+    pub(crate) fn release_snapshot(
+        &self,
+        store: &crate::store::ProjectStore,
+    ) -> Result<(), BundleError> {
+        let archive = self.archive.lock().map_err(|_| BundleError::Unsettled)?;
+        let reference = archive.as_ref().ok_or(BundleError::Unsettled)?;
+        // Root publication may still be unknown. Object admission has already
+        // synced these immutable bytes and their directory before returning.
+        // Its actual namespace owner and pins survive until explicit Close.
+        let pin = store.pin_rescue_capture(reference)?;
+        *self
+            .archive_pin
+            .lock()
+            .map_err(|_| BundleError::Unsettled)? = Some(pin);
+        *self
+            .archive_store
+            .lock()
+            .map_err(|_| BundleError::Unsettled)? = Some(store.actor_object_store());
+        self.snapshot
+            .lock()
+            .map_err(|_| BundleError::Unsettled)?
+            .take();
+        Ok(())
+    }
     #[must_use]
     pub const fn cut(&self) -> &AcceptedCut {
         &self.cut
@@ -324,8 +361,8 @@ impl FrozenRescueCapture {
 
 /// Read-only preview. Separate consent is required for each disclosed loss.
 pub struct RescueSelection {
-    pub(crate) capture: crate::storage_budget::StorageReservation<FrozenRescueCapture>,
-    pub(crate) history: kinewright_core::HistorySnapshot,
+    pub(crate) capture:
+        std::sync::Arc<crate::storage_budget::StorageReservation<FrozenRescueCapture>>,
     pub(crate) limits: crate::storage_budget::StorageLimits,
     pub(crate) selected_digest: String,
     pub(crate) removed_undo: u64,
@@ -344,7 +381,7 @@ impl RescueSelection {
     }
     #[must_use]
     pub fn undo_floor(&self) -> u64 {
-        self.history.floor_offset
+        0
     }
     #[must_use]
     pub fn removed_undo(&self) -> u64 {

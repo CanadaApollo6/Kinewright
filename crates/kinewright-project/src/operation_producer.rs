@@ -2,7 +2,7 @@
 //! bytes afterwards, and advance nothing when admission or the edit is refused.
 use super::{
     Action, Conflict, Message, PENDING_BYTES, PENDING_COMMANDS, PRODUCER_BUFFER_PEAK,
-    PRODUCER_HEADER_BYTES, Receipt, StreamState, hash,
+    PRODUCER_HEADER_BYTES, Publisher, Receipt, StreamState, hash,
 };
 use crate::{
     bundle_records::{HeadId, ObjectRef},
@@ -90,6 +90,12 @@ struct EncodedPayload {
 }
 #[derive(Clone)]
 pub struct EncodedMessage(Arc<EncodedPayload>);
+impl PartialEq for EncodedMessage {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.raw.get() == other.0.raw.get()
+    }
+}
+impl Eq for EncodedMessage {}
 impl std::fmt::Debug for EncodedMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EncodedMessage")
@@ -99,14 +105,14 @@ impl std::fmt::Debug for EncodedMessage {
 }
 impl Serialize for EncodedMessage {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.0.raw.serialize(serializer)
+        crate::operation_wire::serialize(&self.0.raw, serializer)
     }
 }
 impl<'de> Deserialize<'de> for EncodedMessage {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         // Incoming transport has its own caller's ingress reservation. It can
         // never acquire or forge an outgoing actor's lease hold.
-        let raw = Box::<RawValue>::deserialize(deserializer)?;
+        let raw = crate::operation_wire::deserialize(deserializer)?;
         Ok(Self(Arc::new(EncodedPayload { raw, _charge: None })))
     }
 }
@@ -183,6 +189,7 @@ impl<'a> From<&'a Action> for ActionRef<'a> {
 }
 #[derive(Serialize)]
 struct Wire<'a> {
+    publisher: Publisher,
     id: &'a CommandId,
     sequence: u64,
     predecessor: [u8; 32],
@@ -389,11 +396,23 @@ impl Producer {
         if owner.history().position() != self.next_key {
             return Err(Conflict::AcceptedKey.into());
         }
-        if matches!(action, Action::Do { .. }) && certificate.is_some() {
+        if let Action::Do { operations, .. } = &action
+            && certificate.is_some()
+        {
             if !context.inputs.is_empty() {
                 return Err(HistoryError::InvalidOrigin.into());
             }
-            context.inputs.push(self.lease.inputs.clone());
+            if crate::operation_history::Resources::payload(operations)
+                .iter()
+                .any(|resource| {
+                    !matches!(
+                        resource,
+                        crate::operation_history::Resource::Media { sha256: None, .. }
+                    )
+                })
+            {
+                context.inputs.push(self.lease.inputs.clone());
+            }
         }
         let prepared = self.prepare(self.next_key, ActionRef::from(&action), &context)?;
         let effects = action.execute_with_inputs(context, owner, certificate)?;
@@ -410,6 +429,10 @@ impl Producer {
         self.hold.take();
         Ok(())
     }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one atomic preparation reserves, hashes and encodes the exact accepted packet"
+    )]
     pub(crate) fn prepare(
         &self,
         accepted: CommandKey,
@@ -445,15 +468,24 @@ impl Producer {
             .sequence
             .checked_add(1)
             .ok_or(Conflict::CounterExhausted)?;
+        let publisher = match (
+            self.lease.parent_identity,
+            self.lease.namespace_name.as_deref(),
+        ) {
+            (Some(parent), Some(name)) => Publisher::native(parent, name)?,
+            (None, None) => Publisher::Portable,
+            _ => return Err(Conflict::Detached),
+        };
         let command = hash(
             b"kinewright/accepted-command/v1\0",
-            &(&id, accepted, action, context),
+            &(publisher, &id, accepted, action, context),
         )?;
         let tip = hash(
             b"kinewright/accepted-chain/v1\0",
             &(self.state.tip, command),
         )?;
         let wire = Wire {
+            publisher,
             id: &id,
             sequence,
             predecessor: self.state.tip,
@@ -464,6 +496,9 @@ impl Producer {
         };
         let mut counter = Counter(0);
         serde_json::to_writer(&mut counter, &wire).map_err(|_| Conflict::Encoding)?;
+        if counter.0 > PENDING_BYTES {
+            return Err(Conflict::CommandTooLarge);
+        }
         if counter.0 > PENDING_BYTES.saturating_sub(self.bytes) {
             return Err(Conflict::Backpressure);
         }

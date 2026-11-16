@@ -2,11 +2,8 @@
 use super::{
     HostAuth, HostCommand, HostCommandOwner, HostError, HostRefusal, HostReply, SessionRoots,
 };
-use kinewright_core::AcceptedHistory;
-use kinewright_project::{
-    manual_history::{AcceptedManualCommand, ManualLease},
-    receipts::ReceiptLookup,
-};
+use kinewright_project::operation_protocol::EncodedMessage as AcceptedHistory;
+use kinewright_project::operation_protocol::Lease as ManualLease;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub(super) struct ForegroundOwner {
@@ -156,6 +153,22 @@ impl HostCommandOwner {
         if let Some(reply) = retained {
             return reply;
         }
+        // A later authenticated operation acknowledges delivery of the previous
+        // result. Release its full capture before preparing another one, while
+        // retaining the client/sequence/digest fence even if this operation fails.
+        if let Some((_, _, _, previous)) = &mut self.foreground_reply
+            && (previous.history.is_some()
+                || previous.switch_attachment.is_some()
+                || previous.switch_preview.is_some())
+        {
+            *previous = HostReply {
+                error: Some(HostRefusal::new(
+                    "operation_changed",
+                    "a later operation acknowledged this result",
+                )),
+                ..HostReply::default()
+            };
+        }
         let reply = self.execute_client(command, roots, editor);
         if reply.error.is_none() {
             self.foreground_reply = Some((client, operation, digest, reply.clone()));
@@ -235,7 +248,7 @@ impl HostCommandOwner {
         let mut lease = self.owner_mut()?.issue_manual_lease(client, token)?;
         lease.generation = self.next_manual_generation;
         self.next_manual_generation = next;
-        self.manual = Some(lease.clone());
+        self.manual = Some(self.owner()?.manual_authority(lease.clone())?);
         Ok(lease)
     }
     pub(super) fn commit_history(
@@ -244,16 +257,11 @@ impl HostCommandOwner {
         messages: &[AcceptedHistory],
         reply: &mut HostReply,
     ) -> Result<(), HostError> {
-        let lease = self
-            .manual
-            .as_ref()
-            .filter(|lease| lease.client == client)
-            .cloned()
-            .ok_or_else(|| {
-                HostRefusal::new("manual_lease", "this client has no manual editor lease")
-            })?;
-        if messages.len() > kinewright_core::MANUAL_COMMANDS
-            || serde_json::to_vec(messages)?.len() > kinewright_core::MANUAL_BYTES + 128
+        if messages.len() > kinewright_project::operation_protocol::PENDING_COMMANDS
+            || messages
+                .iter()
+                .try_fold(0_u64, |n, message| n.checked_add(message.byte_len()))
+                .is_none_or(|n| n > kinewright_project::operation_protocol::PENDING_BYTES)
         {
             return Err(HostRefusal::new(
                 "manual_capacity",
@@ -261,27 +269,27 @@ impl HostCommandOwner {
             )
             .into());
         }
-        for message in messages {
-            let envelope = AcceptedManualCommand::decode(message)?.envelope;
-            if envelope.manual.as_ref().map(|m| &m.binding) != Some(&lease) {
-                return Err(HostRefusal::new("manual_lease", "stale manual lease").into());
+        self.manual
+            .as_ref()
+            .filter(|lease| lease.client == client)
+            .ok_or_else(|| {
+                HostRefusal::new("manual_lease", "this client has no manual editor lease")
+            })?;
+        let authority = self.manual.take().expect("verified manual client");
+        let outcome: Result<(), HostError> = (|| {
+            for message in messages {
+                let (receipt, report) = self
+                    .owner_mut()?
+                    .commit_manual_history(&authority, message)?;
+                if let Some(report) = report {
+                    self.saved(&report, reply, false)?;
+                }
+                reply.manual_ack.push(receipt);
             }
-            let (result, report) = self.owner_mut()?.commit_manual_history(&lease, message)?;
-            if !matches!(
-                result,
-                ReceiptLookup::Committed(_) | ReceiptLookup::Retired(_)
-            ) {
-                return Err(HostRefusal::new(
-                    "manual_pending",
-                    "manual publication has not been proved durable; editing remains pending",
-                )
-                .into());
-            }
-            if let Some(report) = report {
-                self.saved(&report, reply, false)?;
-            }
-            reply.manual_ack.push(message.clone());
-        }
+            Ok(())
+        })();
+        self.manual = Some(authority);
+        outcome?;
         if !messages.is_empty() {
             self.prepared_owned_media = None;
         }

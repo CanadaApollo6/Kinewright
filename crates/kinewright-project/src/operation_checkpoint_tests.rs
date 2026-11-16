@@ -48,6 +48,7 @@ fn checkpoint() -> Checkpoint {
         command_cut: None,
         take_map_revision_ref: None,
         stream: Some(stream),
+        install: None,
     }
 }
 #[test]

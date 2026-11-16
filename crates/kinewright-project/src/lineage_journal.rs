@@ -5,6 +5,10 @@ use kinewright_core::{Clip, ClipId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+#[allow(
+    dead_code,
+    reason = "legacy oracle retained until the final H2b deletion checkpoint"
+)]
 pub(crate) fn verify_history_boundaries(
     lineage: &LineageRecord,
     history: &kinewright_core::HistorySnapshot,
@@ -145,6 +149,10 @@ struct LineageJournal {
 
 /// Recovery keeps the independently stored current occurrences without replaying
 /// the unavailable Undo maps. The ordinary reader still rebuilds every map.
+#[allow(
+    dead_code,
+    reason = "legacy oracle retained until the final H2b deletion checkpoint"
+)]
 pub(crate) fn restore_current(
     bytes: &[u8],
     reserve: impl FnOnce(u64) -> Result<crate::storage_budget::StorageReservation, BundleError>,

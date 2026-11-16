@@ -3131,6 +3131,7 @@ mod tests {
             )
             .unwrap();
         app.projects[0].ja1 = Some(attachment);
+        app.projects[0].install_ja1_view();
         app.projects[0].cue_source_asset(media.id);
         app.projects[0].source_in = TimeCode(4);
         app.projects[0].source_out = TimeCode(12);
@@ -3161,7 +3162,12 @@ mod tests {
             .settle_manual_for_test();
         let after = core.export_history().unwrap();
         assert_eq!(
-            after.batches.len(),
+            after
+                .history()
+                .undo
+                .iter()
+                .map(|step| step.commands().len())
+                .sum::<usize>(),
             1,
             "verified Source patch must pass the real manual permit"
         );
@@ -3222,7 +3228,13 @@ mod tests {
                 .unwrap()
                 .settle_manual_for_test();
             assert_eq!(
-                core.export_history().unwrap().batches.len(),
+                core.export_history()
+                    .unwrap()
+                    .history()
+                    .undo
+                    .iter()
+                    .map(|step| step.commands().len())
+                    .sum::<usize>(),
                 offset + 2,
                 "media placement must use its manual permit: {} {:?}",
                 app.status,
@@ -3244,13 +3256,20 @@ mod tests {
             .unwrap()
             .settle_manual_for_test();
         assert_eq!(
-            core.export_history().unwrap().batches.len(),
+            core.export_history()
+                .unwrap()
+                .history()
+                .undo
+                .iter()
+                .map(|step| step.commands().len())
+                .sum::<usize>(),
             5,
             "stranded A/B restoration must use its manual permit"
         );
         assert_eq!(
             core.export_history()
                 .unwrap()
+                .history()
                 .document
                 .clip(ClipId(10000))
                 .unwrap()

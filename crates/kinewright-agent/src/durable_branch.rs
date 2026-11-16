@@ -2,8 +2,9 @@
 #![allow(clippy::missing_errors_doc)]
 use crate::TimelineBranch;
 use kinewright_core::{
-    Command, Core, Document, Event, JournalCommand, Query, QueryResult, TimelineRevision,
+    Command, Document, Event, JournalCommand, Query, QueryResult, TimelineRevision,
 };
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{BundleError, ProjectBundle},
     bundle_records::{BranchId, ObjectRef, SpecialistBaseRecord},
@@ -16,7 +17,6 @@ pub struct DurableTimelineBranch {
     branch_id: BranchId,
     branch: TimelineBranch,
     base: SpecialistBaseRecord,
-    baseline_delta: Vec<kinewright_core::Operation>,
     pin: Option<StorePin>,
     registration: Option<kinewright_project::editing_session::DurableBranchSessionGuard>,
 }
@@ -41,41 +41,42 @@ impl DurableTimelineBranch {
     ) -> Result<Self, BundleError> {
         let source = bundle.manual_branch_id().clone();
         let checkpoint = bundle.checkpoint(&source)?.clone();
-        let frozen = bundle.branch_history(&source)?;
         if live
-            .export_history()
+            .snapshot_identity()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?
-            != *frozen
+            != checkpoint.identity
         {
-            return Err(BundleError::Unsupported(
-                "live Core is not the durable base".into(),
-            ));
+            return Err(BundleError::HistoryChanged);
         }
         let base = SpecialistBaseRecord {
-            history_role: kinewright_project::history_record::HistoryRole::Candidate,
+            history_role: kinewright_project::operation_history::Role::Task,
             target_branch: source.clone(),
             base_head: checkpoint.head_id,
-            base_document_hash: checkpoint.document_hash,
+            base_document_hash: checkpoint.document_ref.sha256.clone(),
             original_baseline_ref: checkpoint.document_ref,
             frozen_checkpoint_ref: bundle.checkpoint_reference(&source)?,
-            full_applied_delta: vec![],
         };
         let pin = bundle
             .store()
             .pin(std::slice::from_ref(&base.frozen_checkpoint_ref))?;
-        let branch_id = bundle.fork_branch(
-            &source,
-            kinewright_project::history_record::HistoryRole::Ordinary,
-        )?;
-        let (revision, _) = snapshot(live)?;
-        let branch = TimelineBranch::new(name, revision, std::sync::Arc::clone(&frozen.document))
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let branch_id =
+            bundle.fork_branch(&source, kinewright_project::operation_history::Role::Task)?;
+        let saved = bundle.checkpoint(&branch_id)?;
+        let core = Core::open(
+            saved.open(bundle.store(), live.history_pool())?,
+            branch_id.clone(),
+            saved.revision,
+        )
+        .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let baseline = core
+            .baseline_document()
+            .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+        let branch = TimelineBranch::from_registered(name, baseline, core);
         bundle.attach_core(&branch.core())?;
         Ok(Self {
             branch_id,
             branch,
             base,
-            baseline_delta: vec![],
             pin: Some(pin),
             registration: None,
         })
@@ -112,24 +113,7 @@ impl DurableTimelineBranch {
 
     /// Store the full applied delta and its original base independently of manual floors.
     pub fn persist(&mut self, bundle: &mut ProjectBundle) -> Result<ObjectRef, BundleError> {
-        let frozen = self
-            .branch
-            .core()
-            .export_history()
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let mut full_delta = self.baseline_delta.clone();
-        full_delta.extend(frozen.applied_operations());
         bundle.save_branch(&self.branch_id, &self.branch.core())?;
-        self.base.full_applied_delta = full_delta;
-        self.baseline_delta = specialist_floor_delta(
-            bundle,
-            &self.base,
-            &self
-                .branch
-                .core()
-                .export_history()
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-        )?;
         let reference = bundle.retain_specialist_base(&self.base)?;
         self.pin = Some(bundle.store().pin(&[
             reference.clone(),
@@ -154,24 +138,28 @@ impl DurableTimelineBranch {
             )?;
         if checkpoint.branch_id != base.target_branch
             || checkpoint.head_id != base.base_head
-            || checkpoint.document_hash != base.base_document_hash
+            || checkpoint.document_ref.sha256 != base.base_document_hash
             || base.original_baseline_ref != checkpoint.document_ref
         {
             return Err(BundleError::Corrupt(
                 "specialist base identity mismatch".into(),
             ));
         }
-        let baseline = bundle
-            .store()
-            .read_record::<Document>(&base.original_baseline_ref)?;
-        let history = bundle.branch_history(&branch_id)?;
-        let baseline_delta = specialist_floor_delta(bundle, &base, &history)?;
-        let branch = TimelineBranch::new(name, TimelineRevision(0), Arc::new((*baseline).clone()))
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        bundle
-            .attach_core(&branch.core())?
-            .restore_history((*history).clone())
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let saved = bundle.checkpoint(&branch_id)?;
+        let reader = bundle.branch_history(&branch_id)?;
+        let pool = reader.pool();
+        drop(reader);
+        let core = Core::open(
+            saved.open(bundle.store(), &pool)?,
+            branch_id.clone(),
+            saved.revision,
+        )
+        .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let baseline = core
+            .baseline_document()
+            .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+        let branch = TimelineBranch::from_registered(name, baseline, core);
+        bundle.attach_core(&branch.core())?;
         let pin = bundle
             .store()
             .pin(&[base_ref.clone(), bundle.checkpoint_reference(&branch_id)?])?;
@@ -179,7 +167,6 @@ impl DurableTimelineBranch {
             branch_id,
             branch,
             base: (*base).clone(),
-            baseline_delta,
             pin: Some(pin),
             registration: None,
         })
@@ -198,7 +185,6 @@ impl DurableTimelineBranch {
             branch_id: registration.branch_id().clone(),
             base: registration.base().clone(),
             branch,
-            baseline_delta: vec![],
             pin: None,
             registration: Some(registration),
         })
@@ -217,15 +203,14 @@ impl DurableTimelineBranch {
         )?;
         let core = registration.core().clone();
         let base = registration.base().clone();
-        let baseline = session.durable_branch_baseline(&registration)?;
-        let history = session.durable_branch_history(&registration)?;
-        let baseline_delta = specialist_floor_delta_from_baseline(&base, &history, &baseline)?;
+        let baseline = core
+            .baseline_document()
+            .map_err(|error| BundleError::Corrupt(error.to_string()))?;
         let branch = TimelineBranch::from_registered(name, baseline, core);
         Ok(Self {
             branch_id,
             branch,
             base,
-            baseline_delta,
             pin: None,
             registration: Some(registration),
         })
@@ -240,12 +225,6 @@ impl DurableTimelineBranch {
             .ok_or_else(|| BundleError::Identity("unregistered durable session".into()))?;
         let reference = session.persist_durable_branch(registration)?;
         self.base = registration.base().clone();
-        let history = session.durable_branch_history(registration)?;
-        self.baseline_delta = specialist_floor_delta_from_baseline(
-            &self.base,
-            &history,
-            &*session.durable_branch_baseline(registration)?,
-        )?;
         Ok(reference)
     }
     pub fn close_registered(
@@ -263,14 +242,15 @@ impl DurableTimelineBranch {
         let checkpoint = bundle.checkpoint(&self.base.target_branch)?;
         if checkpoint.branch_id != self.base.target_branch
             || checkpoint.head_id != self.base.base_head
-            || checkpoint.document_hash != self.base.base_document_hash
+            || checkpoint.document_ref.sha256 != self.base.base_document_hash
         {
             return Err(BundleError::Unsupported("durable base conflict".into()));
         }
-        let current = live
-            .export_history()
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        if current != *bundle.branch_history(&self.base.target_branch)? {
+        if live
+            .snapshot_identity()
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?
+            != checkpoint.identity
+        {
             return Err(BundleError::Unsupported(
                 "runtime Core is not the bound durable head".into(),
             ));
@@ -284,21 +264,23 @@ impl DurableTimelineBranch {
         id: CommandId,
     ) -> Result<CommandEnvelope, BundleError> {
         let revision = self.bind(bundle, live)?;
-        let frozen = self
+        let checkpoint = bundle.checkpoint(&self.branch_id)?;
+        if self
             .branch
             .core()
-            .export_history()
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let mut full_delta = self.baseline_delta.clone();
-        full_delta.extend(frozen.applied_operations());
-        if full_delta != self.base.full_applied_delta {
+            .snapshot_identity()
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?
+            != checkpoint.identity
+        {
             return Err(BundleError::Unsupported(
                 "specialist changed after freezing".into(),
             ));
         }
+        let delta = bundle.branch_history(&self.branch_id)?.into_operations()?;
         Ok(CommandEnvelope {
             switch: None,
             manual: None,
+            context: None,
             version: 1,
             action: "edit".into(),
             id,
@@ -308,9 +290,7 @@ impl DurableTimelineBranch {
             lease: None,
             expected_head: Some(self.base.base_head.clone()),
             expected_revision: revision,
-            command: Some(JournalCommand::DoBatch(
-                self.base.full_applied_delta.clone(),
-            )),
+            command: Some(JournalCommand::DoBatch(delta.operations().to_owned())),
             comment_text: None,
             comment_strokes: None,
             evidence: vec![],
@@ -329,13 +309,11 @@ impl DurableTimelineBranch {
             return Ok(previous);
         }
         let revision = self.bind(bundle, live)?;
+        let delta = bundle.branch_history(&self.branch_id)?.into_operations()?;
         if envelope.expected_revision != revision
             || envelope.expected_head.as_ref() != Some(&self.base.base_head)
             || envelope.target_branch != self.base.target_branch
-            || envelope.command
-                != Some(JournalCommand::DoBatch(
-                    self.base.full_applied_delta.clone(),
-                ))
+            || envelope.command != Some(JournalCommand::DoBatch(delta.operations().to_owned()))
         {
             return Err(BundleError::Unsupported(
                 "merge envelope differs from frozen durable binding".into(),
@@ -347,19 +325,6 @@ impl DurableTimelineBranch {
             .clone();
         bundle.command(envelope, live, &inputs, &[])
     }
-}
-
-/// The original base and full proposal are independent of the bounded undo checkpoint.
-use kinewright_project::editing_session::specialist_floor_delta_from_baseline;
-fn specialist_floor_delta(
-    bundle: &ProjectBundle,
-    base: &SpecialistBaseRecord,
-    history: &kinewright_core::HistorySnapshot,
-) -> Result<Vec<kinewright_core::Operation>, BundleError> {
-    let baseline = bundle
-        .store()
-        .read_record::<Document>(&base.original_baseline_ref)?;
-    specialist_floor_delta_from_baseline(base, history, &baseline)
 }
 
 #[cfg(test)]
@@ -381,7 +346,7 @@ mod tests {
                 .as_path(),
             "c5-registered",
         );
-        let core = Core::spawn(Document {
+        let core = Core::for_test(Document {
             tracks: vec![kinewright_core::Track {
                 id: kinewright_core::TrackId(1),
                 kind: kinewright_core::TrackKind::Video,
@@ -504,7 +469,7 @@ mod tests {
             let private_root = std::fs::canonicalize(temp.root()).unwrap();
             let a = private_root.join("drive/a.kinewright");
             let b = private_root.join("b.kinewright");
-            let core = Core::spawn(Document {
+            let core = Core::for_test(Document {
                 tracks: vec![Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
@@ -514,19 +479,7 @@ mod tests {
                 ..Document::default()
             })
             .unwrap();
-            let cost = kinewright_project::bundle_commit::history_cost_probe(
-                &core.export_history().unwrap(),
-                &StorageLimits::default(),
-            )
-            .unwrap();
-            let profile = StorageLimits {
-                branch_history_bytes: if floor {
-                    cost * 4
-                } else {
-                    StorageLimits::default().branch_history_bytes
-                },
-                ..StorageLimits::default()
-            };
+            let profile = StorageLimits::default();
             let mut owner =
                 Ja1EditingSession::new(&private_root, &core, StorageLimits::default()).unwrap();
             owner.first_save(&a, profile.clone()).unwrap();
@@ -560,16 +513,9 @@ mod tests {
                     .persist_registered(&mut owner))
                 .is_err()
             );
-            if floor {
-                assert!(
-                    worker.pending_history_save().unwrap().is_some(),
-                    "real over-allowance own ticket"
-                );
-            }
-            let attempted_proposal = worker.export_history().unwrap().applied_operations();
-            edit(&worker, true);
+            // The registered owner retains the exact failed publication, not a Core floor ticket.
             let full = worker.export_history().unwrap();
-            let full_proposal = full.applied_operations();
+            let full_proposal = worker.operations(false).unwrap();
             std::fs::rename(private_root.join("drive"), private_root.join("hidden-a")).unwrap();
             let offer = owner.probe_active().unwrap().unwrap();
             let capture = owner.prepare_rescue(&offer).unwrap().unwrap();
@@ -602,7 +548,14 @@ mod tests {
             let b_history = owner.core().export_history().unwrap();
             let b_root = owner.root_sha256().unwrap();
             std::fs::rename(private_root.join("hidden-a"), private_root.join("drive")).unwrap();
-            let readable_a = LoadedBundle::read_with_limits_probe(&a, profile).unwrap();
+            let readable_a = LoadedBundle::read_with_limits_probe(
+                &a,
+                profile,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap();
             let manifest_ref = readable_a.root().unwrap().store_manifest_ref.clone();
             let manifest: kinewright_project::store::StoreManifest = serde_json::from_slice(
                 &std::fs::read(private_root.join(format!(
@@ -627,23 +580,29 @@ mod tests {
                             .unwrap(),
                         )
                         .unwrap();
-                        record.full_applied_delta == attempted_proposal
+                        record == *specialist.base()
                     }),
                 "the branch checkpoint and complete proposal publish in the same root"
             );
             drop(readable_a);
             owner.reconcile_retained_destination(&a).unwrap();
             assert_eq!(
-                worker.export_history().unwrap().floor_offset > full.floor_offset,
-                floor
+                worker.export_history().unwrap(),
+                full,
+                "SETTLEMENT_DOES_NOT_FOLD_A_NEVERFOLD_SESSION"
             );
-            assert!(worker.pending_history_save().unwrap().is_none());
             assert_eq!(owner.root_sha256().unwrap(), b_root);
             assert_eq!(owner.core().export_history().unwrap(), b_history);
             let base = specialist.persist_registered(&mut owner).unwrap();
-            assert_eq!(specialist.base().full_applied_delta, full_proposal);
+            assert_eq!(
+                specialist.core().operations(false).unwrap().operations(),
+                full_proposal.operations()
+            );
             owner.persist_durable_branch(&mut stale_guard).unwrap();
-            assert_eq!(stale_guard.base().full_applied_delta, full_proposal);
+            assert_eq!(
+                stale_guard.core().operations(false).unwrap().operations(),
+                full_proposal.operations()
+            );
             assert_eq!(owner.root_sha256().unwrap(), b_root);
             owner.retire_working_branch(&x, &b_root, true).unwrap();
             let after_retirement = owner.root_sha256().unwrap();
@@ -652,7 +611,13 @@ mod tests {
             assert_eq!(worker.attachment_state().unwrap(), AttachmentState::Sealed);
             assert_eq!(core.attachment_state().unwrap(), AttachmentState::Sealed);
             drop(owner);
-            let mut original = Ja1EditingSession::open(&a).unwrap();
+            let mut original = Ja1EditingSession::open(
+                &a,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap();
             let reopened = DurableTimelineBranch::reopen_registered(
                 &mut original,
                 x,
@@ -660,10 +625,18 @@ mod tests {
                 "reopened A specialist",
             )
             .unwrap();
-            assert_eq!(reopened.base().full_applied_delta, full_proposal);
-            let loaded = LoadedBundle::read(&b).unwrap();
-            let independent = Core::spawn(Document::default()).unwrap();
-            loaded.restore_manual(&independent).unwrap();
+            assert_eq!(
+                reopened.core().operations(false).unwrap().operations(),
+                full_proposal.operations()
+            );
+            let mut loaded = LoadedBundle::read(
+                &b,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap();
+            let independent = loaded.open_manual().unwrap();
             assert_eq!(independent.export_history().unwrap(), b_history);
         }
     }
@@ -678,6 +651,7 @@ mod tests {
         use super::*;
         use kinewright_core::*;
         use kinewright_media::test_support::TempDirectory;
+        use kinewright_project::operation_actor::Core;
         use kinewright_project::{
             bundle::{BundleWriteAdmission, LoadedBundle},
             bundle_recovery::RecoverySelection,
@@ -690,7 +664,7 @@ mod tests {
             "c4-specialist",
         );
         let path = temp.path("branches.kinewright");
-        let core = Core::spawn(Document {
+        let core = Core::for_test(Document {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
@@ -724,13 +698,28 @@ mod tests {
         );
         apply(&core, Command::Undo);
         apply(&core, Command::Redo);
-        let mut bundle =
-            ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+        let mut bundle = ProjectBundle::activate(
+            &path,
+            BundleWriteAdmission::new_document(),
+            core.history_pool(),
+        )
+        .unwrap();
         let inputs = bundle.empty_inputs().unwrap().reference.clone();
         bundle.save(&core, &inputs).unwrap();
         let left = bundle.manual_branch_id().clone();
-        let original = (*bundle.branch_lineage(&left).unwrap()).clone();
-        let ids = bundle.checkpoint(&left).unwrap().batch_ids.clone();
+        let original = bundle.branch_lineage(&left).unwrap().lineage().clone();
+        let ids: Vec<_> = core
+            .export_history()
+            .unwrap()
+            .history()
+            .undo
+            .iter()
+            .flat_map(|step| {
+                step.commands()
+                    .iter()
+                    .map(|command| (command.id, command.payload_digest))
+            })
+            .collect();
         let mut specialist = DurableTimelineBranch::fork(&mut bundle, &core, "writable").unwrap();
         apply(
             &specialist.core(),
@@ -742,10 +731,13 @@ mod tests {
         specialist.persist(&mut bundle).unwrap();
         assert_eq!(
             bundle
-                .branch_lineage(specialist.branch_id())
+                .branch_history(specialist.branch_id())
                 .unwrap()
-                .baseline,
-            original.current
+                .into_boundary(0)
+                .unwrap()
+                .lineage()
+                .occurrences,
+            original.occurrences
         );
         let manifest = bundle
             .store()
@@ -779,29 +771,44 @@ mod tests {
         );
         bundle.save(&active, &inputs).unwrap();
         assert_eq!(
-            &bundle.checkpoint(&right).unwrap().batch_ids[..ids.len()],
-            &ids
+            active
+                .export_history()
+                .unwrap()
+                .history()
+                .undo
+                .iter()
+                .flat_map(|step| step
+                    .commands()
+                    .iter()
+                    .map(|command| (command.id, command.payload_digest)))
+                .take(ids.len())
+                .collect::<Vec<_>>(),
+            ids
         );
         let restored = bundle.branch_lineage(&right).unwrap();
-        assert_eq!(restored.current, original.current);
-        assert_eq!(restored.split_ancestry, original.split_ancestry);
+        assert_eq!(restored.lineage().occurrences, original.occurrences);
+        assert_eq!(restored.lineage().split_ancestry, original.split_ancestry);
         drop(restored);
-        let history = active.export_history().unwrap();
-        bundle
-            .attach_core(&active)
-            .unwrap()
-            .install_history_transition(HistoryTransition::floor(history, 1).unwrap())
-            .unwrap();
+        apply(&active, Command::Undo);
         bundle.save(&active, &inputs).unwrap();
-        let floored = bundle.branch_lineage(&right).unwrap();
-        assert_eq!(floored.baseline, original.undo[1]);
-        assert_eq!(floored.current, original.current);
-        assert_eq!(floored.split_ancestry, original.split_ancestry);
-        drop(floored);
-        let loaded = LoadedBundle::read(&path).unwrap();
+        apply(&active, Command::Redo);
+        bundle.save(&active, &inputs).unwrap();
+        let restored = bundle.branch_lineage(&right).unwrap();
+        assert_eq!(
+            restored.lineage(),
+            &original,
+            "SHARED_PREFIX_LINEAGE_SURVIVES_UNDO_REDO_AND_PUBLICATION"
+        );
+        drop(restored);
+        let mut loaded = LoadedBundle::read(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         assert_eq!(loaded.root().unwrap().manual_branch_id, right);
-        let fresh = Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&fresh).unwrap();
+        let fresh = loaded.open_manual().unwrap();
         assert_eq!(
             fresh.export_history().unwrap(),
             active.export_history().unwrap()
@@ -814,7 +821,10 @@ mod tests {
         assert!(matches!(
             kinewright_project::bundle::ProjectBundle::activate(
                 &root,
-                kinewright_project::bundle::BundleWriteAdmission::new_document()
+                kinewright_project::bundle::BundleWriteAdmission::new_document(),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
             ),
             Err(kinewright_project::bundle::BundleError::DurabilityUnsupported)
         ));

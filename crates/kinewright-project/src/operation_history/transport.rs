@@ -52,6 +52,7 @@ pub struct SnapshotTransport {
     role: Role,
     sizing: CreationSizing,
     identity: SnapshotIdentity,
+    #[serde(with = "crate::operation_wire")]
     body: Box<RawValue>,
     #[serde(skip)]
     reservation: Option<HistoryReservation>,
@@ -83,7 +84,24 @@ impl OwnerSnapshot {
         })
     }
 }
+impl std::fmt::Debug for SnapshotTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnapshotTransport")
+            .field("role", &self.role)
+            .field("identity", &self.identity)
+            .finish_non_exhaustive()
+    }
+}
 impl SnapshotTransport {
+    /// Exact bytes of a previously validated retained transport can be used
+    /// again without decoding a second owner. Identity alone is not this proof.
+    #[must_use]
+    pub fn same_encoded_state(&self, other: &Self) -> bool {
+        self.role == other.role
+            && self.sizing == other.sizing
+            && self.identity == other.identity
+            && self.body.get() == other.body.get()
+    }
     #[must_use]
     pub const fn role(&self) -> Role {
         self.role
@@ -128,6 +146,48 @@ impl SnapshotTransport {
             }
         };
         let window = reservation.workspace()?;
+        let snapshot = Self::decode_body(&body, role, sizing, reservation, window)?;
+        drop(body);
+        Self::validate_decoded(snapshot, identity)
+    }
+    pub fn receive(
+        self: std::sync::Arc<Self>,
+        pool: &HistoryPool,
+        expected: Role,
+    ) -> Result<ValidatedOwnerSnapshot, Error> {
+        match std::sync::Arc::try_unwrap(self) {
+            Ok(transport) => transport.validate(pool, expected),
+            Err(shared) => shared.validate_shared(pool, expected),
+        }
+    }
+    pub fn validate_shared(
+        &self,
+        pool: &HistoryPool,
+        expected: Role,
+    ) -> Result<ValidatedOwnerSnapshot, Error> {
+        if self.role != expected || self.sizing.kind.role() != expected {
+            return Err(Error::InvalidPolicy);
+        }
+        let reservation = pool.admit_sized(self.sizing)?;
+        let window = reservation.workspace()?;
+        let snapshot = Self::decode_body(&self.body, self.role, self.sizing, reservation, window)?;
+        Self::validate_decoded(snapshot, self.identity)
+    }
+    fn decode_body(
+        body: &RawValue,
+        role: Role,
+        sizing: CreationSizing,
+        reservation: HistoryReservation,
+        window: super::reservation::Workspace,
+    ) -> Result<OwnerSnapshot, Error> {
+        let limits = sizing.limits()?;
+        let bytes = body.get().len() as u64;
+        if bytes
+            .checked_add(HEADER_BYTES)
+            .is_none_or(|n| n > limits.envelope.retained)
+        {
+            return Err(Error::Capacity("snapshot transport"));
+        }
         // This frame includes both documents, unlike an operation payload.
         // Use the existing JSON preflight against the already admitted shared
         // workspace, with its raw frame subtracted. The operation payload cap
@@ -147,9 +207,14 @@ impl SnapshotTransport {
         if data.role != role || data.sizing != sizing {
             return Err(Error::InvalidRecord);
         }
-        drop(body);
         drop(window);
-        let validated = OwnerSnapshot { data, reservation }.validate()?;
+        Ok(OwnerSnapshot { data, reservation })
+    }
+    fn validate_decoded(
+        snapshot: OwnerSnapshot,
+        identity: SnapshotIdentity,
+    ) -> Result<ValidatedOwnerSnapshot, Error> {
+        let validated = snapshot.validate()?;
         if validated.identity() != identity {
             return Err(Error::IdentityMismatch);
         }
@@ -310,5 +375,45 @@ mod operation_cases {
                 "PORTABLE_OPERATION_CAPTURE_PRESERVES_BOTH_STACKS_AND_OWNERS {name}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tagged_command_tests {
+    use super::*;
+    #[test]
+    fn portable_capture_roundtrips_inside_an_internally_tagged_origin() {
+        #[derive(Serialize, Deserialize)]
+        #[serde(tag = "origin")]
+        enum Envelope {
+            Gui { snapshot: SnapshotTransport },
+        }
+        let pool = HistoryPool::new(crate::operation_history::PoolLimits::default());
+        let source = super::super::OwnerHistory::new(
+            &pool,
+            Role::Ordinary,
+            Role::Ordinary.policy(),
+            &super::super::tests::origin(1),
+            || Ok(super::super::tests::document()),
+        )
+        .unwrap();
+        let expected = source.identity().unwrap();
+        let wire = serde_json::to_vec(&Envelope::Gui {
+            snapshot: source.capture().unwrap().into_transport().unwrap(),
+        })
+        .unwrap();
+        let Envelope::Gui { snapshot } = serde_json::from_slice(&wire)
+            .expect("PORTABLE_CAPTURE_DECODES_INSIDE_TAGGED_GUI_ORIGIN");
+        let restored = snapshot
+            .validate(
+                &HistoryPool::new(crate::operation_history::PoolLimits::default()),
+                Role::Ordinary,
+            )
+            .unwrap();
+        assert_eq!(
+            restored.identity(),
+            expected,
+            "TAGGED_ORIGIN_PRESERVES_COMBINED_OWNER_IDENTITY"
+        );
     }
 }

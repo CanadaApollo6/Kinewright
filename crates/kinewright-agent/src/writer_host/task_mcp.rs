@@ -1064,9 +1064,10 @@ impl HostCommandOwner {
             return Ok(json!({"receipt":receipt,"history":history,"result":result}));
         }
         let delta = self.hooks.runs[run].tasks[task]
-            .frozen_delta()
+            .frozen_delta(self.owner()?)?
             .ok_or_else(|| refused("frozen delta missing"))?
-            .to_vec();
+            .operations()
+            .to_owned();
         let delta_ref = self
             .owner_mut()?
             .admit_host_grant(&serde_json::to_vec(&delta)?)?;

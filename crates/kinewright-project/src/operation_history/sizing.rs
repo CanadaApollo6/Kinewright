@@ -9,7 +9,7 @@ const DOCUMENT_FLOOR: u64 = 512 << 10;
 // Small baselines still need room for the fixed 2,000-removal fixture. The
 // doubled-baseline floor dominates once the baseline itself is substantial.
 const MINIMUM_DOCUMENT_GROWTH: u64 = 2 << 20;
-const OWNER_ALLOWANCE: u64 = 3 << 20;
+pub(crate) const OWNER_ALLOWANCE: u64 = 3 << 20;
 const OWNER_MAXIMUM: u64 = 32 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -843,11 +843,15 @@ mod tests {
     fn s3_fix1_reused_crash_residue_keeps_bytes_and_one_charge() {
         use crate::bundle::{BundleWriteAdmission, LoadedBundle};
         use crate::editing_session::Ja1EditingSession;
-        use kinewright_core::{Core, Document};
+        use crate::operation_actor::Core;
+        use kinewright_core::Document;
         const CHILD_ROOT: &str = "KINEWRIGHT_C0_FIX1_CRASH_ROOT";
+        let pool = crate::operation_history::HistoryPool::new(
+            crate::operation_history::PoolLimits::default(),
+        );
         let bytes = wav(5432);
         if let Some(path) = std::env::var_os(CHILD_ROOT) {
-            let mut owner = LoadedBundle::read(Path::new(&path))
+            let mut owner = LoadedBundle::read(Path::new(&path), &pool)
                 .unwrap()
                 .into_writer()
                 .unwrap();
@@ -860,7 +864,7 @@ mod tests {
         }
         let temp = TempDirectory::new_in(&workspace_target_dir(), "c0-fix1-crash-residue");
         let path = temp.path("crash.kinewright");
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         let mut initial =
             Ja1EditingSession::activate(&path, BundleWriteAdmission::new_document(), &core, None)
                 .unwrap();
@@ -883,7 +887,10 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        let mut owner = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
+        let mut owner = LoadedBundle::read(&path, &pool)
+            .unwrap()
+            .into_writer()
+            .unwrap();
         let before = owner.store().usage().unwrap();
         assert_eq!(before.unclassified_bytes, bytes.len() as u64);
         let (asset, entry, pins) = owner
@@ -972,8 +979,9 @@ mod tests {
     }
     #[test]
     fn studio_imports_unlisted_colour_tags_and_reopens_the_media() {
-        use crate::{bundle::LoadedBundle, editing_session::Ja1EditingSession};
-        use kinewright_core::{ColorMatrix, ColorPrimaries, ColorTransfer, Core, Document};
+        use crate::editing_session::Ja1EditingSession;
+        use crate::operation_actor::Core;
+        use kinewright_core::{ColorMatrix, ColorPrimaries, ColorTransfer, Document};
         use kinewright_media::test_support::GeneratedMedia;
 
         let root = TempDirectory::new_in(&workspace_target_dir(), "unlisted-studio-import");
@@ -1004,7 +1012,7 @@ mod tests {
             ],
             "mp4",
         );
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         let mut owner =
             Ja1EditingSession::new(root.root(), &core, StorageLimits::default()).unwrap();
         let imported = owner.import_owned_media(source.path());
@@ -1025,17 +1033,17 @@ mod tests {
             "import does not claim renderer support or guess Rec.709"
         );
         let expected = core.export_history().unwrap();
-        assert_eq!(expected.document.media_pool, vec![asset]);
+        assert_eq!(expected.history().document.media_pool, vec![asset]);
         let path = root.path("imported.kinewright");
+        drop(expected);
         owner.first_save(&path, StorageLimits::default()).unwrap();
+        let expected = core.export_history().unwrap();
+        let pool = core.history_pool().clone();
         drop(owner);
+        drop(core);
         drop(source);
-        let restored = Core::spawn(Document::default()).unwrap();
-        LoadedBundle::read(&path)
-            .unwrap()
-            .restore_manual(&restored)
-            .unwrap();
-        assert_eq!(restored.export_history().unwrap(), expected);
+        let restored = Ja1EditingSession::open(&path, &pool).unwrap();
+        assert_eq!(restored.core().export_history().unwrap(), expected);
     }
 
     #[test]
@@ -1088,13 +1096,13 @@ mod tests {
         let (a, first, _a_pins) = import(&mut owner, 1, 1111);
         let (b, second, _b_pins) = import(&mut owner, 1, -2222);
         assert_ne!(first.entry_id, second.entry_id);
-        let core = kinewright_core::Core::spawn(kinewright_core::Document {
+        let core = crate::operation_actor::Core::for_test(kinewright_core::Document {
             media_pool: vec![a.clone()],
             ..Default::default()
         })
         .unwrap();
         let history = core.export_history().unwrap();
-        let other = kinewright_core::Core::spawn(kinewright_core::Document {
+        let other = crate::operation_actor::Core::for_test(kinewright_core::Document {
             media_pool: vec![b.clone()],
             ..Default::default()
         })
@@ -1103,21 +1111,22 @@ mod tests {
         .unwrap();
         let inputs = manifest(&owner, vec![first.clone(), second.clone()]);
         let mut retained = inputs.clone();
-        crate::bundle_commit::retain_history_inputs(&history, &mut retained);
+        crate::bundle_commit::retain_document_inputs(&history.history().document, &mut retained);
         assert_eq!(
             retained.entries,
             vec![first.clone()],
             "C0_HISTORICAL_COMPLETE_IDENTITY_PRESERVED"
         );
         let mut retained = inputs.clone();
-        crate::bundle_commit::retain_history_inputs(&other, &mut retained);
+        crate::bundle_commit::retain_document_inputs(&other.history().document, &mut retained);
         assert_eq!(
             retained.entries,
             vec![second.clone()],
             "C0_HISTORICAL_COMPLETE_IDENTITY_PRESERVED"
         );
-        crate::bundle_commit::validate_inputs(&history, &inputs).unwrap();
-        crate::bundle_commit::validate_inputs(&other, &inputs).unwrap();
+        crate::bundle_commit::validate_document_inputs(&history.history().document, &inputs)
+            .unwrap();
+        crate::bundle_commit::validate_document_inputs(&other.history().document, &inputs).unwrap();
         let sealed = owner.admit_inputs(&inputs).unwrap();
         for (asset, entry) in [(a, first), (b, second)] {
             assert!(entry.matches_media_asset(&asset));
@@ -1203,7 +1212,8 @@ mod tests {
         let (root, _owner) = session("c0-unsaved-capacity");
         let source = root.path("source.wav");
         std::fs::write(&source, wav(3333)).unwrap();
-        let core = kinewright_core::Core::spawn(kinewright_core::Document::default()).unwrap();
+        let core =
+            crate::operation_actor::Core::for_test(kinewright_core::Document::default()).unwrap();
         let limits = StorageLimits {
             pending_commands: 2,
             ..StorageLimits::default()
@@ -1215,6 +1225,8 @@ mod tests {
         edit.import_owned_media(&source).unwrap();
         let prepared = edit.refresh_unsaved_host_source().unwrap();
         assert_eq!(&prepared.inputs, edit.current_inputs_ref());
+        drop(launch);
+        drop(prepared);
         let before = core.export_history().unwrap();
         let inputs = edit.current_inputs_ref().clone();
         let Err(error) = edit.import_owned_media(&source) else {
@@ -1250,7 +1262,8 @@ mod tests {
         std::fs::write(&actual, &bytes).unwrap();
         let link = root.path("link.wav");
         std::os::unix::fs::symlink(&actual, &link).unwrap();
-        let core = kinewright_core::Core::spawn(kinewright_core::Document::default()).unwrap();
+        let core =
+            crate::operation_actor::Core::for_test(kinewright_core::Document::default()).unwrap();
         let mut session = crate::editing_session::Ja1EditingSession::new(
             root.root(),
             &core,
@@ -1440,7 +1453,8 @@ mod tests {
         let (root, _owner) = session("c0-unsaved-local-colour");
         let path = root.path("source.wav");
         std::fs::write(&path, wav(1234)).unwrap();
-        let core = kinewright_core::Core::spawn(kinewright_core::Document::default()).unwrap();
+        let core =
+            crate::operation_actor::Core::for_test(kinewright_core::Document::default()).unwrap();
         let mut edit = crate::editing_session::Ja1EditingSession::new(
             root.root(),
             &core,
@@ -1472,9 +1486,10 @@ mod tests {
             "C0_UNSAVED_OVERRIDE_ADMITS_NEW_INPUT"
         );
         let history = core.export_history().unwrap();
-        crate::bundle_commit::validate_inputs(&history, &manifest).unwrap();
+        crate::bundle_commit::validate_document_inputs(&history.history().document, &manifest)
+            .unwrap();
         assert_eq!(
-            history.document.media_pool[0].color_description,
+            history.history().document.media_pool[0].color_description,
             changed.color_description
         );
     }

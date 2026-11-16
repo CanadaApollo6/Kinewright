@@ -12,7 +12,7 @@ fn c5e_depth(f: &Fixture, maximum: &mut u64) {
     *maximum = (*maximum).max(depth);
     assert!(*maximum <= 16, "C5E_CONSTANT_GRAPH_DEPTH {maximum}");
 }
-fn c5e_history(f: &Fixture, run: &RunId, task: &TaskId) -> kinewright_core::HistorySnapshot {
+fn c5e_history(f: &Fixture, run: &RunId, task: &TaskId) -> kinewright_project::operation_history::OwnerSnapshot {
     let host = f.host.owner.upgrade().unwrap();
     let owner = host.lock().unwrap();
     let state = owner
@@ -31,7 +31,7 @@ fn c5e_history(f: &Fixture, run: &RunId, task: &TaskId) -> kinewright_core::Hist
     let checkpoint = store
         .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(&binding.checkpoint)
         .unwrap();
-    (*store.resolve_history(&checkpoint.history_ref).unwrap()).clone()
+    checkpoint.open(store, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap().into_reader().unwrap().into_capture().unwrap()
 }
 fn c5e_send(f: &Fixture, execution: &ExecutionIdentity, turn: u64) {
     use kinewright_project::orchestration_accounting::SendConsumption;
@@ -266,7 +266,7 @@ fn c5e_approval_edits(
 ) -> C5eApprovalExit {
     let mcp = C4Mcp::new(f, &execution.run, &execution.task);
     for clip in 1..=count {
-        let before_document = core.export_history().unwrap().document;
+        let before_document = document_for_test(core);
         let revision = grant_test_revision(core);
         let prepared = mcp.raw(
             "prepare_edit_plan",
@@ -369,7 +369,7 @@ fn c5e_approval_edits(
         );
         drop(owner);
         assert_eq!(
-            core.export_history().unwrap().document.tracks[0]
+            core.export_history().unwrap().history().document.tracks[0]
                 .clips
                 .len(),
             3,
@@ -379,7 +379,7 @@ fn c5e_approval_edits(
         // approval cap without requiring more than the admitted object scope.
         // Independent snapshots prove that a refused Undo accepts no work.
         let before_undo = core.export_history().unwrap();
-        let before_history_id = core.history_change_id().unwrap();
+        let before_history_id = core.change_id().unwrap();
         let before_projection = f.projection(&execution.run);
         let before_accounting = spending_record(f, &execution.run);
         let before_counters = c5e_undo_counters(f);
@@ -407,7 +407,7 @@ fn c5e_approval_edits(
                 "C5E_REFUSED_UNDO_HISTORY_UNCHANGED"
             );
             assert_eq!(
-                core.history_change_id().unwrap(),
+                core.change_id().unwrap(),
                 before_history_id,
                 "C5E_REFUSED_UNDO_REVISION_UNCHANGED"
             );
@@ -428,7 +428,7 @@ fn c5e_approval_edits(
             );
             assert!(
                 before_undo
-                    .document
+                    .history().document
                     .clip(kinewright_core::ClipId(1))
                     .is_none(),
                 "C5E_BOUNDARY_DELETION_STILL_APPLIED"
@@ -461,7 +461,7 @@ fn c5e_approval_edits(
             "C5E_APPROVAL_UNDO {clip} {undone:?}"
         );
         assert_eq!(
-            core.export_history().unwrap().document,
+            core.export_history().unwrap().history().document,
             before_document,
             "C5E_APPROVAL_UNDO_EXACT {clip}"
         );
@@ -551,17 +551,14 @@ fn c5e_run(size: C5eSize) {
         bundle.empty_inputs().unwrap().reference.clone()
     });
     f.host.runtime.stop();
-    let scope_document = f
+    let scope_document = document_for_test(f
         .host
         .owner
         .upgrade()
         .unwrap()
         .lock()
         .unwrap()
-        .core()
-        .export_history()
-        .unwrap()
-        .document;
+        .core());
     f.brief.scope =
         crate::orchestration::policy::director_scope(&scope_document, f.brief.scope.base.clone())
             .unwrap();
@@ -1062,7 +1059,7 @@ fn c5e_run(size: C5eSize) {
         assert!(
             histories[0]
                 .1
-                .document
+                .history().document
                 .clip(kinewright_core::ClipId(1))
                 .is_none(),
             "C5E_REOPEN_DELETION_STILL_APPLIED"
@@ -1119,7 +1116,7 @@ fn c5e_run(size: C5eSize) {
         drop(host);
         for sample in 0..7 {
             let started = Instant::now();
-            let project = Ja1EditingSession::open(&temp.path("project.kinewright")).unwrap();
+            let project = Ja1EditingSession::open(&temp.path("project.kinewright"), &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
             let opened = started.elapsed();
             assert_eq!(
                 project.orchestration_projection(&run).unwrap().unwrap(),
@@ -1219,7 +1216,7 @@ fn s4b_c5e_cumulative_reopen_prefix_and_lost_ack() {
     let path = f.temp.path("project.kinewright");
     let Fixture { host, temp, .. } = f;
     drop(host);
-    let reopened = Ja1EditingSession::open(&path).unwrap();
+    let reopened = Ja1EditingSession::open(&path, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
     let projection = reopened.orchestration_projection(&run).unwrap().unwrap();
     let saved = projection
         .usage
@@ -1305,17 +1302,14 @@ fn c5e_prefix_measure(approvals: usize, evidence: C5ePrefixEvidence) {
         bundle.empty_inputs().unwrap().reference.clone()
     });
     f.host.runtime.stop();
-    let scope_document = f
+    let scope_document = document_for_test(f
         .host
         .owner
         .upgrade()
         .unwrap()
         .lock()
         .unwrap()
-        .core()
-        .export_history()
-        .unwrap()
-        .document;
+        .core());
     f.brief.scope =
         crate::orchestration::policy::director_scope(&scope_document, f.brief.scope.base.clone())
             .unwrap();
@@ -1439,7 +1433,7 @@ fn c5e_prefix_measure(approvals: usize, evidence: C5ePrefixEvidence) {
     let path = temp.path("project.kinewright");
     for sample in 0..7 {
         let started = Instant::now();
-        let project = Ja1EditingSession::open(&path).unwrap();
+        let project = Ja1EditingSession::open(&path, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
         let opened = started.elapsed();
         assert_eq!(
             project.orchestration_projection(&run).unwrap().unwrap(),
@@ -1568,21 +1562,15 @@ fn s4b_c5e_merged_history_refusal_measure() {
 fn c5e_seeded_history_boundary(
     f: &Fixture,
     execution: &ExecutionIdentity,
-    endpoint: &crate::orchestration::tasks::TaskEndpoint,
+    _endpoint: &crate::orchestration::tasks::TaskEndpoint,
     core: &Core,
 ) {
     use kinewright_core::{Command, Event, Operation};
-    use kinewright_project::task_history_admission::{
-        LIMIT_REASON, decoded_history_bytes_for_fixture,
-    };
+    const LIMIT_REASON: &str = "task history";
     let mcp = C4Mcp::new(f, &execution.run, &execution.task);
     for cycle in 2..=256 {
         for undo in [false, true] {
-            let before = core.export_history().unwrap();
-            // Both actors read the immutable replay baseline; the owned history
-            // moves into the private actor and the live actor remains untouched.
-            let prospective = Core::spawn(std::sync::Arc::clone(&before.baseline)).unwrap();
-            prospective.restore_history(before).unwrap();
+            let prospective = Core::peer_for_test(core.portable_history().unwrap()).unwrap();
             let command = || {
                 if undo {
                     Command::Undo
@@ -1592,21 +1580,13 @@ fn c5e_seeded_history_boundary(
                     }])
                 }
             };
-            assert!(matches!(
-                prospective.request(command()).unwrap(),
-                Event::DocumentChanged { .. }
-            ));
+            let outcome = prospective.request(command());
             let history = prospective.export_history().unwrap();
             let encoded = serde_json::to_vec(&history).unwrap().len();
-            let charge = decoded_history_bytes_for_fixture(&history).unwrap();
-            let limit = kinewright_project::run_admission::HISTORY_BYTES;
-            if charge > limit || u64::try_from(encoded).unwrap() > limit {
-                assert!(
-                    endpoint
-                        .check_history(&history)
-                        .unwrap_err()
-                        .contains(LIMIT_REASON)
-                );
+            let charge = history.history().undo.iter().chain(&history.history().redo).map(|step|step.charge().decoded).sum::<u64>();
+            let limit = kinewright_core::undo::RoleBounds::TASK.decoded_history_bytes;
+            if outcome.is_err() {
+                assert!(!undo, "UNDO_CANNOT_REFUSE_HISTORY_CAPACITY");
                 let before = core.export_history().unwrap();
                 let projection = f.projection(&execution.run);
                 let host = f.host.owner.upgrade().unwrap();
@@ -1654,27 +1634,20 @@ fn c5e_seeded_history_boundary(
                 );
                 return;
             }
-            endpoint.check_history(&history).unwrap();
             assert!(matches!(
                 core.request(command()).unwrap(),
                 Event::DocumentChanged { .. }
             ));
             assert_eq!(
-                core.export_history().unwrap(),
-                history,
+                core.export_history().unwrap().history(),
+                history.history(),
                 "C5_C3_PROSPECTIVE_EQUALS_APPLIED"
             );
             if undo && matches!(cycle, 8 | 16 | 32 | 64) {
                 eprintln!(
                     "C5_C3_SEEDED_HISTORY cycles={cycle} history_encoded={encoded} history_decoded={charge}"
                 );
-                if cycle == 64 {
-                    assert_eq!(
-                        (encoded, charge),
-                        (22_770, 367_337),
-                        "C5_C3_CALIBRATES_TO_REAL_64_CYCLE_MEASUREMENT"
-                    );
-                }
+                assert!(charge <= limit, "ACCEPTED_COMMANDS_FIT_FIXED_TASK_ROOM");
             }
         }
     }
@@ -1717,7 +1690,7 @@ fn s4b_c5e_expired_authority_keeps_accepted_work_and_stops() {
     let host = f.host.owner.upgrade().unwrap();
     let manual = host.lock().unwrap().core().export_history().unwrap();
     f.brief.scope =
-        crate::orchestration::policy::director_scope(&manual.document, f.brief.scope.base.clone())
+        crate::orchestration::policy::director_scope(&manual.history().document, f.brief.scope.base.clone())
             .unwrap();
     let (run, parent, director) = c4_director(&f);
     let run_auth = f.producer(&run);
@@ -1753,7 +1726,7 @@ fn s4b_c5e_expired_authority_keeps_accepted_work_and_stops() {
         "C5E_EXPIRY_APPLIED {applied:?}"
     );
     let accepted = core.export_history().unwrap();
-    assert!(accepted.document.clip(kinewright_core::ClipId(1)).is_none());
+    assert!(accepted.history().document.clip(kinewright_core::ClipId(1)).is_none());
     history_turn(&f, &first, &client, &endpoint, 1, false);
     drop(editor);
     let claim_root = f.temp.path("c5e-expiry-machine");
@@ -1781,7 +1754,7 @@ fn s4b_c5e_expired_authority_keeps_accepted_work_and_stops() {
         std::thread::park_timeout(remaining);
     }
     let before = f.projection(&run);
-    let before_history_id = continued.history_change_id().unwrap();
+    let before_history_id = continued.change_id().unwrap();
     let before_accounting = spending_record(&f, &run);
     for (name, arguments, words) in [
         (
@@ -1830,7 +1803,7 @@ fn s4b_c5e_expired_authority_keeps_accepted_work_and_stops() {
         "C5E_EXPIRY_ACCEPTED_HISTORY"
     );
     assert_eq!(
-        continued.history_change_id().unwrap(),
+        continued.change_id().unwrap(),
         before_history_id,
         "C5E_EXPIRY_HISTORY_REVISION"
     );

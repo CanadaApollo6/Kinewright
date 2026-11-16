@@ -32,7 +32,7 @@ impl Default for StorageLimits {
         Self {
             control_bytes: 64 << 20,
             pending_commands: 64,
-            command_bytes: 256 << 10,
+            command_bytes: crate::operation_protocol::NATIVE_COMMAND_BYTES,
             branch_history_bytes: 32 << 20,
             live_history_bytes: 128 << 20,
             versions: 100,

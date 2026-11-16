@@ -620,6 +620,9 @@ impl KinewrightApp {
         } else {
             SidecarMode::None
         };
+        let pool = kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        );
         let mut project = ProjectSession::create(
             1,
             name,
@@ -630,6 +633,7 @@ impl KinewrightApp {
             &sidecar_mode,
             Some(Arc::clone(&sidecar_writer)),
             None,
+            &pool,
         )
         .expect("startup project session must be valid");
         project.studio.mode = crate::studio::Mode::Studio;
@@ -944,15 +948,16 @@ impl KinewrightApp {
                 .require_supported()
                 .map_err(|e| e.to_string())?;
             let owner = if session.source_admission.is_studio() {
-                let history = session.core.export_history().map_err(|e| e.to_string())?;
-                if session.source_admission.inspection_document() != Some(&*history.document) {
+                if session.source_admission.inspection_document() != Some(&*session.document) {
                     return Err("The read-only inspection has local edits. Keep this session open; Studio activation cannot discard them.".into());
                 }
-                crate::ja1_attachment::Ja1Attachment::open(
+                crate::ja1_attachment::Ja1Attachment::open_document_view(
                     session
                         .project_path
                         .as_deref()
                         .ok_or("Studio project has no path")?,
+                    &session.core,
+                    &session.document,
                 )
                 .map_err(|e| e.to_string())?
             } else {
@@ -1005,16 +1010,17 @@ impl KinewrightApp {
                         session.project_path.is_some() && session.sidecar.authority.is_none();
                 }
                 if !was_legacy && self.focused().ja1.is_none() {
-                    let prepared =
-                        self.focused().project_path.as_deref().map(
-                            kinewright_project::bundle_recovery::VerifiedCheckpointRecovery::open,
-                        );
+                    let prepared = self.focused().project_path.as_deref().map(|path| {
+                        kinewright_project::bundle_recovery::VerifiedCheckpointRecovery::open(
+                            path,
+                            self.focused().core.history_pool(),
+                        )
+                    });
                     if let Some(Ok(Some(recovery))) = prepared {
                         let current = self.focused().core.export_history();
-                        if current
-                            .as_ref()
-                            .is_ok_and(|history| &*history.document == recovery.document())
-                        {
+                        if current.as_ref().is_ok_and(|history| {
+                            &*history.history().document == recovery.document()
+                        }) {
                             let session = &mut self.projects[self.focused_project];
                             session.retire_legacy_agent_threads(
                                 "Checkpoint recovery",
@@ -1376,6 +1382,7 @@ impl KinewrightApp {
             sidecar_mode,
             Some(writer),
             refuse_rename,
+            self.focused().core.history_pool(),
         )?;
         // The investigator settings are app-wide: a new project inherits the
         // focused copy rather than re-reading the file. Mutes stay
@@ -1715,10 +1722,13 @@ impl KinewrightApp {
                 .checkpoint_recovery
                 .as_ref()
                 .ok_or_else(|| "No verified checkpoint recovery is available.".to_owned())?;
-            let current = session.core.export_history().map_err(|e| e.to_string())?;
-            if &*current.document != recovery.document() {
+            if &*session.document != recovery.document() {
                 return Err("The inspection has local edits. Keep it open; checkpoint recovery cannot discard them.".into());
             }
+            kinewright_project::editing_session::Ja1EditingSession::retire_document_view(
+                &session.core,
+            )
+            .map_err(|error| error.to_string())?;
             recovery.save_copy(path).map_err(|e| e.to_string())
         })();
         match result {
@@ -3642,7 +3652,18 @@ impl KinewrightApp {
                     .map(move |event| (project_index, event))
             })
             .collect::<Vec<_>>();
-        for (project_index, event) in core_events {
+        for (project_index, notification) in core_events {
+            let event = match notification {
+                Ok(event) => event,
+                Err(kinewright_project::operation_actor::Refusal {
+                    error: kinewright_project::operation_actor::Error::MutationRefused(reason),
+                    token,
+                }) => Event::MutationRefused { reason, token },
+                Err(refusal) => {
+                    self.status = refusal.to_string();
+                    continue;
+                }
+            };
             // Review-final B1: every router decision this event carries is
             // made in exactly one place, which both this drain and the test
             // mirror call. The arms below do the rest.
@@ -6505,9 +6526,10 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn au5_one_learn_completion_is_one_operation_and_one_undo() {
         use kinewright_core::{
-            AudioBus, AudioBusId, AudioChain, Command, Core, Document, Effect, EffectId, Event,
+            AudioBus, AudioBusId, AudioChain, Command, Document, Effect, EffectId, Event,
             NOISE_PROFILE_BAND_COUNT, NOISE_PROFILE_PARAMETER_NAMES, ParamValue,
         };
+        use kinewright_project::operation_actor::Core;
         let mut denoise = Effect {
             enabled: true,
             enabled_curve: None,
@@ -6588,7 +6610,7 @@ mod tests {
             "audio_master"
         );
 
-        let core = Core::spawn(original.clone()).unwrap();
+        let core = Core::for_test(original.clone()).unwrap();
         assert!(matches!(
             core.request(Command::DoBatchCoalesced {
                 operations: vec![operation],
@@ -6938,6 +6960,9 @@ pub(crate) mod in1_tests {
             &SidecarMode::None,
             None,
             None,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
         )
         .expect("the test session builds");
         let (probe_tx, probe_rx) = std::sync::mpsc::channel();
@@ -7438,7 +7463,11 @@ pub(crate) mod in1_tests {
     /// Two router tests drive `poll_background` itself rather than this
     /// mirror, so the production tick is pinned as well as the decision.
     pub(crate) fn in1_drain_core(app: &mut KinewrightApp, project_index: usize) {
-        let events: Vec<Event> = app.projects[project_index].core_events.try_iter().collect();
+        let events: Vec<Event> = app.projects[project_index]
+            .core_events
+            .try_iter()
+            .map(Result::unwrap)
+            .collect();
         for event in events {
             app.note_core_event_for_router(project_index, &event);
             if let Event::DocumentChanged { doc, revision, .. } = event {
@@ -10268,6 +10297,9 @@ pub(crate) mod in1_tests {
             &SidecarMode::None,
             None,
             None,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
         )
         .expect("the second IN2 project builds");
         app.projects.push(project);
@@ -11175,11 +11207,9 @@ pub(crate) mod in1_tests {
             Vec::new(),
         );
         in2_pump_until_finished(&mut app);
-        // Make the real live actor fail its request: the first accepted batch
-        // at u64::MAX panics while incrementing its revision, so
-        // `apply_to_live` observes CoreDisconnected and the production Err arm
-        // performs the stale return.
-        let replacement = kinewright_core::Core::spawn_at(
+        // The actor refuses its exhausted revision before changing the document.
+        // The real branch error must keep the proposal open and stale.
+        let replacement = kinewright_project::operation_actor::Core::for_test_at_revision(
             app.projects[0].document.as_ref().clone(),
             TimelineRevision(u64::MAX),
         )
@@ -11202,7 +11232,7 @@ pub(crate) mod in1_tests {
                 .resolver
                 .as_ref()
                 .is_some_and(|resolver| {
-                    matches!(resolver, IncidentResolver::Session { stop, .. } if stop.contains("Core actor has stopped"))
+                    matches!(resolver, IncidentResolver::Session { stop, .. } if stop.contains("CounterExhausted"))
                 }),
         );
         assert!(
@@ -11924,7 +11954,8 @@ mod in2b_tests {
                 let old_path = app.focused().project_path.clone();
                 let admission = app.focused().source_admission.clone();
                 let digest = app.focused().saved_digest.clone();
-                let history = app.focused().core.export_history().unwrap();
+                let history =
+                    serde_json::to_value(app.focused().core.export_history().unwrap()).unwrap();
                 let generations = (
                     app.focused().last_written_gen,
                     app.focused().confirmed_written_gen,
@@ -11946,7 +11977,10 @@ mod in2b_tests {
                 assert_eq!(app.focused().project_path, old_path);
                 assert_eq!(app.focused().source_admission, admission);
                 assert_eq!(app.focused().saved_digest, digest);
-                assert_eq!(app.focused().core.export_history().unwrap(), history);
+                assert_eq!(
+                    serde_json::to_value(app.focused().core.export_history().unwrap()).unwrap(),
+                    history
+                );
                 assert_eq!(
                     (
                         app.focused().last_written_gen,
@@ -12095,6 +12129,9 @@ mod in2b_tests {
             &mode,
             Some(Arc::clone(&writer)),
             None,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
         )
         .expect("the test session builds");
         let (probe_tx, probe_rx) = std::sync::mpsc::channel();
@@ -12371,6 +12408,9 @@ mod in2b_tests {
             id
         };
         let branch = TimelineBranch::new_at(
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
             "in2b-block",
             revision,
             std::sync::Arc::clone(&app.projects[0].document),
@@ -12485,6 +12525,9 @@ mod in2b_tests {
             },
             Some(writer),
             None,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
         )
         .expect("the reopen builds");
         let report = reopened
@@ -13058,7 +13101,12 @@ mod in2b_tests {
             branch_revision: TimelineRevision(1),
             base_document: Arc::new(Document::default()),
             document: Arc::new(Document::default()),
-            operations: Arc::new(Vec::new()),
+            operations: Arc::new(
+                kinewright_project::operation_actor::Core::for_test(Document::default())
+                    .unwrap()
+                    .operations(false)
+                    .unwrap(),
+            ),
         };
         let cleared = chat_panel_observation(stored.as_ref(), &Ok(compared), revision);
         assert_eq!(cleared, (None, None), "site 6 success clears");
@@ -16849,7 +16897,8 @@ pub(crate) mod ja_observe {
                 }
             }
             let core = app.focused().core.clone();
-            let history = core.observe_history().map_err(|e| e.to_string())?;
+            let history_capture = core.export_history().map_err(|e| e.to_string())?;
+            let history = history_capture.history();
             let accepted_observed_ns = started.elapsed().as_nanos().to_string();
             // Delay only the transport poll. The actual App producer, actor,
             // media consumer and paint callback run while every disk ack is absent.
@@ -16939,32 +16988,43 @@ pub(crate) mod ja_observe {
                         attachment.message
                     ));
                 }
-                let loaded = kinewright_project::bundle::LoadedBundle::read(path)
-                    .map_err(|e| e.to_string())?;
-                let restored = kinewright_core::Core::spawn(kinewright_core::Document::default())
-                    .map_err(|e| e.to_string())?;
-                loaded
-                    .restore_manual(&restored)
-                    .map_err(|e| e.to_string())?;
+                let mut loaded = kinewright_project::bundle::LoadedBundle::read(
+                    path,
+                    &kinewright_project::operation_history::HistoryPool::new(
+                        kinewright_project::operation_history::PoolLimits::default(),
+                    ),
+                )
+                .map_err(|e| e.to_string())?;
+                let restored = loaded.open_manual().map_err(|e| e.to_string())?;
                 let durable = restored.export_history().map_err(|e| e.to_string())?;
                 let local = core.export_history().map_err(|e| e.to_string())?;
                 let checkpoint = loaded.manual_checkpoint().map_err(|e| e.to_string())?;
-                let exact_ids = checkpoint
-                    .batch_ids
+                let accepted_messages = accepted
                     .iter()
-                    .rev()
-                    .zip(accepted.iter().rev())
-                    .all(|(id, a)| id.as_str() == a.batch_id);
+                    .map(|encoded| encoded.decode().map_err(|e| e.to_string()))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let exact_ids = accepted_messages.iter().all(|message| {
+                    checkpoint
+                        .stream
+                        .as_ref()
+                        .is_some_and(|stream| stream.lookup(message).ok().flatten().is_some())
+                });
                 let complete = paint_before_ack
                     && manual_painted.len() == accepted.len()
                     && manual_painted
                         .iter()
                         .all(|f| f["presented_before_ack"] == true)
                     && local == durable
-                    && durable.batches.len() == accepted.len()
+                    && durable
+                        .history()
+                        .undo
+                        .iter()
+                        .map(|step| step.commands().len())
+                        .sum::<usize>()
+                        == accepted.len()
                     && exact_ids
                     && attachment.manual_pending_for_test()?.is_empty();
-                let observation = json!({"complete":complete,"painted_frames":manual_painted,"paint_before_ack":paint_before_ack,"pending_was_dirty":pending_dirty,"accepted":accepted,"durable_history":durable,"durable_batch_ids":checkpoint.batch_ids,"saved_after_exact_ack":!attachment.is_dirty(),"evidence_class":"actual_headless_paint_before_transport_publication"});
+                let observation = json!({"complete":complete,"painted_frames":manual_painted,"paint_before_ack":paint_before_ack,"pending_was_dirty":pending_dirty,"accepted":accepted,"durable_history":durable,"durable_receipts":checkpoint.stream,"saved_after_exact_ack":!attachment.is_dirty(),"evidence_class":"actual_headless_paint_before_transport_publication"});
                 attachment.close();
                 observation
             } else if manual_stream {
@@ -17072,8 +17132,10 @@ pub(crate) mod ja_observe {
         let presented = pending && mark.is_some_and(|m| m.cell.stamp == issued && m.cell.at == at);
         let last = accepted
             .last()
-            .ok_or("manual frame accepted identity missing")?;
-        let value = serde_json::json!({"center_rgba":rgba,"presented_before_ack":presented,"command_sequence":last.sequence,"command_digest":last.digest,"batch_id":last.batch_id,"history_sha256":kinewright_media::sha256_bytes(&serde_json::to_vec(&local).map_err(|e| e.to_string())?),"raw_frame":raw});
+            .ok_or("manual frame accepted identity missing")?
+            .decode()
+            .map_err(|e| e.to_string())?;
+        let value = serde_json::json!({"center_rgba":rgba,"presented_before_ack":presented,"command_sequence":last.id.sequence,"command_digest":last.digest().map_err(|e| e.to_string())?,"command_id":last.id,"history_sha256":kinewright_media::sha256_bytes(&serde_json::to_vec(&local).map_err(|e| e.to_string())?),"raw_frame":raw});
         app.focused_mut().ja1 = Some(attachment);
         Ok(value)
     }
@@ -17137,7 +17199,7 @@ pub(crate) fn ja1_destination_witness() {
         );
         assert!(close.contains("only accessible copy"), "{close}");
         app.pending_project_action = None;
-        let history = app.focused().core.export_history().unwrap();
+        let history = serde_json::to_value(app.focused().core.export_history().unwrap()).unwrap();
         let count = app.projects.len();
         for step in 0..5 {
             if let Ok(selected) = std::env::var("JA_C6_DESTINATION_CASE")
@@ -17171,7 +17233,10 @@ pub(crate) fn ja1_destination_witness() {
                 app.status
             );
             assert_eq!(app.projects.len(), count);
-            assert_eq!(app.focused().core.export_history().unwrap(), history);
+            assert_eq!(
+                serde_json::to_value(app.focused().core.export_history().unwrap()).unwrap(),
+                history
+            );
         }
         assert!(
             app.focused()
@@ -17211,7 +17276,10 @@ pub(crate) fn ja1_destination_witness() {
             app.poll_ja1(&ctx);
             std::thread::yield_now();
         }
-        assert_eq!(app.focused().core.export_history().unwrap(), history);
+        assert_eq!(
+            serde_json::to_value(app.focused().core.export_history().unwrap()).unwrap(),
+            history
+        );
         app.start_ja1(Action::Abandon);
         while app.focused().ja1_job.is_some() {
             app.poll_ja1(&ctx);
@@ -17285,7 +17353,10 @@ pub(crate) fn ja1_focus_witness() {
             assert_eq!(retained.owner.rescue_slots(), slots);
             assert!(matches!(
                 kinewright_project::editing_session::Ja1EditingSession::open(
-                    &temp.path("drive/a.kinewright")
+                    &temp.path("drive/a.kinewright"),
+                    &kinewright_project::operation_history::HistoryPool::new(
+                        kinewright_project::operation_history::PoolLimits::default()
+                    )
                 ),
                 Err(kinewright_project::bundle::BundleError::Contention(_))
             ));
@@ -17302,6 +17373,10 @@ pub(crate) fn ja1_focus_witness() {
 }
 
 #[cfg(all(test, target_os = "linux"))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the real view witness checks the saved prefix and a later accepted suffix through one user flow"
+)]
 pub(crate) fn ja1_review_save_suffix_witness() {
     use crate::ja1_attachment::{Action, Ja1Attachment, tests::named};
     use kinewright_project::{
@@ -17311,8 +17386,15 @@ pub(crate) fn ja1_review_save_suffix_witness() {
     for mode in ["ordinary", "first", "as"] {
         let (temp, mut attachment) = named();
         if mode == "first" {
-            let core = kinewright_core::Core::spawn(
-                (*attachment.owner.core().export_history().unwrap().document).clone(),
+            let core = kinewright_project::operation_actor::Core::for_test(
+                (*attachment
+                    .owner
+                    .core()
+                    .export_history()
+                    .unwrap()
+                    .history()
+                    .document)
+                    .clone(),
             )
             .unwrap();
             attachment = Ja1Attachment::new(
@@ -17321,7 +17403,7 @@ pub(crate) fn ja1_review_save_suffix_witness() {
             .unwrap();
         }
         let actor = attachment.owner.core().clone();
-        let expected = actor.export_history().unwrap();
+        let mut expected = serde_json::to_value(actor.export_history().unwrap()).unwrap();
         let path = temp.path(if mode == "first" {
             "first.kinewright"
         } else if mode == "as" {
@@ -17337,29 +17419,36 @@ pub(crate) fn ja1_review_save_suffix_witness() {
             Action::Save
         };
         let (mut app, engine) = in2b_tests::in2b_harness(Document::default(), None);
-        app.focused_mut().ja1_job = Some(std::thread::spawn(move || {
-            io_observer::at_barrier(
-                if mode == "ordinary" {
-                    "history_selected"
-                } else {
-                    "copy_before_publish"
-                },
-                move || {
-                    assert!(matches!(
-                        actor
-                            .request(Command::Do(Operation::SetTrackSyncLock {
-                                track: TrackId(1),
-                                locked: false
-                            }))
-                            .unwrap(),
-                        Event::DocumentChanged { .. }
-                    ));
-                },
-                || attachment.apply(action),
-            )
-            .unwrap();
-            attachment
-        }));
+        app.focused_mut().ja1_job =
+            Some(std::thread::spawn(move || {
+                io_observer::at_barrier(
+                    if mode == "ordinary" {
+                        "history_selected"
+                    } else {
+                        "copy_before_publish"
+                    },
+                    move || {
+                        let result = actor.request(Command::Do(Operation::SetTrackSyncLock {
+                            track: TrackId(1),
+                            locked: false,
+                        }));
+                        if mode == "ordinary" {
+                            assert!(matches!(result.unwrap(), Event::DocumentChanged { .. }));
+                        } else {
+                            assert!(
+                                matches!(result, Err(kinewright_project::operation_actor::Refusal {
+                            error: kinewright_project::operation_actor::Error::MutationRefused(
+                                kinewright_core::CoreMutationRefusal::Frozen), ..
+                        })),
+                                "COPY_INSTALL_FENCES_POST_CAPTURE_RAW_EDITS"
+                            );
+                        }
+                    },
+                    || attachment.apply(action),
+                )
+                .unwrap();
+                attachment
+            }));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let ctx = egui::Context::default();
             theme::install(&ctx);
@@ -17369,10 +17458,30 @@ pub(crate) fn ja1_review_save_suffix_witness() {
                 app.poll_ja1(&ctx);
                 std::thread::yield_now();
             }
-            let loaded = LoadedBundle::read(&path).unwrap();
-            let reader = kinewright_core::Core::spawn(Document::default()).unwrap();
-            loaded.restore_manual(&reader).unwrap();
-            assert_eq!(reader.export_history().unwrap(), expected);
+            let mut loaded = LoadedBundle::read(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap();
+            let reader = loaded.open_manual().unwrap();
+            let stored = serde_json::to_value(reader.export_history().unwrap()).unwrap();
+            if mode != "ordinary" {
+                assert!(
+                    stored["history"]["epoch"].as_u64().unwrap()
+                        > expected["history"]["epoch"].as_u64().unwrap()
+                );
+                expected["history"]["epoch"] = stored["history"]["epoch"].clone();
+            }
+            assert_eq!(stored, expected);
+            if mode != "ordinary" {
+                assert!(
+                    !app.focused().is_dirty(),
+                    "REFUSED_COPY_SUFFIX_IS_NOT_UNSAVED_WORK"
+                );
+                return;
+            }
             assert!(
                 app.focused().is_dirty(),
                 "App must not close an accepted unpublished suffix for {mode}"
@@ -17437,7 +17546,7 @@ pub(crate) fn ja1_review_dirty_poll_witness() {
                 ));
             }
             let ((), trace) = io_observer::observe(|| {
-                let history = app.focused().core.export_history().unwrap();
+                let position = app.focused().core.change_id().unwrap().position;
                 let saved = app
                     .focused()
                     .ja1
@@ -17446,11 +17555,8 @@ pub(crate) fn ja1_review_dirty_poll_witness() {
                     .owner
                     .association()
                     .unwrap()
-                    .saved_digest()
-                    .unwrap()
-                    .to_owned();
-                let expected =
-                    kinewright_media::sha256_bytes(&serde_json::to_vec(&history).unwrap()) != saved;
+                    .saved_position();
+                let expected = saved != Some(position);
                 for _ in 0..100 {
                     assert_eq!(app.focused().is_dirty(), expected);
                 }
@@ -17512,7 +17618,7 @@ pub(crate) fn ja1_review_worker_panic_witness() {
 )]
 pub(crate) fn ja_c9_bootstrap_save_witness(dirty_named: bool) {
     use crate::ja1_attachment::Action;
-    use kinewright_core::{AttachmentState, Core};
+    use kinewright_core::AttachmentState;
     use kinewright_project::bundle::LoadedBundle;
 
     let root = kinewright_media::test_support::workspace_target_dir();
@@ -17556,7 +17662,7 @@ pub(crate) fn ja_c9_bootstrap_save_witness(dirty_named: bool) {
         } else {
             None
         };
-        let before = core.export_history().unwrap();
+        let before_install = serde_json::to_value(core.export_history().unwrap()).unwrap();
         if let Some(owner) = named_owner {
             // C9's named-owner harness: the named checkpoint predates a local
             // dirty edit when the real Studio host is activated.
@@ -17582,6 +17688,18 @@ pub(crate) fn ja_c9_bootstrap_save_witness(dirty_named: bool) {
             app.focused().ja1.as_ref().unwrap().host_attached(),
             "{}",
             app.status
+        );
+        let before = serde_json::to_value(core.export_history().unwrap()).unwrap();
+        assert!(
+            before["history"]["epoch"].as_u64().unwrap()
+                > before_install["history"]["epoch"].as_u64().unwrap(),
+            "BOOTSTRAP_INSTALL_STARTS_A_NEW_EPOCH"
+        );
+        let mut selected = before.clone();
+        selected["history"]["epoch"] = before_install["history"]["epoch"].clone();
+        assert_eq!(
+            selected, before_install,
+            "BOOTSTRAP_PRESERVES_THE_EXACT_SELECTED_STATE"
         );
         assert!(app.focused().ja1_read_only());
         assert_eq!(core.attachment_state(), Ok(AttachmentState::Frozen));
@@ -17636,7 +17754,7 @@ pub(crate) fn ja_c9_bootstrap_save_witness(dirty_named: bool) {
                 app.status
             );
             assert_eq!(
-                core.export_history().unwrap(),
+                serde_json::to_value(core.export_history().unwrap()).unwrap(),
                 before,
                 "producer {producer}"
             );
@@ -17644,7 +17762,10 @@ pub(crate) fn ja_c9_bootstrap_save_witness(dirty_named: bool) {
         // A stale/raw sender reaches the actor's Frozen refusal. The real GUI
         // event drain must replace its generic check message with the Save reason.
         core.send(Command::Do(operation(dirty_named))).unwrap();
-        assert_eq!(core.export_history().unwrap(), before);
+        assert_eq!(
+            serde_json::to_value(core.export_history().unwrap()).unwrap(),
+            before
+        );
         app.status.clear();
         app.poll_background(&ctx);
         assert!(
@@ -17652,7 +17773,10 @@ pub(crate) fn ja_c9_bootstrap_save_witness(dirty_named: bool) {
             "C2_BOOTSTRAP_SAVE_UI_REMAINS_AVAILABLE"
         );
         assert!(app.status.contains("Save once"), "{}", app.status);
-        assert_eq!(core.export_history().unwrap(), before);
+        assert_eq!(
+            serde_json::to_value(core.export_history().unwrap()).unwrap(),
+            before
+        );
 
         // The periodic successful Status path must also retain the same fence.
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -17671,7 +17795,10 @@ pub(crate) fn ja_c9_bootstrap_save_witness(dirty_named: bool) {
                 .message
                 .contains("Save once")
         );
-        assert_eq!(core.export_history().unwrap(), before);
+        assert_eq!(
+            serde_json::to_value(core.export_history().unwrap()).unwrap(),
+            before
+        );
 
         // A later successful host reply must not clear the bootstrap presentation
         // or leave the actor writable before a durable checkpoint exists.
@@ -17685,7 +17812,10 @@ pub(crate) fn ja_c9_bootstrap_save_witness(dirty_named: bool) {
         assert!(app.focused().ja1_read_only());
         assert_eq!(core.attachment_state(), Ok(AttachmentState::Frozen));
         assert!(app.status.contains("Save once"), "{}", app.status);
-        assert_eq!(core.export_history().unwrap(), before);
+        assert_eq!(
+            serde_json::to_value(core.export_history().unwrap()).unwrap(),
+            before
+        );
 
         if dirty_named {
             assert!(
@@ -17731,8 +17861,14 @@ pub(crate) fn ja_c9_bootstrap_save_witness(dirty_named: bool) {
             .unwrap()
             .settle_manual_for_test();
         let accepted_history = core.export_history().unwrap();
-        assert_eq!(accepted_history.batches.len(), before.batches.len() + 1);
-        assert_eq!(accepted_history.document.tracks[0].sync_lock, dirty_named);
+        assert_eq!(
+            accepted_history.history().undo.len(),
+            before["history"]["undo"].as_array().unwrap().len() + 1
+        );
+        assert_eq!(
+            accepted_history.history().document.tracks[0].sync_lock,
+            dirty_named
+        );
         let pending = app
             .focused()
             .ja1
@@ -17756,19 +17892,27 @@ pub(crate) fn ja_c9_bootstrap_save_witness(dirty_named: bool) {
             );
             std::thread::yield_now();
         }
-        let loaded = LoadedBundle::read(&path).unwrap();
-        let restored = Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&restored).unwrap();
+        let mut loaded = LoadedBundle::read(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
+        let restored = loaded.open_manual().unwrap();
         assert_eq!(restored.export_history().unwrap(), accepted_history);
-        assert_eq!(
+        let message = pending[0].decode().unwrap();
+        assert!(
             loaded
                 .manual_checkpoint()
                 .unwrap()
-                .batch_ids
-                .last()
+                .stream
+                .as_ref()
                 .unwrap()
-                .as_str(),
-            pending[0].batch_id
+                .lookup(&message)
+                .unwrap()
+                .is_some(),
+            "C9_PUBLISHED_RECEIPT_MATCHES_ACCEPTED_COMMAND"
         );
         assert!(!app.focused().ja1_read_only());
         assert!(!app.status.contains("Save once"));
@@ -17839,13 +17983,13 @@ pub(crate) fn ja_c9_manual_producer_gate_witness() {
         .settle_manual_for_test();
     let before = core.export_history().unwrap();
     assert_eq!(
-        before.batches.len(),
+        before.history().position,
         5,
         "discrete, batch, live and keyboard producers must use the permit"
     );
     let attachment = app.projects[0].ja1.as_mut().unwrap();
     let cut = attachment.owner.freeze_host_cut().unwrap();
-    let history = cut.history().clone();
+    let history = cut.identity();
     // The actual actor fence, rather than a UI read-only flag, blocks commands
     // which were planned earlier or come from asynchronous/background callbacks.
     app.send_operation(operation());
@@ -17886,7 +18030,7 @@ pub(crate) fn ja_c9_manual_producer_gate_witness() {
         .unwrap()
         .settle_manual_for_test();
     assert_eq!(
-        core.export_history().unwrap(),
+        core.snapshot_identity().unwrap(),
         history,
         "no producer may accept after the frozen cut"
     );
@@ -17981,10 +18125,11 @@ pub(crate) fn ja_s2h_legacy_activation_witness() {
     assert!(app.status.contains("Save are available"));
     assert!(app.save_project(false), "{}", app.status);
     assert_eq!(core.export_history().unwrap(), expected);
-    let serialized = kinewright_project::serialize_project_document(&expected.document).unwrap();
+    let serialized =
+        kinewright_project::serialize_project_document(&expected.history().document).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), serialized.as_bytes());
     let (reopened, _, _) = kinewright_project::load_document(&path).unwrap();
-    assert_eq!(reopened, *expected.document);
+    assert_eq!(reopened, *expected.history().document);
     in2b_tests::in2b_quiesce_engine(&engine);
     in1_tests::in2_cleanup(&mut app);
     app.focused_mut()

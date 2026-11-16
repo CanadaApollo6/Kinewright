@@ -23,7 +23,7 @@ fn app_session_undo_stops_at_saved_floor_and_next_save_keeps_edits() {
     };
     let (mut app, engine) = in2b_harness(document, None);
     let path = temp.path("saved.kinewright");
-    let mut owner = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let mut owner = ProjectBundle::activate(&path, BundleWriteAdmission::new_document(), app.focused().core.history_pool()).unwrap();
     let inputs = owner.empty_inputs().unwrap().reference.clone();
     owner.save(&app.focused().core, &inputs).unwrap();
     owner
@@ -39,45 +39,37 @@ fn app_session_undo_stops_at_saved_floor_and_next_save_keeps_edits() {
         });
         owner.save(&app.focused().core, &inputs).unwrap();
     }
-    let saved = app.focused().core.export_history().unwrap();
-    assert!(saved.floor_offset > 0);
+    let saved = serde_json::to_value(app.focused().core.export_history().unwrap()).unwrap();
+    assert_eq!(saved["history"]["undo"].as_array().unwrap().len(), 40, "SAVING_DOES_NOT_FOLD_EXECUTOR_HISTORY");
     assert_eq!(
         saved,
-        *owner.branch_history(owner.manual_branch_id()).unwrap()
+        serde_json::to_value(owner.branch_history(owner.manual_branch_id()).unwrap().into_capture().unwrap()).unwrap()
     );
-    for _ in 0..saved.cursor.undo.len() + 3 {
+    for _ in 0..saved["history"]["undo"].as_array().unwrap().len() + 3 {
         app.undo();
     }
     let floor = app.focused().core.export_history().unwrap();
-    eprintln!(
-        "APP_SESSION_FLOOR saved_batches={} undo={} after_undo_batches={} saved_cost={:?} undo_cost={:?}",
-        saved.batches.len(),
-        saved.cursor.undo.len(),
-        floor.batches.len(),
-        kinewright_project::bundle_commit::history_cost_probe(&saved, &StorageLimits::default()),
-        kinewright_project::bundle_commit::history_cost_probe(&floor, &StorageLimits::default()),
-    );
     assert!(
-        floor.cursor.undo.is_empty(),
+        floor.history().undo.is_empty(),
         "app offered undo below the saved floor"
     );
-    assert_eq!(floor.cursor.redo.len(), saved.cursor.undo.len());
+    assert_eq!(floor.history().redo.len(), saved["history"]["undo"].as_array().unwrap().len());
+    drop(floor);
     owner
         .save(&app.focused().core, &inputs)
         .expect("undo through the app/session path made every later save fail");
-    for _ in 0..floor.cursor.redo.len() {
+    for _ in 0..saved["history"]["undo"].as_array().unwrap().len() {
         app.redo();
     }
     assert_eq!(
-        app.focused().core.export_history().unwrap().document,
-        saved.document,
+        serde_json::to_value(&*app.focused().core.export_history().unwrap().history().document).unwrap(),
+        saved["history"]["document"],
         "app/session undo lost a saved edit"
     );
     owner.save(&app.focused().core, &inputs).unwrap();
     drop(owner);
-    let loaded = LoadedBundle::read(&path).unwrap();
-    let restored = kinewright_core::Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&restored).unwrap();
+    let mut loaded = LoadedBundle::read(&path, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
+    let restored = loaded.open_manual().unwrap();
     assert_eq!(
         restored.export_history().unwrap(),
         app.focused().core.export_history().unwrap()

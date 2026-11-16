@@ -175,7 +175,7 @@ fn te13_fix5_restart(
     let prior = app.focused_mut().ja1.take().unwrap();
     drop(writer.take());
     drop(prior);
-    let owner = kinewright_project::editing_session::Ja1EditingSession::open(&path).unwrap();
+    let owner = kinewright_project::editing_session::Ja1EditingSession::open(&path, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
     let mut attachment = crate::ja1_attachment::Ja1Attachment::new(owner).unwrap();
     *writer = Some(te13_fix5_launch(&mut attachment, fixture));
     // Re-establish the same authenticated subject, not authority over another

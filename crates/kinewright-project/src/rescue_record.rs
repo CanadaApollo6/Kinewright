@@ -60,6 +60,7 @@ pub struct RescueCopyV1 {
     pub project_id: ProjectId,
     pub originating_session: SessionId,
     pub full_capture_sha256: String,
+    pub capture_checkpoints: Vec<ObjectRef>,
     pub selected_capture_sha256: String,
     pub old_floor: u64,
     pub new_floor: u64,
@@ -144,7 +145,11 @@ impl crate::store::record_sealed::Sealed for RescueCopyV1 {}
 impl BundleRecord for RescueCopyV1 {
     const KIND: RecordKind = RecordKind::OwnedEvidence;
     fn dependencies(&self) -> Vec<ObjectRef> {
-        self.acknowledged_root.iter().cloned().collect()
+        self.acknowledged_root
+            .iter()
+            .chain(&self.capture_checkpoints)
+            .cloned()
+            .collect()
     }
     fn validate(&self, _: &StorageLimits) -> Result<(), BundleError> {
         if self.role != RESCUE_ROLE || self.schema != 1 {
@@ -169,6 +174,17 @@ impl BundleRecord for RescueCopyV1 {
             || (self.summary.count_overflow && self.summary.count != u64::MAX)
         {
             return Err(BundleError::Corrupt("rescue capture/provenance".into()));
+        }
+        if self.capture_checkpoints.len() > 4 {
+            return Err(BundleError::Capacity("rescue captures"));
+        }
+        for reference in &self.capture_checkpoints {
+            reference.validate()?;
+            if reference.record_kind != RecordKind::BranchCheckpoint {
+                return Err(BundleError::Corrupt(
+                    "rescue capture checkpoint kind".into(),
+                ));
+            }
         }
         for root in self
             .acknowledged_root

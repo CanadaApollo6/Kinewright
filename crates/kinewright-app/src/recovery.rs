@@ -35,11 +35,12 @@ use std::{
 use crossbeam_channel::{Receiver, Sender, select, unbounded};
 use eframe::egui;
 use kinewright_core::{
-    Core, Document, Event, IncidentCode, IncidentObservation, IncidentSubject, JournalCommand,
+    Document, Event, IncidentCode, IncidentObservation, IncidentSubject, JournalCommand,
     LabelIncident, PROJECT_FORMAT_VERSION, TimelineRevision,
 };
 #[cfg(test)]
 use kinewright_project::canonical_project_identity;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     JOURNAL_MAGIC as MAGIC, allocate_journal_path, default_recovery_directory,
 };
@@ -417,7 +418,19 @@ fn inspect_path(path: &Path) -> Inspection {
 }
 
 fn replay(parsed: ParsedJournal) -> Inspection {
-    let core = match Core::spawn(parsed.initial_document.clone()) {
+    let pool = kinewright_project::operation_history::HistoryPool::new(
+        kinewright_project::operation_history::PoolLimits::default(),
+    );
+    let origin = kinewright_project::operation_history::CreationOrigin {
+        branch: kinewright_project::bundle_records::BranchId::fresh().expect("OS randomness"),
+        batch: kinewright_project::bundle_records::BatchId::fresh().expect("OS randomness"),
+    };
+    let core = match Core::spawn(
+        &pool,
+        kinewright_project::operation_history::Role::Ordinary,
+        origin,
+        parsed.initial_document.clone(),
+    ) {
         Ok(core) => core,
         Err(error) => {
             return Inspection::Unusable(Damage {
@@ -534,11 +547,11 @@ impl Recorder {
             .subscribe()
             .map_err(|error| format!("could not subscribe recovery recorder to Core: {error}"))?;
         let initial_document = match events.recv_timeout(CORE_RESPONSE_TIMEOUT) {
-            Ok(Event::DocumentChanged {
+            Ok(Ok(Event::DocumentChanged {
                 doc,
                 journal_command: None,
                 ..
-            }) => (*doc).clone(),
+            })) => (*doc).clone(),
             Ok(_) => return Err("Core returned an unexpected initial recovery event".to_owned()),
             Err(error) => {
                 return Err(format!(
@@ -605,7 +618,7 @@ impl Drop for Recorder {
 
 fn recorder_loop(
     mut writer: JournalWriter,
-    events: &Receiver<Event>,
+    events: &Receiver<kinewright_project::operation_actor::Notification>,
     controls: &Receiver<RecorderControl>,
     runtime_error: &Mutex<Option<String>>,
 ) {
@@ -633,11 +646,12 @@ fn recorder_loop(
                 Err(_) => break,
             },
             recv(events) -> event => match event {
-                Ok(event) => {
+                Ok(Ok(event)) => {
                     if !record_event(&mut writer, event, runtime_error) {
                         break;
                     }
                 }
+                Ok(Err(_)) => {},
                 Err(_) => break,
             }
         }
@@ -645,11 +659,14 @@ fn recorder_loop(
 }
 
 fn drain_events(
-    events: &Receiver<Event>,
+    events: &Receiver<kinewright_project::operation_actor::Notification>,
     writer: &mut JournalWriter,
     runtime_error: &Mutex<Option<String>>,
 ) -> bool {
-    while let Ok(event) = events.try_recv() {
+    while let Ok(notification) = events.try_recv() {
+        let Ok(event) = notification else {
+            continue;
+        };
         if !record_event(writer, event, runtime_error) {
             return false;
         }
@@ -1509,7 +1526,7 @@ mod tests {
     }
 
     fn execute(initial: &Document, commands: &[JournalCommand]) -> Document {
-        let core = Core::spawn(initial.clone()).unwrap();
+        let core = Core::for_test(initial.clone()).unwrap();
         let mut document = initial.clone();
         for command in commands {
             match core.request(command.clone().into()).unwrap() {
@@ -1870,7 +1887,7 @@ mod tests {
     #[test]
     fn recorder_subscribes_to_human_and_agent_core_events() {
         let directory = TestDirectory::new("events");
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         let runtime_error = Arc::new(Mutex::new(None));
         let mut recorder = Recorder::start(
             &core,
@@ -1902,7 +1919,7 @@ mod tests {
         else {
             return;
         };
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         let runtime_error = Arc::new(Mutex::new(None));
         let recorder = Recorder::start(&core, &path, None, runtime_error).unwrap();
         for command in representative_commands() {
@@ -1993,7 +2010,7 @@ mod tests {
     #[test]
     fn clean_drop_removes_only_this_sessions_journal() {
         let directory = TestDirectory::new("clean-drop");
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         let path;
         {
             let recovery = Recovery::start_in(directory.0.clone(), &core, None);
@@ -2024,7 +2041,7 @@ mod tests {
         let directory = TestDirectory::new("header-only");
         let stale = directory.0.join("unsaved-1.journal");
         drop(JournalWriter::create(&stale, None, &Document::default()).unwrap());
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
 
         let recovery = Recovery::start_in(directory.0.clone(), &core, None);
         assert_eq!(recovery.pending.len(), 1);
@@ -2047,7 +2064,7 @@ mod tests {
         let directory = TestDirectory::new("attached-no-scan");
         let stale = directory.0.join("unsaved-1.journal");
         drop(JournalWriter::create(&stale, None, &Document::default()).unwrap());
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
 
         let recovery = Recovery::start_attached_in(directory.0.clone(), &core, None);
         assert!(recovery.pending.is_empty());
@@ -2060,8 +2077,8 @@ mod tests {
         let directory = TestDirectory::new("pending-transfer");
         let stale = directory.0.join("unsaved-1.journal");
         drop(JournalWriter::create(&stale, None, &Document::default()).unwrap());
-        let first_core = Core::spawn(Document::default()).unwrap();
-        let next_core = Core::spawn(Document::default()).unwrap();
+        let first_core = Core::for_test(Document::default()).unwrap();
+        let next_core = Core::for_test(Document::default()).unwrap();
         let mut first = Recovery::start_in(directory.0.clone(), &first_core, None);
         let mut next = Recovery::start_attached_in(directory.0.clone(), &next_core, None);
 
@@ -2075,7 +2092,7 @@ mod tests {
     #[test]
     fn successful_save_checkpoint_discards_pre_save_commands_and_adopts_the_name() {
         let directory = TestDirectory::new("checkpoint");
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         let mut recovery = Recovery::start_in(directory.0.clone(), &core, None);
         let unsaved_path = recovery.path.clone();
         let first = JournalCommand::Do(Operation::AddAsset { asset: asset(1) });
@@ -2189,7 +2206,7 @@ mod tests {
         );
         fs::write(directory.0.join("notes.txt"), b"not a journal").unwrap();
 
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         let mut recovery = Recovery::start_in(directory.0.clone(), &core, None);
         assert_eq!(recovery.pending.len(), 2);
         let saved = recovery
@@ -2339,7 +2356,7 @@ pub(crate) fn g04_gui_journal_observation() -> Result<serde_json::Value, String>
     fs::write(&project, &bytes).unwrap();
     let directory = temp.path("recovery");
     fs::create_dir(&directory).unwrap();
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let control = Recovery::start_attached_in(directory.clone(), &core, Some(&project));
     core.request(kinewright_core::Command::Undo).unwrap();
     control
@@ -2382,7 +2399,7 @@ pub(crate) fn g04_gui_journal_observation() -> Result<serde_json::Value, String>
                 let pending_slot = Arc::clone(&pending_slot);
                 let created = std::thread::spawn(move || {
                     let pending = pending_slot.lock().unwrap().take().unwrap();
-                    let core = Core::spawn(Document::default()).unwrap();
+                    let core = Core::for_test(Document::default()).unwrap();
                     let writer =
                         Recovery::start_with_pending(directory, &core, Some(&named), pending);
                     let created = writer.recorder.is_some();
@@ -2439,7 +2456,7 @@ pub(crate) fn g04_gui_lost_authority() {
         kinewright_project::serialize_project_document(&Document::default()).unwrap(),
     )
     .unwrap();
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     let mut recovery = Recovery::start_attached_in(temp.path("recovery"), &core, Some(&project));
     recovery.recorder.as_ref().unwrap().flush().unwrap();
     let journal = recovery.path.clone();
@@ -2513,7 +2530,7 @@ pub(crate) fn g04_gui_directory_stays_pinned() {
         kinewright_project::serialize_project_document(&Document::default()).unwrap(),
     )
     .unwrap();
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     let directory = temp.path("recovery");
     let mut recovery = Recovery::start_attached_in(directory.clone(), &core, Some(&project));
     recovery.recorder.as_ref().unwrap().flush().unwrap();
@@ -2558,7 +2575,7 @@ pub(crate) fn g04_startup_retirement_keeps_scanned_identity() {
     let journal = directory.join(kinewright_project::journal_file_name(&project));
     let control = JournalWriter::create(&journal, Some(&project), &Document::default()).unwrap();
     drop(control);
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     let mut recovery =
         Recovery::start_with_pending(directory.clone(), &core, None, scan_directory(&directory));
     let captured = fs::read(&journal).unwrap();

@@ -4639,7 +4639,8 @@ mod tests {
 
     #[test]
     fn freeze_at_playhead_builds_one_split_gap_add_batch_and_one_undo_reverts_it() {
-        use kinewright_core::{Command, Core, Event};
+        use kinewright_core::{Command, Event};
+        use kinewright_project::operation_actor::Core;
 
         let mut document = linked_fixture();
         document.tracks.truncate(1);
@@ -4666,7 +4667,7 @@ mod tests {
             ]
         );
 
-        let core = Core::spawn(document.clone()).unwrap();
+        let core = Core::for_test(document.clone()).unwrap();
         core.request(Command::DoBatch(operations)).unwrap();
         let undone = match core.request(Command::Undo).unwrap() {
             Event::DocumentChanged { doc, .. } => doc,
@@ -5241,14 +5242,15 @@ mod tests {
     /// (`au2_core.rs:1387`).
     #[test]
     fn a_coalesced_envelope_drag_is_one_undo_entry() {
-        use kinewright_core::{Command, Core, Event};
+        use kinewright_core::{Command, Event};
+        use kinewright_project::operation_actor::Core;
 
         let mut document = linked_fixture();
         document.tracks[1].clips[0].audio_gain_curve = Some(envelope_curve(&[(0, 0), (20, 0)]));
         let clip = document.tracks[1].clips[0].id;
         let key = kinewright_core::envelope_coalesce_key(clip);
         assert_eq!(key, format!("envelope:{clip}"));
-        let core = Core::spawn(document.clone()).unwrap();
+        let core = Core::for_test(document.clone()).unwrap();
 
         let duration = TimeCode(30);
         let stored = document.tracks[1].clips[0]

@@ -301,9 +301,9 @@ fn s4b_c3_fix1_history_crash_child() {
     core.request(Command::Undo).unwrap();
     let after = core.export_history().unwrap();
     assert!(
-        !before.cursor.redo.is_empty()
-            && !after.cursor.redo.is_empty()
-            && !manual.cursor.redo.is_empty()
+        !before.history().redo.is_empty()
+            && !after.history().redo.is_empty()
+            && !manual.history().redo.is_empty()
     );
     let machine = f.temp.path("history-machine");
     let claim = crate::execution_claim::MachineClaim::acquire_fixture(
@@ -411,12 +411,8 @@ fn s4b_c3_fix1_history_atomic_crash_cuts() {
                 serde_json::from_value(data["machine"].clone()).unwrap();
             let identity: ExecutionIdentity =
                 serde_json::from_value(data["identity"].clone()).unwrap();
-            let expected: kinewright_core::HistorySnapshot = serde_json::from_value(
-                data[if cut == "after" { "after" } else { "before" }].clone(),
-            )
-            .unwrap();
-            let manual: kinewright_core::HistorySnapshot =
-                serde_json::from_value(data["manual"].clone()).unwrap();
+            let expected = decode_owner_fixture(data[if cut == "after" { "after" } else { "before" }].clone());
+            let manual = decode_owner_fixture(data["manual"].clone());
             let writer = WriterHost::start(HostConfig {
                 scheduler_settings: Some(root.join("scheduler")),
                 project: "hooks".into(),

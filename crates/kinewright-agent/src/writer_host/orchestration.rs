@@ -161,7 +161,7 @@ pub(super) struct HostRun {
     pub pending_provider_wait: Option<String>,
 }
 #[cfg(test)]
-pub type ConsentApplyHook = Arc<dyn Fn(&kinewright_core::Core) + Send + Sync>;
+pub type ConsentApplyHook = Arc<dyn Fn(&kinewright_project::operation_actor::Core) + Send + Sync>;
 #[derive(Default)]
 pub(super) struct Hooks {
     pub pending_edit_applications: Vec<super::task_mcp::consent::PendingEditApplication>,
@@ -1090,9 +1090,10 @@ impl HostCommandOwner {
                 .and_then(|run| run.tasks.get(&publish.task))
                 .ok_or_else(|| refused("result task missing"))?;
             let delta = runtime
-                .frozen_delta()
+                .frozen_delta(self.owner()?)?
                 .ok_or_else(|| refused("task is not frozen"))?
-                .to_vec();
+                .operations()
+                .to_owned();
             let result = &publish.result;
             // `usage_ref` was bound by the host above; only base, head and
             // delta identify the frozen task.
@@ -1245,6 +1246,34 @@ impl HostCommandOwner {
     }
 
     pub(super) fn observe_run(
+        &self,
+        index: usize,
+        run: &RunId,
+        after_sequence: u64,
+    ) -> Result<RunViewPage, HostError> {
+        self.observe_run_inner(index, run, after_sequence)
+            .map_err(|error| {
+                let Some(notice) = self
+                    .hooks
+                    .runs
+                    .get(run)
+                    .and_then(|runtime| runtime.release_notice.as_ref())
+                else {
+                    return error;
+                };
+                let mut refusal = error.refusal();
+                if refusal.code == "damaged_bundle" && !refusal.message.contains(notice) {
+                    // A shared immutable record can affect several task results.
+                    // Retained-work notices still reach the reader if building its
+                    // ordinary summary fails at the first damaged dependency.
+                    refusal.message.push(' ');
+                    refusal.message.push_str(notice);
+                    return refusal.into();
+                }
+                error
+            })
+    }
+    fn observe_run_inner(
         &self,
         index: usize,
         run: &RunId,

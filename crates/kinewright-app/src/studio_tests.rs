@@ -5,7 +5,7 @@
 )]
 use super::*;
 use crate::app::in1_tests::{in1_harness, in1_harness_with_engine, in1_shutdown};
-use kinewright_core::{Command, Core, Event, Operation, Playback, Track, TrackId, TrackKind};
+use kinewright_core::{Command, Event, Operation, Playback, Track, TrackId, TrackKind};
 use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
 use kinewright_project::{
     bundle::{LoadedBundle, ProjectBundle},
@@ -82,9 +82,14 @@ pub(crate) fn fixtures() -> Fixtures {
     let mut owners = Vec::new();
     let mut contexts = Vec::new();
     for (index, fixture) in pair.into_iter().enumerate() {
-        let loaded = LoadedBundle::read(&fixture.path).unwrap();
-        let core = Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&core).unwrap();
+        let mut loaded = LoadedBundle::read(
+            &fixture.path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
+        let core = loaded.open_manual().unwrap();
         let inputs = loaded
             .manual_checkpoint()
             .unwrap()
@@ -93,7 +98,7 @@ pub(crate) fn fixtures() -> Fixtures {
         let mut bundle = loaded.into_writer().unwrap();
         let alias = root.path(&format!("legacy-locator-{index}.mkv"));
         std::fs::write(&alias, &media_bytes[index]).unwrap();
-        let asset = core.export_history().unwrap().document.media_pool[0].clone();
+        let asset = core.export_history().unwrap().history().document.media_pool[0].clone();
         assert!(matches!(
             core.request(Command::Do(Operation::RelinkAsset {
                 asset: asset.id,
@@ -106,6 +111,7 @@ pub(crate) fn fixtures() -> Fixtures {
         let clip = core
             .export_history()
             .unwrap()
+            .history()
             .document
             .tracks
             .iter()
@@ -332,7 +338,15 @@ fn s3_frozen_selection_survives_background_copy_and_reopen() {
     drop(app);
     drop(engine);
     retire.wait();
-    let reopened = LoadedBundle::read(&copy).unwrap().into_writer().unwrap();
+    let reopened = LoadedBundle::read(
+        &copy,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
     let original = reopened.frozen_context(&key).unwrap();
     assert_eq!(
         serde_json::to_vec(&original.document).unwrap(),
@@ -699,7 +713,13 @@ fn s3_still_import_and_manual_placement() {
             .unwrap()
             .apply(Action::Save)
             .unwrap();
-        let loaded = LoadedBundle::read(&path).unwrap();
+        let loaded = LoadedBundle::read(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         assert_eq!(
             loaded.admission().inspection_document().unwrap().media_pool[0].kind,
             kinewright_core::MediaKind::Image

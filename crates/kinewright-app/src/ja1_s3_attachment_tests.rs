@@ -3,7 +3,7 @@ use super::*;
 
 #[test]
 fn s3_confirm_host_death_enters_l2_before_replacement() {
-    for floor in [false, true] {
+    for direct in [false, true] {
         let (_temp, mut app, path) = s2h_fix3_app(false);
         app.send_manual(Command::Do(Operation::SetTrackSyncLock {
             track: TrackId(1),
@@ -25,11 +25,11 @@ fn s3_confirm_host_death_enters_l2_before_replacement() {
             .as_mut()
             .unwrap()
             .drop_http_reply("confirm_barrier", false);
-        if floor {
+        if direct {
             app.host
                 .as_mut()
                 .unwrap()
-                .begin_manual_recovery_with_floor(&mut app.owner, Some(1))
+                .begin_manual_recovery_with_floor(&mut app.owner, None)
                 .unwrap();
         } else {
             app.apply(Action::Retry).unwrap();
@@ -38,7 +38,9 @@ fn s3_confirm_host_death_enters_l2_before_replacement() {
         assert!(
             confirm_proxy
                 .dropped
-                .load(std::sync::atomic::Ordering::Acquire)
+                .load(std::sync::atomic::Ordering::Acquire),
+            "CONFIRM_REPLY_DROP_REACHES_THE_CONFIRM_PHASE direct={direct}: {}",
+            app.message
         );
         let installed = app.owner.core().export_history().unwrap();
         let child = app.host.as_ref().unwrap().child_id();
@@ -55,11 +57,14 @@ fn s3_confirm_host_death_enters_l2_before_replacement() {
         assert!(app.apply(Action::Save).is_err());
         assert!(app.close());
         drop(app);
-        let restored = Core::spawn(kinewright_core::Document::default()).unwrap();
-        LoadedBundle::read(&path)
-            .unwrap()
-            .restore_manual(&restored)
-            .unwrap();
+        let mut loaded = LoadedBundle::read(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
+        let restored = loaded.open_manual().unwrap();
         assert_eq!(restored.export_history().unwrap(), installed);
         drop((save_proxy, confirm_proxy));
     }
@@ -76,7 +81,7 @@ fn s3_known_manual_refusal_stays_known() {
         .request(kinewright_agent::writer_host::HostCommand::BeginRecovery {
             client,
             frozen: Some(
-                kinewright_agent::writer_host::HostSnapshot::from_history(before.clone()).unwrap(),
+                kinewright_agent::writer_host::HostSnapshot::capture(app.owner.core()).unwrap(),
             ),
             pending: vec![],
             discard_batches: None,

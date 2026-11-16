@@ -72,7 +72,7 @@ impl Ja1EditingSession {
     /// Prepare a caller's fallible subscriptions/resources before publication or sealing.
     pub fn select_local_with_activation(
         &mut self,
-        mut prepare: impl FnMut(&kinewright_core::Core) -> Result<(), BundleError>,
+        mut prepare: impl FnMut(&crate::operation_actor::Core) -> Result<(), BundleError>,
     ) -> ProjectSelectionResult {
         if let Some((_, report)) = &self.selection_result {
             if let Err(error) = prepare(&self.core) {
@@ -103,7 +103,8 @@ impl Ja1EditingSession {
                 self.input_leases = prepared.restore.input_leases;
                 self.association = Some(ActiveAssociation {
                     path: report.path.clone(),
-                    saved: Some(prepared.restore.history_digest),
+                    saved: Some(report.history_sha256.clone()),
+                    saved_position: Some(report.position),
                 });
                 self.selection_result = Some((target, report.clone()));
             }
@@ -135,28 +136,28 @@ impl Ja1EditingSession {
                     let cut = self
                         .attachment
                         .capture()
-                        .map_err(crate::bundle::history_error)?;
+                        .map_err(crate::bundle::operation_error)?;
                     self.attachment
                         .resume(&cut)
-                        .map_err(crate::bundle::history_error)?;
+                        .map_err(crate::bundle::operation_error)?;
                     return Err(BundleError::HistoryChanged);
                 }
                 let report = reconciled.ok_or(BundleError::HistoryBarrierInvariant)?;
                 let saved = report.history_sha256.clone();
+                let saved_position = report.position;
                 self.preliminary_save = Some(super::PreliminarySave {
                     report,
                     branch,
                     pending: true,
                 });
-                self.association
-                    .as_mut()
-                    .ok_or(BundleError::Unsettled)?
-                    .saved = Some(saved);
+                let association = self.association.as_mut().ok_or(BundleError::Unsettled)?;
+                association.saved = Some(saved);
+                association.saved_position = Some(saved_position);
             }
             let cut = self
                 .attachment
                 .freeze()
-                .map_err(crate::bundle::history_error)?;
+                .map_err(crate::bundle::operation_error)?;
             let save = if self.dirty()? {
                 let core = self.core.clone();
                 let inputs = self.inputs.clone();
@@ -181,22 +182,21 @@ impl Ja1EditingSession {
                     let current = self
                         .attachment
                         .capture()
-                        .map_err(crate::bundle::history_error)?;
+                        .map_err(crate::bundle::operation_error)?;
                     self.attachment
                         .resume(&current)
-                        .map_err(crate::bundle::history_error)?;
+                        .map_err(crate::bundle::operation_error)?;
                 }
                 return Err(error);
             }
-            let saved = self
+            let checkpoint = self
                 .active_bundle()?
-                .checkpoint(self.active_bundle()?.manual_branch_id())?
-                .history_digest
-                .clone();
-            self.association
-                .as_mut()
-                .ok_or(BundleError::Unsettled)?
-                .saved = Some(saved);
+                .checkpoint(self.active_bundle()?.manual_branch_id())?;
+            let saved = checkpoint.identity;
+            let saved_position = checkpoint.position;
+            let association = self.association.as_mut().ok_or(BundleError::Unsettled)?;
+            association.saved = Some(saved.to_string());
+            association.saved_position = Some(saved_position);
             // This validates the exact ordinary floor result against durable L; a bypassed suffix refuses.
             if let Err(error) = self
                 .active_bundle()?
@@ -205,10 +205,10 @@ impl Ja1EditingSession {
                 let current = self
                     .attachment
                     .capture()
-                    .map_err(crate::bundle::history_error)?;
+                    .map_err(crate::bundle::operation_error)?;
                 self.attachment
                     .resume(&current)
-                    .map_err(crate::bundle::history_error)?;
+                    .map_err(crate::bundle::operation_error)?;
                 return Err(error);
             }
             Ok(())
@@ -227,42 +227,9 @@ impl Ja1EditingSession {
         }
     }
     pub fn recovery_save_disclosure(&self) -> Result<String, BundleError> {
-        let actor = self.core.actor_identity();
-        let revision = self
-            .core
-            .history_change_id()
-            .map_err(crate::bundle::history_error)?;
-        let limits = self.store()?.limits();
-        if let Some((cached_actor, cached_revision, cached_limits, text)) =
-            &*self.save_disclosure_cache.borrow()
-            && *cached_actor == actor
-            && *cached_revision == revision
-            && cached_limits == limits
-        {
-            return Ok(text.clone());
-        }
-        let (revision, history) = self
-            .core
-            .export_history_identified()
-            .map_err(crate::bundle::history_error)?;
-        #[cfg(any(test, feature = "test-util"))]
-        crate::namespace::note(
-            "studio_save_disclosure_select",
-            std::path::Path::new("status"),
-        );
-        let selected = crate::bundle_commit::select_history(&history, limits)?;
-        let lost = history
-            .cursor
-            .undo
-            .len()
-            .saturating_sub(selected.history.cursor.undo.len());
-        let text = format!(
-            "Saving your current work removes {lost} oldest Undo entries. Current content, complete Redo and the open gesture are preserved."
-        );
-        *self.save_disclosure_cache.borrow_mut() =
-            Some((actor, revision, limits.clone(), text.clone()));
-        Ok(text)
+        Ok(String::new())
     }
+
     pub fn selection_availability(&self) -> Result<String, BundleError> {
         let Some(prepared) = &self.prepared else {
             return Ok(String::new());
@@ -305,10 +272,13 @@ impl Ja1EditingSession {
         }
         for registered in &self.durable_sessions {
             let bundle = self.registered_bundle(&registered.guard)?;
-            let digest =
-                Self::cached_history_digest(registered.guard.core(), &registered.digest_cache)?;
+            let change = registered
+                .guard
+                .core()
+                .change_id()
+                .map_err(crate::bundle::operation_error)?;
             if bundle.unsettled
-                || bundle.checkpoint(&registered.guard.branch)?.history_digest != digest
+                || bundle.checkpoint(&registered.guard.branch)?.position != change.position
             {
                 disclosure.push(' ');
                 disclosure.push_str(&registered.name);
@@ -334,7 +304,7 @@ impl Ja1EditingSession {
     }
     pub fn open_project(&self, path: &Path) -> Result<Self, BundleError> {
         self.check_destination_change()?;
-        Self::open(path)
+        Self::open(path, self.core.history_pool())
     }
     pub fn save_as(
         &mut self,
@@ -361,20 +331,39 @@ impl Ja1EditingSession {
         if self.dirty()? {
             self.save_active()?;
         }
+        let cut = self
+            .attachment
+            .freeze()
+            .map_err(crate::bundle::operation_error)?;
         let outcome = if let Some(inspection) = inspection {
-            self.active_bundle_mut()?
-                .save_as_admitted(inspection, limits)?
+            self.active_bundle_mut()
+                .and_then(|bundle| bundle.save_as_admitted(inspection, limits))
         } else {
-            self.active_bundle_mut()?
-                .save_as_with_limits(path, limits)?
+            self.active_bundle_mut()
+                .and_then(|bundle| bundle.save_as_with_limits(path, limits))
+        };
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // An uncertain destination is returned as a retained BundleCopy.
+                // An error here owns no publication and must release this cut.
+                self.attachment
+                    .resume(&cut)
+                    .map_err(crate::bundle::operation_error)?;
+                return Err(error);
+            }
         };
         match outcome {
             crate::bundle_copy::SaveAsOutcome::SameProject(mut report) => {
+                self.attachment
+                    .resume(&cut)
+                    .map_err(crate::bundle::operation_error)?;
                 self.set_path_spelling(path);
                 report.path = path.to_path_buf();
                 Ok(CopyStatus::Committed(report))
             }
             crate::bundle_copy::SaveAsOutcome::Copied(copy) => {
+                self.pending_copy_cut = Some(cut);
                 let mut status = copy.status().clone();
                 if let CopyStatus::Committed(report) = &mut status {
                     report.path = path.to_path_buf();
@@ -387,16 +376,24 @@ impl Ja1EditingSession {
                         .replace(RetainedDestination::FirstSave(copy));
                     if let Some(previous) = previous {
                         self.retained_destinations
-                            .push((previous, self.core.clone()));
+                            .push((previous, Some(self.core.clone())));
                     }
                     self.inputs = inputs;
                     self.association = Some(ActiveAssociation {
                         path,
                         saved: Some(report.history_sha256.clone()),
+                        saved_position: Some(report.position),
                     });
+                    self.adopt_copy_snapshot()?;
                 } else {
-                    self.retained_destinations
-                        .push((RetainedDestination::FirstSave(copy), self.core.clone()));
+                    self.pending_copy_cut = None;
+                    self.attachment
+                        .resume(&cut)
+                        .map_err(crate::bundle::operation_error)?;
+                    self.retained_destinations.push((
+                        RetainedDestination::FirstSave(copy),
+                        Some(self.core.clone()),
+                    ));
                 }
                 Ok(status)
             }
@@ -418,7 +415,7 @@ impl Ja1EditingSession {
             || self
                 .core
                 .attachment_state()
-                .map_err(crate::bundle::history_error)?
+                .map_err(crate::bundle::operation_error)?
                 == AttachmentState::Frozen
         {
             return Err(BundleError::Unsettled);
@@ -473,24 +470,6 @@ impl Ja1EditingSession {
     pub fn retirement_disclosure(&self, branch: &BranchId) -> Result<String, BundleError> {
         let bundle = self.active_bundle()?;
         let checkpoint = bundle.checkpoint(branch)?;
-        let resolved;
-        let history: &kinewright_core::HistorySnapshot =
-            if let Some(cached) = bundle.verified_cached_history(branch)? {
-                cached
-            } else {
-                resolved = bundle.branch_history(branch)?;
-                &resolved
-            };
-        let bytes = serde_json::to_vec(history).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let shared = bundle
-            .branches
-            .iter()
-            .any(|(id, c)| id != branch && c.history_ref == checkpoint.history_ref);
-        let relief = if shared {
-            0
-        } else {
-            crate::store::preflight_record(&bytes, bundle.store.limits())?
-        };
         let retained = bundle
             .store
             .closure(&[bundle.checkpoint_reference(branch)?])?
@@ -510,13 +489,17 @@ impl Ja1EditingSession {
                 work.task.0.as_str()
             );
         }
+        let (undo, redo) = {
+            let reader = bundle.branch_history(branch)?;
+            (reader.history().undo().len(), reader.history().redo().len())
+        };
         Ok(format!(
-            "{task_disclosure}Remove working branch {} at head {}: its content {} and {} Undo / {} Redo entries leave the current branch index. Current-history residency relief: {relief} bytes. Its closure contains {retained} bytes; immediate reclaimable bytes: 0, because this publication retains the previous root. Automatic recovery, independent evidence and readers may keep these bytes after later saves. {}",
+            "{task_disclosure}Remove working branch {} at head {}: its content {} and {} Undo / {} Redo entries leave the current branch index. Current-history residency relief: 0 bytes; this branch is stored on disk. Its closure contains {retained} bytes; immediate reclaimable bytes: 0, because this publication retains the previous root. Automatic recovery, independent evidence and readers may keep these bytes after later saves. {}",
             branch.as_str(),
             checkpoint.head_id.as_str(),
-            checkpoint.document_hash,
-            history.cursor.undo.len(),
-            history.cursor.redo.len(),
+            checkpoint.document_ref.sha256,
+            undo,
+            redo,
             self.branch_blockers(branch).join(" ")
         ))
     }
@@ -557,7 +540,7 @@ impl Ja1EditingSession {
         if self
             .core
             .attachment_state()
-            .map_err(crate::bundle::history_error)?
+            .map_err(crate::bundle::operation_error)?
             != AttachmentState::Live
             || self.active_bundle()?.unsettled
         {
@@ -617,7 +600,7 @@ impl Ja1EditingSession {
         if self
             .core
             .attachment_state()
-            .map_err(crate::bundle::history_error)?
+            .map_err(crate::bundle::operation_error)?
             != AttachmentState::Live
             || self.active_bundle()?.unsettled
             || self.active_bundle()?.pending_command.is_some()
@@ -649,7 +632,6 @@ impl Ja1EditingSession {
         if result.is_err() && !bundle.unsettled {
             bundle.branches.insert(branch.clone(), removed);
         } else if result.is_ok() {
-            bundle.history_cache.remove(branch);
         }
         result
     }
@@ -699,5 +681,89 @@ impl Ja1EditingSession {
             bundle.pending_evidence.truncate(pending_before);
         }
         result
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod save_as_refusal_tests {
+    use super::*;
+    use crate::{namespace::ProjectNamespace, operation_actor::Core};
+    use kinewright_core::{
+        AttachmentState, Command, Document, Operation, Track, TrackId, TrackKind,
+    };
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+
+    #[test]
+    fn definite_save_as_refusal_releases_the_exact_frozen_source_for_edits_and_retry() {
+        let temp = TempDirectory::new_in(&workspace_target_dir(), "hx-save-as-refusal");
+        let core = Core::for_test(Document::default()).unwrap();
+        let mut session =
+            Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
+        session
+            .first_save(&temp.path("a.kinewright"), StorageLimits::default())
+            .unwrap();
+        let destination = temp.path("b.kinewright");
+        let mut held = ProjectNamespace::acquire(&destination).unwrap();
+        let before = core.snapshot_identity().unwrap();
+        let refusal = session.save_as(&destination, StorageLimits::default());
+        assert!(
+            matches!(refusal, Err(BundleError::Contention(_))),
+            "SAVE_AS_DESTINATION_REFUSAL_IS_DEFINITE: {refusal:?}"
+        );
+        assert_eq!(
+            core.snapshot_identity().unwrap(),
+            before,
+            "SAVE_AS_DEFINITE_REFUSAL_PRESERVES_THE_FULL_OWNER"
+        );
+        assert_eq!(
+            core.attachment_state().unwrap(),
+            AttachmentState::Live,
+            "SAVE_AS_DEFINITE_REFUSAL_RELEASES_SOURCE_FREEZE"
+        );
+        core.request(Command::Do(Operation::AddTrack {
+            track: Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            },
+        }))
+        .unwrap();
+        session.save_active().unwrap();
+        held.release().unwrap();
+        assert!(
+            matches!(
+                session
+                    .save_as(&destination, StorageLimits::default())
+                    .unwrap(),
+                CopyStatus::Committed(_)
+            ),
+            "SAVE_AS_RETRY_KEEPS_THE_LATER_ACCEPTED_EDIT"
+        );
+        let expected = core.snapshot_identity().unwrap();
+        drop(session);
+        let reopened = Ja1EditingSession::open(
+            &destination,
+            &crate::operation_history::HistoryPool::new(
+                crate::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            reopened.core().snapshot_identity().unwrap(),
+            expected,
+            "SAVE_AS_RETRY_COLD_OPENS_THE_SELECTED_FULL_OWNER"
+        );
+        assert_eq!(
+            reopened
+                .core()
+                .export_history()
+                .unwrap()
+                .history()
+                .document
+                .tracks
+                .len(),
+            1
+        );
     }
 }

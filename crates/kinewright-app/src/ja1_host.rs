@@ -5,7 +5,7 @@ use kinewright_agent::writer_host::{
     HostChoiceKind, HostClient, HostCommand, HostConfig, HostOrigin, HostReply, HostSnapshot,
     HostSourceBinding, HostStatus, SessionRoots, SourceServer,
 };
-use kinewright_core::AcceptedCut;
+use kinewright_project::operation_actor::AcceptedCut;
 use kinewright_project::{
     bundle::BundleError, bundle_records::ObjectRef, editing_session::Ja1EditingSession,
     source_boundary::BorrowedSourceDescriptor,
@@ -74,7 +74,7 @@ pub(super) struct HostAttachment {
     context: std::sync::Weak<std::sync::atomic::AtomicBool>,
     recovery: Option<JoinHandle<Result<recovery::RecoveredManual, BundleError>>>,
     recovery_plan: std::sync::Arc<std::sync::Mutex<Option<recovery::RecoveryPlan>>>,
-    recovery_originals: Vec<kinewright_core::AcceptedHistory>,
+    recovery_originals: Vec<kinewright_project::operation_protocol::EncodedMessage>,
     pub client: HostClient,
     pub status: HostStatus,
     source: Option<BorrowedSourceDescriptor>,
@@ -100,6 +100,26 @@ pub(super) struct HostAttachment {
 type StatusLane = JoinHandle<Result<HostReply, kinewright_agent::writer_host::HostError>>;
 
 impl HostAttachment {
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn set_fixture_issuer(&mut self, issuer: kinewright_agent::writer_host::HostIssuer) {
+        self.issuer = Some(issuer);
+    }
+    fn owner_document(
+        owner: &Ja1EditingSession,
+    ) -> Result<std::sync::Arc<kinewright_core::Document>, BundleError> {
+        match owner
+            .core()
+            .request(kinewright_core::Command::Query(
+                kinewright_core::Query::Document,
+            ))
+            .map_err(|error| BundleError::Corrupt(error.to_string()))?
+        {
+            kinewright_core::Event::QueryResult(kinewright_core::QueryResult::Document(
+                document,
+            )) => Ok(document),
+            _ => Err(BundleError::HistoryChanged),
+        }
+    }
     pub fn import_unsaved_media(
         &mut self,
         owner: &mut Ja1EditingSession,
@@ -140,14 +160,7 @@ impl HostAttachment {
             callback: server.bootstrap(),
         };
         self.pending_source_server = Some(server);
-        let snapshot = HostSnapshot::from_history(
-            self.cut
-                .as_ref()
-                .ok_or(BundleError::HistoryChanged)?
-                .history()
-                .clone(),
-        )
-        .map_err(host_error)?;
+        let snapshot = HostSnapshot::capture(owner.core()).map_err(host_error)?;
         let reply =
             self.foreground_request(HostCommand::RefreshUnsavedInputs { binding, snapshot })?;
         if reply.error.is_none() {
@@ -169,7 +182,9 @@ impl HostAttachment {
     }
 
     #[cfg(all(test, target_os = "linux"))]
-    pub(super) fn prepared_switch_probe(&self) -> Option<kinewright_core::Core> {
+    pub(super) fn prepared_switch_probe(
+        &self,
+    ) -> Option<kinewright_project::operation_actor::Core> {
         self.prepared_switch
             .as_ref()
             .map(|(actor, _)| actor.core().clone())
@@ -179,9 +194,9 @@ impl HostAttachment {
         owner: &mut Ja1EditingSession,
         committed: &kinewright_project::bundle_switch::SwitchAttachment,
     ) -> Result<(HostReply, super::PreparedView), BundleError> {
-        committed.verify()?;
+        drop(committed.verify(owner.core().history_pool())?);
         if let Some((installed, _)) = &self.installed_switch
-            && installed != committed
+            && installed.identity()? != committed.identity()?
         {
             return Err(BundleError::HistoryChanged);
         }
@@ -320,7 +335,7 @@ impl HostAttachment {
                 roots,
                 origin: HostOrigin::Gui {
                     retention,
-                    initial_snapshot: HostSnapshot::from_history(transfer.history).map_err(
+                    initial_snapshot: Some(HostSnapshot::from_history(transfer.history).map_err(
                         |error| {
                             Self::failed_launch(
                                 owner,
@@ -329,7 +344,7 @@ impl HostAttachment {
                                 host_error(error),
                             )
                         },
-                    )?,
+                    )?),
                     expected_root_sha256: transfer.expected_root_sha256,
                     expected_project_id: transfer.project_id,
                 },
@@ -504,13 +519,13 @@ impl HostAttachment {
         {
             return Ok(None);
         }
-        if self
-            .manual
-            .as_ref()
-            .is_some_and(|gate| gate.actor == owner.core().actor_identity())
+        if let Some(gate) = &self.manual
+            && gate.actor == owner.core().actor_identity()
+            && gate.permit.is_current().map_err(BundleError::Operation)?
         {
             return Ok(None);
         }
+        self.manual = None;
         // C9 has no absent-suffix/floor/recovery authorization. A first-save or
         // dirty bootstrap must explicitly Save before granting a durable identity.
         let digest = HostSnapshot::capture(owner.core())
@@ -564,7 +579,7 @@ impl HostAttachment {
         let lease = reply.manual_lease.ok_or(BundleError::HistoryChanged)?;
         let inputs = reply.manual_inputs.ok_or(BundleError::HistoryChanged)?;
         let permit = if let Some(cut) = &self.cut {
-            let digest = lease.history_sha256.clone();
+            let digest = lease.snapshot.to_string();
             let endpoint = owner.manual_recovery_endpoint(cut, vec![])?;
             let permit = endpoint.finish(
                 lease,
@@ -574,7 +589,11 @@ impl HostAttachment {
             owner.finish_host_manual_recovery(&digest)?;
             permit
         } else {
-            owner.bind_manual_producer(lease, inputs)?
+            owner.bind_manual_producer(
+                lease,
+                inputs,
+                self.context.upgrade().ok_or(BundleError::HistoryChanged)?,
+            )?
         };
         self.client = self.client.with_manual_editor(self.manual_client.clone());
         self.manual = Some(super::ManualProducerGate {
@@ -813,18 +832,14 @@ impl HostAttachment {
                 .ensure_host_snapshot(self.cut.as_ref().ok_or(BundleError::HistoryChanged)?)?;
         }
         let snapshot = || -> Result<HostSnapshot, BundleError> {
-            let history = self
+            if self
                 .cut
                 .as_ref()
-                .ok_or(BundleError::HistoryChanged)?
-                .history()
-                .clone();
-            let bytes =
-                serde_json::to_vec(&history).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            Ok(HostSnapshot {
-                history,
-                history_sha256: kinewright_media::sha256_bytes(&bytes),
-            })
+                .is_none_or(|cut| owner.core().change_id().ok() != Some(cut.change()))
+            {
+                return Err(BundleError::HistoryChanged);
+            }
+            HostSnapshot::capture(owner.core()).map_err(host_error)
         };
         let command = match action {
             Action::DismissManualNotice
@@ -843,9 +858,7 @@ impl HostAttachment {
             }
             Action::ImportMedia(path) => {
                 let asset_id = kinewright_core::AssetId(
-                    snapshot()?
-                        .history
-                        .document
+                    Self::owner_document(owner)?
                         .media_pool
                         .iter()
                         .map(|asset| asset.id.0)

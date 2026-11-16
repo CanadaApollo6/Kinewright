@@ -81,7 +81,7 @@ pub(super) mod linux {
     ) {
         let root = temp("c11-switch");
         let path = root.path("a.kinewright");
-        let core = Core::spawn(Document {
+        let core = Core::for_test(Document {
             duration: kinewright_core::TimeCode(90),
             tracks: vec![Track {
                 id: TrackId(1),
@@ -129,16 +129,49 @@ pub(super) mod linux {
             branch,
             version: "2".repeat(32),
         };
-        source.prepare_host_attachment().unwrap();
-        let cut = source.freeze_host_cut().unwrap();
-        source.complete_host_cut(&cut, None, None).unwrap();
         (root, path, source, target, entry)
+    }
+    fn retained_command_keys(path: &Path) -> Vec<(kinewright_core::undo::CommandKey, [u8; 32])> {
+        let history = manual_history_from(path);
+        history
+            .history()
+            .undo
+            .iter()
+            .chain(history.history().redo.iter().rev())
+            .flat_map(|step| {
+                step.commands()
+                    .iter()
+                    .map(|command| (command.id, command.payload_digest))
+            })
+            .collect()
+    }
+    fn installed_shape(
+        history: &kinewright_project::operation_actor::PortableHistory,
+        epoch: u64,
+    ) -> serde_json::Value {
+        let snapshot = history
+            .clone()
+            .validate(&kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ))
+            .unwrap()
+            .into_reader()
+            .unwrap()
+            .into_capture()
+            .unwrap();
+        assert!(
+            snapshot.history().epoch > epoch,
+            "SWITCH_RETURN_STARTS_A_LATER_EPOCH"
+        );
+        let mut value = serde_json::to_value(snapshot).unwrap();
+        value["history"]["epoch"] = json!(epoch);
+        value
     }
     fn acquire(
         host: &ProcessHost,
         source: &Ja1EditingSession,
         identity: &str,
-    ) -> kinewright_core::ManualPermit {
+    ) -> kinewright_project::operation_actor::ManualPermit {
         let reply = successful(
             &host.client,
             HostCommand::AcquireManual {
@@ -146,7 +179,11 @@ pub(super) mod linux {
             },
         );
         source
-            .bind_manual_producer(reply.manual_lease.unwrap(), reply.manual_inputs.unwrap())
+            .bind_manual_producer(
+                reply.manual_lease.unwrap(),
+                reply.manual_inputs.unwrap(),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            )
             .unwrap()
     }
     fn confirm(
@@ -154,7 +191,7 @@ pub(super) mod linux {
         source: &mut Ja1EditingSession,
         attachment: &SwitchAttachment,
         identity: &str,
-    ) -> kinewright_core::ManualPermit {
+    ) -> kinewright_project::operation_actor::ManualPermit {
         let granted = successful(
             &host.client,
             HostCommand::ConfirmSwitch {
@@ -186,8 +223,11 @@ pub(super) mod linux {
         }
     }
     pub(super) fn restart(restored: bool) {
-        let (root, path, mut source, target, expected_input) = setup();
-        let mut host = switch_host(config(root.root(), Some(path.clone())));
+        let (root, path, mut source, _target, expected_input) = setup();
+        let (configuration, _origin_callback) = handoff_config(&mut source, root.root());
+        let cut = source.freeze_host_cut().unwrap();
+        source.complete_host_cut(&cut, None, None).unwrap();
+        let mut host = switch_host(configuration);
         let identity = "d".repeat(64);
         let old_permit = acquire(&host, &source, &identity);
         let client = host.client.with_manual_editor(identity.clone());
@@ -208,16 +248,27 @@ pub(super) mod linux {
         source
             .acknowledge_manual(&old_permit, ack.manual_ack)
             .unwrap();
-        let old = source.core().export_history().unwrap();
+        let old = serde_json::to_value(source.core().export_history().unwrap()).unwrap();
         let old_core = source.core().clone();
-        let old_batch_ids = kinewright_project::bundle::LoadedBundle::read(&path)
-            .unwrap()
-            .manual_checkpoint()
-            .unwrap()
-            .batch_ids
-            .clone();
+        let old_batch_ids = retained_command_keys(&path);
         let started = Instant::now();
         let cut = source.freeze_host_cut().unwrap();
+        let target = successful(&client, HostCommand::Status)
+            .status
+            .recovery_points
+            .into_iter()
+            .find_map(|point| match point {
+                kinewright_agent::writer_host::HostRecoverySelection::Checkpoint {
+                    root,
+                    branch,
+                } => Some(SwitchTarget::Snapshot {
+                    root,
+                    branch,
+                    version: "2".repeat(32),
+                }),
+                kinewright_agent::writer_host::HostRecoverySelection::WorkingBranch { .. } => None,
+            })
+            .expect("CURRENT_SNAPSHOT_TARGET");
         let preview = successful(&client, HostCommand::PrepareSwitch { target });
         let payload = preview.switch_preview.unwrap();
         let envelope = preview.switch_envelope.unwrap();
@@ -230,18 +281,26 @@ pub(super) mod linux {
         assert!(published.manual_lease.is_none());
         let original = published.switch_result.unwrap();
         let committed = published.switch_attachment.unwrap();
-        let adopted_batch_ids = kinewright_project::bundle::LoadedBundle::read(&path)
-            .unwrap()
-            .manual_checkpoint()
-            .unwrap()
-            .batch_ids
-            .clone();
+        let adopted_batch_ids = retained_command_keys(&path);
         assert_eq!(original.target_version, Some("2".repeat(32)));
-        committed.verify().unwrap();
+        let validated = committed
+            .verify(&kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ))
+            .unwrap()
+            .into_reader()
+            .unwrap();
+        let depth = validated.history().undo().len();
+        assert!(
+            !validated
+                .into_boundary(depth)
+                .unwrap()
+                .lineage()
+                .occurrences
+                .is_empty()
+        );
         assert_eq!(committed.history, payload.history);
         assert_eq!(committed.inputs, payload.inputs);
-        assert_eq!(committed.lineage, payload.lineage);
-        assert!(!committed.lineage.current.is_empty());
         assert_eq!(committed.inputs.entries.len(), 1);
         assert_eq!(committed.inputs.entries[0], expected_input);
         assert_ne!(committed.current.branch, original.old.branch);
@@ -336,14 +395,7 @@ pub(super) mod linux {
                 .is_some()
         );
         let permit = confirm(&host, &mut source, &committed, &identity);
-        assert_eq!(
-            kinewright_project::bundle::LoadedBundle::read(&path)
-                .unwrap()
-                .manual_checkpoint()
-                .unwrap()
-                .batch_ids,
-            adopted_batch_ids
-        );
+        assert_eq!(retained_command_keys(&path), adopted_batch_ids);
         note(
             if restored {
                 "switch-restart-after-restore"
@@ -352,24 +404,23 @@ pub(super) mod linux {
             },
             started,
         );
-        assert!(matches!(
-            old_permit.request(Edit::Undo).unwrap(),
-            Event::MutationRefused { .. }
-        ));
-        let adopted = source.core().export_history().unwrap();
+        assert!(old_permit.request(Edit::Undo).is_err());
+        let adopted = serde_json::to_value(source.core().export_history().unwrap()).unwrap();
         assert!(matches!(
             permit
                 .request(Edit::Do(Operation::SetTrackSyncLock {
                     track: TrackId(1),
-                    locked: !adopted.document.tracks[0].sync_lock
+                    locked: !adopted["history"]["document"]["tracks"][0]["sync_lock"]
+                        .as_bool()
+                        .unwrap()
                 }))
                 .unwrap(),
             Event::DocumentChanged { .. }
         ));
         permit.request(Edit::Undo).unwrap();
         assert_eq!(
-            source.core().export_history().unwrap().document,
-            adopted.document
+            *source.core().export_history().unwrap().history().document,
+            serde_json::from_value::<Document>(adopted["history"]["document"].clone()).unwrap()
         );
         let accepted = permit.pending().unwrap();
         let ack = successful(
@@ -381,11 +432,7 @@ pub(super) mod linux {
         );
         source.acknowledge_manual(&permit, ack.manual_ack).unwrap();
         assert_eq!(
-            &kinewright_project::bundle::LoadedBundle::read(&path)
-                .unwrap()
-                .manual_checkpoint()
-                .unwrap()
-                .batch_ids[..adopted_batch_ids.len()],
+            &retained_command_keys(&path)[..adopted_batch_ids.len()],
             adopted_batch_ids.as_slice()
         );
         let returning = Instant::now();
@@ -409,33 +456,21 @@ pub(super) mod linux {
         let returned = result.switch_attachment.unwrap();
         assert_eq!(returned.current.branch, original.old.branch);
         assert_eq!(
-            returned.history, old,
-            "return restores exact old Undo/Redo, not just its Document"
+            installed_shape(&returned.history, old["history"]["epoch"].as_u64().unwrap()),
+            old,
+            "return restores exact old Undo/Redo, ledger, lineage and resources"
         );
         source
             .activate_host_switch(&cut, &returned, |_| Ok(()))
             .unwrap();
         let back_permit = confirm(&host, &mut source, &returned, &identity);
-        assert_eq!(
-            kinewright_project::bundle::LoadedBundle::read(&path)
-                .unwrap()
-                .manual_checkpoint()
-                .unwrap()
-                .batch_ids,
-            old_batch_ids
-        );
+        assert_eq!(retained_command_keys(&path), old_batch_ids);
         note("return", returning);
         assert!(
-            matches!(
-                old_permit.request(Edit::Redo).unwrap(),
-                Event::MutationRefused { .. }
-            ),
+            old_permit.request(Edit::Redo).is_err(),
             "old lease must still refuse after return"
         );
-        assert!(matches!(
-            permit.request(Edit::Undo).unwrap(),
-            Event::MutationRefused { .. }
-        ));
+        assert!(permit.request(Edit::Undo).is_err());
         assert!(
             client
                 .request(HostCommand::CommitHistory {
@@ -504,7 +539,7 @@ pub(super) mod linux {
     #[derive(serde::Serialize, serde::Deserialize)]
     struct GuiBootstrap {
         host: kinewright_agent::writer_host::HostBootstrap,
-        history: kinewright_core::HistorySnapshot,
+        history: kinewright_project::operation_actor::PortableHistory,
         identity: String,
     }
     struct GuiProcess(Child);
@@ -517,7 +552,7 @@ pub(super) mod linux {
     fn gui_start(
         directory: &Path,
         host: &ProcessHost,
-        history: kinewright_core::HistorySnapshot,
+        history: kinewright_project::operation_actor::PortableHistory,
         identity: &str,
     ) -> GuiProcess {
         std::fs::create_dir_all(directory).unwrap();
@@ -552,8 +587,8 @@ pub(super) mod linux {
         let bootstrap: GuiBootstrap =
             serde_json::from_slice(&std::fs::read(directory.join("private.json")).unwrap())
                 .unwrap();
-        let core = Core::spawn(Document::default()).unwrap();
-        core.restore_history(bootstrap.history).unwrap();
+        let core =
+            kinewright_project::operation_actor::Core::peer_for_test(bootstrap.history).unwrap();
         let mut owner =
             Ja1EditingSession::new(&directory, &core, StorageLimits::default()).unwrap();
         owner.prepare_host_attachment().unwrap();
@@ -566,7 +601,6 @@ pub(super) mod linux {
         let payload = kinewright_project::bundle_switch::SwitchPayload {
             history: committed.history.clone(),
             inputs: committed.inputs.clone(),
-            lineage: committed.lineage.clone(),
         };
         let prepared = owner.prepare_gui_switch(payload).unwrap();
         marker(&directory, "before-restore");
@@ -600,18 +634,24 @@ pub(super) mod linux {
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             )
             .unwrap();
-        assert_eq!(owner.core().export_history().unwrap(), committed.history);
+        assert_eq!(
+            owner.core().snapshot_identity().unwrap(),
+            committed.history.identity()
+        );
         atomic_json(
             &directory.join("result.json"),
-            &owner.core().export_history().unwrap(),
+            &owner.core().portable_history().unwrap(),
         );
         wait_marker(&directory, "quit");
     }
     pub(crate) fn matrix() {
         for gui_death in [false, true] {
             for after_restore in [false, true] {
-                let (root, path, source, target, _) = setup();
-                let mut host = switch_host(config(root.root(), Some(path.clone())));
+                let (root, path, mut source, target, _) = setup();
+                let (configuration, _origin_callback) = handoff_config(&mut source, root.root());
+                let cut = source.freeze_host_cut().unwrap();
+                source.complete_host_cut(&cut, None, None).unwrap();
+                let mut host = switch_host(configuration);
                 let identity = "c".repeat(64);
                 successful(
                     &host.client,
@@ -624,7 +664,7 @@ pub(super) mod linux {
                 let mut gui = gui_start(
                     &directory,
                     &host,
-                    source.core().export_history().unwrap(),
+                    source.core().portable_history().unwrap(),
                     &identity,
                 );
                 let envelope = successful(&client, HostCommand::PrepareSwitch { target })
@@ -675,10 +715,11 @@ pub(super) mod linux {
                 marker(&gui_directory, "continue-before");
                 marker(&gui_directory, "continue-after");
                 wait_marker(&gui_directory, "result.json");
-                let history: kinewright_core::HistorySnapshot = serde_json::from_slice(
-                    &std::fs::read(gui_directory.join("result.json")).unwrap(),
-                )
-                .unwrap();
+                let history: kinewright_project::operation_actor::PortableHistory =
+                    serde_json::from_slice(
+                        &std::fs::read(gui_directory.join("result.json")).unwrap(),
+                    )
+                    .unwrap();
                 assert_eq!(history, committed.history);
                 assert_eq!(
                     successful(&client, HostCommand::ReadHistory)
@@ -699,7 +740,9 @@ pub(super) mod linux {
             let (root, path, mut source, target, _) = setup();
             let signals = root.path("signals");
             std::fs::create_dir(&signals).unwrap();
-            let configuration = config(root.root(), Some(path.clone()));
+            let (configuration, _origin_callback) = handoff_config(&mut source, root.root());
+            let cut = source.freeze_host_cut().unwrap();
+            source.complete_host_cut(&cut, None, None).unwrap();
             let auth = HostAuth::generate().unwrap();
             let mut child = Command::new(env!("CARGO_BIN_EXE_kinewright"))
                 .arg("host")
@@ -799,7 +842,7 @@ pub(super) mod linux {
                     &client,
                     HostCommand::BeginRecovery {
                         client: identity.clone(),
-                        frozen: Some(HostSnapshot::from_history(cut.history().clone()).unwrap()),
+                        frozen: Some(HostSnapshot::capture(source.core()).unwrap()),
                         pending: vec![],
                         discard_batches: None,
                     },
@@ -813,7 +856,9 @@ pub(super) mod linux {
                     },
                 );
                 let mut endpoint = source.manual_recovery_endpoint(&cut, vec![]).unwrap();
-                endpoint.install(barrier.after.history.clone()).unwrap();
+                endpoint
+                    .install(barrier.after.history.clone(), barrier.acknowledged.clone())
+                    .unwrap();
                 let reply = successful(
                     &client,
                     HostCommand::ConfirmBarrier {

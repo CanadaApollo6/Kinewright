@@ -22,7 +22,7 @@ use kinewright_core::{
     AgentEvent, Analysis, AnalysisKind, AssetId, AssetSilences, AssetTranscript, AudioBus,
     AudioBusId, AudioLoudness, AutomationCurve, BeatMontageCadenceContract, BeatMontageSelect,
     BeatStatus, CaptionCue, CaptionMotion, CaptionPreset, Clip, ClipContent, ClipId, ColorNodeKind,
-    ColorProvenance, ColorSourceError, Command, Core, DeliveryAspect, DeliveryEncodeDepth,
+    ColorProvenance, ColorSourceError, Command, DeliveryAspect, DeliveryEncodeDepth,
     DeliveryProfile, DeliveryVariant, Document, Effect, EffectId, Event, Export,
     ExportCancellation, INVESTIGATOR_EXPLANATION_CEILING_BYTES,
     INVESTIGATOR_MAX_PROPOSAL_OPERATIONS, Incident, IncidentId, IncidentLog, IncidentOutcome,
@@ -45,6 +45,7 @@ use kinewright_core::{
     plan_speaker_multicam, plan_subject_reframe_basis_points_with_containment, qa_document,
     validate_beat_montage_plan_cadence,
 };
+use kinewright_project::operation_actor::Core;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     model::{
@@ -1463,14 +1464,8 @@ impl KinewrightMcp {
         if let Some(endpoint) = &self.task_endpoint {
             endpoint.check_batch_history(&self.core, operations)
         } else {
-            self.ordinary_history_limits
-                .check_batch(&self.core, operations)
-                .map_err(|error| match error {
-                    kinewright_project::bundle::BundleError::Capacity(_) => format!(
-                        "history_capacity: {error}. Try a smaller edit or start a new project."
-                    ),
-                    other => other.to_string(),
-                })
+            // The executor refuses atomically under its creation bounds.
+            Ok(())
         }
     }
     #[cfg(test)]
@@ -2537,7 +2532,7 @@ impl KinewrightMcp {
     ///
     /// **The branch *is* the proposal.** The session edits its branch through
     /// the ordinary `prepare_edit_plan` / `commit_edit_plan` path, and this
-    /// handler snapshots `Query::AppliedOperations` — the operations still
+    /// handler snapshots the leased applied-delta query — the operations still
     /// represented by the branch's undo stack, so an edit the session undid is
     /// not proposed, and, because the branch was spawned with an empty
     /// `op_log`, "since `spawn_at`" is the whole list. It is the same list
@@ -2638,7 +2633,8 @@ impl KinewrightMcp {
             truncate_to_serialized_bytes(&args.explanation, INVESTIGATOR_EXPLANATION_CEILING_BYTES);
         let proposal = IncidentProposal {
             operation_count: operations.len(),
-            operations: (*operations).clone(),
+            // The incident owns its capped proposal independently of the query lease.
+            operations: Vec::from(operations.operations()),
             summary: summary.clone(),
             explanation,
             base_revision: investigator.base_revision,
@@ -2672,18 +2668,12 @@ impl KinewrightMcp {
 
     /// The branch's applied operations: the proposal, exactly as
     /// `apply_to_live` would replay it.
-    fn applied_branch_operations(&self) -> Result<Arc<Vec<Operation>>, McpError> {
-        match self
-            .core
-            .request(Command::Query(Query::AppliedOperations))
-            .map_err(|error| McpError::internal_error(error.to_string(), None))?
-        {
-            Event::QueryResult(QueryResult::AppliedOperations(operations)) => Ok(operations),
-            _ => Err(McpError::internal_error(
-                "Core returned the wrong applied-operations query result",
-                None,
-            )),
-        }
+    fn applied_branch_operations(
+        &self,
+    ) -> Result<kinewright_project::operation_history::OwnerOperations, McpError> {
+        self.core
+            .operations(false)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))
     }
 
     fn media_status(&self) -> Result<CallToolResult, McpError> {
@@ -2905,7 +2895,7 @@ impl KinewrightMcp {
                 expected, actual, ..
             }) => revision_conflict_text(expected, actual),
             Ok(_) => error_text("Core returned the wrong operation result"),
-            Err(error) => error_text(error.to_string()),
+            Err(error) => core_refusal_text(&error),
         }
     }
 
@@ -3015,8 +3005,11 @@ impl KinewrightMcp {
             }
         } else {
             apply()
-        }
-        .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        };
+        let event = match event {
+            Ok(event) => event,
+            Err(error) => return Ok(core_refusal_text(&error)),
+        };
         Ok(match event {
             Event::DocumentChanged { doc, revision, .. } => {
                 if self.publish_to_playback {
@@ -3842,13 +3835,13 @@ impl KinewrightMcp {
         if let Err(error) = self.check_batch_history(operations) {
             return Ok(Err(error_text(error)));
         }
-        let event = self
-            .core
-            .request(Command::DoBatchIfRevision {
-                expected: expected_revision,
-                operations: operations.to_vec(),
-            })
-            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        let event = match self.core.request(Command::DoBatchIfRevision {
+            expected: expected_revision,
+            operations: operations.to_vec(),
+        }) {
+            Ok(event) => event,
+            Err(error) => return Ok(Err(core_refusal_text(&error))),
+        };
         Ok(match event {
             Event::DocumentChanged { doc, revision, .. } => {
                 if self.publish_to_playback {
@@ -15631,6 +15624,14 @@ pub(crate) fn render_optional_hundredths(value: Option<i32>) -> String {
     value.map_or_else(|| "none".to_owned(), |value| value.to_string())
 }
 
+fn core_refusal_text(refusal: &kinewright_project::operation_actor::Refusal) -> CallToolResult {
+    if refusal.error.is_capacity() {
+        error_text(format!("history_capacity: {refusal}"))
+    } else {
+        error_text(refusal.to_string())
+    }
+}
+
 fn error_text(text: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(text)])
 }
@@ -19201,21 +19202,19 @@ mod tests {
     #[test]
     fn history_capacity_ordinary_mcp_single_plan_and_lut_refuse_before_ack() {
         let (core, playback, analysis) = fixture();
-        let mut service = KinewrightMcp::new(
+        let core = Core::for_test_with_bounds(
+            core.baseline_document().unwrap(),
+            kinewright_core::undo::RoleBounds {
+                operation_bytes: 1,
+                ..kinewright_project::operation_history::Role::Ordinary.bounds()
+            },
+        )
+        .unwrap();
+        let service = KinewrightMcp::new(
             core.clone(),
             playback,
             analysis,
             ConfirmationBroker::default(),
-        );
-        let limits = kinewright_project::storage_budget::StorageLimits {
-            branch_history_bytes: 1,
-            ..kinewright_project::storage_budget::StorageLimits::default()
-        };
-        service.ordinary_history_limits = Arc::new(
-            kinewright_project::manual_history::OrdinaryHistoryAdmission::new(
-                kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(&limits)
-                    .unwrap(),
-            ),
         );
         let before = core.export_history().unwrap();
         let (revision, _) = service.snapshot().unwrap();
@@ -19339,7 +19338,7 @@ mod tests {
             })))),
             ..Default::default()
         });
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         let mut server = McpServer::start_isolated(core, media.clone(), media).unwrap();
         server.request_shutdown();
         let (state, _) = gate
@@ -19835,7 +19834,7 @@ mod tests {
             lut_assets: Vec::new(),
         };
         let media = Arc::new(NoopMedia::default());
-        (Core::spawn(document).unwrap(), media.clone(), media)
+        (Core::for_test(document).unwrap(), media.clone(), media)
     }
 
     fn verified_source_analysis() -> Arc<dyn Analysis> {
@@ -19904,7 +19903,7 @@ mod tests {
             ],
         });
         KinewrightMcp::new(
-            Core::spawn(document).unwrap(),
+            Core::for_test(document).unwrap(),
             playback,
             verified_source_analysis(),
             ConfirmationBroker::default(),
@@ -19927,7 +19926,7 @@ mod tests {
             clips: Vec::new(),
         });
         KinewrightMcp::new(
-            Core::spawn(document).unwrap(),
+            Core::for_test(document).unwrap(),
             playback,
             verified_source_analysis(),
             ConfirmationBroker::default(),
@@ -19978,7 +19977,7 @@ mod tests {
         };
         let mut document = (*seed_document).clone();
         document.media_pool[0].source_fingerprint = current_fingerprint;
-        let core = Core::spawn(document).unwrap();
+        let core = Core::for_test(document).unwrap();
         let media = Arc::new(NoopMedia {
             probe_asset: Some(probe_asset),
             ..NoopMedia::default()
@@ -20092,7 +20091,7 @@ mod tests {
             ..Document::default()
         };
         let analysis = montage_analysis(status);
-        (Core::spawn(document).unwrap(), analysis)
+        (Core::for_test(document).unwrap(), analysis)
     }
 
     fn music_structure_fixture(
@@ -20168,7 +20167,7 @@ mod tests {
             timeline_beats,
             ..NoopMedia::default()
         });
-        (Core::spawn(document).unwrap(), analysis)
+        (Core::for_test(document).unwrap(), analysis)
     }
 
     fn end_anchored_music_fit_fixture() -> (Core, Arc<NoopMedia>) {
@@ -20222,7 +20221,7 @@ mod tests {
             )]),
             ..NoopMedia::default()
         });
-        (Core::spawn(document).unwrap(), analysis)
+        (Core::for_test(document).unwrap(), analysis)
     }
 
     fn ready_music_structure_status() -> BeatStatus {
@@ -21603,7 +21602,7 @@ mod tests {
             ..NoopMedia::default()
         });
         let service = KinewrightMcp::new(
-            Core::spawn(document.clone()).unwrap(),
+            Core::for_test(document.clone()).unwrap(),
             media.clone(),
             media,
             ConfirmationBroker::default(),
@@ -21726,7 +21725,7 @@ mod tests {
             (AssetId(3), offline("audio is offline")),
         ]));
         let service = KinewrightMcp::new(
-            Core::spawn(document.clone()).unwrap(),
+            Core::for_test(document.clone()).unwrap(),
             playback.clone(),
             media.clone(),
             ConfirmationBroker::default(),
@@ -21759,7 +21758,7 @@ mod tests {
             offline("active overlay is offline"),
         )]));
         let service = KinewrightMcp::new(
-            Core::spawn(overlay_document.clone()).unwrap(),
+            Core::for_test(overlay_document.clone()).unwrap(),
             playback.clone(),
             media.clone(),
             ConfirmationBroker::default(),
@@ -21782,7 +21781,7 @@ mod tests {
             offline("active freeze source is offline"),
         )]));
         let service = KinewrightMcp::new(
-            Core::spawn(freeze_document).unwrap(),
+            Core::for_test(freeze_document).unwrap(),
             playback.clone(),
             media,
             ConfirmationBroker::default(),
@@ -21798,7 +21797,7 @@ mod tests {
             offline("selected source is offline"),
         )]));
         let service = KinewrightMcp::new(
-            Core::spawn(document).unwrap(),
+            Core::for_test(document).unwrap(),
             playback,
             media,
             ConfirmationBroker::default(),
@@ -21869,7 +21868,7 @@ mod tests {
             ..NoopMedia::default()
         });
         let service = KinewrightMcp::new(
-            Core::spawn(document).unwrap(),
+            Core::for_test(document).unwrap(),
             playback,
             media,
             ConfirmationBroker::default(),
@@ -22221,7 +22220,7 @@ mod tests {
             matte_coverage: coverage,
             ..NoopMedia::default()
         });
-        let core = Core::spawn(document).unwrap();
+        let core = Core::for_test(document).unwrap();
         let service =
             KinewrightMcp::new(core.clone(), playback, media, ConfirmationBroker::default());
         (service, core)
@@ -22262,7 +22261,7 @@ mod tests {
             thumbnail_frames: frames,
             ..NoopMedia::default()
         });
-        let core = Core::spawn(document).unwrap();
+        let core = Core::for_test(document).unwrap();
         let service =
             KinewrightMcp::new(core.clone(), playback, media, ConfirmationBroker::default());
         (service, core)
@@ -22909,7 +22908,7 @@ mod tests {
             thumbnail_frames: frames,
             ..NoopMedia::default()
         });
-        let core = Core::spawn(document).unwrap();
+        let core = Core::for_test(document).unwrap();
         let service =
             KinewrightMcp::new(core.clone(), playback, media, ConfirmationBroker::default());
         (service, core)
@@ -24386,7 +24385,7 @@ mod tests {
         });
         let playback: Arc<dyn Playback> = media.clone();
         let analysis: Arc<dyn Analysis> = media;
-        let core = Core::spawn(document).unwrap();
+        let core = Core::for_test(document).unwrap();
         let service = KinewrightMcp::new(
             core.clone(),
             playback,
@@ -25496,7 +25495,7 @@ mod tests {
     }
 
     fn au5b_service(document: Document, analysis: Arc<dyn Analysis>) -> KinewrightMcp {
-        let core = Core::spawn(document).unwrap();
+        let core = Core::for_test(document).unwrap();
         let playback: Arc<dyn Playback> = Arc::new(NoopMedia::default());
         KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default())
     }
@@ -26585,7 +26584,7 @@ mod tests {
             color_description: kinewright_core::ColorDescription::default(),
             assumed_from: None,
         });
-        let core = Core::spawn(document).unwrap();
+        let core = Core::for_test(document).unwrap();
         let playback: Arc<dyn Playback> = Arc::new(NoopMedia::default());
         let analysis: Arc<dyn Analysis> = Arc::new(NoopMedia::default());
         let saved = KinewrightMcp::configured(
@@ -27213,7 +27212,7 @@ mod tests {
             confidence_basis_points: 10_000,
             provenance: ColorProvenance::StreamMetadata,
         };
-        let core = Core::spawn(document).unwrap();
+        let core = Core::for_test(document).unwrap();
         let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
         let before = service.snapshot().unwrap();
 
@@ -27399,7 +27398,7 @@ mod tests {
         });
         document.validate().unwrap();
         let proof_document = document.clone();
-        let core = Core::spawn(document).unwrap();
+        let core = Core::for_test(document).unwrap();
         let before = RgbaImage {
             width: 2,
             height: 2,
@@ -27624,7 +27623,7 @@ mod tests {
             });
         freeze_document.validate().unwrap();
         let freeze_service = KinewrightMcp::new(
-            Core::spawn(freeze_document).unwrap(),
+            Core::for_test(freeze_document).unwrap(),
             Arc::new(NoopMedia::default()),
             Arc::new(NoopMedia {
                 thumbnail_frames: BTreeMap::from([(TimeCode(12), before.clone())]),
@@ -27692,7 +27691,7 @@ mod tests {
                 ..NoopMedia::default()
             });
             let unavailable = KinewrightMcp::new(
-                Core::spawn(proof_document.clone()).unwrap(),
+                Core::for_test(proof_document.clone()).unwrap(),
                 Arc::new(NoopMedia::default()),
                 media,
                 ConfirmationBroker::default(),
@@ -27716,7 +27715,7 @@ mod tests {
         let mut incompatible_document = proof_document.clone();
         incompatible_document.color_context.working.transfer = ColorTransfer::Bt709;
         let incompatible = KinewrightMcp::new(
-            Core::spawn(incompatible_document).unwrap(),
+            Core::for_test(incompatible_document).unwrap(),
             Arc::new(NoopMedia::default()),
             Arc::new(NoopMedia::default()),
             ConfirmationBroker::default(),
@@ -27744,7 +27743,7 @@ mod tests {
             ..NoopMedia::default()
         });
         let failed = KinewrightMcp::new(
-            Core::spawn(proof_document.clone()).unwrap(),
+            Core::for_test(proof_document.clone()).unwrap(),
             Arc::new(NoopMedia::default()),
             failed_media,
             ConfirmationBroker::default(),
@@ -27778,7 +27777,7 @@ mod tests {
             ..NoopMedia::default()
         });
         let unsupported = KinewrightMcp::new(
-            Core::spawn(proof_document).unwrap(),
+            Core::for_test(proof_document).unwrap(),
             Arc::new(NoopMedia::default()),
             unsupported_media,
             ConfirmationBroker::default(),
@@ -27944,7 +27943,7 @@ mod tests {
             ..NoopMedia::default()
         });
         let service = KinewrightMcp::new(
-            Core::spawn(document).unwrap(),
+            Core::for_test(document).unwrap(),
             playback,
             media,
             ConfirmationBroker::default(),
@@ -28090,7 +28089,7 @@ mod tests {
         let probed = probed_color_description();
         let mut document = (*seed_document).clone();
         document.media_pool[0].color_description = probed.clone();
-        let core = Core::spawn(document).unwrap();
+        let core = Core::for_test(document).unwrap();
         let service = KinewrightMcp::new(
             core.clone(),
             playback,
@@ -32073,7 +32072,7 @@ mod tests {
             .expect("the seeded legacy stack is valid");
         let media = Arc::new(NoopMedia::default());
         KinewrightMcp::configured(
-            Core::spawn(document).unwrap(),
+            Core::for_test(document).unwrap(),
             media.clone(),
             media,
             None,
@@ -32489,7 +32488,7 @@ mod tests {
             .expect("the seeded asset table is valid");
         let media = Arc::new(NoopMedia::default());
         let service = KinewrightMcp::configured(
-            Core::spawn(document).unwrap(),
+            Core::for_test(document).unwrap(),
             media.clone(),
             media,
             None,
@@ -32567,7 +32566,7 @@ mod tests {
             ..NoopMedia::default()
         });
         let service = KinewrightMcp::new(
-            Core::spawn(document).unwrap(),
+            Core::for_test(document).unwrap(),
             media.clone(),
             media,
             ConfirmationBroker::default(),
@@ -32621,7 +32620,7 @@ mod tests {
         }];
         clean.validate().unwrap();
         let clean_service = KinewrightMcp::new(
-            Core::spawn(clean).unwrap(),
+            Core::for_test(clean).unwrap(),
             clean_media.clone(),
             clean_media,
             ConfirmationBroker::default(),
@@ -33211,7 +33210,7 @@ mod tests {
         }];
         with_primary.validate().unwrap();
         let primary_service = KinewrightMcp::new(
-            Core::spawn(with_primary).unwrap(),
+            Core::for_test(with_primary).unwrap(),
             Arc::new(NoopMedia::default()),
             Arc::new(NoopMedia::default()),
             ConfirmationBroker::default(),
@@ -33253,7 +33252,7 @@ mod tests {
             .validate()
             .expect("the CC4 stack is a valid document");
         let look_service = KinewrightMcp::new(
-            Core::spawn(with_look).unwrap(),
+            Core::for_test(with_look).unwrap(),
             Arc::new(NoopMedia::default()),
             Arc::new(NoopMedia::default()),
             ConfirmationBroker::default(),
@@ -33999,7 +33998,7 @@ mod tests {
     }
 
     fn au4_service(document: Document, analysis: NoopMedia) -> KinewrightMcp {
-        let core = Core::spawn(document).unwrap();
+        let core = Core::for_test(document).unwrap();
         let playback: Arc<dyn Playback> = Arc::new(NoopMedia::default());
         KinewrightMcp::configured(
             core,
@@ -35326,7 +35325,7 @@ mod tests {
         else {
             panic!("the fixture core answers a document query");
         };
-        let branch = Core::spawn_at((*document).clone(), IN2_BASE_REVISION).unwrap();
+        let branch = Core::for_test_at_revision((*document).clone(), IN2_BASE_REVISION).unwrap();
         let incidents: IncidentLogHandle =
             Arc::new(RwLock::new(IncidentLog::with_start(Instant::now(), None)));
         let id = {
@@ -35411,7 +35410,7 @@ mod tests {
     ///
     /// The branch is the proposal: two commits on the branch produce a
     /// two-operation proposal whose `operations` are exactly
-    /// `Query::AppliedOperations`, whose `base_revision` is the live revision
+    /// the leased applied-delta query, whose `base_revision` is the live revision
     /// `spawn_at` seeded the branch at — **not** the branch's own counter,
     /// which two commits have already moved — and which leaves the incident
     /// still `Investigating`, because the application resolves incidents and
@@ -36254,7 +36253,7 @@ mod tests {
         else {
             panic!("the fixture core answers a document query");
         };
-        let branch = Core::spawn_at((*document).clone(), IN2_BASE_REVISION).unwrap();
+        let branch = Core::for_test_at_revision((*document).clone(), IN2_BASE_REVISION).unwrap();
         let incidents: IncidentLogHandle =
             Arc::new(RwLock::new(IncidentLog::with_start(Instant::now(), None)));
         let id = {

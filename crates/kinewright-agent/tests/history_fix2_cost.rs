@@ -4,10 +4,9 @@ use kinewright_agent::writer_host::{
     HostClient, HostCommand, HostConfig, HostOrigin, HostSnapshot, HostSourceBinding, SessionRoots,
     SourceServer,
 };
-use kinewright_core::{
-    Command, Core, Document, Event, Operation, TimeCode, Track, TrackId, TrackKind,
-};
+use kinewright_core::{Command, Document, Event, Operation, TimeCode, Track, TrackId, TrackKind};
 use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{bundle::BundleWriteAdmission, editing_session::Ja1EditingSession};
 use std::{
     path::PathBuf,
@@ -55,7 +54,7 @@ fn history_fix2_startup_sample() {
         .unwrap();
     let temp = TempDirectory::new_in(&workspace_target_dir(), "fix2-startup");
     let path = temp.path("startup.kinewright");
-    let core = Core::spawn(document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
     let mut owner =
         Ja1EditingSession::activate(&path, BundleWriteAdmission::new_document(), &core, None)
             .unwrap();
@@ -64,10 +63,10 @@ fn history_fix2_startup_sample() {
         edit(&core, index);
     }
     let history = core.export_history().unwrap();
-    assert_eq!(history.batches.len(), edits);
+    assert_eq!(history.history().undo.len(), edits);
     println!(
         "STARTUP_INPUT={}",
-        serde_json::json!({"edits":edits,"encoded":history.encoded_bytes().unwrap(),"retained":kinewright_core::history_size::restored_history_live_bytes(&history).unwrap(),"operation_bytes":std::mem::size_of::<Operation>(),"history_batch_bytes":std::mem::size_of::<kinewright_core::HistoryBatch>()})
+        serde_json::json!({"edits":edits,"encoded":serde_json::to_vec(&history).unwrap().len(),"retained":history.creation_sizing().limits().unwrap().envelope.retained,"operation_bytes":std::mem::size_of::<Operation>(),"history_batch_bytes":std::mem::size_of::<kinewright_core::undo::Step>()})
     );
     let transfer = owner.prepare_host_attachment().unwrap();
     let live = Arc::new(AtomicBool::new(true));
@@ -103,7 +102,7 @@ fn history_fix2_startup_sample() {
                 source: transfer.source,
                 callback: server.bootstrap(),
             },
-            initial_snapshot: HostSnapshot::from_history(transfer.history).unwrap(),
+            initial_snapshot: Some(HostSnapshot::from_history(transfer.history).unwrap()),
             expected_root_sha256: transfer.expected_root_sha256,
             expected_project_id: transfer.project_id,
         },
@@ -120,7 +119,11 @@ fn history_fix2_startup_sample() {
         let received = client.request(HostCommand::ReadHistory).unwrap();
         assert!(received.error.is_none(), "history read refused");
         assert!(
-            received.history.as_ref() == Some(&history),
+            received
+                .history
+                .as_ref()
+                .map(kinewright_project::operation_actor::PortableHistory::identity)
+                == Some(history.identity().unwrap()),
             "STARTUP_RESTORES_ALL_HISTORY_EXACTLY"
         );
         let reply = client.request(HostCommand::Shutdown).unwrap();
@@ -149,7 +152,7 @@ fn history_fix2_startup_sample() {
     live.store(false, Ordering::Release);
     drop(server);
     assert_eq!(
-        core.export_history().unwrap().document.duration,
+        core.export_history().unwrap().history().document.duration,
         TimeCode::ZERO
     );
 }
@@ -161,7 +164,7 @@ fn history_fix2_edit_and_save_sample() {
     for edits in [1000, 12000] {
         let temp = TempDirectory::new_in(&workspace_target_dir(), "fix2-edit-cost");
         let path = temp.path("cost.kinewright");
-        let core = Core::spawn(document()).unwrap();
+        let core = Core::for_test(document()).unwrap();
         let mut owner =
             Ja1EditingSession::activate(&path, BundleWriteAdmission::new_document(), &core, None)
                 .unwrap();
@@ -178,12 +181,19 @@ fn history_fix2_edit_and_save_sample() {
         let lease = owner
             .issue_manual_lease("cost-person".into(), "cost-local".into())
             .unwrap();
-        let gui = Core::spawn(Document::default()).unwrap();
-        gui.restore_history(core.export_history().unwrap()).unwrap();
+        let gui = kinewright_project::operation_actor::Core::peer_for_test(
+            core.portable_history().unwrap(),
+        )
+        .unwrap();
         let replica = Ja1EditingSession::new(temp.root(), &gui, StorageLimits::default()).unwrap();
         let permit = replica
-            .bind_manual_producer(lease.clone(), owner.manual_input_context().unwrap())
+            .bind_manual_producer(
+                lease.clone(),
+                owner.manual_input_context().unwrap(),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            )
             .unwrap();
+        let authority = owner.manual_authority(lease.clone()).unwrap();
         for sample in 0_usize..10 {
             let before = gui.export_history().unwrap();
             let start = Instant::now();
@@ -205,7 +215,7 @@ fn history_fix2_edit_and_save_sample() {
                 owner.save_active().unwrap();
                 println!(
                     "EDIT_SAVE_REFUSAL={}",
-                    serde_json::json!({"edits":edits,"retained_batches":before.batches.len(),"floor_offset":before.floor_offset,"sample":sample,"hand_edit_ms":edit_ms,"unchanged_save_ms":started.elapsed().as_secs_f64()*1000.0,"reason":reason.to_string()})
+                    serde_json::json!({"edits":edits,"retained_batches":before.history().undo.len(),"floor_offset":before.fold_frontier().map_or(0, |key| key.position + 1),"sample":sample,"hand_edit_ms":edit_ms,"unchanged_save_ms":started.elapsed().as_secs_f64()*1000.0,"reason":reason.to_string()})
                 );
                 continue;
             }
@@ -215,23 +225,29 @@ fn history_fix2_edit_and_save_sample() {
             );
             let pending = permit.pending().unwrap();
             let start = Instant::now();
-            owner
-                .commit_manual_history(&lease, pending.last().unwrap())
+            assert_eq!(pending.len(), 1);
+            let (receipt, _) = owner
+                .commit_manual_history(&authority, &pending[0])
                 .unwrap();
             let save_ms = start.elapsed().as_secs_f64() * 1000.0;
-            replica.acknowledge_manual(&permit, pending).unwrap();
+            replica.acknowledge_manual(&permit, vec![receipt]).unwrap();
             println!(
                 "EDIT_SAVE_SAMPLE={}",
-                serde_json::json!({"edits":edits,"retained_batches":before.batches.len(),"floor_offset":before.floor_offset,"sample":sample,"hand_edit_ms":edit_ms,"save_ms":save_ms})
+                serde_json::json!({"edits":edits,"retained_batches":before.history().undo.len(),"floor_offset":before.fold_frontier().map_or(0, |key| key.position + 1),"sample":sample,"hand_edit_ms":edit_ms,"save_ms":save_ms})
             );
         }
         let expected = gui.export_history().unwrap();
         drop(permit);
         drop(replica);
         drop(owner);
-        let loaded = kinewright_project::bundle::LoadedBundle::read(&path).unwrap();
-        let restored = Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&restored).unwrap();
+        let mut loaded = kinewright_project::bundle::LoadedBundle::read(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
+        let restored = loaded.open_manual().unwrap();
         assert_eq!(
             restored.export_history().unwrap(),
             expected,

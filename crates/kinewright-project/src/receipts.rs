@@ -1,12 +1,13 @@
 //! Durable command results. Lookup precedes fresh authority and never executes a command.
 #![allow(clippy::missing_errors_doc)]
+use crate::operation_actor::Core;
 use crate::{
     bundle::{BundleError, ProjectBundle},
     bundle_records::{BatchId, BranchId, HeadId, ObjectRef, ProjectId, RecordKind, SessionId},
     storage_budget::StorageLimits,
     store::BundleRecord,
 };
-use kinewright_core::{Core, HistorySnapshot, JournalCommand, TimelineRevision};
+use kinewright_core::{JournalCommand, TimelineRevision};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -73,6 +74,8 @@ pub struct CommandEnvelope {
     pub switch: Option<Box<crate::bundle_switch::SwitchRequest>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual: Option<crate::manual_history::ManualHistoryIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::operation_actor::CommandContext>,
     pub version: u32,
     pub action: String,
     pub id: CommandId,
@@ -361,13 +364,10 @@ impl ReceiptLedger {
                             .any(|r| r.record_kind != RecordKind::BranchCheckpoint)
                         || [&result.old.history, &result.new.history]
                             .iter()
-                            .any(|r| r.record_kind != RecordKind::History)
+                            .any(|r| r.record_kind != RecordKind::OperationHistory)
                         || [&result.old.inputs, &result.new.inputs]
                             .iter()
                             .any(|r| r.record_kind != RecordKind::InputManifest)
-                        || [&result.old.lineage, &result.new.lineage]
-                            .iter()
-                            .any(|r| r.record_kind != RecordKind::Lineage)
                     {
                         return Err(BundleError::Corrupt("switch result identity/kind".into()));
                     }
@@ -463,7 +463,7 @@ impl ProjectBundle {
         core: &Core,
         inputs: &ObjectRef,
         first_sequence: u64,
-        cut: Option<&kinewright_core::AcceptedCut>,
+        cut: Option<&crate::operation_actor::AcceptedCut>,
     ) -> Result<IssuerId, BundleError> {
         if self.unsettled || self.pending_command.is_some() {
             return Err(BundleError::Unsettled);
@@ -483,6 +483,12 @@ impl ProjectBundle {
                 .store
                 .run_error(BundleError::Capacity("issuer entries")));
         }
+        // A newly named document has no saved cut yet. Establish that baseline
+        // before issuing authority; later issuance stays metadata-only and never
+        // publishes an existing project's unrelated unsaved suffix.
+        if self.root.is_none() && self.branches.is_empty() {
+            self.save_current(core, inputs)?;
+        }
         let id = IssuerId::fresh()?;
         self.issuers.insert(
             id.clone(),
@@ -493,11 +499,12 @@ impl ProjectBundle {
                 metadata_subject: None,
             },
         );
-        let result = if let Some(cut) = cut {
-            self.save_frozen(core, inputs, cut)
-        } else {
-            self.save_current(core, inputs)
-        };
+        if let Some(cut) = cut
+            && core.change_id().map_err(crate::bundle::operation_error)? != cut.change()
+        {
+            return Err(BundleError::HistoryChanged);
+        }
+        let result = crate::bundle_commit::BundleCommit::publish_maintenance(self);
         if let Err(error) = result {
             if !self.unsettled {
                 self.issuers.remove(&id);
@@ -512,6 +519,20 @@ impl ProjectBundle {
         for issuer in self.issuers.values_mut() {
             issuer.retired = true;
         }
+    }
+    /// A saved receipt can be returned after restart immediately. In this
+    /// process its matching private shadow must finish before the first ack.
+    pub(crate) fn settle_matching_receipt(
+        &mut self,
+        envelope: &CommandEnvelope,
+    ) -> Result<(), BundleError> {
+        if self.pending_command.as_deref() == Some(envelope)
+            && let Some(pending) = &self.pending_publication
+        {
+            let core = pending.core.clone();
+            self.reconcile_command(&core)?;
+        }
+        Ok(())
     }
     pub fn receipt_lookup(&self, envelope: &CommandEnvelope) -> Result<ReceiptLookup, BundleError> {
         let _reading = crate::run_admission::reading(&self.store);
@@ -593,8 +614,8 @@ impl ProjectBundle {
         &mut self,
         id: &IssuerId,
         through: u64,
-        core: &Core,
-        inputs: &ObjectRef,
+        _core: &Core,
+        _inputs: &ObjectRef,
     ) -> Result<(), BundleError> {
         if self.unsettled || self.pending_command.is_some() {
             return Err(BundleError::Unsettled);
@@ -615,7 +636,7 @@ impl ProjectBundle {
                 BundleError::Corrupt("issuer disappeared during owner operation".into())
             })?
             .reconciled_high_water = through;
-        if let Err(error) = self.save_current(core, inputs) {
+        if let Err(error) = crate::bundle_commit::BundleCommit::publish_maintenance(self) {
             if !self.unsettled {
                 self.issuers.insert(id.clone(), old);
             }
@@ -628,8 +649,8 @@ impl ProjectBundle {
         &mut self,
         id: &IssuerId,
         forget: bool,
-        core: &Core,
-        inputs: &ObjectRef,
+        _core: &Core,
+        _inputs: &ObjectRef,
     ) -> Result<(), BundleError> {
         if self.unsettled || self.pending_command.is_some() {
             return Err(BundleError::Unsettled);
@@ -670,7 +691,7 @@ impl ProjectBundle {
         {
             self.issuers.remove(id);
         }
-        if let Err(error) = self.save_current(core, inputs) {
+        if let Err(error) = crate::bundle_commit::BundleCommit::publish_maintenance(self) {
             if !self.unsettled {
                 self.receipts = prior;
                 self.issuers.insert(id.clone(), old);
@@ -691,18 +712,25 @@ impl ProjectBundle {
     pub fn install_reconciled_command(
         &mut self,
         core: &Core,
-        before: HistorySnapshot,
+        before: crate::operation_actor::AcceptedCut,
     ) -> Result<(), BundleError> {
-        let attachment = self.attach_core(core)?;
         self.reconcile_command(core)?;
-        let checkpoint = self
-            .branches
-            .get(&self.manual_branch_id)
-            .ok_or_else(|| BundleError::Corrupt("missing acknowledged checkpoint".into()))?;
-        let history = self.store.resolve_history(&checkpoint.history_ref)?;
-        attachment
-            .install_checkpoint(before, (*history).clone())
-            .map_err(crate::bundle::history_error)
+        let owner = self.attach_core(core)?;
+        let current = owner.capture().map_err(crate::bundle::operation_error)?;
+        let checkpoint = self.checkpoint(self.manual_branch_id())?;
+        if current.identity() == checkpoint.identity {
+            return Ok(());
+        }
+        if current != before {
+            return Err(BundleError::HistoryChanged);
+        }
+        let incoming = checkpoint.open(&self.store, self.history_pool())?;
+        let epoch = incoming.position().epoch;
+        owner
+            .install_snapshot(&before, incoming, Some(epoch))
+            .map_err(crate::bundle::operation_error)?;
+        let cut = owner.freeze().map_err(crate::bundle::operation_error)?;
+        owner.resume(&cut).map_err(crate::bundle::operation_error)
     }
 }
 

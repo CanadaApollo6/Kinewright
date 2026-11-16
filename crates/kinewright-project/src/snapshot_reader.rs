@@ -221,12 +221,24 @@ impl HostSnapshotReader {
     ) -> Result<StorageReservation<T>, BundleError> {
         self.store.read_record(reference)
     }
-    /// Resolve the leased history closure in the GUI's ordinary read budget.
-    pub fn resolve_history(
+    pub fn owner_history(
         &self,
-        reference: &ObjectRef,
-    ) -> Result<StorageReservation<kinewright_core::HistorySnapshot>, BundleError> {
-        self.store.resolve_manual_history(reference)
+        pool: &crate::operation_history::HistoryPool,
+    ) -> Result<crate::operation_history::OwnerRead, BundleError> {
+        let checkpoint = self
+            .store
+            .read_record::<crate::bundle_records::BranchCheckpoint>(
+                &self.descriptor.checkpoint_ref,
+            )?;
+        if checkpoint.owner_ref != self.descriptor.owner_ref
+            || checkpoint.identity != self.descriptor.identity
+        {
+            return Err(BundleError::HistoryChanged);
+        }
+        checkpoint
+            .open(&self.store, pool)?
+            .into_reader()
+            .map_err(BundleError::from)
     }
 }
 

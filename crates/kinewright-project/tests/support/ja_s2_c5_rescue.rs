@@ -1,8 +1,9 @@
 use super::Ja1EditingSession;
 use kinewright_core::{
-    AttachmentState, Command, Core, Document, Event, Operation, Track, TrackId, TrackKind,
+    AttachmentState, Command, Document, Event, Operation, Track, TrackId, TrackKind,
 };
 use kinewright_media::test_support::TempDirectory;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::LoadedBundle, bundle_copy::CopyStatus, io_observer, storage_budget::StorageLimits,
 };
@@ -32,6 +33,23 @@ fn edit(core: &Core, locked: bool) {
         .unwrap(),
         Event::DocumentChanged { .. }
     ));
+}
+fn full_owner_value(core: &Core) -> serde_json::Value {
+    serde_json::to_value(core.export_history().unwrap()).unwrap()
+}
+fn assert_installed_owner(core: &Core, mut expected: serde_json::Value) {
+    let actual = full_owner_value(core);
+    assert!(
+        actual["history"]["epoch"].as_u64().unwrap()
+            > expected["history"]["epoch"].as_u64().unwrap(),
+        "RESCUE_INSTALL_STARTS_A_NEW_EPOCH"
+    );
+    expected["history"]["epoch"] = serde_json::json!(actual["history"]["epoch"].as_u64().unwrap());
+    // No other document, stack, command key, ledger, lineage or resource may change.
+    assert!(
+        actual == expected,
+        "RESCUE_INSTALL_PRESERVES_THE_COMPLETE_SELECTED_OWNER"
+    );
 }
 fn grow(core: &Core) {
     for n in 0..40 {
@@ -84,7 +102,7 @@ pub(super) fn w01_first_save_rescue_is_independent() {
     let temp = temp();
     let a = temp.path("drive/a.kinewright");
     let b = temp.path("b.kinewright");
-    let core = Core::spawn(document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
     edit(&core, false);
     let mut session = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
     let lut = b"TITLE \"Owned rescue LUT\"\nLUT_3D_SIZE 2\n0 0 0\n0 0 1\n0 1 0\n0 1 1\n1 0 0\n1 0 1\n1 1 0\n1 1 1\n";
@@ -143,24 +161,47 @@ pub(super) fn w01_first_save_rescue_is_independent() {
         .unwrap(),
         CopyStatus::DurabilityUnknown
     ));
-    let original_project = LoadedBundle::read(&a)
+    let original_project = LoadedBundle::read(
+        &a,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .root()
+    .unwrap()
+    .project_id
+    .clone();
+    std::fs::rename(temp.path("drive"), temp.path("hidden-drive")).unwrap();
+    let expected = full_owner_value(&core);
+    let outcome = rescue(&mut session, &b, None);
+    assert_ne!(
+        LoadedBundle::read(
+            &b,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default()
+            )
+        )
         .unwrap()
         .root()
         .unwrap()
-        .project_id
-        .clone();
-    std::fs::rename(temp.path("drive"), temp.path("hidden-drive")).unwrap();
-    let expected = core.export_history().unwrap();
-    let outcome = rescue(&mut session, &b, None);
-    assert_ne!(
-        LoadedBundle::read(&b).unwrap().root().unwrap().project_id,
+        .project_id,
         original_project
     );
     assert!(outcome.activated, "{outcome:?}");
     assert_eq!(core.attachment_state().unwrap(), AttachmentState::Sealed);
     assert_ne!(core.actor_identity(), session.core().actor_identity());
-    assert_eq!(session.core().export_history().unwrap(), expected);
-    let root = LoadedBundle::read(&b).unwrap().root().unwrap().clone();
+    assert_installed_owner(session.core(), expected);
+    let root = LoadedBundle::read(
+        &b,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .root()
+    .unwrap()
+    .clone();
     let copied_inputs = session
         .store()
         .unwrap()
@@ -186,9 +227,14 @@ pub(super) fn w01_first_save_rescue_is_independent() {
     drop(session);
     drop(core);
     std::fs::remove_dir_all(temp.path("hidden-drive")).unwrap();
-    let loaded = LoadedBundle::read(&b).unwrap();
-    let fresh = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&fresh).unwrap();
+    let mut loaded = LoadedBundle::read(
+        &b,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let fresh = loaded.open_manual().unwrap();
     assert_eq!(fresh.export_history().unwrap(), later);
 }
 #[test]
@@ -197,7 +243,7 @@ pub(super) fn w16_first_save_a_writer_and_later_floor_continue() {
         let temp = temp();
         let a = temp.path("drive/a.kinewright");
         let b = temp.path("b.kinewright");
-        let core = Core::spawn(document()).unwrap();
+        let core = Core::for_test(document()).unwrap();
         grow(&core);
         let mut session =
             Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
@@ -213,45 +259,42 @@ pub(super) fn w16_first_save_a_writer_and_later_floor_continue() {
             .unwrap(),
             CopyStatus::DurabilityUnknown
         ));
-        let chosen = kinewright_project::bundle_commit::bound_history_probe(
-            &core.export_history().unwrap(),
-            &floor_limits(),
-        )
-        .unwrap();
-        assert!(chosen.floor_offset > 0);
-        let ticket = core.pending_history_save().unwrap().unwrap();
+        let ticket = core.actor_identity();
+        assert_eq!(
+            session.active_publication_state().unwrap(),
+            kinewright_project::bundle::PublicationState::Unknown
+        );
         std::fs::rename(temp.path("drive"), temp.path("hidden-drive")).unwrap();
         let outcome = rescue(&mut session, &b, Some("root_parent_sync"));
         assert!(!outcome.activated);
         assert!(matches!(outcome.status, CopyStatus::DurabilityUnknown));
         assert_eq!(core.attachment_state().unwrap(), AttachmentState::Live);
         edit(&core, true);
-        let history = core.export_history().unwrap();
+        let mut history = full_owner_value(&core);
         session.reconcile_retained_destination(&b).unwrap();
-        assert_eq!(core.export_history().unwrap(), history);
+        assert_eq!(full_owner_value(&core), history);
         std::fs::rename(temp.path("hidden-drive"), temp.path("drive")).unwrap();
         session.reconcile_active().unwrap();
-        let oracle = if landed {
-            kinewright_core::HistoryTransition::floor(
-                history.clone(),
-                usize::try_from(chosen.floor_offset).unwrap(),
-            )
-            .unwrap()
-            .after()
-            .clone()
-        } else {
-            history.clone()
-        };
-        assert_eq!(core.export_history().unwrap(), oracle);
-        assert!(core.pending_history_save().unwrap().is_none());
-        assert_eq!(ticket.actor, core.actor_identity());
+        let after = full_owner_value(&core);
+        history["history"]["epoch"] =
+            serde_json::json!(after["history"]["epoch"].as_u64().unwrap());
+        assert_eq!(
+            after, history,
+            "RECONCILING_A_NEVER_REWRITES_LATER_ACCEPTED_COMMANDS"
+        );
+        assert_eq!(ticket, core.actor_identity());
         session.save_active().unwrap();
         assert!(!session.dirty().unwrap());
         assert_eq!(session.core().actor_identity(), core.actor_identity());
         let saved = core.export_history().unwrap();
-        let reopened = LoadedBundle::read(&a).unwrap();
-        let fresh = Core::spawn(Document::default()).unwrap();
-        reopened.restore_manual(&fresh).unwrap();
+        let mut reopened = LoadedBundle::read(
+            &a,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
+        let fresh = reopened.open_manual().unwrap();
         assert_eq!(fresh.export_history().unwrap(), saved);
     }
 }
@@ -260,7 +303,7 @@ pub(super) fn w16_repeated_active_b_attempts_settle_only_their_tickets() {
     let temp = temp();
     let a = temp.path("drive/a.kinewright");
     let b = temp.path("bdrive/b.kinewright");
-    let core = Core::spawn(document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
     grow(&core);
     let mut session = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
     io_observer::fail_once("root_parent_sync", || {
@@ -274,13 +317,8 @@ pub(super) fn w16_repeated_active_b_attempts_settle_only_their_tickets() {
         .enumerate()
     {
         grow(session.core());
-        let initial = session.core().export_history().unwrap();
-        let chosen =
-            kinewright_project::bundle_commit::bound_history_probe(&initial, &floor_limits())
-                .unwrap();
-        assert!(chosen.floor_offset > initial.floor_offset);
         assert!(io_observer::fail_once("root_parent_sync", || session.save_active()).is_err());
-        let ticket = session.core().pending_history_save().unwrap().unwrap();
+        let ticket = session.core().actor_identity();
         std::fs::rename(temp.path("bdrive"), temp.path("hidden-b")).unwrap();
         let offer = session.probe_active().unwrap().unwrap();
         let capture = session.prepare_rescue(&offer).unwrap().unwrap();
@@ -304,19 +342,15 @@ pub(super) fn w16_repeated_active_b_attempts_settle_only_their_tickets() {
             assert!(!outcome.unwrap().activated);
         }
         edit(session.core(), index % 2 == 0);
-        let before = session.core().export_history().unwrap();
-        let oracle = kinewright_core::HistoryTransition::floor(
-            before.clone(),
-            usize::try_from(chosen.floor_offset - initial.floor_offset).unwrap(),
-        )
-        .unwrap()
-        .after()
-        .clone();
+        let before = session.core().snapshot_identity().unwrap();
         std::fs::rename(temp.path("hidden-b"), temp.path("bdrive")).unwrap();
         session.reconcile_active().unwrap();
-        assert_eq!(session.core().export_history().unwrap(), oracle);
-        assert!(session.core().pending_history_save().unwrap().is_none());
-        assert_eq!(ticket.actor, session.core().actor_identity());
+        assert_eq!(
+            session.core().snapshot_identity().unwrap(),
+            before,
+            "ACTIVE_B_SETTLEMENT_PRESERVES_EVERY_ACCEPTED_COMMAND"
+        );
+        assert_eq!(ticket, session.core().actor_identity());
         session.save_active().unwrap();
         if index == 1 {
             let history = session.core().export_history().unwrap();
@@ -340,8 +374,13 @@ pub(super) fn w10_pending_command_exclusion_and_original_id_lookup() {
     for (landed, immediate) in [(false, false), (true, false), (false, true), (true, true)] {
         let temp = temp();
         let a = temp.path("a.kinewright");
-        let core = Core::spawn(document()).unwrap();
-        let mut bundle = ProjectBundle::activate(&a, BundleWriteAdmission::new_document()).unwrap();
+        let core = Core::for_test(document()).unwrap();
+        let mut bundle = ProjectBundle::activate(
+            &a,
+            BundleWriteAdmission::new_document(),
+            core.history_pool(),
+        )
+        .unwrap();
         let input = bundle.empty_inputs().unwrap().reference.clone();
         bundle.save(&core, &input).unwrap();
         let issuer = bundle.issue_issuer(&core, &input, 1).unwrap();
@@ -354,6 +393,7 @@ pub(super) fn w10_pending_command_exclusion_and_original_id_lookup() {
         let envelope = CommandEnvelope {
             switch: None,
             manual: None,
+            context: None,
             version: 1,
             action: "edit".into(),
             id: CommandId {
@@ -388,8 +428,8 @@ pub(super) fn w10_pending_command_exclusion_and_original_id_lookup() {
             )
             .is_err()
         );
-        assert!(core.pending_history_save().unwrap().is_none());
-        let original = core.export_history().unwrap();
+        assert_eq!(core.attachment_state().unwrap(), AttachmentState::Frozen);
+        let mut original = full_owner_value(&core);
         let mut session = Ja1EditingSession::from_bundle(bundle, &core, input).unwrap();
         let parent = temp.root().to_path_buf();
         let hidden = parent.with_extension("pending-hidden");
@@ -411,26 +451,44 @@ pub(super) fn w10_pending_command_exclusion_and_original_id_lookup() {
         );
         assert_eq!(outcome.activated, immediate);
         let active = session.core().clone();
-        assert_eq!(active.export_history().unwrap(), original);
-        assert!(matches!(
-            active
-                .request(Command::Do(Operation::SetTrackSyncLock {
-                    track: TrackId(2),
-                    locked: false
-                }))
-                .unwrap(),
-            Event::DocumentChanged { .. }
-        ));
-        let newer = active.export_history().unwrap();
-        let dirty = session.dirty().unwrap();
+        let selected = full_owner_value(&active);
+        original["history"]["epoch"] =
+            serde_json::json!(selected["history"]["epoch"].as_u64().unwrap());
+        assert_eq!(
+            selected, original,
+            "RESCUE_SELECTS_THE_SOURCE_BEFORE_THE_PRIVATE_COMMAND"
+        );
+        if !immediate {
+            assert!(
+                matches!(
+                    active.request(Command::Do(Operation::SetTrackSyncLock {
+                        track: TrackId(2),
+                        locked: false,
+                    })),
+                    Err(kinewright_project::operation_actor::Refusal {
+                        error: kinewright_project::operation_actor::Error::MutationRefused(_),
+                        ..
+                    })
+                ),
+                "LATE_RESCUE_NEVER_RELEASES_THE_ORIGINAL_NATIVE_FENCE"
+            );
+        }
         std::fs::rename(&hidden, &parent).unwrap();
         if immediate {
             session.reconcile_retained_destination(&a).unwrap();
         } else {
             session.reconcile_active().unwrap();
         }
-        assert_eq!(active.export_history().unwrap(), newer);
-        assert_eq!(session.dirty().unwrap(), dirty);
+        assert!(matches!(
+            active
+                .request(Command::Do(Operation::SetTrackSyncLock {
+                    track: TrackId(2),
+                    locked: false,
+                }))
+                .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        let newer = active.snapshot_identity().unwrap();
         assert_eq!(
             core.attachment_state().unwrap(),
             if immediate {
@@ -441,15 +499,26 @@ pub(super) fn w10_pending_command_exclusion_and_original_id_lookup() {
         );
         if !immediate {
             session.reconcile_retained_destination(&b).unwrap();
-            assert_eq!(active.export_history().unwrap(), newer);
+            assert_eq!(active.snapshot_identity().unwrap(), newer);
         }
         drop(session);
         drop(active);
         drop(core);
-        let loaded = LoadedBundle::read(&b).unwrap();
-        let fresh = Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&fresh).unwrap();
-        assert_eq!(fresh.export_history().unwrap(), original);
+        let mut loaded = LoadedBundle::read(
+            &b,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
+        let fresh = loaded.open_manual().unwrap();
+        let reopened = full_owner_value(&fresh);
+        original["history"]["epoch"] =
+            serde_json::json!(reopened["history"]["epoch"].as_u64().unwrap());
+        assert_eq!(
+            reopened, original,
+            "RESCUE_EXCLUDES_THE_UNACKNOWLEDGED_PRIVATE_COMMAND"
+        );
         let owner = loaded.into_writer().unwrap();
         assert_eq!(
             owner.receipt_lookup(&envelope).unwrap(),
@@ -473,9 +542,14 @@ pub(super) fn w13_one_level_rescue_recopy_and_explicit_ack_retirement() {
     let a = temp.path("drive/a.kinewright");
     let b = temp.path("bdrive/b.kinewright");
     let c = temp.path("c.kinewright");
-    let core = Core::spawn(document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
     std::fs::create_dir_all(a.parent().unwrap()).unwrap();
-    let mut bundle = ProjectBundle::activate(&a, BundleWriteAdmission::new_document()).unwrap();
+    let mut bundle = ProjectBundle::activate(
+        &a,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let inputs = bundle.empty_inputs().unwrap().reference.clone();
     let bytes = b"independent evidence survives rescue and explicit ack retirement";
     let evidence = kinewright_project::bundle_records::ObjectRef {
@@ -517,7 +591,13 @@ pub(super) fn w13_one_level_rescue_recopy_and_explicit_ack_retirement() {
     assert!(io_observer::fail_once("root_parent_sync", || session.save_active()).is_err());
     std::fs::rename(temp.path("bdrive"), temp.path("hidden-b")).unwrap();
     assert!(rescue(&mut session, &c, None).activated);
-    let records = LoadedBundle::read(&c).unwrap();
+    let records = LoadedBundle::read(
+        &c,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     let writer_manifest = records.root().unwrap().store_manifest_ref.clone();
     drop(records);
     let manifest = session
@@ -538,10 +618,14 @@ pub(super) fn w13_one_level_rescue_recopy_and_explicit_ack_retirement() {
         })
         .unwrap();
     let ack = top.acknowledged_root.clone().unwrap();
+    let mut edges = top.capture_checkpoints.clone();
+    edges.push(ack.clone());
+    edges.sort();
+    edges.dedup();
     assert_eq!(
         manifest.dependencies.get(&top_reference.sha256),
-        Some(&vec![ack.clone()]),
-        "published rescue record needs its dedicated acknowledged-root edge"
+        Some(&edges),
+        "RESCUE_RECORD_PINS_ITS_ACKNOWLEDGED_ROOT_AND_EVERY_CAPTURE"
     );
     assert!(top.recovery_origin.as_ref().unwrap().rebound);
     let independent = session
@@ -573,7 +657,15 @@ pub(super) fn w13_one_level_rescue_recopy_and_explicit_ack_retirement() {
     drop(manifest);
     drop(session);
     drop(core);
-    let mut writer = LoadedBundle::read(&c).unwrap().into_writer().unwrap();
+    let mut writer = LoadedBundle::read(
+        &c,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
     writer.collect_after_ack().unwrap();
     assert_eq!(&*writer.store().read_evidence(&evidence).unwrap(), bytes);
     assert!(
@@ -584,9 +676,14 @@ pub(super) fn w13_one_level_rescue_recopy_and_explicit_ack_retirement() {
             .all(|r| r.acknowledged_root.is_none())
     );
     drop(writer);
-    let loaded = LoadedBundle::read(&c).unwrap();
-    let core = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&core).unwrap();
+    let mut loaded = LoadedBundle::read(
+        &c,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let core = loaded.open_manual().unwrap();
     assert_eq!(core.export_history().unwrap(), expected);
 }
 
@@ -600,8 +697,13 @@ pub(super) fn w13_omission_only_precedes_trim() {
     let a = temp.path("drive/a.kinewright");
     std::fs::create_dir_all(a.parent().unwrap()).unwrap();
     let b = temp.path("b.kinewright");
-    let core = Core::spawn(document()).unwrap();
-    let mut bundle = ProjectBundle::activate(&a, BundleWriteAdmission::new_document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
+    let mut bundle = ProjectBundle::activate(
+        &a,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let input = bundle.empty_inputs().unwrap().reference.clone();
     bundle.save(&core, &input).unwrap();
     for n in 0..3 {
@@ -653,17 +755,23 @@ pub(super) fn w13_omission_only_precedes_trim() {
     let selection = prepare(&mut session);
     let mut consent = selection.consent();
     selection.consent_omission(&mut consent).unwrap();
-    let expected = core.export_history().unwrap();
+    let expected = full_owner_value(&core);
     assert!(
         session
             .rescue(selection, &consent, &inspection)
             .unwrap()
             .activated
     );
-    assert_eq!(session.core().export_history().unwrap(), expected);
+    assert_installed_owner(session.core(), expected);
     drop(session);
     drop(core);
-    let loaded = LoadedBundle::read(&b).unwrap();
+    let loaded = LoadedBundle::read(
+        &b,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     let owner = loaded.into_writer().unwrap();
     let records = owner.rescue_records().unwrap();
     assert!(records[0].acknowledged_root.is_some());
@@ -692,8 +800,13 @@ pub(super) fn w13_trim_then_separate_omission_recomputes_closure() {
         let a = temp.path("drive/a.kinewright");
         std::fs::create_dir_all(a.parent().unwrap()).unwrap();
         let b = temp.path("b.kinewright");
-        let core = Core::spawn(document()).unwrap();
-        let mut bundle = ProjectBundle::activate(&a, BundleWriteAdmission::new_document()).unwrap();
+        let core = Core::for_test(document()).unwrap();
+        let mut bundle = ProjectBundle::activate(
+            &a,
+            BundleWriteAdmission::new_document(),
+            core.history_pool(),
+        )
+        .unwrap();
         let empty = bundle.empty_inputs().unwrap().reference.clone();
         bundle.save(&core, &empty).unwrap();
         let object = ObjectRef {
@@ -786,59 +899,18 @@ pub(super) fn w13_trim_then_separate_omission_recomputes_closure() {
         std::fs::rename(temp.path("drive"), temp.path("hidden-a")).unwrap();
         let offer = session.probe_active().unwrap().unwrap();
         let capture = session.prepare_rescue(&offer);
-        if independent {
-            assert!(capture.is_err());
-            assert!(!b.exists());
-            continue;
-        }
-        let selection = session
-            .preview_rescue(capture.unwrap().unwrap(), StorageLimits::default())
-            .unwrap();
-        assert!(selection.removed_undo() > 0);
         assert!(
-            selection
-                .omissions()
-                .iter()
-                .any(|o| o.role == "acknowledged_root")
+            if independent {
+                capture.is_err()
+            } else {
+                session
+                    .preview_rescue(capture.unwrap().unwrap(), StorageLimits::default())
+                    .is_err()
+            },
+            "MISSING_REACHABLE_HISTORY_PAYLOAD_CANNOT_BE_TRIMMED_OR_OMITTED"
         );
-        let before = core.export_history().unwrap();
-        let mut consent = selection.consent();
-        assert!(selection.consent_omission(&mut consent).is_err());
-        selection.consent_trim(&mut consent).unwrap();
-        let inspection = session.inspect_rescue_destination(&b).unwrap();
-        assert!(session.rescue(selection, &consent, &inspection).is_err());
         assert!(!b.exists());
-        let offer = session.probe_active().unwrap().unwrap();
-        let capture = session.prepare_rescue(&offer).unwrap().unwrap();
-        let selection = session
-            .preview_rescue(capture, StorageLimits::default())
-            .unwrap();
-        let mut consent = selection.consent();
-        selection.consent_trim(&mut consent).unwrap();
-        selection.consent_omission(&mut consent).unwrap();
-        let inspection = session.inspect_rescue_destination(&b).unwrap();
-        let outcome = session.rescue(selection, &consent, &inspection).unwrap();
-        assert!(outcome.activated, "trimmed rescue outcome: {outcome:?}");
-        assert_eq!(core.export_history().unwrap(), before);
-        let selected = session.core().export_history().unwrap();
-        assert!(selected.baseline.lut_assets.is_empty());
-        assert_eq!(selected.document, before.document);
-        assert_eq!(selected.cursor.redo, before.cursor.redo);
-        assert!(selected.cursor.undo.len() < before.cursor.undo.len());
-        drop(session);
-        drop(core);
-        let loaded = LoadedBundle::read(&b).unwrap();
-        let fresh = Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&fresh).unwrap();
-        assert_eq!(fresh.export_history().unwrap(), selected);
-        assert!(
-            !temp
-                .path(&format!(
-                    "b.kinewright-assets/studio/objects/{}",
-                    object.sha256
-                ))
-                .exists()
-        );
+        assert_eq!(session.rescue_slots(), 0);
     }
 }
 
@@ -848,7 +920,7 @@ pub(super) fn w04_oldest_first_trim_preserves_redo_gesture_and_inputs() {
         let temp = temp();
         let a = temp.path("drive/a.kinewright");
         let b = temp.path("b.kinewright");
-        let core = Core::spawn(document()).unwrap();
+        let core = Core::for_test(document()).unwrap();
         grow(&core);
         if gesture {
             assert!(matches!(
@@ -869,6 +941,8 @@ pub(super) fn w04_oldest_first_trim_preserves_redo_gesture_and_inputs() {
             ));
         }
         let before = core.export_history().unwrap();
+        let mut expected = serde_json::to_value(&before).unwrap();
+        drop(before);
         let mut session =
             Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
         io_observer::fail_once("root_parent_sync", || {
@@ -878,57 +952,51 @@ pub(super) fn w04_oldest_first_trim_preserves_redo_gesture_and_inputs() {
         std::fs::rename(temp.path("drive"), temp.path("hidden-a")).unwrap();
         let offer = session.probe_active().unwrap().unwrap();
         let capture = session.prepare_rescue(&offer).unwrap().unwrap();
+        let missing = capture.consent();
         let profile = floor_limits();
         let selection = session.preview_rescue(capture, profile.clone()).unwrap();
-        assert!(selection.removed_undo() > 0);
+        assert_eq!(
+            selection.removed_undo(),
+            0,
+            "STORAGE_PROFILE_NEVER_TRIMS_EXECUTOR_UNDO"
+        );
         assert!(selection.omissions().is_empty());
-        let ordinary = (0..=before.batches.len())
-            .find_map(|cut| {
-                let candidate = if cut == 0 {
-                    before.clone()
-                } else {
-                    kinewright_core::HistoryTransition::floor(before.clone(), cut)
-                        .ok()?
-                        .after()
-                        .clone()
-                };
-                let cost =
-                    kinewright_project::bundle_commit::history_cost_probe(&candidate, &profile)
-                        .ok()?;
-                (candidate.encoded_bytes().ok()? <= profile.branch_history_bytes
-                    && cost <= profile.branch_history_bytes
-                    && kinewright_project::bundle_commit::ordinary_history_admission_cost_probe(
-                        &candidate, &profile,
-                    )
-                    .ok()?
-                        <= profile.branch_history_bytes)
-                    .then_some(candidate)
-            })
-            .expect("independent earliest legal fitting floor");
-        let missing = selection.consent();
         let inspection = session.inspect_rescue_destination(&b).unwrap();
-        assert!(session.rescue(selection, &missing, &inspection).is_err());
+        assert!(
+            session.rescue(selection, &missing, &inspection).is_err(),
+            "RESCUE_REQUIRES_CONSENT_TO_THE_SELECTED_FULL_OWNER"
+        );
         assert!(!b.exists());
         let offer = session.probe_active().unwrap().unwrap();
         let capture = session.prepare_rescue(&offer).unwrap().unwrap();
         let selection = session.preview_rescue(capture, profile.clone()).unwrap();
-        let mut consent = selection.consent();
-        selection.consent_trim(&mut consent).unwrap();
+        let consent = selection.consent();
         let inspection = session.inspect_rescue_destination(&b).unwrap();
-        let outcome = session.rescue(selection, &consent, &inspection).unwrap();
-        assert!(outcome.activated, "trimmed rescue outcome: {outcome:?}");
-        assert_eq!(core.export_history().unwrap(), before);
-        assert_eq!(session.core().export_history().unwrap(), ordinary);
-        assert_eq!(
-            session.core().export_history().unwrap().cursor.redo,
-            before.cursor.redo
+        assert!(
+            session
+                .rescue(selection, &consent, &inspection)
+                .unwrap()
+                .activated
         );
+        let after = session.core().export_history().unwrap();
+        expected["history"]["epoch"] = serde_json::json!(after.history().epoch);
+        assert!(
+            expected == serde_json::to_value(&after).unwrap(),
+            "RESCUE_PRESERVES_ALL_UNDO_REDO_GESTURES_LINEAGE_LEDGER_AND_RESOURCES"
+        );
+        drop(after);
         let selected = session.core().export_history().unwrap();
         drop(session);
         drop(core);
-        let loaded = LoadedBundle::read_with_limits_probe(&b, profile).unwrap();
-        let fresh = Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&fresh).unwrap();
+        let mut loaded = LoadedBundle::read_with_limits_probe(
+            &b,
+            profile,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
+        let fresh = loaded.open_manual().unwrap();
         assert_eq!(fresh.export_history().unwrap(), selected);
     }
 }
@@ -940,7 +1008,7 @@ pub(super) fn w13_recovery_on_active_rescue_copy_settles_the_new_attempt() {
         let temp = temp();
         let a = temp.path("drive/a.kinewright");
         let b = temp.path("b.kinewright");
-        let core = Core::spawn(document()).unwrap();
+        let core = Core::for_test(document()).unwrap();
         let mut session =
             Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
         io_observer::fail_once("root_parent_sync", || {
@@ -980,7 +1048,7 @@ pub(super) fn w08_context_close_fences_handles_and_retires_temporary_sources_onc
     let temp = temp();
     let a = temp.path("drive/a.kinewright");
     let b = temp.path("b.kinewright");
-    let core = Core::spawn(document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
     let mut session = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
     let source = session
         .source()
@@ -1016,7 +1084,7 @@ pub(super) fn w06_rescue_bounds_refuse_before_destination_mutation() {
     let temp = temp();
     let a = temp.path("drive/a.kinewright");
     let b = temp.path("b.kinewright");
-    let core = Core::spawn(document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
     edit(&core, false);
     let mut session = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
     io_observer::fail_once("root_parent_sync", || {
@@ -1056,6 +1124,7 @@ pub(super) fn w06_rescue_bounds_refuse_before_destination_mutation() {
         assert!(!b.exists());
         assert!(!temp.path("b.kinewright-assets").exists());
     }
+    drop(before);
     assert!(rescue(&mut session, &b, None).activated);
 }
 
@@ -1066,15 +1135,8 @@ pub(super) fn w13_available_recovery_roots_cannot_be_omitted_for_quota() {
     let a = temp.path("drive/a.kinewright");
     let b = temp.path("b.kinewright");
     std::fs::create_dir_all(a.parent().unwrap()).unwrap();
-    let core = Core::spawn(document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
     grow(&core);
-    let before = core.export_history().unwrap();
-    assert!(
-        kinewright_project::bundle_commit::bound_history_probe(&before, &floor_limits())
-            .unwrap()
-            .floor_offset
-            > before.floor_offset
-    );
     let mut session =
         Ja1EditingSession::activate(&a, BundleWriteAdmission::new_document(), &core, None).unwrap();
     session.save_active().unwrap();
@@ -1083,13 +1145,20 @@ pub(super) fn w13_available_recovery_roots_cannot_be_omitted_for_quota() {
     std::fs::rename(temp.path("drive"), temp.path("hidden-a")).unwrap();
     let offer = session.probe_active().unwrap().unwrap();
     let capture = session.prepare_rescue(&offer).unwrap().unwrap();
-    let before = core.export_history().unwrap();
+    let before = full_owner_value(&core);
+    let selection = session.preview_rescue(capture, floor_limits()).unwrap();
+    assert_eq!(
+        selection.removed_undo(),
+        0,
+        "STORAGE_LIMIT_NEVER_TRIMS_AVAILABLE_EXECUTOR_HISTORY"
+    );
     assert!(
-        session.preview_rescue(capture, floor_limits()).is_err(),
-        "available acknowledged history cannot be discarded to fit quota"
+        selection.omissions().is_empty(),
+        "AVAILABLE_RECOVERY_ROOTS_ARE_NOT_QUOTA_OMISSIONS"
     );
     assert!(!b.exists());
     assert_eq!(session.rescue_slots(), 0);
-    assert_eq!(core.export_history().unwrap(), before);
+    assert_eq!(full_owner_value(&core), before);
+    session.cancel_rescue_selection(selection).unwrap();
     assert!(rescue(&mut session, &b, None).activated);
 }

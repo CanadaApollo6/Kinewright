@@ -8,6 +8,7 @@ use kinewright_agent::writer_host::{ProtocolFixture, ProtocolFixtureMode, Sessio
 use kinewright_core::*;
 use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
 use kinewright_project::bundle::LoadedBundle;
+use kinewright_project::operation_actor::Core;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Condvar, Mutex},
@@ -60,7 +61,7 @@ impl Fixture {
         .apply(&mut document)
         .unwrap();
         let before = Arc::new(document);
-        let core = Core::spawn(Arc::clone(&before)).unwrap();
+        let core = Core::for_test(Arc::clone(&before)).unwrap();
         let mut owner = Ja1EditingSession::activate(
             &path,
             kinewright_project::bundle::BundleWriteAdmission::new_document(),
@@ -84,7 +85,9 @@ impl Fixture {
         attachment.fixture_host = Some(writer);
         assert!(
             attachment.host.as_ref().unwrap().manual.is_some(),
-            "MANUAL_REAL_LEASE"
+            "MANUAL_REAL_LEASE status={:?} current={}",
+            attachment.host.as_ref().unwrap().status,
+            attachment.owner.core().snapshot_identity().unwrap()
         );
         attachment.host.as_mut().unwrap().manual_publication_hold = true;
         let (mut app, engine) = in1_harness(Document::default());
@@ -157,13 +160,15 @@ impl Fixture {
         self.attempt();
     }
     fn fill(&mut self) {
-        // Full curve values fill the real byte window; no transport acknowledgement is allowed.
-        for step in 1..30 {
-            self.send_value(step);
-            if self.edits().waiting_for_ack() {
-                break;
-            }
+        // Fill the actual command window before opening the drag. No-op closes
+        // change no document or stack, so the final drag still has one Undo.
+        // The new 1 MiB coalesced-step cap is smaller than the 2 MiB outbox;
+        // repeatedly extending that step would test a different refusal.
+        for _ in 1..kinewright_project::operation_protocol::PENDING_COMMANDS {
+            self.gate().permit.close_gesture().unwrap();
         }
+        self.send_value(1);
+        self.send_value(2);
         assert!(self.edits().waiting_for_ack(), "MANUAL_FULL_WINDOW");
         let pending = self.gate().permit.pending().unwrap();
         assert!(!pending.is_empty());
@@ -283,11 +288,16 @@ fn manual_value_final_drag_is_saved_and_one_undo() {
     let path = f.temp.path("p.kinewright");
     f.app.focused_mut().ja1.as_mut().unwrap().close();
     f.app.focused_mut().ja1 = None;
-    let loaded = LoadedBundle::read(&path).unwrap();
-    let cold = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&cold).unwrap();
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let cold = loaded.open_manual().unwrap();
     assert_eq!(
-        *cold.export_history().unwrap().document,
+        *cold.export_history().unwrap().history().document,
         *final_document,
         "MANUAL_FINAL_COLD_VALUE"
     );
@@ -308,7 +318,10 @@ fn manual_value_final_capacity_refusal_is_truthful() {
     let reasons = events
         .try_iter()
         .filter_map(|event| match event {
-            Event::MutationRefused { reason, .. } => Some(reason),
+            Err(kinewright_project::operation_actor::Refusal {
+                error: kinewright_project::operation_actor::Error::MutationRefused(reason),
+                ..
+            }) => Some(reason),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -331,7 +344,13 @@ fn manual_value_final_capacity_refusal_is_truthful() {
         "MANUAL_REFUSED_SCREEN_VALUE"
     );
     assert_eq!(
-        *f.app.focused().core.export_history().unwrap().document,
+        *f.app
+            .focused()
+            .core
+            .export_history()
+            .unwrap()
+            .history()
+            .document,
         *accepted
     );
 }
@@ -375,7 +394,8 @@ fn manual_value_close_and_quit_ask_for_unapplied_value() {
     let held = Arc::clone(&gate);
     f.edits_mut().before_send = Some(Box::new(move || held.hold()));
     f.release();
-    f.until(|f| gate.entered() && f.gate().permit.pending().unwrap().is_empty());
+    f.until(|_| gate.entered());
+    assert_ne!(f.value(), -555, "HELD_FINAL_VALUE_HAS_NOT_BEEN_ACCEPTED");
     assert!(
         f.attachment()
             .host
@@ -448,16 +468,17 @@ fn manual_value_discrete_edits_are_ordered_and_bounded() {
     assert_eq!(f.scalar(), -15, "MANUAL_DISCRETE_FINAL_ORDER");
     let history = f.app.focused().core.export_history().unwrap();
     let values = history
-        .batches
+        .history()
+        .undo
         .iter()
         .rev()
         .take(15)
         .rev()
-        .map(|b| match &b.command {
-            JournalCommand::Do(Operation::SetEffectParam {
+        .map(|step| match &step.commands()[0].operations[0] {
+            Operation::SetEffectParam {
                 value: ParamValue::Integer(v),
                 ..
-            }) => *v,
+            } => *v,
             other => panic!("{other:?}"),
         })
         .collect::<Vec<_>>();
@@ -535,13 +556,17 @@ fn manual_value_fix1_paused_recovery_keeps_retry_and_accepted_edits() {
     assert_ne!(f.value(), -555);
     assert!(!f.gate().permit.pending().unwrap().is_empty());
     {
-        let saved = Core::spawn(Document::default()).unwrap();
-        LoadedBundle::read(&f.temp.path("p.kinewright"))
-            .unwrap()
-            .restore_manual(&saved)
-            .unwrap();
+        let saved = LoadedBundle::read(
+            &f.temp.path("p.kinewright"),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap()
+        .open_manual()
+        .unwrap();
         assert_ne!(
-            *saved.export_history().unwrap().document,
+            *saved.export_history().unwrap().history().document,
             *accepted,
             "MANUAL_RECOVERY_PREFIX_WAS_NOT_SAVED"
         );
@@ -653,13 +678,17 @@ fn manual_value_fix1_paused_recovery_keeps_retry_and_accepted_edits() {
         f.app.focused().ja1_job.is_none()
             && f.attachment().project_path().as_ref() == Some(&recovered)
     });
-    let cold = Core::spawn(Document::default()).unwrap();
-    LoadedBundle::read(&recovered)
-        .unwrap()
-        .restore_manual(&cold)
-        .unwrap();
+    let cold = LoadedBundle::read(
+        &recovered,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .open_manual()
+    .unwrap();
     assert_eq!(
-        *cold.export_history().unwrap().document,
+        *cold.export_history().unwrap().history().document,
         *accepted,
         "MANUAL_RECOVERY_COPY_KEEPS_ACCEPTED"
     );
@@ -797,6 +826,9 @@ fn manual_value_fix1_revision_conflict_notice_survives_later_acceptance() {
 #[test]
 fn manual_value_fix1_open_gesture_does_not_claim_backpressure() {
     let mut f = Fixture::new();
+    for _ in 1..kinewright_project::operation_protocol::PENDING_COMMANDS {
+        f.gate().permit.close_gesture().unwrap();
+    }
     f.send_value(10);
     assert!(f.attachment().manual_edits_pending());
     assert_eq!(
@@ -910,7 +942,14 @@ fn manual_value_fix1_recovery_owns_late_results_and_counts_only_refusals() {
         } else {
             f.edits_mut().after_send = Some(Box::new(move || held.hold()));
         }
-        let next = if refused { curve(450, 20) } else { param(20) };
+        let next = if refused {
+            Operation::SetTrackSyncLock {
+                track: TrackId(404),
+                locked: false,
+            }
+        } else {
+            param(20)
+        };
         f.app.send_operations_coalesced(vec![next], f.key.clone());
         f.until(|_| gate.entered());
         if before_send {
@@ -922,7 +961,15 @@ fn manual_value_fix1_recovery_owns_late_results_and_counts_only_refusals() {
                     .unwrap();
             }
         }
-        let accepted = f.app.focused().core.export_history().unwrap().document;
+        let Event::QueryResult(QueryResult::Document(accepted)) = f
+            .app
+            .focused()
+            .core
+            .request(Command::Query(Query::Document))
+            .unwrap()
+        else {
+            panic!("LATE_RESULT_ORACLE_IS_THE_ACTORS_ACCEPTED_DOCUMENT");
+        };
         let attachment = f.app.focused_mut().ja1.as_mut().unwrap();
         attachment
             .host
@@ -971,7 +1018,7 @@ fn manual_value_fix1_recovery_owns_late_results_and_counts_only_refusals() {
 
 #[test]
 fn manual_value_glm_prepared_media_clean_refusal_stays_editable() {
-    for capacity in [true, false] {
+    for forged_counter in [true, false] {
         let mut f = Fixture::new();
         let source = f.temp.path("refused.wav");
         std::fs::write(
@@ -984,15 +1031,15 @@ fn manual_value_glm_prepared_media_clean_refusal_stays_editable() {
         )
         .unwrap();
         let before = f.app.focused().core.export_history().unwrap();
-        f.app.focused_mut().ja1.as_mut().unwrap().before_host_reply = Some(if capacity {
-            limit_prepared_media_reply
+        f.app.focused_mut().ja1.as_mut().unwrap().before_host_reply = Some(if forged_counter {
+            forge_prepared_media_counter
         } else {
             unbind_prepared_media_reply
         });
-        let reason = if capacity {
-            CoreMutationRefusal::ManualHistoryCapacity
+        let words = if forged_counter {
+            kinewright_project::operation_protocol::Conflict::Snapshot.to_string()
         } else {
-            CoreMutationRefusal::ManualInputRequired
+            CoreMutationRefusal::ManualInputRequired.to_string()
         };
         let error = f
             .app
@@ -1003,14 +1050,38 @@ fn manual_value_glm_prepared_media_clean_refusal_stays_editable() {
             .apply(Action::ImportMedia(source))
             .unwrap_err();
         assert!(
-            matches!(error, BundleError::CoreMutationRefused(actual) if actual == reason),
-            "MANUAL_PREPARED_REAL_CORE_REFUSAL: {error}"
+            if forged_counter {
+                matches!(
+                    error,
+                    BundleError::HistoryChanged
+                        | BundleError::Operation(
+                            kinewright_project::operation_actor::Error::Protocol(
+                                kinewright_project::operation_protocol::Conflict::Snapshot
+                            )
+                        )
+                )
+            } else {
+                matches!(
+                    error,
+                    BundleError::CoreMutationRefused(CoreMutationRefusal::ManualInputRequired)
+                )
+            },
+            "MANUAL_PREPARED_REAL_CORE_REFUSAL forged={forged_counter}: {error}"
         );
         assert_eq!(f.app.focused().core.export_history().unwrap(), before);
         assert!(
             f.attachment().imported_media.is_none(),
             "MANUAL_REFUSED_ASSET_NOT_ANNOUNCED"
         );
+        if forged_counter {
+            assert!(
+                f.attachment().read_only(),
+                "FORGED_PREPARED_COUNTER_FREEZES_INTO_RECOVERY"
+            );
+            let host = f.attachment().host.as_ref().unwrap();
+            assert!(host.cut.is_some() && host.unknown_operation);
+            continue;
+        }
         assert!(
             !f.attachment().read_only(),
             "MANUAL_PREPARED_REFUSAL_STAYS_EDITABLE: {}",
@@ -1018,16 +1089,16 @@ fn manual_value_glm_prepared_media_clean_refusal_stays_editable() {
         );
         let host = f.attachment().host.as_ref().unwrap();
         assert!(host.cut.is_none() && !host.unknown_operation && !host.recovery_running());
-        assert_eq!(f.attachment().message, reason.to_string());
-        f.until(|f| f.app.status.contains(&reason.to_string()) && !f.attachment().read_only());
+        assert_eq!(f.attachment().message, words);
+        f.until(|f| f.app.status.contains(&words) && !f.attachment().read_only());
         assert!(!f.attachment().read_only());
         assert!(
-            f.app.status.contains(&reason.to_string()),
+            f.app.status.contains(&words),
             "MANUAL_PREPARED_REASON_REMAINS_VISIBLE"
         );
         assert!(!f.app.status.contains("reply was not confirmed"));
         assert!(f.app.focused().pending_timeline_adds.is_empty());
-        if !capacity {
+        if !forged_counter {
             f.app.send_operation(Operation::SetTrackSyncLock {
                 track: TrackId(1),
                 locked: false,
@@ -1043,16 +1114,10 @@ fn manual_value_glm_prepared_media_clean_refusal_stays_editable() {
     }
 }
 
-fn limit_prepared_media_reply(reply: &mut kinewright_agent::writer_host::HostReply) {
+fn forge_prepared_media_counter(reply: &mut kinewright_agent::writer_host::HostReply) {
     assert!(reply.error.is_none() && reply.owned_media.is_some());
     let lease = reply.manual_lease.as_mut().expect("real manual lease");
-    lease.history_limits = kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(
-        &kinewright_project::storage_budget::StorageLimits {
-            command_bytes: 1,
-            ..kinewright_project::storage_budget::StorageLimits::default()
-        },
-    )
-    .unwrap();
+    lease.next_key.position = lease.next_key.position.checked_add(1).unwrap();
 }
 fn unbind_prepared_media_reply(reply: &mut kinewright_agent::writer_host::HostReply) {
     assert!(reply.error.is_none() && reply.manual_lease.is_some());

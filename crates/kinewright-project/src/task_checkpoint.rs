@@ -7,14 +7,13 @@ use crate::{
     orchestration_records::{OrchestrationPayload, OrchestrationRecord},
     store::{SealedObject, StorePin},
 };
-use std::{collections::BTreeSet, sync::Arc};
+use std::collections::BTreeSet;
 
 pub(crate) struct StagedTaskCheckpoint {
     pub before: ObjectRef,
     pub reference: ObjectRef,
     pub checkpoint: BranchCheckpoint,
     pub base_ref: ObjectRef,
-    pub history: Arc<crate::storage_budget::StorageReservation<kinewright_core::HistorySnapshot>>,
     pub _pin: StorePin,
     pub _seals: Vec<SealedObject>,
 }
@@ -24,7 +23,7 @@ impl StagedTaskCheckpoint {
             branch: self.checkpoint.branch_id.clone(),
             head: self.checkpoint.head_id.clone(),
             checkpoint: self.reference.clone(),
-            document_hash: self.checkpoint.document_hash.clone(),
+            document_hash: self.checkpoint.document_ref.sha256.clone(),
         }
     }
 }
@@ -91,7 +90,7 @@ impl ProjectBundle {
                         if history.source.checkpoint != staged.before
                             || self.checkpoint_reference(&history.source.branch)? != staged.before
                             || history.source.head != current.head_id
-                            || history.source.document_hash != current.document_hash
+                            || history.source.document_hash != current.document_ref.sha256
                         {
                             return Err(BundleError::HistoryChanged);
                         }

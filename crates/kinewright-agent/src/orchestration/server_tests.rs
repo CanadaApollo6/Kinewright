@@ -126,7 +126,7 @@ fn s4_role_scope_closure() {
     use crate::orchestration::{
         orchestration_records::Role, policy::TaskPolicy, tasks::TaskEndpoint,
     };
-    let core = Core::spawn(Document {
+    let core = Core::for_test(Document {
         tracks: vec![
             Track {
                 id: TrackId(1),
@@ -187,7 +187,7 @@ fn s4_role_scope_closure() {
     );
     assert_eq!(result.is_error, Some(false), "{result:?}");
     assert_eq!(
-        core.export_history().unwrap().document.audio_mix.tracks[0].gain_tenth_db,
+        core.export_history().unwrap().history().document.audio_mix.tracks[0].gain_tenth_db,
         -60
     );
     let before = core.export_history().unwrap();
@@ -207,7 +207,7 @@ fn s4_role_scope_closure() {
         json!([{"op":"set_track_mix", "track":2, "gain_tenth_db":-120, "pan_percent":0, "mute":false, "solo":false},{"op":"split_clip","clip":1,"at":50}]),
         json!([{"op":"set_track_sync_lock","track":1,"locked":false}]),
         json!([{"op":"ripple_delete_clip","clip":1}]),
-        json!([{"op":"set_color_context","color_context":before.document.color_context}]),
+        json!([{"op":"set_color_context","color_context":before.history().document.color_context}]),
         json!([{"op":"upsert_audio_bus","bus":{"id":1,"name":"shared","tracks":[2],"gain_tenth_db":0,"gain_curve":null,"effects":[],"ducking_sidechain_tracks":[1]}}]),
     ] {
         assert_eq!(s4_prepare(&handler, operations).is_error, Some(true));
@@ -245,7 +245,7 @@ fn s4_role_scope_closure() {
         media.probe_paths.lock().unwrap().is_empty(),
         "scope must refuse before probing unrelated input"
     );
-    let other = Core::spawn((*before.document).clone()).unwrap();
+    let other = Core::for_test((*before.history().document).clone()).unwrap();
     let mismatched = s4_handler(other, endpoint.clone());
     assert_eq!(
         s4_call(&mismatched, "get_timeline_state", json!({})).is_error,
@@ -340,7 +340,7 @@ fn s4_drain_and_durable_base() {
         "s4-task",
     );
     let path = root.path("task.kinewright");
-    let core = Core::spawn(Document {
+    let core = Core::for_test(Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -376,7 +376,7 @@ fn s4_drain_and_durable_base() {
         .issue_manual_lease("person".into(), "s4-manual".into())
         .unwrap();
     let permit = owner
-        .bind_manual_producer(lease, owner.manual_input_context().unwrap())
+        .bind_manual_producer(lease, owner.manual_input_context().unwrap(), std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)))
         .unwrap();
     permit
         .request(Command::Do(Operation::SetTrackSyncLock {
@@ -480,7 +480,7 @@ fn s4_drain_and_durable_base() {
         "admitted work drains after closure: {result:?}"
     );
     assert_eq!(
-        frozen.delta().len(),
+        frozen.delta(&owner).unwrap().len(),
         1,
         "only the currently applied split survives Undo/Redo"
     );
@@ -494,8 +494,8 @@ fn s4_drain_and_durable_base() {
         Some(true)
     );
     assert!(matches!(
-        task.core().request(Command::Redo).unwrap(),
-        Event::MutationRefused { .. }
+        task.core().request(Command::Redo),
+        Err(kinewright_project::operation_actor::Refusal { error: kinewright_project::operation_actor::Error::MutationRefused(_), .. })
     ));
     assert_eq!(core.export_history().unwrap(), manual);
     assert_eq!(permit.pending().unwrap(), manual_pending);
@@ -504,7 +504,7 @@ fn s4_drain_and_durable_base() {
     drop(task);
     drop(handler);
     drop(owner);
-    let mut owner = Ja1EditingSession::open(&path).unwrap();
+    let mut owner = Ja1EditingSession::open(&path, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
     let candidate = owner
         .reopen_registered_candidate(candidate.branch_id().clone(), &candidate_base)
         .unwrap();
@@ -520,7 +520,7 @@ fn s4_drain_and_durable_base() {
     )
     .unwrap();
     assert_eq!(
-        reopened.freeze_fixture(&mut owner).unwrap().delta().len(),
+        reopened.freeze_fixture(&mut owner).unwrap().delta(&owner).unwrap().len(),
         1
     );
     let mut wrong = base.clone();
@@ -541,8 +541,8 @@ fn s4_drain_and_durable_base() {
     changed.sequence += 1;
     assert!(reopened.merge(&mut owner, changed).is_err());
     let history = owner.durable_branch_history(&candidate).unwrap();
-    assert_eq!(history.document.tracks[0].clips.len(), 2);
-    assert_eq!(history.cursor.undo.len(), 2);
+    assert_eq!(history.history().document().tracks[0].clips.len(), 2);
+    assert_eq!(history.history().undo().len(), 2);
     drop(history);
     let registrations = owner.durable_sessions().len();
     let retired_core = reopened.core().clone();
@@ -609,7 +609,7 @@ fn s4_editor_result_to_candidate() {
     let root =
         kinewright_media::test_support::TempDirectory::new_in(&directory, "s4-editor-result");
     let path = root.path("studio.kinewright");
-    let manual = Core::spawn(Document {
+    let manual = Core::for_test(Document {
         tracks: vec![
             Track {
                 id: TrackId(1),
@@ -653,7 +653,7 @@ fn s4_editor_result_to_candidate() {
         .issue_manual_lease("person".into(), "person-private".into())
         .unwrap();
     let permit = owner
-        .bind_manual_producer(lease, owner.manual_input_context().unwrap())
+        .bind_manual_producer(lease, owner.manual_input_context().unwrap(), std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)))
         .unwrap();
     permit
         .request(Command::Do(Operation::SetTrackSyncLock {
@@ -687,7 +687,7 @@ fn s4_editor_result_to_candidate() {
         assert_eq!(applied.is_error,Some(false),"{applied:?}");
         let frozen=task.freeze_fixture(&mut owner).unwrap().clone();
         assert_eq!(frozen.base(),&base);
-        let reopened=kinewright_project::bundle::LoadedBundle::read(&path).unwrap();
+        let reopened=kinewright_project::bundle::LoadedBundle::read(&path, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
         assert_eq!(reopened.root().unwrap().manual_branch_id,manual_attachment.current.branch);
         drop(reopened);
         let id=CommandId {issuer:issuer.clone(),sequence:index as u64+1};
@@ -697,9 +697,9 @@ fn s4_editor_result_to_candidate() {
         assert_eq!(task.original_merge_envelope().unwrap(),&original);
         assert!(matches!(receipt,kinewright_project::receipts::ReceiptLookup::Committed(_)));
         let history=owner.durable_branch_history(&candidate).unwrap();
-        assert_eq!(history.cursor.undo.len(),index+2);
-        assert_eq!(history.document.tracks[0].clips.len(),2);
-        if role==Role::Audio {assert_eq!(history.document.audio_mix.tracks[0].gain_tenth_db,-60);}
+        assert_eq!(history.history().undo().len(),index+2);
+        assert_eq!(history.history().document().tracks[0].clips.len(),2);
+        if role==Role::Audio {assert_eq!(history.history().document().audio_mix.tracks[0].gain_tenth_db,-60);}
         drop(history);
         assert_eq!(manual.export_history().unwrap(),manual_history);
         assert_eq!(permit.pending().unwrap(),manual_pending);
@@ -758,7 +758,7 @@ fn s4_solo_removal_and_director_routing() {
         removed.track_audible(TrackId(1)),
         "removing the sole soloed track unmutes a surviving track"
     );
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let base = kinewright_project::editing_session::BranchBinding {
         branch: s4_id(10),
         head: s4_id(11),
@@ -848,7 +848,7 @@ fn s4_solo_removal_and_director_routing() {
     assert_eq!(
         core.export_history()
             .unwrap()
-            .document
+            .history().document
             .clip(ClipId(1))
             .unwrap()
             .audio_gain_tenth_db,

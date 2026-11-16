@@ -197,7 +197,7 @@ impl Adapter {
                     }
                     let path = self.baseline.root.join(&reference.relative_file);
                     let (result, trace) = io_observer::observe(|| {
-                        kinewright_project::bundle::LoadedBundle::read(&path)
+                        kinewright_project::bundle::LoadedBundle::read(&path, &self.baseline.pool)
                     });
                     let loaded = result.map_err(|e| e.to_string())?;
                     Ok(
@@ -223,8 +223,12 @@ impl Adapter {
                         kinewright_project::bundle::BundleWriteAdmission::new_document()
                     };
                     self.bundle = Some(
-                        kinewright_project::bundle::ProjectBundle::activate(&path, admission)
-                            .map_err(|e| e.to_string())?,
+                        kinewright_project::bundle::ProjectBundle::activate(
+                            &path,
+                            admission,
+                            &self.baseline.pool,
+                        )
+                        .map_err(|e| e.to_string())?,
                     );
                 }
                 let bundle = self.bundle.as_mut().ok_or("missing bundle owner")?;
@@ -255,11 +259,10 @@ impl Adapter {
                     .map(|_| self.baseline.snapshot().map(|(_, document)| document))
                     .transpose()?;
                 self.bundle = None;
-                let loaded = kinewright_project::bundle::LoadedBundle::read(&path)
-                    .map_err(|e| e.to_string())?;
-                let core = kinewright_core::Core::spawn(kinewright_core::Document::default())
-                    .map_err(|e| e.to_string())?;
-                loaded.restore_manual(&core).map_err(|e| e.to_string())?;
+                let mut loaded =
+                    kinewright_project::bundle::LoadedBundle::read(&path, &self.baseline.pool)
+                        .map_err(|e| e.to_string())?;
+                let core = loaded.open_manual().map_err(|e| e.to_string())?;
                 self.baseline.core = Some(core);
                 self.bundle = Some(loaded.into_writer().map_err(|e| e.to_string())?);
                 let (_, after) = self.baseline.snapshot()?;
@@ -374,24 +377,24 @@ impl Adapter {
             return Ok(());
         }
         if path.is_file() {
-            let loaded =
-                kinewright_project::bundle::LoadedBundle::read(path).map_err(|e| e.to_string())?;
-            let core = kinewright_core::Core::spawn(kinewright_core::Document::default())
-                .map_err(|e| e.to_string())?;
-            loaded.restore_manual(&core).map_err(|e| e.to_string())?;
+            let mut loaded =
+                kinewright_project::bundle::LoadedBundle::read(path, &self.baseline.pool)
+                    .map_err(|e| e.to_string())?;
+            let core = loaded.open_manual().map_err(|e| e.to_string())?;
             self.baseline.core = Some(core);
             self.bundle = Some(loaded.into_writer().map_err(|e| e.to_string())?);
         } else {
             if self.baseline.core.is_none() {
-                self.baseline.core = Some(
-                    kinewright_core::Core::spawn(kinewright_core::Document::default())
-                        .map_err(|e| e.to_string())?,
-                );
+                self.baseline.core = Some(self.baseline.recorded_core(
+                    kinewright_core::Document::default(),
+                    kinewright_core::TimelineRevision::default(),
+                )?);
             }
             self.bundle = Some(
                 kinewright_project::bundle::ProjectBundle::activate(
                     path,
                     kinewright_project::bundle::BundleWriteAdmission::new_document(),
+                    &self.baseline.pool,
                 )
                 .map_err(|e| e.to_string())?,
             );

@@ -4,12 +4,12 @@ mod tests {
     use super::super::*;
     use crate::app::in1_tests::in1_shutdown;
     use crate::app::in2b_tests::{in2b_harness, in2b_quiesce_engine};
-    use kinewright_core::{Core, Track, TrackKind};
+    use kinewright_core::{Query, QueryResult, Track, TrackKind};
     use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    use kinewright_project::operation_actor::Core;
     use kinewright_project::{
         bundle::{BundleWriteAdmission, LoadedBundle},
         bundle_copy::CopyStatus,
-        bundle_records::LineageRecord,
         editing_session::Ja1EditingSession,
         owned_inputs::OwnedInputRef,
         storage_budget::StorageLimits,
@@ -63,7 +63,7 @@ mod tests {
             ],
         });
         document.duration = TimeCode(90);
-        let core = Core::spawn(document).unwrap();
+        let core = Core::for_test(document).unwrap();
         let mut owner =
             Ja1EditingSession::new(root.root(), &core, StorageLimits::default()).unwrap();
         owner.import_owned_media(&locator).unwrap();
@@ -71,25 +71,29 @@ mod tests {
             owner.first_save(&source, StorageLimits::default()).unwrap(),
             CopyStatus::Committed(_)
         ));
-        let checkpoint = LoadedBundle::read(&source)
-            .unwrap()
-            .manual_checkpoint()
-            .unwrap()
-            .clone();
-        let expected = core.export_history().unwrap().document;
-        let occurrences = owner
-            .store()
-            .unwrap()
-            .read_record::<LineageRecord>(&checkpoint.lineage_ref)
-            .unwrap()
-            .current
-            .clone();
+        let checkpoint = LoadedBundle::read(
+            &source,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap()
+        .manual_checkpoint()
+        .unwrap()
+        .clone();
+        let Event::QueryResult(QueryResult::Document(expected)) =
+            core.request(Command::Query(Query::Document)).unwrap()
+        else {
+            panic!("document")
+        };
+        let depth = core.export_history().unwrap().history().undo.len();
+        let occurrences = core.boundary(depth).unwrap().lineage().clone();
         drop(owner);
         drop(core);
         std::fs::remove_file(&locator).unwrap();
         let history_path = root.path(&format!(
             "source.kinewright-assets/studio/objects/{}",
-            checkpoint.history_ref.sha256
+            checkpoint.owner_ref.sha256
         ));
         let history_bytes = std::fs::read(&history_path).unwrap();
         let damaged = vec![b'x'; history_bytes.len()];
@@ -109,14 +113,15 @@ mod tests {
             assert!(app.focused().ja1_read_only());
             assert!(app.status.contains("Undo history could not be restored"));
             let before = app.focused().core.export_history().unwrap();
-            assert_eq!(before.document, expected);
-            assert!(before.batches.is_empty() && before.cursor.undo.is_empty());
+            assert_eq!(before.history().document, expected);
+            assert!(before.history().undo.is_empty() && before.history().redo.is_empty());
+            let before = serde_json::to_value(before).unwrap();
             app.send_operation(Operation::SetTrackSyncLock {
                 track: TrackId(1),
                 locked: false,
             });
             assert_eq!(
-                app.focused().core.export_history().unwrap(),
+                serde_json::to_value(app.focused().core.export_history().unwrap()).unwrap(),
                 before,
                 "RECOVERY_VIEW_IS_READ_ONLY"
             );
@@ -134,19 +139,37 @@ mod tests {
             drop(app);
         });
 
-        let owner = Ja1EditingSession::open(&destination).unwrap();
-        let loaded = LoadedBundle::read(&destination).unwrap();
+        let owner = Ja1EditingSession::open(
+            &destination,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
+        let loaded = LoadedBundle::read(
+            &destination,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         let checkpoint = loaded.manual_checkpoint().unwrap();
+        let depth = owner.core().export_history().unwrap().history().undo.len();
+        let recovered = owner.core().boundary(depth).unwrap();
         assert_eq!(
-            owner
-                .store()
-                .unwrap()
-                .read_record::<LineageRecord>(&checkpoint.lineage_ref)
-                .unwrap()
-                .current,
-            occurrences,
-            "CURRENT_OCCURRENCES_SURVIVE_APP_RESCUE"
+            recovered.lineage().occurrences.keys().collect::<Vec<_>>(),
+            occurrences.occurrences.keys().collect::<Vec<_>>(),
+            "DOCUMENT_ONLY_RESCUE_RETAINS_THE_SAME_CLIP_OBJECTS"
         );
+        assert!(
+            recovered
+                .lineage()
+                .occurrences
+                .iter()
+                .all(|(clip, identity)| occurrences.occurrences.get(clip) != Some(identity)),
+            "CORRUPT_OWNER_RESET_NEVER_REUSES_UNVERIFIED_OCCURRENCE_IDENTITY"
+        );
+        drop(recovered);
         let manifest = owner
             .store()
             .unwrap()
@@ -176,7 +199,13 @@ mod tests {
         assert_eq!(std::fs::read(&source).unwrap(), original_root);
         assert_eq!(std::fs::read(&history_path).unwrap(), damaged);
         assert!(
-            LoadedBundle::read(&source).is_err(),
+            LoadedBundle::read(
+                &source,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            )
+            .is_err(),
             "ORIGINAL_HISTORY_REMAINS_QUARANTINED"
         );
     }

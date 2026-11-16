@@ -1,13 +1,176 @@
 #![cfg(all(target_os = "linux", feature = "test-util"))]
-use kinewright_core::{
-    ClipId, Command, Core, Document, Event, HistorySnapshot, Operation, TrackId,
-};
+use kinewright_core::{ClipId, Command, Document, Event, Operation, TrackId};
 use kinewright_media::test_support::TempDirectory;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     editing_session::{DurableBranchRole, Ja1EditingSession},
     storage_budget::StorageLimits,
-    task_history_admission::{LIMIT_REASON, TaskHistoryAdmission},
 };
+#[expect(
+    dead_code,
+    reason = "the native door witness shares the exact fixed sizing document"
+)]
+#[path = "../../kinewright-core/tests/support/merge_fixture.rs"]
+mod merge_fixture;
+
+#[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one real 20000-clip project crosses both native merge legs and cold open"
+)]
+fn twenty_thousand_clip_project_opens_edits_forks_merges_and_saves() {
+    use kinewright_project::{
+        operation_history::{HistoryPool, PoolLimits},
+        receipts::{CommandId, ReceiptLookup},
+    };
+    use std::sync::{Arc, atomic::AtomicBool};
+    let temp = TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "native-20000-clip-merge",
+    );
+    let mut document = merge_fixture::document(20_000, 8, 90);
+    for (index, track) in document.tracks.iter_mut().enumerate() {
+        track.sync_lock = index < 4;
+    }
+    let core = Core::for_test(document).unwrap();
+    let mut writer = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
+    let path = temp.path("project.kinewright");
+    writer.first_save(&path, StorageLimits::default()).unwrap();
+    core.request(Command::Do(Operation::SetTrackSyncLock {
+        track: TrackId(8),
+        locked: false,
+    }))
+    .unwrap();
+    writer.save_active().unwrap();
+    let saved = core.snapshot_identity().unwrap();
+    let mut opened = kinewright_project::bundle::LoadedBundle::read(
+        &path,
+        &HistoryPool::new(PoolLimits::default()),
+    )
+    .unwrap();
+    assert_eq!(
+        opened.open_manual().unwrap().snapshot_identity().unwrap(),
+        saved,
+        "PRODUCT_20000_CLIP_OPENS_AND_EDITS"
+    );
+    drop(opened);
+    let mut candidate = writer
+        .fork_durable_branch("candidate", DurableBranchRole::RunCandidate)
+        .unwrap();
+    writer.persist_durable_branch(&mut candidate).unwrap();
+    let binding = writer.candidate_binding(candidate.branch_id()).unwrap();
+    let mut task = writer
+        .fork_registered_from_candidate(&binding, "dialogue cut")
+        .unwrap();
+    let mut cuts = vec![];
+    for track in 0..4 {
+        cuts.push(Operation::SplitClip {
+            clip: ClipId(track * 2500 + 1),
+            at: kinewright_core::TimeCode(30),
+        });
+        let middle = ClipId(20_001 + track * 2);
+        cuts.push(Operation::SplitClip {
+            clip: middle,
+            at: kinewright_core::TimeCode(36),
+        });
+        if track != 0 {
+            cuts.push(Operation::DeleteClip { clip: middle });
+        }
+    }
+    cuts.push(Operation::RippleDeleteClip {
+        clip: ClipId(20_001),
+    });
+    assert!(
+        matches!(
+            task.core().request(Command::DoBatch(cuts)).unwrap(),
+            Event::DocumentChanged { .. }
+        ),
+        "PRODUCT_20000_CLIP_TASK_CUT_ADMITTED"
+    );
+    let frozen = writer.freeze_registered_candidate(&mut task).unwrap();
+    assert_eq!(
+        frozen.delta(&writer).unwrap().len(),
+        12,
+        "FROZEN_20000_CLIP_TASK_RETAINS_EVERY_OPERATION"
+    );
+    let issuer = writer
+        .issue_manual_lease("candidate".into(), "candidate-private".into())
+        .unwrap()
+        .issuer;
+    let envelope = writer
+        .candidate_merge_envelope(
+            &frozen,
+            CommandId {
+                issuer,
+                sequence: 1,
+            },
+        )
+        .unwrap();
+    assert!(
+        matches!(&envelope.command, Some(kinewright_core::JournalCommand::DoBatch(operations)) if operations.len() == 12),
+        "CANDIDATE_ENVELOPE_FORWARDS_EVERY_OPERATION"
+    );
+    assert!(
+        matches!(
+            writer.commit_candidate(&frozen, &envelope).unwrap(),
+            ReceiptLookup::Committed(_)
+        ),
+        "PRODUCT_20000_CLIP_TASK_MERGES_TO_CANDIDATE"
+    );
+    let operations = candidate.core().operations(false).unwrap();
+    assert_eq!(
+        operations.len(),
+        12,
+        "CANDIDATE_FORWARDS_THE_COMPLETE_FOUR_TRACK_CUT"
+    );
+    let delta = operations.iter().cloned().collect();
+    drop(operations);
+    let lease = writer
+        .issue_manual_lease("person".into(), "person-private".into())
+        .unwrap();
+    let replica = Core::peer_for_test(core.portable_history().unwrap()).unwrap();
+    let gui = Ja1EditingSession::new(temp.root(), &replica, StorageLimits::default()).unwrap();
+    let permit = gui
+        .bind_manual_producer(
+            lease.clone(),
+            writer.manual_input_context().unwrap(),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap();
+    permit
+        .request(Command::DoBatch(delta))
+        .expect("PRODUCT_20000_CLIP_CANDIDATE_FITS_ORDINARY_BATCH");
+    let authority = writer.manual_authority(lease).unwrap();
+    let mut receipts = vec![];
+    for message in permit.pending().unwrap() {
+        let (receipt, report) = writer.commit_manual_history(&authority, &message).unwrap();
+        assert!(report.is_some(), "PRODUCT_20000_CLIP_ACK_FOLLOWS_SAVE");
+        receipts.push(receipt);
+    }
+    gui.acknowledge_manual(&permit, receipts).unwrap();
+    let identity = core.snapshot_identity().unwrap();
+    assert_eq!(
+        identity,
+        replica.snapshot_identity().unwrap(),
+        "PRODUCT_20000_CLIP_PEERS_AGREE"
+    );
+    assert_eq!(core.operations(false).unwrap().len(), 13);
+    writer.save_active().unwrap();
+    let mut cold = kinewright_project::bundle::LoadedBundle::read(
+        &path,
+        &HistoryPool::new(PoolLimits::default()),
+    )
+    .unwrap();
+    assert_eq!(
+        cold.open_manual().unwrap().snapshot_identity().unwrap(),
+        identity,
+        "PRODUCT_20000_CLIP_MERGED_SAVE_COLD_OPENS_EXACTLY"
+    );
+}
 fn document(clips: usize) -> Document {
     let mut document = kinewright_project::c0_fixtures::save_cost_document();
     let template = document.tracks.remove(0);
@@ -23,70 +186,14 @@ fn document(clips: usize) -> Document {
     document.validate().unwrap();
     document
 }
-fn history(seed: &HistorySnapshot, edits: usize, ripple: bool) -> HistorySnapshot {
-    let core = Core::spawn(std::sync::Arc::clone(&seed.baseline)).unwrap();
-    // Independent probes preserve the native seed's document sharing and cursor.
-    core.restore_history(seed.clone()).unwrap();
-    apply_edits(&core, edits, ripple);
-    core.export_history().unwrap()
-}
-fn apply_edits(core: &Core, edits: usize, ripple: bool) {
-    for edit in 0..edits {
-        let operations = if ripple && edit == 100 {
-            (1..=20)
-                .map(|track| Operation::RippleDeleteClip {
-                    clip: ClipId(track * 100 + 10),
-                })
-                .collect()
-        } else {
-            vec![Operation::SetTrackSyncLock {
-                track: TrackId(1),
-                locked: edit % 2 == 0,
-            }]
-        };
-        let event = core.request(Command::DoBatch(operations)).unwrap();
-        assert!(matches!(event, Event::DocumentChanged { .. }), "{event:?}");
-    }
-}
-fn largest_history(
-    admission: &TaskHistoryAdmission,
-    seed: &HistorySnapshot,
-    ripple: bool,
-) -> (usize, HistorySnapshot) {
-    let mut low = 0;
-    let mut high = 1;
-    while admission.check(&history(seed, high, ripple)).is_ok() {
-        low = high;
-        high *= 2;
-        assert!(high <= kinewright_core::HISTORY_COMMANDS);
-    }
-    while high - low > 1 {
-        let mid = usize::midpoint(low, high);
-        if admission.check(&history(seed, mid, ripple)).is_ok() {
-            low = mid;
-        } else {
-            high = mid;
-        }
-    }
-    let refused = history(seed, high, ripple);
-    let error = admission.check(&refused).unwrap_err();
-    assert!(error.to_string().contains(LIMIT_REASON), "{error}");
-    let accepted = history(seed, low, ripple);
-    admission.check(&accepted).unwrap();
-    (low, accepted)
-}
 #[test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "one matrix compares admission, staged persistence and fresh decoding"
-)]
 fn native_task_history_capacity_table() {
     for clips in [40, 120, 400, 1200] {
         let temporary = TempDirectory::new_in(
-            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            &kinewright_media::test_support::workspace_target_dir(),
             "history-capacity-matrix",
         );
-        let core = Core::spawn(document(clips)).unwrap();
+        let core = Core::for_test(document(clips)).unwrap();
         let mut owner =
             Ja1EditingSession::new(temporary.root(), &core, StorageLimits::default()).unwrap();
         owner
@@ -103,14 +210,46 @@ fn native_task_history_capacity_table() {
         let mut task = owner
             .fork_registered_from_candidate(&binding, "task")
             .unwrap();
-        let admission = owner.task_history_admission(&task).unwrap();
-        let seed = task.core().export_history().unwrap();
-        let (edits, history) = largest_history(&admission, &seed, clips == 400);
-        apply_edits(task.core(), edits, clips == 400);
-        admission
-            .check(&task.core().export_history().unwrap())
-            .unwrap();
-        assert_eq!(task.core().export_history().unwrap(), history);
+        for edit in 0..200 {
+            let operations = if clips == 400 && edit == 100 {
+                (1..=20)
+                    .map(|track| Operation::RippleDeleteClip {
+                        clip: ClipId(track * 100 + 10),
+                    })
+                    .collect()
+            } else {
+                vec![Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked: edit % 2 == 0,
+                }]
+            };
+            assert!(
+                matches!(
+                    task.core().request(Command::DoBatch(operations)).unwrap(),
+                    Event::DocumentChanged { .. }
+                ),
+                "TASK_ADMITS_THE_REQUIRED_200_EDITS clips={clips}"
+            );
+        }
+        task.core().request(Command::Undo).unwrap();
+        let expected = task.core().snapshot_identity().unwrap();
+        let too_large = Operation::AddMarker {
+            marker: kinewright_core::Marker {
+                id: kinewright_core::MarkerId(900),
+                position: kinewright_core::TimeCode(0),
+                label: "x".repeat(1 << 20),
+                color_token: 0,
+            },
+        };
+        assert!(
+            task.core().request(Command::Do(too_large)).is_err(),
+            "EXECUTOR_REFUSES_OVERSIZED_STEP clips={clips}"
+        );
+        assert_eq!(
+            task.core().snapshot_identity().unwrap(),
+            expected,
+            "REFUSAL_PRESERVES_DOCUMENT_BOTH_STACKS_LINEAGE_LEDGER_RESOURCES clips={clips}"
+        );
         let frozen = owner.freeze_registered_task_checkpoint(&mut task).unwrap();
         let checkpoint = owner
             .store()
@@ -119,63 +258,24 @@ fn native_task_history_capacity_table() {
                 &frozen.source().checkpoint,
             )
             .unwrap();
-        let restored = owner
-            .store()
-            .unwrap()
-            .resolve_history(&checkpoint.history_ref)
+        let restored = checkpoint
+            .open(owner.store().unwrap(), task.core().history_pool())
             .unwrap();
         assert_eq!(
-            *restored, history,
-            "ADMITTED_NATIVE_TASK_FREEZES_AND_RESOLVES"
+            restored.identity(),
+            expected,
+            "ADMITTED_NATIVE_TASK_FREEZES_AND_OPENS clips={clips}"
         );
-        let metrics = |history: &HistorySnapshot| {
-            let lineage =
-                kinewright_project::task_history_admission::lineage_for_fixture(history).unwrap();
-            let (history_charge, lineage_charge) =
-                kinewright_project::task_history_admission::live_history_bytes_for_fixture(
-                    history, &lineage,
-                )
-                .unwrap();
-            let record = kinewright_project::history_record::HistoryRecord::capture(
-                history,
-                kinewright_project::history_record::HistoryRole::Task,
-            )
-            .unwrap();
-            serde_json::json!({
-                "history_charge":history_charge,
-                "lineage_charge":lineage_charge,
-                "live_pair_charge":history_charge + lineage_charge,
-                "portable_bytes":serde_json::to_vec(history).unwrap().len(),
-                "record_encoded":serde_json::to_vec(&record).unwrap().len(),
-                "record_decoded":kinewright_project::task_history_admission::decoded_history_bytes_for_fixture(history).unwrap(),
-                "lineage_encoded":serde_json::to_vec(&lineage).unwrap().len(),
-                "replay_bound":kinewright_core::history_size::measure_replay_peak(&record.journal, &history.baseline, &history.document).unwrap(),
-            })
-        };
+        let reader = restored.into_reader().unwrap();
+        assert_eq!(
+            reader.creation_sizing(),
+            task.core().export_history().unwrap().creation_sizing(),
+            "REOPEN_USES_THE_IMMUTABLE_CREATION_SIZING clips={clips}"
+        );
+        assert_eq!(reader.history().undo().len(), 199);
+        assert_eq!(reader.history().redo().len(), 1);
         println!(
-            "NATIVE_HISTORY_CAPACITY={}",
-            serde_json::json!({"clips":clips,"edits":edits,"ripple_delete_20": clips==400,
-                "accepted":metrics(&history), "first_refused":metrics(&self::history(&seed, edits + 1, clips == 400))})
-        );
-        if clips == 400 {
-            assert!(edits >= 200, "REQUIRED_400_200");
-        }
-        let decoded_lineage = owner
-            .store()
-            .unwrap()
-            .read_record::<kinewright_project::bundle_records::LineageRecord>(
-                &checkpoint.lineage_ref,
-            )
-            .unwrap();
-        let (decoded_history, decoded_lineage) =
-            kinewright_project::task_history_admission::live_history_bytes_for_fixture(
-                &restored,
-                &decoded_lineage,
-            )
-            .unwrap();
-        assert!(
-            decoded_history + decoded_lineage <= kinewright_project::history_record::TASK_LIVE,
-            "ADMITTED_TASK_DECODE_FITS_ROLE clips={clips} history={decoded_history} lineage={decoded_lineage}"
+            "NATIVE_HISTORY_CAPACITY clips={clips} accepted=200 undo=199 redo=1 identity={expected}"
         );
     }
 }

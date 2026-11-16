@@ -101,6 +101,7 @@ fn runtime_fix1_pending_source_close_has_typed_admission_until_removal() {
     let reader = service
         .open_borrowed_source(&transfer.source.unwrap(), &transfer.inputs)
         .unwrap();
+    drop(transfer.history);
     app.projects[0].ja1 = Some(attachment);
     app.new_project();
     let id = app.projects[0].id;

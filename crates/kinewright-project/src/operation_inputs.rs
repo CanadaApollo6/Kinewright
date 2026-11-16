@@ -16,10 +16,66 @@ pub struct ManualInputs {
     reference: ObjectRef,
     manifest: StorageReservation<OwnedInputManifest>,
     font: String,
+    _pin: Option<crate::store::StorePin>,
 }
 impl ManualInputs {
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "the retained store pin owns reachability until this input context drops"
+    )]
     pub fn read(store: &ProjectStore, reference: &ObjectRef) -> Result<Self, BundleError> {
-        Self::from_reserved(reference.clone(), store.read_record(reference)?)
+        let pin = store.pin(std::slice::from_ref(reference))?;
+        let mut inputs = Self::from_reserved(reference.clone(), store.read_record(reference)?)?;
+        inputs._pin = Some(pin);
+        Ok(inputs)
+    }
+    /// The GUI receives this exact manifest from its authenticated writer.
+    /// Its decoded bytes remain charged even after the named writer handoff;
+    /// the writer's live authority owns the physical pin in that process.
+    pub(crate) fn from_wire(
+        reference: ObjectRef,
+        manifest: OwnedInputManifest,
+        usage: &std::sync::Arc<std::sync::Mutex<crate::storage_budget::StorageUsage>>,
+    ) -> Result<Self, BundleError> {
+        let mut bytes = std::mem::size_of::<OwnedInputManifest>() as u64;
+        let mut add = |n: usize| -> Result<(), BundleError> {
+            bytes = bytes
+                .checked_add(n as u64)
+                .ok_or(BundleError::Capacity("input manifest capacity"))?;
+            Ok(())
+        };
+        add(manifest
+            .entries
+            .capacity()
+            .checked_mul(std::mem::size_of::<OwnedInputEntry>())
+            .ok_or(BundleError::Capacity("input manifest capacity"))?)?;
+        if let Some(id) = &manifest.project_id {
+            add(id.allocated_capacity())?;
+        }
+        if let Some(id) = &manifest.session_id {
+            add(id.allocated_capacity())?;
+        }
+        for entry in &manifest.entries {
+            add(entry.entry_id.capacity())?;
+            add(entry.object.sha256.capacity())?;
+            add(entry
+                .dependencies
+                .capacity()
+                .checked_mul(std::mem::size_of::<ObjectRef>())
+                .ok_or(BundleError::Capacity("input manifest capacity"))?)?;
+            for reference in &entry.dependencies {
+                add(reference.sha256.capacity())?;
+            }
+            if let Some(text) = &entry.selected_stream {
+                add(text.capacity())?;
+            }
+            if let Some(text) = &entry.profile {
+                add(text.capacity())?;
+            }
+        }
+        let limits = crate::storage_budget::StorageLimits::default();
+        let charge = StorageReservation::reserve(usage, &limits, 0, bytes, 0, false, u64::MAX)?;
+        Self::from_reserved(reference, charge.hold(manifest))
     }
     fn from_reserved(
         reference: ObjectRef,
@@ -83,6 +139,7 @@ impl ManualInputs {
             reference,
             manifest,
             font: kinewright_media::sha256_bytes(kinewright_core::title_font_bytes()),
+            _pin: None,
         })
     }
     #[must_use]
@@ -177,8 +234,11 @@ impl ManualInputs {
         }
         Ok(())
     }
-    #[cfg(test)]
-    pub(crate) fn fixture() -> Self {
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    /// # Panics
+    /// Panics if the fixed empty test context cannot be admitted.
+    pub fn fixture() -> Self {
         let manifest = OwnedInputManifest {
             project_id: None,
             session_id: None,

@@ -11,7 +11,11 @@ fn native_windows_switch_admission_refuses_before_mutation() {
     let root = kinewright_media::test_support::TempDirectory::new("c11-refusal");
     let path = root.path("a.kinewright");
     let (result, trace) = io_observer::observe(|| {
-        ProjectBundle::activate(&path, BundleWriteAdmission::new_document())
+        ProjectBundle::activate(
+            &path,
+            BundleWriteAdmission::new_document(),
+            core.history_pool(),
+        )
     });
     assert!(matches!(result, Err(BundleError::DurabilityUnsupported)));
     assert!(trace.events.is_empty());
@@ -20,8 +24,9 @@ fn native_windows_switch_admission_refuses_before_mutation() {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use kinewright_core::{Command, Core, Document, Event, Operation, Track, TrackId, TrackKind};
+    use kinewright_core::{Command, Document, Event, Operation, Track, TrackId, TrackKind};
     use kinewright_media::test_support::TempDirectory;
+    use kinewright_project::operation_actor::Core;
     use kinewright_project::{
         bundle::{BundleError, LoadedBundle},
         bundle_copy::CopyStatus,
@@ -37,7 +42,7 @@ mod linux {
     fn setup() -> (TempDirectory, PathBuf, Ja1EditingSession) {
         let root = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "c11-project");
         let path = root.path("a.kinewright");
-        let core = Core::spawn(Document {
+        let core = Core::for_test(Document {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
@@ -93,13 +98,27 @@ mod linux {
         *result
     }
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one switch lifecycle includes the exact raw receipt and both saved-owner checks"
+    )]
     fn g05a_atomic_retain_create_select_and_switch_generation() {
         let (root, path, mut session) = setup();
         // Keep a genuine Redo stack in L. Adoption must not be a whole-document Undo.
         edit(session.core(), true);
         session.core().request(Command::Undo).unwrap();
         session.save_active().unwrap();
-        let old = session.current_switch_attachment().unwrap();
+        let old = session
+            .current_switch_attachment()
+            .unwrap()
+            .identity()
+            .unwrap();
+        let mut old_contents =
+            serde_json::to_value(session.core().export_history().unwrap()).unwrap();
+        old_contents["history"]
+            .as_object_mut()
+            .unwrap()
+            .remove("epoch");
         let old_core = session.core().clone();
         let envelope = request(&mut session, None);
         session.prepare_host_switch(&envelope).unwrap();
@@ -115,24 +134,41 @@ mod linux {
         assert_eq!(session.list_working_branches().unwrap().len(), 2);
         assert_eq!(result.switch_generation, 1);
         assert!(matches!(
-            old_core.request(Command::Undo).unwrap(),
-            Event::MutationRefused { .. }
+            old_core.request(Command::Undo),
+            Err(kinewright_project::operation_actor::Refusal {
+                error: kinewright_project::operation_actor::Error::MutationRefused(
+                    kinewright_core::CoreMutationRefusal::Sealed
+                ),
+                ..
+            })
         ));
         let adopted = session.core().export_history().unwrap();
-        assert_eq!(adopted, target.history);
+        assert_eq!(adopted.identity().unwrap(), target.history.identity());
+        let depth = adopted.history().undo.len();
+        let adopted_document = std::sync::Arc::clone(&adopted.history().document);
+        drop(adopted);
         assert_eq!(
             session.current_switch_attachment().unwrap().inputs,
             target.inputs
         );
+        let expected_lineage = target
+            .history
+            .validate(session.core().history_pool())
+            .unwrap()
+            .into_reader()
+            .unwrap()
+            .into_boundary(depth)
+            .unwrap();
         assert_eq!(
-            session.current_switch_attachment().unwrap().lineage,
-            target.lineage
+            session.core().boundary(depth).unwrap().lineage(),
+            expected_lineage.lineage()
         );
-        edit(session.core(), !adopted.document.tracks[0].sync_lock);
+        drop(expected_lineage);
+        edit(session.core(), !adopted_document.tracks[0].sync_lock);
         session.core().request(Command::Undo).unwrap();
         assert_eq!(
-            session.core().export_history().unwrap().document,
-            adopted.document
+            session.core().export_history().unwrap().history().document,
+            adopted_document
         );
         session.save_active().unwrap();
         assert_eq!(session.manual_switch_generation().unwrap(), 1);
@@ -144,7 +180,20 @@ mod linux {
         );
         let returned = committed(session.publish_host_switch(&return_request).unwrap().0);
         assert_eq!(returned.new.branch, old.current.branch);
-        assert_eq!(session.core().export_history().unwrap(), old.history);
+        assert_eq!(
+            session.core().snapshot_identity().unwrap(),
+            returned.new.history_digest
+        );
+        let mut returned_contents =
+            serde_json::to_value(session.core().export_history().unwrap()).unwrap();
+        returned_contents["history"]
+            .as_object_mut()
+            .unwrap()
+            .remove("epoch");
+        assert_eq!(
+            returned_contents, old_contents,
+            "RETURN_SELECTION_PRESERVES_THE_COMPLETE_SAVED_OWNER"
+        );
         assert_eq!(returned.switch_generation, 2);
         session.save_active().unwrap();
         assert_eq!(session.manual_switch_generation().unwrap(), 2);
@@ -154,19 +203,29 @@ mod linux {
             CopyStatus::Committed(_)
         ));
         assert_eq!(
-            LoadedBundle::read(&copy)
-                .unwrap()
-                .root()
-                .unwrap()
-                .manual_switch_generation,
+            LoadedBundle::read(
+                &copy,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            )
+            .unwrap()
+            .root()
+            .unwrap()
+            .manual_switch_generation,
             2
         );
         assert_eq!(
-            LoadedBundle::read(&path)
-                .unwrap()
-                .root()
-                .unwrap()
-                .manual_switch_generation,
+            LoadedBundle::read(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            )
+            .unwrap()
+            .root()
+            .unwrap()
+            .manual_switch_generation,
             2
         );
     }
@@ -215,12 +274,23 @@ mod linux {
         let (_root, _path, mut session) = setup();
         let envelope = request(&mut session, None);
         session.prepare_host_switch(&envelope).unwrap();
-        let before = session.current_switch_attachment().unwrap();
+        let before = session
+            .current_switch_attachment()
+            .unwrap()
+            .identity()
+            .unwrap();
         let outcome = io_observer::fail_once("root_before_publish", || {
             session.publish_host_switch(&envelope)
         });
         assert!(outcome.is_err());
-        assert_eq!(session.current_switch_attachment().unwrap(), before);
+        assert_eq!(
+            session
+                .current_switch_attachment()
+                .unwrap()
+                .identity()
+                .unwrap(),
+            before
+        );
         assert_eq!(
             session.core().attachment_state().unwrap(),
             kinewright_core::AttachmentState::Live
@@ -233,7 +303,7 @@ mod linux {
     }
     #[test]
     fn g05a_each_source_identity_is_required_before_selection() {
-        for field in 0..10 {
+        for field in 0..9 {
             let (_root, _path, mut session) = setup();
             let mut envelope = request(&mut session, None);
             let before = session.current_switch_attachment().unwrap();
@@ -241,18 +311,17 @@ mod linux {
                 0 => envelope.expected_head = None,
                 1 => envelope.owner_epoch ^= 1,
                 2 => envelope.switch.as_mut().unwrap().checkpoint_generation += 1,
-                3 => envelope.switch.as_mut().unwrap().floor_generation += 1,
-                4 => envelope.switch.as_mut().unwrap().switch_generation += 1,
-                5 => envelope.switch.as_mut().unwrap().source_checkpoint.sha256 = "0".repeat(64),
-                6 => {
+                3 => envelope.switch.as_mut().unwrap().switch_generation += 1,
+                4 => envelope.switch.as_mut().unwrap().source_checkpoint.sha256 = "0".repeat(64),
+                5 => {
                     envelope.project_id =
                         kinewright_project::bundle_records::ProjectId::fresh().unwrap();
                 }
-                7 => {
+                6 => {
                     envelope.target_branch =
                         kinewright_project::bundle_records::BranchId::fresh().unwrap();
                 }
-                8 => envelope.expected_revision.0 += 1,
+                7 => envelope.expected_revision.0 += 1,
                 _ => envelope.id.sequence += 1,
             }
             assert!(matches!(
@@ -280,11 +349,24 @@ mod linux {
         committed(session.publish_host_switch(&envelope).unwrap().0);
         assert!(matches!(
             kinewright_project::bundle_recovery::without_api_probe("host-switch", || {
-                LoadedBundle::read(&path)
+                LoadedBundle::read(
+                    &path,
+                    &kinewright_project::operation_history::HistoryPool::new(
+                        kinewright_project::operation_history::PoolLimits::default(),
+                    ),
+                )
             }),
             Err(BundleError::Unsupported(_))
         ));
-        assert!(LoadedBundle::read(&path).is_ok());
+        assert!(
+            LoadedBundle::read(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            )
+            .is_ok()
+        );
     }
     #[test]
     fn g05a_exact_receipt_bearing_publication_requires_checkpoint_agreement() {
@@ -299,9 +381,21 @@ mod linux {
         );
         assert_eq!(std::fs::read(&path).unwrap(), root);
         assert_eq!(session.core().export_history().unwrap(), history);
-        assert!(LoadedBundle::read(&path).is_ok());
+        assert!(
+            LoadedBundle::read(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            )
+            .is_ok()
+        );
     }
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one switch lifecycle includes the exact raw receipt and both saved-owner checks"
+    )]
     fn g05a_independent_open_checks_raw_switch_receipt_and_api_declarations() {
         use kinewright_project::{
             bundle_records::{ObjectRef, RecordKind},
@@ -327,7 +421,15 @@ mod linux {
         let manifest: StoreManifest =
             serde_json::from_slice(&std::fs::read(objects.join(&manifest_ref.sha256)).unwrap())
                 .unwrap();
-        assert!(LoadedBundle::read(&path).is_ok());
+        assert!(
+            LoadedBundle::read(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            )
+            .is_ok()
+        );
         for case in 0..3 {
             let mut next = manifest.clone();
             let mut changed = root.clone();
@@ -370,7 +472,12 @@ mod linux {
             created.push(reference.sha256.clone());
             changed["studio"]["store_manifest_ref"] = serde_json::to_value(reference).unwrap();
             std::fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
-            let result = LoadedBundle::read(&path);
+            let result = LoadedBundle::read(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            );
             if case == 0 {
                 assert!(
                     matches!(result, Err(BundleError::Corrupt(ref reason)) if reason == "switch receipt checkpoint agreement")
@@ -382,7 +489,15 @@ mod linux {
             for hash in created {
                 std::fs::remove_file(objects.join(hash)).unwrap();
             }
-            assert!(LoadedBundle::read(&path).is_ok());
+            assert!(
+                LoadedBundle::read(
+                    &path,
+                    &kinewright_project::operation_history::HistoryPool::new(
+                        kinewright_project::operation_history::PoolLimits::default()
+                    )
+                )
+                .is_ok()
+            );
         }
     }
 }

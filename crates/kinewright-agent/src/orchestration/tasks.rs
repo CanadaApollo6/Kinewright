@@ -10,7 +10,8 @@ use super::{
     orchestration_records::{AttemptId, EndpointId, RunId, TaskBrief, TaskId},
     policy::TaskPolicy,
 };
-use kinewright_core::{Core, Document, Operation};
+use kinewright_core::{Document, Operation};
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::BundleError,
     editing_session::{DurableBranchSessionGuard, FrozenTaskResult, Ja1EditingSession},
@@ -90,7 +91,6 @@ struct Ingress {
     authority: RuntimeTaskAuthority,
     actor: kinewright_core::ActorIdentity,
     policy: TaskPolicy,
-    history_admission: Option<kinewright_project::task_history_admission::TaskHistoryAdmission>,
 }
 
 #[derive(Clone)]
@@ -122,7 +122,6 @@ impl TaskEndpoint {
         policy: TaskPolicy,
         authority: RuntimeTaskAuthority,
         core: &Core,
-        history_admission: Option<kinewright_project::task_history_admission::TaskHistoryAdmission>,
     ) -> Self {
         Self(Arc::new(Ingress {
             gate: Mutex::new(()),
@@ -137,13 +136,12 @@ impl TaskEndpoint {
             policy,
             authority,
             actor: core.actor_identity(),
-            history_admission,
         }))
     }
     #[cfg(any(test, feature = "eval-harness"))]
     #[must_use]
     pub fn for_fixture(policy: TaskPolicy, authority: RuntimeTaskAuthority, core: &Core) -> Self {
-        Self::from_authorized_owner(policy, authority, core, None)
+        Self::from_authorized_owner(policy, authority, core)
     }
     #[must_use]
     pub fn authority(&self) -> &RuntimeTaskAuthority {
@@ -271,76 +269,44 @@ impl TaskEndpoint {
         redo: bool,
     ) -> Result<
         (
-            kinewright_core::HistorySnapshot,
-            kinewright_core::HistorySnapshot,
-            Vec<Operation>,
-        ),
-        String,
-    > {
-        self.with_history_preview(|| self.preview_history_step_serial(core, expected, redo))
-    }
-    fn preview_history_step_serial(
-        &self,
-        core: &Core,
-        expected: kinewright_core::TimelineRevision,
-        redo: bool,
-    ) -> Result<
-        (
-            kinewright_core::HistorySnapshot,
-            kinewright_core::HistorySnapshot,
+            kinewright_project::operation_history::OwnerSnapshot,
+            kinewright_project::operation_history::OwnerSnapshot,
             Vec<Operation>,
         ),
         String,
     > {
         self.check_live()?;
-        if !self.matches_core(core) {
-            return Err("task actor changed".into());
-        }
-        let kinewright_core::Event::QueryResult(kinewright_core::QueryResult::Snapshot {
-            revision,
-            ..
-        }) = core
-            .request(kinewright_core::Command::Query(
-                kinewright_core::Query::Snapshot,
-            ))
-            .map_err(|e| e.to_string())?
-        else {
-            return Err("task revision unavailable".into());
-        };
-        if revision != expected {
+        if !self.matches_core(core)
+            || core.change_id().map_err(|e| e.to_string())?.revision != expected
+        {
             return Err("task revision changed".into());
         }
         let history = core.export_history().map_err(|e| e.to_string())?;
         let boundary = if redo {
-            history.cursor.redo.last()
+            history.history().redo.last()
         } else {
-            history.cursor.undo.last()
+            history.history().undo.back()
         }
         .ok_or("history cursor is empty")?;
-        self.0.policy.validate_batch(
-            if redo {
-                &history.document
-            } else {
-                &boundary.document
-            },
-            &boundary.operations,
-        )?;
-        let operations = boundary.operations.clone();
-        let private =
-            Core::spawn(std::sync::Arc::clone(&history.baseline)).map_err(|e| e.to_string())?;
-        self.restore_history_preview(&private, &history)?;
-        private
-            .request(if redo {
+        let operations = boundary.operations().cloned().collect::<Vec<_>>();
+        let after = core
+            .preview_command(if redo {
                 kinewright_core::Command::Redo
             } else {
                 kinewright_core::Command::Undo
             })
             .map_err(|e| e.to_string())?;
-        let after = private.export_history().map_err(|e| e.to_string())?;
+        self.0.policy.validate_batch(
+            if redo {
+                &history.history().document
+            } else {
+                &after.history().document
+            },
+            &operations,
+        )?;
         self.0
             .policy
-            .validate_history_change(&history.document, &after.document)?;
-        self.check_history(&after)?;
+            .validate_history_change(&history.history().document, &after.history().document)?;
         Ok((history, after, operations))
     }
     pub(crate) fn history_step(
@@ -348,89 +314,29 @@ impl TaskEndpoint {
         core: &Core,
         expected: kinewright_core::TimelineRevision,
         redo: bool,
-    ) -> Result<kinewright_core::HistorySnapshot, String> {
+    ) -> Result<kinewright_project::operation_history::OwnerSnapshot, String> {
         let _gate = self.admit()?;
-        let (_, after, _) = self.preview_history_step(core, expected, redo)?;
+        self.preview_history_step(core, expected, redo)?;
         core.request(if redo {
             kinewright_core::Command::Redo
         } else {
             kinewright_core::Command::Undo
         })
         .map_err(|e| e.to_string())?;
-        let actual = core.export_history().map_err(|e| e.to_string())?;
-        if actual != after {
-            return Err("task history differs from validated transition".into());
-        }
-        Ok(actual)
-    }
-    pub(crate) fn check_history(
-        &self,
-        history: &kinewright_core::HistorySnapshot,
-    ) -> Result<(), String> {
-        match &self.0.history_admission {
-            Some(admission) => admission.check(history),
-            None => kinewright_project::task_history_admission::check_history(
-                history,
-                &kinewright_project::storage_budget::StorageLimits::default(),
-            ),
-        }
-        .map_err(|error| error.to_string())
-    }
-    fn restore_history_preview(
-        &self,
-        private: &Core,
-        history: &kinewright_core::HistorySnapshot,
-    ) -> Result<(), String> {
-        if let Some(admission) = &self.0.history_admission {
-            admission
-                .restore_preview(private, history)
-                .map_err(|error| error.to_string())
-        } else {
-            private
-                .restore_history(history.clone())
-                .map_err(|error| error.to_string())
-        }
+        core.export_history().map_err(|e| e.to_string())
     }
     pub(crate) fn check_batch_history(
         &self,
         core: &Core,
         operations: &[Operation],
     ) -> Result<(), String> {
-        self.with_history_preview(|| self.check_batch_history_serial(core, operations))
-    }
-    fn with_history_preview<T>(
-        &self,
-        work: impl FnOnce() -> Result<T, String>,
-    ) -> Result<T, String> {
-        if let Some(admission) = &self.0.history_admission {
-            admission
-                .with_preview(work)
-                .map_err(|error| error.to_string())?
-        } else {
-            work()
+        self.check_live()?;
+        if !self.matches_core(core) {
+            return Err("task actor changed".into());
         }
-    }
-    fn check_batch_history_serial(
-        &self,
-        core: &Core,
-        operations: &[Operation],
-    ) -> Result<(), String> {
-        let history = core.export_history().map_err(|error| error.to_string())?;
-        let private = Core::spawn(std::sync::Arc::clone(&history.baseline))
-            .map_err(|error| error.to_string())?;
-        self.restore_history_preview(&private, &history)?;
-        if matches!(
-            private
-                .request(kinewright_core::Command::DoBatch(operations.to_vec()))
-                .map_err(|error| error.to_string())?,
-            kinewright_core::Event::DocumentChanged { .. }
-        ) {
-            self.check_history(
-                &private
-                    .export_history()
-                    .map_err(|error| error.to_string())?,
-            )?;
-        }
+        let _ = operations;
+        // Capacity is admitted atomically by the executor. A second document
+        // preview here would copy the entire project once more on every edit.
         Ok(())
     }
     pub(crate) fn validate_batch(
@@ -510,7 +416,6 @@ impl EditorTask {
             },
             authority,
             registration.core(),
-            Some(owner.task_history_admission(&registration)?),
         );
         Ok(Self {
             history_epoch: endpoint.authority().endpoint.clone(),
@@ -575,7 +480,6 @@ impl EditorTask {
             },
             authority,
             registration.core(),
-            Some(owner.task_history_admission(&registration)?),
         );
         Ok(Self {
             history_epoch: endpoint.authority().endpoint.clone(),
@@ -606,11 +510,6 @@ impl EditorTask {
         }
         // Frozen work can outlive its closed registration. Its new endpoint
         // remains sealed below and grants no edit authority.
-        let history_admission = if self.frozen.is_some() {
-            None
-        } else {
-            Some(owner.task_history_admission(&self.registration)?)
-        };
         self.endpoint = TaskEndpoint::from_authorized_owner(
             TaskPolicy {
                 role: brief.role,
@@ -618,7 +517,6 @@ impl EditorTask {
             },
             authority,
             self.registration.core(),
-            history_admission,
         );
         if self.frozen.is_some() {
             self.endpoint
@@ -715,8 +613,14 @@ impl EditorTask {
         self.merge_envelope = Some(envelope);
         Ok(())
     }
-    pub(crate) fn frozen_delta(&self) -> Option<&[Operation]> {
-        self.frozen.as_ref().map(FrozenTaskResult::delta)
+    pub(crate) fn frozen_delta(
+        &self,
+        owner: &Ja1EditingSession,
+    ) -> Result<Option<kinewright_project::operation_history::OwnerOperations>, BundleError> {
+        self.frozen
+            .as_ref()
+            .map(|frozen| frozen.delta(owner))
+            .transpose()
     }
     #[must_use]
     pub fn endpoint(&self) -> TaskEndpoint {
@@ -741,6 +645,12 @@ impl EditorTask {
             return Ok(false);
         };
         owner.release_checkpointed_native_branch(&self.registration)
+    }
+    pub(crate) fn verify_checkpointed(
+        &self,
+        owner: &Ja1EditingSession,
+    ) -> Result<bool, BundleError> {
+        owner.verify_registered_task_checkpoint(&self.registration)
     }
     #[cfg(all(target_os = "linux", any(test, feature = "eval-harness")))]
     pub fn freeze_fixture(
@@ -806,7 +716,7 @@ impl EditorTask {
             if envelope.id != id {
                 return Err(BundleError::HistoryChanged);
             }
-            let receipt = owner.manual_transition_receipt(envelope)?;
+            let receipt = owner.command_receipt(envelope)?;
             if receipt != ReceiptLookup::Absent {
                 return Ok(receipt);
             }
@@ -821,10 +731,11 @@ impl EditorTask {
         let document = owner
             .store()?
             .read_record::<Document>(&checkpoint.document_ref)?;
+        let delta = frozen.delta(owner)?;
         self.endpoint
             .0
             .policy
-            .validate_batch(&document, frozen.delta())
+            .validate_batch(&document, delta.operations())
             .map_err(BundleError::Unsupported)?;
         if self.merge_envelope.is_none() {
             let envelope = owner.candidate_merge_envelope(frozen, id)?;
@@ -841,7 +752,7 @@ impl EditorTask {
             || envelope.action != "edit"
             || envelope.command
                 != Some(kinewright_core::JournalCommand::DoBatch(
-                    frozen.delta().to_vec(),
+                    delta.operations().to_owned(),
                 ))
         {
             return Err(BundleError::HistoryChanged);

@@ -15,6 +15,11 @@ pub struct ManualPermit {
     generation: u64,
 }
 impl ManualPermit {
+    /// Whether this permit still names the actor's installed command stream.
+    pub fn is_current(&self) -> Result<bool, Error> {
+        self.core
+            .call(|reply| Message::CurrentProducer(self.generation, reply))
+    }
     pub fn send(&self, command: Command) -> Result<(), Error> {
         self.core
             .sender
@@ -86,6 +91,15 @@ impl<P: 'static> Attachment<P> {
             generation,
         })
     }
+    pub(crate) fn acknowledge_frozen(
+        &self,
+        _proof: &P,
+        cut: AcceptedCut,
+        receipts: Vec<Receipt>,
+    ) -> Result<(), Error> {
+        self.core
+            .call(|reply| Message::AcknowledgeFrozen(TypeId::of::<P>(), cut, receipts, reply))?
+    }
     pub fn acknowledge_manual(
         &self,
         _proof: &P,
@@ -122,7 +136,10 @@ impl State {
     }
     pub(super) fn check_permit(&self, permit: Option<u64>) -> Result<(), Error> {
         match (&self.producer, permit) {
-            (None, None) => Ok(()),
+            // Revoking an installed stream must not turn escaped raw handles
+            // into producers. Once manual authority existed, only a new permit
+            // may mutate this actor, even during continuity re-acquisition.
+            (None, None) if self.permit_generation == 0 => Ok(()),
             (Some(bound), Some(generation))
                 if bound.permit == generation && bound.live.load(Ordering::Acquire) =>
             {
@@ -159,6 +176,10 @@ impl State {
             ..
         } = request;
         let result = checked.and_then(|()| {
+            self.history
+                .as_mut()
+                .ok_or(Error::Retired)?
+                .promote_live()?;
             let generation = self
                 .permit_generation
                 .checked_add(1)
@@ -227,10 +248,19 @@ impl State {
 }
 fn producer_error(error: ProducerError) -> Error {
     match error {
+        ProducerError::Protocol(Conflict::CommandTooLarge) => {
+            Error::MutationRefused(CoreMutationRefusal::ManualHistoryCapacity)
+        }
         ProducerError::Protocol(error) => Error::Protocol(error),
         ProducerError::History(HistoryError::InputRequired) => {
             Error::MutationRefused(CoreMutationRefusal::ManualInputRequired)
         }
+        ProducerError::History(HistoryError::History(
+            kinewright_core::undo::Error::StepTooLarge
+            | kinewright_core::undo::Error::HistoryFull
+            | kinewright_core::undo::Error::Capacity
+            | kinewright_core::undo::Error::DocumentCapacity,
+        )) => Error::MutationRefused(CoreMutationRefusal::ManualHistoryCapacity),
         ProducerError::History(error) => Error::History(error),
     }
 }

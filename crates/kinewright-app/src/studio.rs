@@ -338,7 +338,8 @@ impl KinewrightApp {
         path: &std::path::Path,
     ) -> Result<(), String> {
         let mut attachment =
-            crate::ja1_attachment::Ja1Attachment::open(path).map_err(|error| error.to_string())?;
+            crate::ja1_attachment::Ja1Attachment::open(path, self.focused().core.history_pool())
+                .map_err(|error| error.to_string())?;
         if std::env::var("KINEWRIGHT_SCREENSHOT_STUDIO_SCENE").as_deref() == Ok("revise") {
             return self.prepare_revise_screenshot(attachment, path);
         }

@@ -75,7 +75,13 @@ fn s4b_c4_notes_stop_startup_full_queue_and_execution() {
         let mut project = c7::project("c4-notes-native");
         let setting = std::fs::read(project.temp.path("scheduler/director.json")).unwrap();
         let fixture = ProtocolFixture::new(project.temp.root(), mode);
-        let owner = Ja1EditingSession::open(&project.path).unwrap();
+        let owner = Ja1EditingSession::open(
+            &project.path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         let mut attachment = Ja1Attachment::new(owner).unwrap();
         let writer = attachment
             .launch_protocol_fixture(
@@ -247,8 +253,16 @@ fn s4b_c4_notes_stop_startup_full_queue_and_execution() {
         // request retains its old epoch/revision and resolves to its exact receipt.
         drop(attachment);
         drop(writer);
-        let mut attachment =
-            Ja1Attachment::new(Ja1EditingSession::open(&project.path).unwrap()).unwrap();
+        let mut attachment = Ja1Attachment::new(
+            Ja1EditingSession::open(
+                &project.path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         let writer = attachment
             .launch_protocol_fixture(
                 SessionRoots {

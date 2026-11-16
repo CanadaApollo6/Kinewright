@@ -518,7 +518,15 @@ impl History {
     /// already validated state. Retained commands keep their original keys;
     /// the peer adopts this epoch after validating the published record.
     pub fn begin_install_epoch(&mut self) -> Result<CommandKey, Error> {
-        self.epoch = self.epoch.checked_add(1).ok_or(Error::CounterExhausted)?;
+        let epoch = self.epoch.checked_add(1).ok_or(Error::CounterExhausted)?;
+        self.begin_install_epoch_at(epoch)
+    }
+    /// Select an agreed later epoch for an already validated private state.
+    pub fn begin_install_epoch_at(&mut self, epoch: u64) -> Result<CommandKey, Error> {
+        if epoch <= self.epoch {
+            return Err(Error::InvalidMetadata);
+        }
+        self.epoch = epoch;
         Ok(self.position())
     }
     #[must_use]

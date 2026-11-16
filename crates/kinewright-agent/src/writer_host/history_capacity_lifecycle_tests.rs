@@ -131,7 +131,7 @@ fn history_admission_native_copy_run() -> C5Fix10Run {
             role: Role::Colour,
             scope: r.f.brief.scope.clone(),
         }
-        .validate_batch(&r.core.export_history().unwrap().document, &operations)
+        .validate_batch(&r.core.export_history().unwrap().history().document, &operations)
         .expect("COPY_WITNESS_HAS_THE_REAL_COLOUR_ROLE_AND_EFFECT_GRANTS");
         let event = r
             .core
@@ -191,7 +191,7 @@ fn history_capacity_crash_child() {
             );
         }
     }
-    assert_eq!(r.core.export_history().unwrap().batches.len(), edits);
+    assert_eq!(r.core.export_history().unwrap().history().undo.len(), edits);
     if clips == 1200 {
         let before = r.core.export_history().unwrap();
         let refused = capacity_edit(&r.editor, &r.core, clips, edits);
@@ -217,7 +217,7 @@ fn history_capacity_crash_child() {
         Some(false),
         "CAPACITY_KEEP_REDO {undone:?}"
     );
-    assert_eq!(r.core.export_history().unwrap().cursor.redo.len(), 1);
+    assert_eq!(r.core.export_history().unwrap().history().redo.len(), 1);
     capacity_finish_merge_stop(r, Some(std::path::Path::new(&handoff)));
 }
 
@@ -592,50 +592,27 @@ fn capacity_candidate_metrics(
     clips: usize,
     accepted: usize,
 ) {
-    use kinewright_core::{Command, Event};
-    use kinewright_project::{
-        bundle_records::BranchCheckpoint,
-        history_record::{HistoryRecord, HistoryRole},
-        task_history_admission::{lineage_for_fixture, live_history_bytes_for_fixture},
-    };
     let store = owner.store().unwrap();
-    let checkpoint = store
-        .read_record::<BranchCheckpoint>(&before.checkpoint)
-        .unwrap();
-    let retained = store.resolve_history(&checkpoint.history_ref).unwrap();
-    let bytes = store
-        .read_evidence(result.delta_ref.as_ref().unwrap())
-        .unwrap();
-    let delta: Vec<kinewright_core::Operation> = serde_json::from_slice(&bytes).unwrap();
-    let operation_count = delta.len();
-    let preview = Core::spawn(std::sync::Arc::clone(&retained.baseline)).unwrap();
-    preview.restore_history((*retained).clone()).unwrap();
-    assert!(matches!(
-        preview.request(Command::DoBatch(delta)).unwrap(),
-        Event::DocumentChanged { .. }
-    ));
-    let proposed = preview.export_history().unwrap();
-    let metrics = |history: &kinewright_core::HistorySnapshot| {
-        let lineage = lineage_for_fixture(history).unwrap();
-        let (history_live, lineage_live) =
-            live_history_bytes_for_fixture(history, &lineage).unwrap();
-        let record = HistoryRecord::capture(history, HistoryRole::Candidate).unwrap();
-        serde_json::json!({"history_live":history_live,"lineage_live":lineage_live,"role_live":history_live + lineage_live,
-            "replay_peak":kinewright_core::history_size::measure_replay_peak(&record.journal,&history.baseline,&history.document).unwrap(),
-            "record_encoded":serde_json::to_vec(&record).unwrap().len()})
-    };
-    println!(
-        "CAPACITY_CANDIDATE_METRICS={}",
-        serde_json::json!({"clips":clips,"accepted_merges":accepted,
-        "operations_in_refused_merge":operation_count,"accepted":metrics(&retained),"refused":metrics(&proposed)})
-    );
+    let checkpoint = store.read_record::<kinewright_project::bundle_records::BranchCheckpoint>(&before.checkpoint).unwrap();
+    let retained = checkpoint.open(store, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap().into_reader().unwrap().into_capture().unwrap();
+    let delta: Vec<kinewright_core::Operation> = serde_json::from_slice(&store.read_evidence(result.delta_ref.as_ref().unwrap()).unwrap()).unwrap();
+    let charge = kinewright_core::undo::batch_charge(&delta).unwrap();
+    let steps: Vec<_> = retained.history().undo.iter().chain(retained.history().redo.iter()).map(kinewright_core::undo::Step::charge).collect();
+    println!("CAPACITY_CANDIDATE_METRICS={}", serde_json::json!({
+        "clips":clips, "accepted_merges":accepted, "operations_in_refused_merge":delta.len(),
+        "retained_steps":steps.len(), "history_encoded": steps.iter().map(|charge| charge.encoded).sum::<u64>(),
+        "history_decoded":steps.iter().map(|charge| charge.decoded).sum::<u64>(),
+        "refused_batch_encoded":charge.encoded, "refused_batch_decoded":charge.decoded,
+        "retained_envelope":retained.creation_sizing().limits().unwrap().envelope.retained,
+        "document_live":kinewright_core::undo::document_capacity_bytes(&retained.history().document).unwrap(),
+    }));
 }
 
 fn capacity_candidate_actor(
     owner: &Ja1EditingSession,
     branch: &kinewright_project::bundle_records::BranchId,
 ) -> (
-    kinewright_core::HistorySnapshot,
+    kinewright_project::operation_history::OwnerSnapshot,
     kinewright_core::TimelineRevision,
 ) {
     let candidate = owner
@@ -651,7 +628,7 @@ fn capacity_candidate_actor(
 }
 
 fn capacity_probe_edit(core: &Core) {
-    let locked = !core.export_history().unwrap().document.tracks[0].sync_lock;
+    let locked = !core.export_history().unwrap().history().document.tracks[0].sync_lock;
     let changed = core
         .request(kinewright_core::Command::DoBatch(vec![
             kinewright_core::Operation::SetTrackSyncLock {
@@ -724,9 +701,8 @@ fn capacity_check_task(f: &Fixture, core: &Core) {
         .find(|(_, guard)| guard.core().actor_identity() == core.actor_identity())
         .unwrap()
         .1;
-    owner
-        .task_history_admission(&guard)
-        .unwrap()
-        .check(&core.export_history().unwrap())
-        .unwrap();
+    assert_eq!(guard.core().actor_identity(), core.actor_identity());
+    let snapshot = core.export_history().unwrap();
+    assert_eq!(snapshot.creation_sizing().kind.role(), kinewright_project::operation_history::Role::Task);
+    snapshot.validate().expect("ACCEPTED_TASK_STATE_FITS_ITS_IMMUTABLE_CREATION_BOUNDS");
 }

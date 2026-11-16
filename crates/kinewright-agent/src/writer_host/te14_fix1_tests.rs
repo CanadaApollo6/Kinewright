@@ -340,7 +340,7 @@ fn te14_fix1_media_control(cold: bool, switch: bool, timeout: bool) {
         let mut branch = project
             .fork_durable_branch(
                 "TE14 real switch",
-                kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+                kinewright_project::editing_session::DurableBranchRole::Session,
             )
             .unwrap();
         project.persist_durable_branch(&mut branch).unwrap();

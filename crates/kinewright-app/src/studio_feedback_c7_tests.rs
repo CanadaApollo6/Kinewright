@@ -15,10 +15,15 @@ pub(super) struct Project {
     pub(super) feedback: Feedback,
 }
 pub(super) fn project(name: &str) -> Project {
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     let temp = TempDirectory::new_in(&workspace_target_dir(), name);
     let path = temp.path("revise.kinewright");
-    let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let mut bundle = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let inputs = bundle.empty_inputs().unwrap().reference.clone();
     bundle.save(&core, &inputs).unwrap();
     let branch = bundle.manual_branch_id().clone();
@@ -66,8 +71,13 @@ fn launch_with_fixture(
     project: &Project,
     fixture: &kinewright_agent::writer_host::ProtocolFixture,
 ) -> Ja1Attachment {
-    let owner =
-        kinewright_project::editing_session::Ja1EditingSession::open(&project.path).unwrap();
+    let owner = kinewright_project::editing_session::Ja1EditingSession::open(
+        &project.path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     let mut attachment = Ja1Attachment::new(owner).unwrap();
     crate::ja1_attachment::SCHEDULER_SETTINGS
         .with(|folder| *folder.borrow_mut() = Some(project.temp.path("scheduler")));
@@ -92,7 +102,13 @@ fn with_host<R>(attachment: &Ja1Attachment, act: impl FnOnce(&mut HostFeedback<'
     })
 }
 fn linked(path: &std::path::Path) -> (Vec<Option<RunId>>, usize) {
-    let owner = kinewright_project::editing_session::Ja1EditingSession::open(path).unwrap();
+    let owner = kinewright_project::editing_session::Ja1EditingSession::open(
+        path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     let batches = owner
         .feedback_index()
         .unwrap()
@@ -256,7 +272,7 @@ fn s3_c7_fix1_host_save_as_keeps_each_projects_notes_apart() {
     use kinewright_project::bundle_records::{BranchId, ProjectId};
     let (mut app, _engine) = in1_harness(Document::default());
     let temp = TempDirectory::new_in(&workspace_target_dir(), "c7-fix1-save-as");
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     let owner = kinewright_project::editing_session::Ja1EditingSession::new(
         temp.root(),
         &core,
@@ -330,10 +346,15 @@ fn s3_c7_fix1_host_save_as_keeps_each_projects_notes_apart() {
     let a_and_b = vec!["typed in A".to_owned(), "typed in B".to_owned()];
     for (path, restored) in [(&a, only_a), (&b, a_and_b)] {
         // Reopened by the identity each bundle itself carries.
-        let project = kinewright_project::editing_session::Ja1EditingSession::open(path)
-            .unwrap()
-            .project_id()
-            .unwrap();
+        let project = kinewright_project::editing_session::Ja1EditingSession::open(
+            path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap()
+        .project_id()
+        .unwrap();
         let file =
             std::fs::read_to_string(directory.join(format!("{}.json", project.as_str()))).unwrap();
         for text in ["typed in A", "typed in B"] {
@@ -552,8 +573,13 @@ fn s3_c7_startup_recovery_queues_exact_revise_and_keeps_reads_live() {
 }
 
 fn c7_unconsumed_batch(project: &mut Project) -> ReviseRequest {
-    let mut owner =
-        kinewright_project::editing_session::Ja1EditingSession::open(&project.path).unwrap();
+    let mut owner = kinewright_project::editing_session::Ja1EditingSession::open(
+        &project.path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     project.feedback.issuer = None;
     assert!(matches!(
         project.feedback.submit_inner(&mut owner),
@@ -713,8 +739,13 @@ fn c7_shutdown_queue(before_ingress: bool) {
         held.observations().is_empty(),
         "C7_SHUTDOWN_NO_NATIVE_LAUNCH"
     );
-    let owner =
-        kinewright_project::editing_session::Ja1EditingSession::open(&project.path).unwrap();
+    let owner = kinewright_project::editing_session::Ja1EditingSession::open(
+        &project.path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     assert!(
         owner.orchestration_runs().unwrap().is_empty(),
         "C7_SHUTDOWN_NO_NEW_RUN"
@@ -816,8 +847,13 @@ fn s3_c7_fix1_refused_shutdown_keeps_queue_open() {
     };
     assert_eq!(batch_id, request.batch_id);
     drop(attachment);
-    let owner =
-        kinewright_project::editing_session::Ja1EditingSession::open(&project.path).unwrap();
+    let owner = kinewright_project::editing_session::Ja1EditingSession::open(
+        &project.path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     assert_eq!(
         owner.orchestration_runs().unwrap().len(),
         1,

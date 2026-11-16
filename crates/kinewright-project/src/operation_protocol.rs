@@ -15,6 +15,18 @@ use kinewright_core::{
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
+/// A frozen source's one-batch operations and all its admitted input origins
+/// must fit the native merge envelope, independently of the manual outbox.
+pub const NATIVE_COMMAND_BYTES: u64 = kinewright_core::undo::RoleBounds::TASK.operation_bytes
+    + crate::operation_history::OWNER_ALLOWANCE
+    + (64 << 10);
+const _: () = assert!(
+    NATIVE_COMMAND_BYTES
+        >= kinewright_core::undo::RoleBounds::TASK.operation_bytes
+            + crate::operation_history::OWNER_ALLOWANCE
+            + 4096,
+    "SOURCE_BATCH_AND_INPUT_ORIGINS_FIT_NATIVE_PUBLICATION"
+);
 pub const PENDING_COMMANDS: usize = 64;
 // One admitted 1 MiB source batch plus its normalised owner/receipt context.
 // The pending queue retains encoded bytes; its holder charges those bytes.
@@ -148,6 +160,7 @@ pub struct Seed {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Message {
+    pub publisher: Publisher,
     pub id: CommandId,
     pub sequence: u64,
     pub predecessor: [u8; 32],
@@ -155,6 +168,18 @@ pub struct Message {
     pub accepted: CommandKey,
     pub action: Action,
     pub context: CommandContext,
+}
+/// Portable models have no namespace. Durable publishers bind the native parent
+/// and namespace name already granted by their lease, including after restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Publisher {
+    Portable,
+    Native([u8; 32]),
+}
+impl Publisher {
+    pub(crate) fn native(parent: (u64, u64), name: &str) -> Result<Self, Conflict> {
+        hash(b"kinewright/native-publisher/v1\0", &(parent, name)).map(Self::Native)
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -177,6 +202,7 @@ pub struct StreamState {
 pub enum Conflict {
     Encoding,
     Backpressure,
+    CommandTooLarge,
     Unnormalised,
     Detached,
     CounterExhausted,
@@ -216,10 +242,16 @@ fn hash(domain: &[u8], value: &impl Serialize) -> Result<[u8; 32], Conflict> {
     Ok(writer.0.finalize())
 }
 impl Message {
-    pub(crate) fn digest(&self) -> Result<[u8; 32], Conflict> {
+    pub fn digest(&self) -> Result<[u8; 32], Conflict> {
         hash(
             b"kinewright/accepted-command/v1\0",
-            &(&self.id, self.accepted, &self.action, &self.context),
+            &(
+                self.publisher,
+                &self.id,
+                self.accepted,
+                &self.action,
+                &self.context,
+            ),
         )
     }
     fn chained(&self) -> Result<[u8; 32], Conflict> {
@@ -265,6 +297,7 @@ impl StreamState {
         context: CommandContext,
     ) -> Result<Message, Conflict> {
         let mut message = Message {
+            publisher: Publisher::Portable,
             id,
             accepted,
             action,

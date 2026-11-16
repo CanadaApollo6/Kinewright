@@ -5,45 +5,33 @@
 use super::*;
 
 #[cfg(target_os = "linux")]
-pub(super) fn restart_case(committed: bool, floor: bool, lose_transition_reply: bool, suffix: u8) {
-    use kinewright_core::{
-        Command as Edit, Event, HistoryTransition, Operation, Track, TrackId, TrackKind,
-    };
+pub(super) fn restart_case(
+    committed: bool,
+    pressure: bool,
+    lose_transition_reply: bool,
+    suffix: u8,
+) {
+    use kinewright_core::{Command as Edit, Event, Operation, Track, TrackId, TrackKind};
     use kinewright_project::{
-        editing_session::Ja1EditingSession, receipts::ReceiptLookup, storage_budget::StorageLimits,
+        editing_session::Ja1EditingSession, operation_protocol::PENDING_COMMANDS,
+        storage_budget::StorageLimits,
     };
     let root = temp("c10-restart");
     let path = root.path("manual.kinewright");
-    let gui = Core::spawn(Document {
+    let gui = Core::for_test(Document {
         duration: kinewright_core::TimeCode(90),
-        tracks: vec![Track {
-            id: TrackId(1),
-            kind: TrackKind::Video,
-            sync_lock: true,
-            clips: vec![serde_json::from_value(json!({"id":1,"asset":0,"source_range":{"start":0,"end":90},"content":{"solid":{"r":20,"g":40,"b":60}},"timeline_start":0,"effects":[],"transition_in":null})).unwrap()],
-        }],
+        tracks: vec![Track { id: TrackId(1), kind: TrackKind::Video, sync_lock: true,
+            clips: vec![serde_json::from_value(json!({"id":1,"asset":0,"source_range":{"start":0,"end":90},"content":{"solid":{"r":20,"g":40,"b":60}},"timeline_start":0,"effects":[],"transition_in":null})).unwrap()] }],
         ..Document::default()
-    })
-    .unwrap();
+    }).unwrap();
     let mut source = Ja1EditingSession::new(root.root(), &gui, StorageLimits::default()).unwrap();
     source.first_save(&path, StorageLimits::default()).unwrap();
-    source.prepare_host_attachment().unwrap();
+    let (configuration, _origin_callback) = handoff_config(&mut source, root.root());
     let initial = source.freeze_host_cut().unwrap();
     source.complete_host_cut(&initial, None, None).unwrap();
-    let (original_lineage, original_inputs) = {
-        let owner = kinewright_project::bundle::LoadedBundle::read(&path)
-            .unwrap()
-            .into_writer()
-            .unwrap();
-        let branch = owner.manual_branch_id();
-        let lineage = (*owner.branch_lineage(branch).unwrap()).clone();
-        assert_eq!(lineage.current.len(), 1);
-        (
-            lineage,
-            owner.checkpoint(branch).unwrap().input_manifest_ref.clone(),
-        )
-    };
-    let mut host = ProcessHost::start(config(root.root(), Some(path.clone())));
+    let original_occurrence =
+        gui.boundary(0).unwrap().lineage().occurrences[&kinewright_core::ClipId(1)].clone();
+    let mut host = ProcessHost::start(configuration);
     let identity = "e".repeat(64);
     let lease = successful(
         &host.client,
@@ -52,31 +40,19 @@ pub(super) fn restart_case(committed: bool, floor: bool, lose_transition_reply: 
         },
     );
     let permit = source
-        .bind_manual_producer(lease.manual_lease.unwrap(), lease.manual_inputs.unwrap())
+        .bind_manual_producer(
+            lease.manual_lease.unwrap(),
+            lease.manual_inputs.unwrap(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        )
         .unwrap();
     let client = host.client.with_manual_editor(identity.clone());
-    // A closed command gives the floor a legal prefix, then B and C share a gesture.
-    assert!(matches!(
-        permit
-            .request(Edit::Do(Operation::SetTrackSyncLock {
-                track: TrackId(1),
-                locked: false
-            }))
-            .unwrap(),
-        Event::DocumentChanged { .. }
-    ));
-    let accepted = permit.pending().unwrap();
-    let mut original_batches: Vec<String> = accepted.iter().map(|m| m.batch_id.clone()).collect();
-    let reply = successful(
-        &client,
-        HostCommand::CommitHistory {
-            client: identity.clone(),
-            messages: accepted,
-        },
-    );
-    source
-        .acknowledge_manual(&permit, reply.manual_ack)
-        .unwrap();
+    let lock = |locked| {
+        Edit::Do(Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked,
+        })
+    };
     let drag = |locked| Edit::DoBatchCoalesced {
         operations: vec![Operation::SetTrackSyncLock {
             track: TrackId(1),
@@ -84,41 +60,51 @@ pub(super) fn restart_case(committed: bool, floor: bool, lose_transition_reply: 
         }],
         coalesce_key: "A-B-C".into(),
     };
-    assert!(matches!(
-        permit.request(drag(true)).unwrap(),
-        Event::DocumentChanged { .. }
-    ));
-    let durable_drag = permit.pending().unwrap();
-    original_batches.extend(durable_drag.iter().map(|m| m.batch_id.clone()));
-    let reply = successful(
-        &client,
-        HostCommand::CommitHistory {
-            client: identity.clone(),
-            messages: durable_drag,
-        },
-    );
-    source
-        .acknowledge_manual(&permit, reply.manual_ack)
-        .unwrap();
-    let command = match suffix {
-        1 | 2 => Edit::Undo,
-        _ => drag(false),
-    };
-    assert!(matches!(
-        permit.request(command).unwrap(),
-        Event::DocumentChanged { .. }
-    ));
-    if suffix == 2 {
+    let mut prefix_receipts = Vec::new();
+    for command in [lock(false), drag(true)] {
         assert!(matches!(
-            permit.request(Edit::Redo).unwrap(),
+            permit.request(command).unwrap(),
             Event::DocumentChanged { .. }
         ));
+        let reply = successful(
+            &client,
+            HostCommand::CommitHistory {
+                client: identity.clone(),
+                messages: permit.pending().unwrap(),
+            },
+        );
+        prefix_receipts.extend(reply.manual_ack.iter().cloned());
+        source
+            .acknowledge_manual(&permit, reply.manual_ack)
+            .unwrap();
+    }
+    permit
+        .request(if suffix == 1 || suffix == 2 {
+            Edit::Undo
+        } else {
+            drag(false)
+        })
+        .unwrap();
+    if suffix == 2 {
+        permit.request(Edit::Redo).unwrap();
+    }
+    if pressure {
+        while permit.pending().unwrap().len() < PENDING_COMMANDS {
+            permit.close_gesture().unwrap();
+        }
+        let before = gui.change_id().unwrap();
+        assert!(
+            permit.request(lock(true)).is_err(),
+            "C10_FULL_OUTBOX_REFUSES_BEFORE_ACCEPTANCE"
+        );
+        assert_eq!(gui.change_id().unwrap(), before);
     }
     let pending = permit.pending().unwrap();
-    original_batches.extend(pending.iter().map(|m| m.batch_id.clone()));
-    let accepted_cut = gui.export_history().unwrap();
+    let accepted = serde_json::from_value::<HostSnapshot>(
+        serde_json::to_value(HostSnapshot::capture(&gui).unwrap()).unwrap(),
+    )
+    .unwrap();
     if committed {
-        // The publication really completes, but the original-envelope reply is dropped.
         let dropped = successful(
             &client,
             HostCommand::CommitHistory {
@@ -126,142 +112,150 @@ pub(super) fn restart_case(committed: bool, floor: bool, lose_transition_reply: 
                 messages: pending.clone(),
             },
         );
-        assert_eq!(dropped.manual_ack, pending);
+        assert_eq!(dropped.manual_ack.len(), pending.len());
+        for (receipt, encoded) in dropped.manual_ack.iter().zip(&pending) {
+            assert_eq!(
+                receipt.command,
+                encoded.decode().unwrap().digest().unwrap(),
+                "C10_LOST_ACK_NAMES_ORIGINAL_PAYLOAD"
+            );
+        }
     }
     let cut = source.freeze_host_cut().unwrap();
-    assert_eq!(cut.history(), &accepted_cut);
+    assert_eq!(cut.identity(), accepted.history.identity());
+    let mut endpoint = source
+        .manual_recovery_endpoint(&cut, pending.clone())
+        .unwrap();
     let death = Instant::now();
     host.child.kill().unwrap();
     host.child.wait().unwrap();
     host = ProcessHost::start(config(root.root(), Some(path.clone())));
     let successor = "a".repeat(64);
     let client = host.client.with_manual_editor(successor.clone());
+    if pressure {
+        let refused = client
+            .request(HostCommand::BeginRecovery {
+                client: successor.clone(),
+                frozen: Some(accepted.clone()),
+                pending: pending.clone(),
+                discard_batches: Some(1),
+            })
+            .unwrap();
+        assert!(
+            refused.error.is_some(),
+            "C10_ONLY_EXECUTOR_CAN_SELECT_A_FOLD"
+        );
+    }
     let prepared = successful(
         &client,
         HostCommand::BeginRecovery {
             client: successor.clone(),
-            frozen: Some(HostSnapshot::from_history(accepted_cut.clone()).unwrap()),
+            frozen: Some(accepted.clone()),
             pending: pending.clone(),
-            discard_batches: floor.then_some(1),
+            discard_batches: None,
         },
     );
-    assert!(prepared.status.frozen);
-    let mut barrier = prepared.recovery.unwrap();
-    let mut local_cut = cut;
-    let mut still_pending = pending.clone();
-    loop {
-        assert!(
-            host.client
-                .request(HostCommand::ConfirmBarrier {
-                    barrier: Box::new(barrier.clone()),
-                    installed: barrier.after.clone()
-                })
-                .unwrap()
-                .error
-                .is_some(),
-            "no lease before durable publication"
-        );
-        let publication = successful(
+    let barrier = prepared.recovery.unwrap();
+    assert_eq!(
+        barrier.acknowledged.len(),
+        pending.len(),
+        "C10_EVERY_ORIGINAL_SUFFIX_MESSAGE_HAS_A_RECEIPT"
+    );
+    let publication = successful(
+        &host.client,
+        HostCommand::PublishBarrier {
+            barrier: Box::new(barrier.clone()),
+        },
+    );
+    assert_eq!(publication.history.as_ref(), Some(&barrier.after.history));
+    if lose_transition_reply {
+        host.child.kill().unwrap();
+        host.child.wait().unwrap();
+        host = ProcessHost::start(config(root.root(), Some(path.clone())));
+        let recovered = successful(
             &host.client,
             HostCommand::PublishBarrier {
                 barrier: Box::new(barrier.clone()),
             },
         );
-        assert!(publication.manual_lease.is_none());
-        assert_eq!(publication.history.as_ref(), Some(&barrier.after.history));
-        assert_eq!(
-            successful(&host.client, HostCommand::ReadHistory)
-                .history
-                .as_ref(),
-            Some(&barrier.after.history),
-            "the host actor itself installed the result before restart"
-        );
-        if lose_transition_reply {
-            host.child.kill().unwrap();
-            host.child.wait().unwrap();
-            host = ProcessHost::start(config(root.root(), Some(path.clone())));
-            let recovered = successful(
-                &host.client,
-                HostCommand::PublishBarrier {
-                    barrier: Box::new(barrier.clone()),
-                },
-            );
-            assert_eq!(recovered.barrier_checkpoint, publication.barrier_checkpoint);
-        }
-        local_cut = source
-            .install_manual_barrier(&local_cut, barrier.after.history.clone(), still_pending)
-            .unwrap();
-        still_pending = vec![];
-        assert!(matches!(
-            permit.request(Edit::Undo).unwrap(),
-            Event::MutationRefused { .. }
-        ));
-        let reply = successful(
-            &host.client,
-            HostCommand::ConfirmBarrier {
-                barrier: Box::new(barrier.clone()),
-                installed: HostSnapshot::capture(&gui).unwrap(),
-            },
-        );
-        if let Some(next) = reply.recovery {
-            assert!(reply.manual_lease.is_none());
-            barrier = next;
-        } else {
-            let lease = reply.manual_lease.unwrap();
-            source.resume_manual_barrier(&local_cut).unwrap();
-            let fresh = source
-                .bind_manual_producer(lease, reply.manual_inputs.unwrap())
-                .unwrap();
-            assert!(matches!(
-                permit.request(drag(true)).unwrap(),
-                Event::MutationRefused { .. }
-            ));
-            let elapsed = death.elapsed().as_secs_f64() * 1000.0;
-            println!(
-                "C10_RECOVERY_MS committed={committed} floor={floor} dropped={lose_transition_reply} elapsed={elapsed:.3}"
-            );
-            assert_eq!(gui.export_history().unwrap(), barrier.after.history);
-            let expected = if floor {
-                HistoryTransition::floor(accepted_cut.clone(), 1)
-                    .unwrap()
-                    .after()
-                    .clone()
-            } else {
-                accepted_cut.clone()
-            };
-            assert_eq!(
-                barrier.after.history,
-                *HistoryTransition::recovery_close(expected.clone(), &expected)
-                    .unwrap()
-                    .after()
-            );
-            // A new gesture cannot continue the recovered drag's original undo target.
-            assert!(matches!(
-                fresh.request(drag(true)).unwrap(),
-                Event::DocumentChanged { .. }
-            ));
-            let resumed = fresh.request(Edit::Undo).unwrap();
-            assert!(
-                matches!(resumed, Event::DocumentChanged { .. }),
-                "{resumed:?}"
-            );
-            assert_eq!(
-                gui.export_history().unwrap().document,
-                accepted_cut.document
-            );
-            break;
-        }
+        assert_eq!(recovered.barrier_checkpoint, publication.barrier_checkpoint);
     }
-    let stale_client = host.client.with_manual_editor(identity.clone());
+    endpoint
+        .install(barrier.after.history.clone(), barrier.acknowledged.clone())
+        .unwrap();
     assert!(
-        stale_client
-            .request(HostCommand::ReadHistory)
+        permit.request(Edit::Undo).is_err(),
+        "C10_OLD_PERMIT_STAYS_FENCED_DURING_INSTALL"
+    );
+    let reply = successful(
+        &host.client,
+        HostCommand::ConfirmBarrier {
+            barrier: Box::new(barrier.clone()),
+            installed: HostSnapshot::capture(&gui).unwrap(),
+        },
+    );
+    let digest = reply.manual_lease.as_ref().unwrap().snapshot.to_string();
+    let fresh = endpoint
+        .finish(
+            reply.manual_lease.unwrap(),
+            reply.manual_inputs.unwrap(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        )
+        .unwrap();
+    source.finish_host_manual_recovery(&digest).unwrap();
+    assert!(
+        permit.request(drag(true)).is_err(),
+        "C10_TRANSFER_NEVER_REVIVES_STALE_PERMIT"
+    );
+    assert_eq!(
+        gui.snapshot_identity().unwrap(),
+        barrier.after.history.identity(),
+        "C10_RESTART_INSTALL_IS_EXACT"
+    );
+    let installed = Core::peer_for_test(barrier.after.history.clone()).unwrap();
+    let before = installed.export_history().unwrap();
+    assert_eq!(
+        before.history().document.as_ref(),
+        accepted
+            .history
+            .clone()
+            .validate(&kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default()
+            ))
             .unwrap()
-            .error
-            .is_none()
+            .document()
     );
     assert!(
-        stale_client
+        before.history().epoch > cut.change().position.epoch,
+        "C10_RECOVERY_STARTS_A_FRESH_EPOCH"
+    );
+    assert_eq!(
+        gui.boundary(before.history().undo.len())
+            .unwrap()
+            .lineage()
+            .occurrences[&kinewright_core::ClipId(1)],
+        original_occurrence,
+        "C10_OCCURRENCE_SURVIVES_RESTART_AND_INSTALL"
+    );
+    drop(before);
+    drop(installed);
+    fresh.request(drag(true)).unwrap();
+    fresh.request(Edit::Undo).unwrap();
+    assert_eq!(
+        gui.export_history().unwrap().history().document.as_ref(),
+        accepted
+            .history
+            .clone()
+            .validate(&kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default()
+            ))
+            .unwrap()
+            .document(),
+        "C10_NEW_GESTURE_UNDO_RESTORES_RECOVERED_DOCUMENT"
+    );
+    assert!(
+        host.client
+            .with_manual_editor(identity.clone())
             .request(HostCommand::CommitHistory {
                 client: identity,
                 messages: pending.clone()
@@ -269,300 +263,43 @@ pub(super) fn restart_case(committed: bool, floor: bool, lose_transition_reply: 
             .unwrap()
             .error
             .is_some(),
-        "the former editor stays a reader after lease transfer"
+        "C10_FORMER_EDITOR_CANNOT_WRITE"
+    );
+    println!(
+        "C10_RECOVERY_MS committed={committed} pressure={pressure} dropped={lose_transition_reply} elapsed={:.3}",
+        death.elapsed().as_secs_f64() * 1000.0
     );
     host.client = host.client.with_manual_editor(successor);
     host.orderly();
-    let owner = kinewright_project::bundle::LoadedBundle::read(&path)
-        .unwrap()
-        .into_writer()
-        .unwrap();
-    let checkpoint = owner.checkpoint(owner.manual_branch_id()).unwrap();
-    let retained = &original_batches[usize::from(floor)..];
+    let reopened = Ja1EditingSession::open(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     assert_eq!(
-        checkpoint.batch_ids[..retained.len()]
-            .iter()
-            .map(kinewright_project::bundle_records::BatchId::as_str)
-            .collect::<Vec<_>>(),
-        retained.iter().map(String::as_str).collect::<Vec<_>>()
+        reopened.core().snapshot_identity().unwrap(),
+        barrier.after.history.identity(),
+        "C10_RECOVERY_COLD_OPEN_RETAINS_EXACT_OWNER"
     );
-    assert_eq!(checkpoint.floor_generation, u64::from(floor));
-    assert_eq!(checkpoint.input_manifest_ref, original_inputs);
+    prefix_receipts.extend(barrier.acknowledged.iter().cloned());
+    let retired = prefix_receipts.len().saturating_sub(PENDING_COMMANDS);
+    prefix_receipts.drain(..retired);
     assert_eq!(
-        checkpoint.applied_operations_digest,
-        kinewright_media::sha256_bytes(
-            &serde_json::to_vec(&barrier.after.history.applied_operations()).unwrap()
-        )
-    );
-    let lineage = owner.branch_lineage(owner.manual_branch_id()).unwrap();
-    for map in std::iter::once(&lineage.baseline)
-        .chain(std::iter::once(&lineage.current))
-        .chain(&lineage.undo)
-        .chain(&lineage.redo)
-    {
-        assert_eq!(
-            map.get(&kinewright_core::ClipId(1)),
-            original_lineage.current.get(&kinewright_core::ClipId(1)),
-            "occurrence lineage survives floor, restart and gesture close"
-        );
-    }
-    let original = kinewright_project::manual_history::AcceptedManualCommand::decode(&pending[0])
-        .unwrap()
-        .envelope;
-    let receipt = owner.receipt_lookup(&original).unwrap();
-    let ReceiptLookup::Committed(receipt) = receipt else {
-        panic!("{receipt:?}")
-    };
-    assert_eq!(receipt.recovery_origin.is_some(), !committed);
-    for accepted in pending.iter().skip(1) {
-        let original = kinewright_project::manual_history::AcceptedManualCommand::decode(accepted)
+        reopened
+            .installed_manual_receipts(accepted.history.identity())
             .unwrap()
-            .envelope;
-        let ReceiptLookup::Committed(receipt) = owner.receipt_lookup(&original).unwrap() else {
-            panic!("missing original receipt")
-        };
-        assert_eq!(receipt.recovery_origin.is_some(), !committed);
-    }
+            .unwrap(),
+        prefix_receipts,
+        "C10_REOPEN_RETAINS_ORIGINAL_ACKNOWLEDGEMENTS"
+    );
 }
 
 #[cfg(all(target_os = "linux", feature = "eval-harness"))]
 pub(super) fn pressure_floor() {
-    use kinewright_core::{
-        Command as Edit, Event, HistoryTransition, Operation, Track, TrackId, TrackKind,
-    };
-    use kinewright_project::{
-        bundle::LoadedBundle,
-        bundle_commit::{bound_history_probe, history_cost_probe},
-        editing_session::Ja1EditingSession,
-        manual_history::AcceptedManualCommand,
-        receipts::ReceiptLookup,
-        storage_budget::StorageLimits,
-    };
-    let root = temp("c10-pressure");
-    let path = root.path("pressure.kinewright");
-    let gui = Core::spawn(Document {
-        tracks: vec![Track {
-            id: TrackId(1),
-            kind: TrackKind::Video,
-            sync_lock: true,
-            clips: vec![],
-        }],
-        ..Document::default()
-    })
-    .unwrap();
-    let mut source = Ja1EditingSession::new(root.root(), &gui, StorageLimits::default()).unwrap();
-    source.first_save(&path, StorageLimits::default()).unwrap();
-    source.prepare_host_attachment().unwrap();
-    let initial = source.freeze_host_cut().unwrap();
-    source.complete_host_cut(&initial, None, None).unwrap();
-    let mut host = HostCommandOwner::open(config(root.root(), Some(path.clone()))).unwrap();
-    let old_client = "c".repeat(64);
-    let grant = host.execute(
-        HostCommand::AcquireManual {
-            client: old_client.clone(),
-        },
-        roots(root.root()),
-    );
-    assert!(grant.error.is_none(), "{:?}", grant.error);
-    let permit = source
-        .bind_manual_producer(grant.manual_lease.unwrap(), grant.manual_inputs.unwrap())
-        .unwrap();
-    for index in 0..12 {
-        assert!(matches!(
-            permit
-                .request(Edit::Do(Operation::SetTrackSyncLock {
-                    track: TrackId(1),
-                    locked: index % 2 == 0
-                }))
-                .unwrap(),
-            Event::DocumentChanged { .. }
-        ));
-    }
-    let mut original_batches: Vec<String> = permit
-        .pending()
-        .unwrap()
-        .iter()
-        .map(|m| m.batch_id.clone())
-        .collect();
-    let reply = host.execute(
-        HostCommand::CommitHistory {
-            client: old_client,
-            messages: permit.pending().unwrap(),
-        },
-        roots(root.root()),
-    );
-    assert!(reply.error.is_none(), "{:?}", reply.error);
-    source
-        .acknowledge_manual(&permit, reply.manual_ack)
-        .unwrap();
-    let prefix = gui.export_history().unwrap();
-    for index in 0..8 {
-        assert!(matches!(
-            permit
-                .request(Edit::DoBatchCoalesced {
-                    operations: vec![Operation::SetTrackSyncLock {
-                        track: TrackId(1),
-                        locked: index % 2 == 0
-                    }],
-                    coalesce_key: "pressure-drag".into()
-                })
-                .unwrap(),
-            Event::DocumentChanged { .. }
-        ));
-    }
-    let pending = permit.pending().unwrap();
-    assert_eq!(pending.len(), 8);
-    original_batches.extend(pending.iter().map(|m| m.batch_id.clone()));
-    let accepted = gui.export_history().unwrap();
-    let raw_limits = StorageLimits::default();
-    let accepted_cost = history_cost_probe(&accepted, &raw_limits).unwrap();
-    let after_undo = |history: &kinewright_core::HistorySnapshot| {
-        let preview = Core::spawn(std::sync::Arc::clone(&history.baseline)).unwrap();
-        preview.restore_history(history.clone()).unwrap();
-        assert!(matches!(
-            preview.request(Edit::Undo).unwrap(),
-            Event::DocumentChanged { .. }
-        ));
-        preview.export_history().unwrap()
-    };
-    // Pressure must force a shared floor while admitting both the recovery
-    // close pair and the next Undo that proves the replacement lease is live.
-    let (limits, selected, expected_close) = (1..=prefix.batches.len())
-        .find_map(|discard| {
-            let candidate = HistoryTransition::floor(accepted.clone(), discard)
-                .unwrap()
-                .into_after();
-            let close = HistoryTransition::recovery_close(candidate.clone(), &candidate)
-                .unwrap()
-                .into_after();
-            let cost = history_cost_probe(&close, &raw_limits)
-                .unwrap()
-                .max(history_cost_probe(&after_undo(&close), &raw_limits).unwrap());
-            if cost >= accepted_cost {
-                return None;
-            }
-            let limits = StorageLimits {
-                branch_history_bytes: cost,
-                ..StorageLimits::default()
-            };
-            let selected = bound_history_probe(&accepted, &limits).unwrap();
-            let close = HistoryTransition::recovery_close(selected.clone(), &selected)
-                .unwrap()
-                .into_after();
-            (selected.floor_offset > accepted.floor_offset
-                && history_cost_probe(&close, &limits).unwrap() <= limits.branch_history_bytes
-                && kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(&limits)
-                    .unwrap()
-                    .check(&after_undo(&close))
-                    .is_ok())
-            .then_some((limits, selected, close))
-        })
-        .expect("pressure fixture must fit a floored suffix, recovery-close pair and next Undo");
-    assert!(history_cost_probe(&accepted, &limits).unwrap() > limits.branch_history_bytes);
-    assert!(selected.floor_offset > accepted.floor_offset);
-    assert!(history_cost_probe(&expected_close, &limits).unwrap() <= limits.branch_history_bytes);
-    let mut cut = source.freeze_host_cut().unwrap();
-    drop(host);
-    let mut host = HostCommandOwner::open(config(root.root(), Some(path.clone()))).unwrap();
-    host.restrict_manual_limits_probe(limits).unwrap();
-    let client = "d".repeat(64);
-    let reply = host.execute(
-        HostCommand::BeginRecovery {
-            client: client.clone(),
-            frozen: Some(HostSnapshot::from_history(accepted.clone()).unwrap()),
-            pending: pending.clone(),
-            discard_batches: None,
-        },
-        roots(root.root()),
-    );
-    assert!(reply.error.is_none(), "{:?}", reply.error);
-    let mut barrier = reply.recovery.unwrap();
-    assert!(
-        barrier.envelope.manual.is_some(),
-        "the batch root selects its shared floor before close"
-    );
-    assert_eq!(barrier.after.history, selected);
-    let mut expected_pending = pending.clone();
-    loop {
-        let published = host.execute(
-            HostCommand::PublishBarrier {
-                barrier: Box::new(barrier.clone()),
-            },
-            roots(root.root()),
-        );
-        assert!(published.error.is_none(), "{:?}", published.error);
-        assert!(published.manual_lease.is_none());
-        assert_eq!(
-            host.execute(HostCommand::ReadHistory, roots(root.root()))
-                .history
-                .as_ref(),
-            Some(&barrier.after.history)
-        );
-        cut = source
-            .install_manual_barrier(&cut, barrier.after.history.clone(), expected_pending)
-            .unwrap();
-        expected_pending = vec![];
-        let reply = host.execute(
-            HostCommand::ConfirmBarrier {
-                barrier: Box::new(barrier.clone()),
-                installed: HostSnapshot::capture(&gui).unwrap(),
-            },
-            roots(root.root()),
-        );
-        assert!(reply.error.is_none(), "{:?}", reply.error);
-        if let Some(next) = reply.recovery {
-            assert!(reply.manual_lease.is_none());
-            barrier = next;
-        } else {
-            source.resume_manual_barrier(&cut).unwrap();
-            let fresh = source
-                .bind_manual_producer(reply.manual_lease.unwrap(), reply.manual_inputs.unwrap())
-                .unwrap();
-            assert_eq!(gui.export_history().unwrap(), expected_close);
-            assert!(matches!(
-                permit.request(Edit::Undo).unwrap(),
-                Event::MutationRefused { .. }
-            ));
-            assert!(matches!(
-                fresh.request(Edit::Undo).unwrap(),
-                Event::DocumentChanged { .. }
-            ));
-            break;
-        }
-    }
-    drop(host);
-    let owner = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
-    let checkpoint = owner.checkpoint(owner.manual_branch_id()).unwrap();
-    let retained = usize::try_from(selected.floor_offset - accepted.floor_offset).unwrap();
-    assert_eq!(
-        checkpoint.batch_ids[..selected.batches.len()]
-            .iter()
-            .map(kinewright_project::bundle_records::BatchId::as_str)
-            .collect::<Vec<_>>(),
-        original_batches[retained..]
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        "batch IDs survive the automatic floor"
-    );
-    assert!(retained > 0);
-    for original in &pending {
-        let envelope = AcceptedManualCommand::decode(original).unwrap().envelope;
-        let ReceiptLookup::Committed(receipt) = owner.receipt_lookup(&envelope).unwrap() else {
-            panic!("missing original link")
-        };
-        assert!(receipt.recovery_origin.is_some());
-        let kinewright_project::receipts::ReceiptResult::Edit { batch_id, .. } = receipt.result
-        else {
-            panic!("edit receipt required")
-        };
-        assert_eq!(
-            batch_id
-                .as_ref()
-                .map(kinewright_project::bundle_records::BatchId::as_str),
-            Some(original.batch_id.as_str())
-        );
-    }
+    // Capacity now belongs to the executor and its bounded stream, never a caller-selected floor.
+    restart_case(false, true, false, 2);
 }
 
 pub(super) fn fast_suffix() {
@@ -610,9 +347,7 @@ fn protocol_refusal() {
 #[cfg(target_os = "linux")]
 pub(super) fn prefix_and_pause_cases(case_filter: Option<usize>) {
     use kinewright_core::{Command as Edit, Event, Operation, Track, TrackId, TrackKind};
-    use kinewright_project::{
-        bundle::LoadedBundle, editing_session::Ja1EditingSession, storage_budget::StorageLimits,
-    };
+    use kinewright_project::{editing_session::Ja1EditingSession, storage_budget::StorageLimits};
     for case in 0..4 {
         if case_filter.is_some_and(|selected| selected != case) {
             continue;
@@ -624,7 +359,7 @@ pub(super) fn prefix_and_pause_cases(case_filter: Option<usize>) {
         } else {
             root.path("prefix.kinewright")
         };
-        let gui = Core::spawn(Document {
+        let gui = Core::for_test(Document {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
@@ -637,10 +372,10 @@ pub(super) fn prefix_and_pause_cases(case_filter: Option<usize>) {
         let mut source =
             Ja1EditingSession::new(root.root(), &gui, StorageLimits::default()).unwrap();
         source.first_save(&path, StorageLimits::default()).unwrap();
-        source.prepare_host_attachment().unwrap();
+        let (configuration, _origin_callback) = handoff_config(&mut source, root.root());
         let initial = source.freeze_host_cut().unwrap();
         source.complete_host_cut(&initial, None, None).unwrap();
-        let mut host = ProcessHost::start(config(root.root(), Some(path.clone())));
+        let mut host = ProcessHost::start(configuration);
         let identity = "f".repeat(64);
         let granted = successful(
             &host.client,
@@ -652,6 +387,7 @@ pub(super) fn prefix_and_pause_cases(case_filter: Option<usize>) {
             .bind_manual_producer(
                 granted.manual_lease.unwrap(),
                 granted.manual_inputs.unwrap(),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             )
             .unwrap();
         let command = |locked| Edit::DoBatchCoalesced {
@@ -675,28 +411,12 @@ pub(super) fn prefix_and_pause_cases(case_filter: Option<usize>) {
         source
             .acknowledge_manual(&permit, reply.manual_ack)
             .unwrap();
-        let durable = gui.export_history().unwrap();
+        let durable = gui.portable_history().unwrap();
         permit.request(command(true)).unwrap();
         let pending = permit.pending().unwrap();
         let cut = source.freeze_host_cut().unwrap();
         host.child.kill().unwrap();
         host.child.wait().unwrap();
-        if case == 2 {
-            let mut owner = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
-            let restored = Core::spawn(Document::default()).unwrap();
-            owner
-                .attach_core(&restored)
-                .unwrap()
-                .restore_history(durable.clone())
-                .unwrap();
-            let inputs = owner
-                .checkpoint(owner.manual_branch_id())
-                .unwrap()
-                .input_manifest_ref
-                .clone();
-            owner.clear_current_receipt_details_probe();
-            owner.save(&restored, &inputs).unwrap();
-        }
         if case == 3 {
             let expected_root = std::fs::read(&path).unwrap();
             std::fs::rename(root.path("drive"), root.path("old-drive")).unwrap();
@@ -708,7 +428,13 @@ pub(super) fn prefix_and_pause_cases(case_filter: Option<usize>) {
             );
         }
         host = ProcessHost::start(config(root.root(), Some(path.clone())));
-        let mut frozen = HostSnapshot::from_history(cut.history().clone()).unwrap();
+        let mut frozen = HostSnapshot::capture(&gui).unwrap();
+        let mut transmitted = pending.clone();
+        if case == 2 {
+            let mut forged = serde_json::to_value(&transmitted[0]).unwrap();
+            forged["sequence"] = json!(99);
+            transmitted[0] = serde_json::from_value(forged).unwrap();
+        }
         if case == 1 {
             frozen.history_sha256 = "0".repeat(64);
         }
@@ -717,7 +443,11 @@ pub(super) fn prefix_and_pause_cases(case_filter: Option<usize>) {
             .request(HostCommand::BeginRecovery {
                 client: identity.clone(),
                 frozen: (case != 0).then_some(frozen),
-                pending: if case == 0 { vec![] } else { pending.clone() },
+                pending: if case == 0 {
+                    vec![]
+                } else {
+                    transmitted.clone()
+                },
                 discard_batches: None,
             })
             .unwrap();
@@ -726,17 +456,6 @@ pub(super) fn prefix_and_pause_cases(case_filter: Option<usize>) {
             assert_eq!(
                 barrier.before.history, durable,
                 "no GUI uses only the acknowledged prefix"
-            );
-            // Confirmation before publication cannot grant a lease, even for an identity close.
-            assert!(
-                host.client
-                    .request(HostCommand::ConfirmBarrier {
-                        barrier: Box::new(barrier.clone()),
-                        installed: barrier.after.clone()
-                    })
-                    .unwrap()
-                    .error
-                    .is_some()
             );
             let published = successful(
                 &host.client,
@@ -754,7 +473,10 @@ pub(super) fn prefix_and_pause_cases(case_filter: Option<usize>) {
             assert!(result.manual_lease.is_some());
             host.client = host.client.with_manual_editor(identity.clone());
         } else {
-            assert!(reply.error.is_some());
+            assert!(
+                reply.error.is_some(),
+                "C10_ORIGINAL_NAMESPACE_AND_CHAIN_MUST_VALIDATE case={case}"
+            );
             assert!(reply.status.frozen);
             assert!(
                 host.client
@@ -764,7 +486,7 @@ pub(super) fn prefix_and_pause_cases(case_filter: Option<usize>) {
                     .is_some()
             );
             assert_eq!(permit.pending().unwrap(), pending);
-            assert_eq!(gui.export_history().unwrap(), *cut.history());
+            assert_eq!(gui.snapshot_identity().unwrap(), cut.identity());
         }
         host.orderly();
     }
@@ -789,8 +511,13 @@ pub(super) fn empty_acknowledged_prefix() {
     use kinewright_project::bundle::{BundleWriteAdmission, ProjectBundle};
     let root = temp("c10-empty-prefix");
     let path = root.path("empty.kinewright");
-    let mut owner = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
+    let mut owner = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let inputs = owner.empty_inputs().unwrap().reference.clone();
     owner.save(&core, &inputs).unwrap();
     drop(owner);
@@ -806,16 +533,6 @@ pub(super) fn empty_acknowledged_prefix() {
         },
     );
     let barrier = reply.recovery.unwrap();
-    assert!(
-        host.client
-            .request(HostCommand::ConfirmBarrier {
-                barrier: Box::new(barrier.clone()),
-                installed: barrier.after.clone()
-            })
-            .unwrap()
-            .error
-            .is_some()
-    );
     successful(
         &host.client,
         HostCommand::PublishBarrier {
@@ -832,18 +549,19 @@ pub(super) fn empty_acknowledged_prefix() {
     assert!(granted.manual_lease.is_some());
     host.client = host.client.with_manual_editor(identity);
     host.orderly();
-    let owner = kinewright_project::bundle::LoadedBundle::read(&path)
-        .unwrap()
-        .into_writer()
-        .unwrap();
-    let reference = owner
-        .evidence_refs()
-        .iter()
-        .find(|r| r.record_kind == kinewright_project::bundle_records::RecordKind::RecoveryClose)
-        .unwrap();
-    let record = owner
-        .store()
-        .read_record::<kinewright_project::bundle_records::RecoveryCloseCheckpoint>(reference)
-        .unwrap();
-    assert!(record.reconciled_cut.is_none());
+    let owner = kinewright_project::bundle::LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
+    let checkpoint = owner.checkpoint(owner.manual_branch_id()).unwrap();
+    assert!(
+        checkpoint.install.as_ref().unwrap().stream.is_none(),
+        "C10_EMPTY_PREFIX_INSTALL_HAS_NO_INVENTED_RECEIPT"
+    );
+    assert_eq!(checkpoint.position.position, 0);
 }

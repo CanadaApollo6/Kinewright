@@ -1,7 +1,8 @@
 //! Immutable prospective checkpoint bounds; no project mutex on task ingress.
 #![allow(clippy::missing_errors_doc)]
 use crate::{
-    bundle::BundleError, bundle_records::SpecialistBaseRecord, storage_budget::StorageLimits,
+    bundle::BundleError, bundle_records::LegacySpecialistBaseRecord as SpecialistBaseRecord,
+    storage_budget::StorageLimits,
 };
 use kinewright_core::{HistorySnapshot, Operation};
 

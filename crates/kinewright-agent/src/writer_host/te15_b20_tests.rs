@@ -172,7 +172,7 @@ fn b20_sequence(role: Role, early: bool) {
         let clip = core
             .export_history()
             .unwrap()
-            .document
+            .history().document
             .tracks
             .iter()
             .flat_map(|t| &t.clips)

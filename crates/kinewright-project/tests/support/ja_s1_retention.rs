@@ -4,16 +4,17 @@
     reason = "each boundary probe lowers the one named limit"
 )]
 use kinewright_core::{
-    Command, Core, Document, Event, JournalCommand, Operation, Query, QueryResult,
-    TimelineRevision, Track, TrackId, TrackKind,
+    Command, Document, Event, JournalCommand, Operation, Query, QueryResult, TimelineRevision,
+    Track, TrackId, TrackKind,
 };
 use kinewright_media::test_support::TempDirectory;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{BundleError, BundleWriteAdmission, LoadedBundle, ProjectBundle},
     bundle_records::{ObjectRef, ProjectId, RecordKind, SpecialistBaseRecord},
     io_observer,
     namespace::ProjectNamespace,
-    receipts::{CommandEnvelope, CommandId, HistoryRequest, ReceiptLookup},
+    receipts::{CommandEnvelope, CommandId, ReceiptLookup},
     storage_budget::StorageLimits,
     store::{ProjectStore, RecoveryInventory, StoreManifest},
 };
@@ -37,8 +38,13 @@ fn setup(path: &Path) -> (Core, ProjectBundle, ObjectRef) {
         sync_lock: true,
         clips: vec![],
     });
-    let core = Core::spawn(document).unwrap();
-    let mut bundle = ProjectBundle::activate(path, BundleWriteAdmission::new_document()).unwrap();
+    let core = Core::for_test(document).unwrap();
+    let mut bundle = ProjectBundle::activate(
+        path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let sealed = bundle.empty_inputs().unwrap();
     let inputs = sealed.reference.clone();
     bundle.save(&core, &inputs).unwrap();
@@ -73,9 +79,14 @@ fn inventory(path: &Path) -> RecoveryInventory {
     .unwrap()
 }
 fn reopen(path: &Path) -> (Core, ProjectBundle, ObjectRef) {
-    let loaded = LoadedBundle::read(path).unwrap();
-    let core = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&core).unwrap();
+    let mut loaded = LoadedBundle::read(
+        path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let core = loaded.open_manual().unwrap();
     let inputs = loaded.root().unwrap().input_manifest_ref.clone();
     let bundle = loaded.into_writer().unwrap();
     (core, bundle, inputs)
@@ -98,6 +109,7 @@ fn request(
     CommandEnvelope {
         switch: None,
         manual: None,
+        context: None,
         version: 1,
         action: "edit".into(),
         id: CommandId {
@@ -276,9 +288,14 @@ fn inventory_retirement_crash_preserves_required_predecessors() {
             assert!(bundle.collection_error().is_some());
         }
         drop(bundle);
-        let loaded = LoadedBundle::read(&path).unwrap();
-        let restored = Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&restored).unwrap();
+        let mut loaded = LoadedBundle::read(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
+        let restored = loaded.open_manual().unwrap();
         if fs::read(&path).unwrap() == root {
             assert_eq!(restored.export_history().unwrap(), acknowledged);
             for r in predecessors {
@@ -406,21 +423,25 @@ fn old_floor_collection_keeps_independent_branch_version_and_receipt_pins() {
     let branch = bundle
         .fork_branch(
             &manual,
-            kinewright_project::history_record::HistoryRole::Ordinary,
+            kinewright_project::operation_history::Role::Ordinary,
         )
         .unwrap();
     let base = SpecialistBaseRecord {
-        history_role: kinewright_project::history_record::HistoryRole::Candidate,
+        history_role: kinewright_project::operation_history::Role::Candidate,
         target_branch: manual.clone(),
         base_head: baseline.head_id,
-        base_document_hash: baseline.document_hash,
-        original_baseline_ref: baseline.baseline_ref,
+        base_document_hash: kinewright_media::sha256_bytes(
+            &serde_json::to_vec(&core.export_history().unwrap().history().document).unwrap(),
+        ),
+        original_baseline_ref: baseline.document_ref,
         frozen_checkpoint_ref: old_checkpoint.clone(),
-        full_applied_delta: vec![],
     };
     let base_ref = bundle.retain_specialist_base(&base).unwrap();
-    let expected_branch = (*bundle.branch_history(&branch).unwrap()).clone();
-    let mut old_floors = vec![];
+    let expected_branch = bundle
+        .branch_history(&branch)
+        .unwrap()
+        .into_capture()
+        .unwrap();
     for i in 0..6 {
         let edit = request(
             &mut bundle,
@@ -429,50 +450,40 @@ fn old_floor_collection_keeps_independent_branch_version_and_receipt_pins() {
             JournalCommand::Do(lock(i % 2 == 0)),
         );
         committed(bundle.command(&edit, &core, &inputs, &[]).unwrap());
-        let mut floor = request(&mut bundle, &core, &inputs, JournalCommand::Undo);
-        let prior = bundle.checkpoint(&manual).unwrap().clone();
-        floor.action = "floor".into();
-        floor.command = None;
-        floor.transition = Some(HistoryRequest::Floor {
-            discard_batches: core.export_history().unwrap().batches.len(),
-            preceding_checkpoint_generation: prior.checkpoint_generation,
-            preceding_floor_generation: prior.floor_generation,
-            command_cut: prior.command_cut.unwrap(),
-        });
-        committed(bundle.command(&floor, &core, &inputs, &[]).unwrap());
-        old_floors.extend(
-            bundle
-                .evidence_refs()
-                .iter()
-                .filter(|r| r.record_kind == RecordKind::HistoryFloor)
-                .cloned(),
-        );
     }
     for _ in 0..4 {
         bundle.save(&core, &inputs).unwrap();
+        bundle.collect_after_ack().unwrap();
     }
-    assert_eq!(
-        bundle
+    assert!(
+        !bundle
             .evidence_refs()
             .iter()
-            .filter(|r| r.record_kind == RecordKind::HistoryFloor)
-            .count(),
-        1
-    );
-    assert!(
-        old_floors[..old_floors.len() - 1]
-            .iter()
-            .all(|r| !object_path(&path, r).exists()),
-        "all automatic floors were retained"
+            .any(|r| r.record_kind == RecordKind::HistoryFloor),
+        "PERSISTENCE_CREATES_NO_HISTORY_FLOOR_RECORDS"
     );
     assert!(object_path(&path, &base_ref).exists());
     assert!(object_path(&path, &old_checkpoint).exists());
     committed(bundle.receipt_lookup(&first).unwrap());
-    assert_eq!(*bundle.branch_history(&branch).unwrap(), expected_branch);
+    assert_eq!(
+        bundle
+            .branch_history(&branch)
+            .unwrap()
+            .into_capture()
+            .unwrap(),
+        expected_branch
+    );
     drop(bundle);
     let (_, bundle, _) = reopen(&path);
     committed(bundle.receipt_lookup(&first).unwrap());
-    assert_eq!(*bundle.branch_history(&branch).unwrap(), expected_branch);
+    assert_eq!(
+        bundle
+            .branch_history(&branch)
+            .unwrap()
+            .into_capture()
+            .unwrap(),
+        expected_branch
+    );
     assert!(object_path(&path, &base_ref).exists());
 }
 
@@ -506,9 +517,14 @@ fn metadata_commit_verifies_new_bytes_but_recovery_verifies_full_graph() {
     );
     let expected = core.export_history().unwrap();
     drop(bundle);
-    let loaded = LoadedBundle::read(&path).unwrap();
-    let restored = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&restored).unwrap();
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let restored = loaded.open_manual().unwrap();
     assert_eq!(restored.export_history().unwrap(), expected);
     let bundle = loaded.into_writer().unwrap();
     assert!(bundle.store().usage().unwrap().verified_bytes >= object.byte_length);
@@ -517,7 +533,15 @@ fn metadata_commit_verifies_new_bytes_but_recovery_verifies_full_graph() {
     tampered[3] ^= 1;
     fs::write(object_path(&path, &object), tampered).unwrap();
     assert!(
-        matches!(LoadedBundle::read(&path), Err(BundleError::Corrupt(_))),
+        matches!(
+            LoadedBundle::read(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            ),
+            Err(BundleError::Corrupt(_))
+        ),
         "recovery skipped full byte verification"
     );
 }
@@ -629,7 +653,7 @@ fn every_storage_cap_backpressures_without_data_loss() {
     assert!(s.reserve_copy(1).is_err());
     drop(hold);
     assert_eq!(s.usage().unwrap().reserved_copy_bytes, 0);
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = kinewright_core::Core::spawn(Document::default()).unwrap();
     let history = core.export_history().unwrap();
     let mut control = store(
         &temp,
@@ -649,17 +673,18 @@ fn every_storage_cap_backpressures_without_data_loss() {
         live.max(kinewright_project::bundle_commit::history_cost_probe(&history, &limits).unwrap());
     let mut s = store(&temp, "history.kinewright", limits);
     let pin = s.admit_history(&history).unwrap();
-    apply(
-        &core,
-        Command::Do(Operation::AddTrack {
+    assert!(matches!(
+        core.request(Command::Do(Operation::AddTrack {
             track: Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
                 sync_lock: true,
                 clips: vec![],
             },
-        }),
-    );
+        }))
+        .unwrap(),
+        Event::DocumentChanged { .. }
+    ));
     assert!(s.admit_history(&core.export_history().unwrap()).is_err());
     drop(pin);
     command_caps(&temp);
@@ -716,13 +741,14 @@ fn version_and_control_caps(temp: &TempDirectory) {
     let branch = bundle.manual_branch_id().clone();
     let checkpoint = bundle.checkpoint(&branch).unwrap().clone();
     let mut base = SpecialistBaseRecord {
-        history_role: kinewright_project::history_record::HistoryRole::Candidate,
+        history_role: kinewright_project::operation_history::Role::Candidate,
         target_branch: branch.clone(),
         base_head: checkpoint.head_id,
-        base_document_hash: checkpoint.document_hash,
-        original_baseline_ref: checkpoint.baseline_ref,
+        base_document_hash: kinewright_media::sha256_bytes(
+            &serde_json::to_vec(&core.export_history().unwrap().history().document).unwrap(),
+        ),
+        original_baseline_ref: checkpoint.document_ref,
         frozen_checkpoint_ref: bundle.checkpoint_reference(&branch).unwrap(),
-        full_applied_delta: vec![],
     };
     let mut limits = StorageLimits::default();
     limits.versions = 1;
@@ -730,7 +756,7 @@ fn version_and_control_caps(temp: &TempDirectory) {
     let reference = bundle.retain_specialist_base(&base).unwrap();
     let root = fs::read(&path).unwrap();
     let before = core.export_history().unwrap();
-    base.full_applied_delta.push(lock(false));
+    base.history_role = kinewright_project::operation_history::Role::Task;
     assert!(matches!(
         bundle.retain_specialist_base(&base),
         Err(BundleError::Capacity(_))

@@ -714,14 +714,12 @@ fn te13_finish_preserves_exact_task_and_person_redo_histories() {
             &saved.source.checkpoint,
         )
         .unwrap();
-    let persisted = host
+    let persisted = checkpoint.open(host
         .owner()
         .unwrap()
         .store()
-        .unwrap()
-        .resolve_history(&checkpoint.history_ref)
-        .unwrap();
-    assert_eq!(*persisted, expected, "TE13_EXACT_DURABLE_TASK_HISTORY");
+        .unwrap(), &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap().into_reader().unwrap().into_capture().unwrap();
+    assert_eq!(persisted, expected, "TE13_EXACT_DURABLE_TASK_HISTORY");
     assert_eq!(
         host.core().export_history().unwrap(),
         manual,
@@ -732,7 +730,7 @@ fn te13_finish_preserves_exact_task_and_person_redo_histories() {
         host.core()
             .export_history()
             .unwrap()
-            .document
+            .history().document
             .markers
             .iter()
             .any(|marker| marker.id == kinewright_core::MarkerId(51)),
@@ -1093,7 +1091,7 @@ fn te13_before_commit_merge_reopen_has_a_production_person_block() {
         locked
             .owner()
             .unwrap()
-            .manual_transition_receipt(history.merge_envelope.as_ref().unwrap())
+            .command_receipt(history.merge_envelope.as_ref().unwrap())
             .unwrap(),
         kinewright_project::receipts::ReceiptLookup::Absent,
         "TE13_RECOVERED_MERGE_NEVER_INVENTED"

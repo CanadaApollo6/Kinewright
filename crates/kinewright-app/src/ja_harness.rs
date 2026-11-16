@@ -48,8 +48,10 @@ fn observe(
     .map_err(|e| e.to_string())?;
     if let Some(reply_drop) = control.switch {
         if report.mode == Mode::Baseline {
-            let core = kinewright_core::Core::spawn(kinewright_core::Document::default())
-                .map_err(|e| e.to_string())?;
+            let core = kinewright_project::operation_actor::Core::for_test(
+                kinewright_core::Document::default(),
+            )
+            .map_err(|e| e.to_string())?;
             let query = matches!(
                 core.request(kinewright_core::Command::Query(
                     kinewright_core::Query::Snapshot
@@ -80,8 +82,10 @@ fn observe(
     if let Some(recovery) = control.manual_recovery {
         let floor = matches!(recovery, ManualRecoveryControl::Floor);
         if report.mode == Mode::Baseline {
-            let core = kinewright_core::Core::spawn(kinewright_core::Document::default())
-                .map_err(|e| e.to_string())?;
+            let core = kinewright_project::operation_actor::Core::for_test(
+                kinewright_core::Document::default(),
+            )
+            .map_err(|e| e.to_string())?;
             let query = matches!(
                 core.request(kinewright_core::Command::Query(
                     kinewright_core::Query::Snapshot

@@ -2,6 +2,7 @@
 #![allow(clippy::too_many_lines)]
 use kinewright_core::*;
 use kinewright_media::test_support::TempDirectory;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{BundleWriteAdmission, LoadedBundle, ProjectBundle},
     bundle_copy::SessionStore,
@@ -50,38 +51,26 @@ fn manifest(owner: &ProjectBundle, entries: Vec<OwnedInputEntry>) -> OwnedInputM
 }
 fn first_save_over_limit(batch_limit: bool) {
     let temp = temp("r3-first-cap");
-    let core = Core::spawn(document(if batch_limit { 1 } else { 2000 })).unwrap();
+    let core = Core::for_test_with_bounds(
+        document(if batch_limit { 1 } else { 2000 }),
+        kinewright_core::undo::RoleBounds {
+            step_cap: 8,
+            ..kinewright_core::undo::RoleBounds::ORDINARY
+        },
+    )
+    .unwrap();
     let count = if batch_limit {
         HISTORY_COMMANDS + 1
     } else {
         500
     };
     for i in 0..count {
-        apply(
-            &core,
-            if batch_limit {
-                Command::Undo
-            } else {
-                lock(i % 2 == 0)
-            },
-        );
+        apply(&core, lock(i % 2 == 0));
     }
     let original = core.export_history().unwrap();
-    if batch_limit {
-        assert!(original.batches.len() > HISTORY_COMMANDS);
-    } else {
-        assert!(
-            kinewright_project::bundle_commit::history_cost_probe(
-                &original,
-                &StorageLimits::default()
-            )
-            .unwrap()
-                > StorageLimits::default().branch_history_bytes
-        );
-    }
     assert!(
-        original.ordinary_admission_bytes().is_err(),
-        "witness must cross an actual default admission cap"
+        original.fold_frontier().is_some(),
+        "ONLY_THE_EXECUTOR_HAS_ALREADY_FOLDED_THE_PREFIX"
     );
     let mut session = SessionStore::create(temp.root(), StorageLimits::default()).unwrap();
     let inputs = session
@@ -106,6 +95,9 @@ fn first_save_over_limit(batch_limit: bool) {
     assert!(failed.is_err());
     assert_eq!(core.export_history().unwrap(), original);
     assert!(!path.exists());
+    let original_document = std::sync::Arc::clone(&original.history().document);
+    let original_position = original.history().position;
+    drop(original);
     let started = Instant::now();
     let bounds_before = io_observer::history_bound_profile();
     let copy = session
@@ -117,33 +109,44 @@ fn first_save_over_limit(batch_limit: bool) {
         .into_destination()
         .unwrap_or_else(|_| panic!("first-save handoff pending"));
     let saved = core.export_history().unwrap();
-    assert!(saved.floor_offset > 0);
-    assert_eq!(saved.document, original.document);
-    assert_eq!(
-        saved,
-        *owner.branch_history(owner.manual_branch_id()).unwrap()
+    assert!(saved.fold_frontier().map_or(0, |key| key.position + 1) > 0);
+    assert_eq!(saved.history().document, original_document);
+    super::round_two::assert_selected_epoch(
+        &saved,
+        &owner
+            .branch_history(owner.manual_branch_id())
+            .unwrap()
+            .into_capture()
+            .unwrap(),
     );
     eprintln!(
         "R3_FIRST_SAVE batch_limit={batch_limit} original_batches={} retained_batches={} floor={} elapsed_ms={:.3} bound_ms={:.3}",
-        original.batches.len(),
-        saved.batches.len(),
-        saved.floor_offset,
+        original_position,
+        saved.history().undo.len(),
+        saved.fold_frontier().map_or(0, |key| key.position + 1),
         elapsed.as_secs_f64() * 1000.0,
         std::time::Duration::from_nanos(bound_ns.try_into().unwrap()).as_secs_f64() * 1000.0
     );
     drop(owner);
-    let loaded = LoadedBundle::read(&path).unwrap();
-    let reopened = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&reopened).unwrap();
-    assert_eq!(reopened.export_history().unwrap(), saved);
-    for _ in 0..saved.cursor.undo.len() {
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let reopened = loaded.open_manual().unwrap();
+    super::round_two::assert_selected_epoch(&saved, &reopened.export_history().unwrap());
+    for _ in 0..saved.history().undo.len() {
         apply(&reopened, Command::Undo);
     }
     let floor = reopened.export_history().unwrap();
     apply(&reopened, Command::Undo);
     let stopped = reopened.export_history().unwrap();
-    assert_eq!(floor.document, stopped.document);
-    assert_eq!(floor.cursor, stopped.cursor);
+    assert_eq!(floor.history().document, stopped.history().document);
+    assert_eq!(floor.history().undo, stopped.history().undo);
+    assert_eq!(floor.history().redo, stopped.history().redo);
+    assert_eq!(stopped.history().position, floor.history().position + 1);
 }
 #[test]
 fn first_save_floors_history_above_default_live_limit() {
@@ -157,7 +160,7 @@ fn first_save_floors_history_above_default_batch_limit() {
 #[test]
 fn first_save_unknown_floor_handoff_reconciles_once() {
     let temp = temp("r3-first-unknown");
-    let core = Core::spawn(document(200)).unwrap();
+    let core = Core::for_test(document(200)).unwrap();
     for i in 0..40 {
         apply(&core, lock(i % 2 == 0));
     }
@@ -193,6 +196,7 @@ fn first_save_unknown_floor_handoff_reconciles_once() {
         "the uncertain root must actually have landed"
     );
     assert_eq!(core.export_history().unwrap(), before);
+    drop(before);
     let report = copy
         .reconcile()
         .expect("floor handoff must install exactly once")
@@ -204,18 +208,32 @@ fn first_save_unknown_floor_handoff_reconciles_once() {
         .into_destination()
         .unwrap_or_else(|_| panic!("handoff remained uncertain"));
     let saved = core.export_history().unwrap();
-    assert!(saved.floor_offset > 0);
-    assert_eq!(
-        saved,
-        *owner.branch_history(owner.manual_branch_id()).unwrap()
+    assert!(
+        saved.fold_frontier().is_none(),
+        "SAVE_DOES_NOT_CUT_A_SHORT_HISTORY"
     );
-    for _ in 0..saved.cursor.undo.len() {
+    super::round_two::assert_selected_epoch(
+        &saved,
+        &owner
+            .branch_history(owner.manual_branch_id())
+            .unwrap()
+            .into_capture()
+            .unwrap(),
+    );
+    let depth = saved.history().undo.len();
+    drop(saved);
+    for _ in 0..depth {
         apply(&core, Command::Undo);
     }
     let floor = core.export_history().unwrap();
     apply(&core, Command::Undo);
-    assert_eq!(core.export_history().unwrap().cursor, floor.cursor);
-    assert_eq!(core.export_history().unwrap().document, floor.document);
+    let stopped = core.export_history().unwrap();
+    assert_eq!(stopped.history().undo, floor.history().undo);
+    assert_eq!(stopped.history().redo, floor.history().redo);
+    assert_eq!(stopped.history().position, floor.history().position + 1);
+    assert_eq!(stopped.history().document, floor.history().document);
+    drop(floor);
+    drop(stopped);
     apply(&core, lock(false));
     let inputs = owner
         .checkpoint(owner.manual_branch_id())
@@ -224,9 +242,14 @@ fn first_save_unknown_floor_handoff_reconciles_once() {
         .clone();
     owner.save(&core, &inputs).unwrap();
     drop(owner);
-    let loaded = LoadedBundle::read(&path).unwrap();
-    let reopened = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&reopened).unwrap();
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let reopened = loaded.open_manual().unwrap();
     assert_eq!(
         reopened.export_history().unwrap(),
         core.export_history().unwrap()
@@ -237,8 +260,20 @@ fn first_save_unknown_floor_handoff_reconciles_once() {
 fn short_reused_lut_ids_floor_save_and_reopen_both_contents() {
     let temp = temp("r3-lut-collision");
     let path = temp.path("edit.kinewright");
-    let core = Core::spawn(document(1)).unwrap();
-    let mut owner = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let core = Core::for_test_with_bounds(
+        document(1),
+        kinewright_core::undo::RoleBounds {
+            step_cap: 2,
+            ..kinewright_core::undo::RoleBounds::ORDINARY
+        },
+    )
+    .unwrap();
+    let mut owner = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let mut entries = vec![];
     for bytes in [
         b"LUT A bytes".as_slice(),
@@ -297,12 +332,10 @@ fn short_reused_lut_ids_floor_save_and_reopen_both_contents() {
         }
     }
     // The baseline needs A and the suffix/current head needs B at the same local ID.
-    let transition = HistoryTransition::floor(core.export_history().unwrap(), 2).unwrap();
-    owner
-        .attach_core(&core)
-        .unwrap()
-        .install_history_transition(transition)
-        .unwrap();
+    assert!(
+        core.export_history().unwrap().fold_frontier().is_some(),
+        "EXECUTOR_FOLDED_THE_OLD_LUT_INTO_ITS_BASELINE"
+    );
     let b = owner
         .admit_inputs(&manifest(&owner, vec![entries[1].clone()]))
         .unwrap();
@@ -314,9 +347,14 @@ fn short_reused_lut_ids_floor_save_and_reopen_both_contents() {
     }
     drop(b);
     drop(owner);
-    let loaded = LoadedBundle::read(&path).unwrap();
-    let reopened = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&reopened).unwrap();
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let reopened = loaded.open_manual().unwrap();
     assert_eq!(
         reopened.export_history().unwrap(),
         core.export_history().unwrap()
@@ -340,15 +378,20 @@ fn short_reused_lut_ids_floor_save_and_reopen_both_contents() {
 fn reconcile_floor(landed: bool, branch_save: bool) {
     let temp = temp("r3-reconcile-floor");
     let path = temp.path("edit.kinewright");
-    let core = Core::spawn(document(200)).unwrap();
-    let mut owner = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let core = Core::for_test(document(200)).unwrap();
+    let mut owner = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let inputs = owner.empty_inputs().unwrap().reference.clone();
     owner.save(&core, &inputs).unwrap();
     let branch = if branch_save {
         owner
             .fork_branch(
                 &owner.manual_branch_id().clone(),
-                kinewright_project::history_record::HistoryRole::Ordinary,
+                kinewright_project::operation_history::Role::Ordinary,
             )
             .unwrap()
     } else {
@@ -363,7 +406,7 @@ fn reconcile_floor(landed: bool, branch_save: bool) {
     for i in 0..40 {
         apply(&core, lock(i % 2 == 0));
     }
-    let before = core.export_history().unwrap();
+    let before = core.snapshot_identity().unwrap();
     let old = fs::read(&path).unwrap();
     let failure = if landed {
         "root_parent_sync"
@@ -381,7 +424,7 @@ fn reconcile_floor(landed: bool, branch_save: bool) {
         result,
         Err(kinewright_project::bundle::BundleError::DurabilityUnknown)
     ));
-    assert_eq!(core.export_history().unwrap(), before);
+    assert_eq!(core.snapshot_identity().unwrap(), before);
     if landed {
         assert_ne!(fs::read(&path).unwrap(), old);
     } else {
@@ -389,23 +432,36 @@ fn reconcile_floor(landed: bool, branch_save: bool) {
     }
     owner.reconcile().unwrap();
     if landed {
-        let published = owner.branch_history(&branch).unwrap();
-        assert!(published.floor_offset > before.floor_offset);
+        let published = owner
+            .branch_history(&branch)
+            .unwrap()
+            .into_capture()
+            .unwrap();
+        assert_eq!(
+            published.identity().unwrap(),
+            before,
+            "RECONCILIATION_PRESERVES_THE_FULL_PUBLISHED_CUT"
+        );
         assert_eq!(
             core.export_history().unwrap(),
-            *published,
+            published,
             "reconcile acknowledged a floor without installing it"
         );
-        for _ in 0..published.cursor.undo.len() {
+        let depth = published.history().undo.len();
+        drop(published);
+        for _ in 0..depth {
             apply(&core, Command::Undo);
         }
         let floor = core.export_history().unwrap();
         apply(&core, Command::Undo);
-        assert_eq!(core.export_history().unwrap().cursor, floor.cursor);
-        assert_eq!(core.export_history().unwrap().document, floor.document);
+        let stopped = core.export_history().unwrap();
+        assert_eq!(stopped.history().undo, floor.history().undo);
+        assert_eq!(stopped.history().redo, floor.history().redo);
+        assert_eq!(stopped.history().position, floor.history().position + 1);
+        assert_eq!(stopped.history().document, floor.history().document);
     } else {
         assert_eq!(
-            core.export_history().unwrap(),
+            core.snapshot_identity().unwrap(),
             before,
             "a different confirmed root discarded unsaved edits"
         );
@@ -418,7 +474,11 @@ fn reconcile_floor(landed: bool, branch_save: bool) {
     }
     assert_eq!(
         core.export_history().unwrap(),
-        *owner.branch_history(&branch).unwrap()
+        owner
+            .branch_history(&branch)
+            .unwrap()
+            .into_capture()
+            .unwrap()
     );
 }
 #[test]
@@ -442,8 +502,13 @@ fn reconcile_older_root_preserves_specialist_unsaved_edits() {
 fn persistent_file_refusal_collects_other_garbage_and_reports_pending_bytes() {
     let temp = temp("r3-stuck-gc");
     let path = temp.path("edit.kinewright");
-    let core = Core::spawn(document(1)).unwrap();
-    let mut owner = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let core = Core::for_test(document(1)).unwrap();
+    let mut owner = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let inputs = owner.empty_inputs().unwrap().reference.clone();
     owner.save(&core, &inputs).unwrap();
     drop(owner);
@@ -462,7 +527,10 @@ fn persistent_file_refusal_collects_other_garbage_and_reports_pending_bytes() {
         "0".repeat(32)
     ));
     fs::write(&temporary, b"abandoned staging bytes").unwrap();
-    let mut owner = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
+    let mut owner = LoadedBundle::read(&path, core.history_pool())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let relative = Path::new("studio/objects").join(&stuck_hash);
     io_observer::fail_path("gc_before_unlink", &relative, || {
         let first = owner.save(&core, &inputs).unwrap();
@@ -530,7 +598,11 @@ fn persistent_file_refusal_collects_other_garbage_and_reports_pending_bytes() {
             );
             assert_eq!(
                 core.export_history().unwrap(),
-                *owner.branch_history(owner.manual_branch_id()).unwrap()
+                owner
+                    .branch_history(owner.manual_branch_id())
+                    .unwrap()
+                    .into_capture()
+                    .unwrap()
             );
         }
     });

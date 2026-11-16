@@ -40,6 +40,10 @@ pub enum RemovedObject {
     Track { track: TrackId },
 }
 impl RemovedObject {
+    #[allow(
+        dead_code,
+        reason = "legacy oracle retained until the final H2b deletion checkpoint"
+    )]
     fn created_by(&self, batch: &kinewright_core::HistoryBatch) -> bool {
         use kinewright_core::{JournalCommand, Operation};
         match self {
@@ -60,6 +64,10 @@ impl RemovedObject {
             }
         }
     }
+    #[allow(
+        dead_code,
+        reason = "legacy oracle retained until the final H2b deletion checkpoint"
+    )]
     fn present_in(&self, document: &kinewright_core::Document) -> bool {
         match self {
             Self::Clip { clip, .. } => document
@@ -107,12 +115,10 @@ pub struct CapturedHistory {
 }
 impl CapturedHistory {
     #[must_use]
-    pub fn from_cut(cut: &kinewright_core::AcceptedCut) -> Self {
+    pub fn from_cut(cut: &crate::operation_actor::AcceptedCut) -> Self {
         Self {
-            revision: cut.revision(),
-            position: u64::try_from(cut.history().batches.len())
-                .ok()
-                .and_then(|count| cut.history().floor_offset.checked_add(count)),
+            revision: cut.change().revision,
+            position: Some(cut.change().position.position),
         }
     }
 }
@@ -260,13 +266,11 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct LiveEditCut {
     pub task: TaskId,
     pub cut: KeptHistoryCut,
-    pub document: std::sync::Arc<kinewright_core::Document>,
+    pub answers: BTreeMap<ObjectRef, crate::operation_history::ApprovalAnswer>,
 }
 struct KeptTaskAudit {
     coverage: KeptEditCoverage,
-    document: Option<crate::storage_budget::StorageReservation<kinewright_core::Document>>,
     branch: Option<BranchId>,
-    history: Option<crate::storage_budget::StorageReservation<kinewright_core::HistorySnapshot>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -277,6 +281,10 @@ enum RemovalProof {
 }
 
 #[derive(PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "legacy oracle retained until the final H2b deletion checkpoint"
+)]
 enum BatchLocation {
     Undo(usize),
     Redo(usize),
@@ -284,6 +292,10 @@ enum BatchLocation {
 }
 
 /// Inspect borrowed, already verified stack metadata. No history replay or document copy.
+#[allow(
+    dead_code,
+    reason = "legacy oracle retained until the final H2b deletion checkpoint"
+)]
 fn retained_batch_proof(
     history: &kinewright_core::HistorySnapshot,
     record: &ApprovalRecord,
@@ -364,50 +376,35 @@ fn retained_batch_proof(
 
 impl KeptTaskAudit {
     fn removal_proof(
-        &mut self,
-        record: &ApprovalRecord,
-        revision: TimelineRevision,
+        &self,
+        reference: &ObjectRef,
         bundle: &crate::bundle::ProjectBundle,
     ) -> RemovalProof {
-        if !self.coverage.covers(&record.binding, revision) {
+        let Some(branch) = &self.branch else {
             return if self.coverage.incomplete {
                 RemovalProof::Uncertain
             } else {
-                // The authenticated complete coverage has no kept cut for this application.
                 RemovalProof::Missing
             };
-        }
-        let Some(document) = &self.document else {
-            return RemovalProof::Uncertain;
         };
-        if !record
-            .targets
-            .iter()
-            .any(|target| target.present_in(document))
-        {
-            return RemovalProof::Kept;
+        // Keep no reader in the audit summary. Each answer is a fixed-size
+        // ledger result; its cold reader and pool lease end before returning.
+        match bundle.branch_history(branch).and_then(|reader| {
+            Ok((
+                reader.history().policy(),
+                reader.approval_answer(reference)?,
+            ))
+        }) {
+            Ok((_, Some(crate::operation_history::ApprovalAnswer::Kept))) => RemovalProof::Kept,
+            Ok((_, Some(crate::operation_history::ApprovalAnswer::Missing))) => {
+                RemovalProof::Missing
+            }
+            // This is the task's authenticated saved source, not a person-selected
+            // sibling line. A task never folds and only reopens its own persisted
+            // state, so an approval absent from that ledger was not kept there.
+            Ok((kinewright_core::undo::RetentionPolicy::NeverFold, None)) => RemovalProof::Missing,
+            _ => RemovalProof::Uncertain,
         }
-        let Some(branch) = self.branch.as_ref() else {
-            return RemovalProof::Uncertain;
-        };
-        let history: &kinewright_core::HistorySnapshot =
-            if let Some(history) = bundle.cached_history(branch) {
-                history
-            } else {
-                // Paired task publications evict this cache. Decode the authenticated
-                // kept reference once per task, only when id presence needs proof.
-                if self.history.is_none() {
-                    self.history = bundle.branch_history(branch).ok();
-                }
-                let Some(history) = self.history.as_deref() else {
-                    return RemovalProof::Uncertain;
-                };
-                history
-            };
-        if history.document.as_ref() != &**document {
-            return RemovalProof::Uncertain;
-        }
-        retained_batch_proof(history, record)
     }
 }
 impl Ja1EditingSession {
@@ -429,7 +426,6 @@ impl Ja1EditingSession {
         let mut integrity = false;
         for task in &state.tasks {
             let mut coverage = KeptEditCoverage::default();
-            let mut document = None;
             let mut branch = None;
             let inspected = (|| -> Result<(), BundleError> {
                 for reference in task
@@ -453,13 +449,6 @@ impl Ja1EditingSession {
                             .is_ok_and(|source| source == history.source)
                         {
                             coverage = history.edit_coverage;
-                            if !coverage.cuts.is_empty() || coverage.incomplete {
-                                let bundle = self.active_bundle()?;
-                                document =
-                                    Some(bundle.store.read_record::<kinewright_core::Document>(
-                                        &bundle.checkpoint(&history.source.branch)?.document_ref,
-                                    )?);
-                            }
                             branch = Some(history.source.branch);
                         } else {
                             coverage.incomplete = true;
@@ -473,15 +462,7 @@ impl Ja1EditingSession {
                 coverage.incomplete = true;
                 integrity = true;
             }
-            kept.insert(
-                task.id.clone(),
-                KeptTaskAudit {
-                    coverage,
-                    document,
-                    branch,
-                    history: None,
-                },
-            );
+            kept.insert(task.id.clone(), KeptTaskAudit { coverage, branch });
         }
         let mut applications = BTreeMap::<_, Option<TimelineRevision>>::new();
         for reference in &state.edit_applications {
@@ -560,33 +541,21 @@ impl Ja1EditingSession {
                 .get_mut(&record.binding.task)
                 .ok_or_else(|| BundleError::Corrupt("edit audit task binding".into()))?;
             let proof = application
-                .map(|revision| {
-                    let mut proof = kept.removal_proof(&record, revision, self.active_bundle()?);
-                    for cut in live.iter().filter(|cut| {
-                        cut.task == record.binding.task
-                            && cut.cut.epoch == record.binding.history_epoch
-                            && cut.cut.revision >= revision
-                            && record
-                                .binding
-                                .history_position
-                                .checked_add(1)
-                                .is_some_and(|position| cut.cut.position >= position)
-                    }) {
-                        if !record
-                            .targets
-                            .iter()
-                            .any(|target| target.present_in(&cut.document))
-                        {
-                            proof = RemovalProof::Kept;
-                            break;
-                        }
-                        if !kept.coverage.cuts.iter().any(|saved| {
-                            saved.epoch == cut.cut.epoch
-                                && saved.position >= cut.cut.position
-                                && saved.revision >= cut.cut.revision
-                        }) {
-                            // A newer live snapshot can reuse ids; without its history do not claim Undo.
-                            proof = RemovalProof::Uncertain;
+                .map(|_revision| {
+                    let mut proof = kept.removal_proof(reference, self.active_bundle()?);
+                    for cut in live.iter().filter(|cut| cut.task == record.binding.task) {
+                        if let Some(answer) = cut.answers.get(reference) {
+                            proof = match answer {
+                                crate::operation_history::ApprovalAnswer::Kept => {
+                                    RemovalProof::Kept
+                                }
+                                crate::operation_history::ApprovalAnswer::Missing => {
+                                    RemovalProof::Missing
+                                }
+                                crate::operation_history::ApprovalAnswer::Uncertain => {
+                                    RemovalProof::Uncertain
+                                }
+                            };
                         }
                     }
                     Ok::<_, BundleError>(proof)
@@ -796,60 +765,59 @@ pub(crate) fn owner_differential_proof(
 #[cfg(test)]
 mod compact_position_tests {
     use super::CapturedHistory;
-    use kinewright_core::{
-        Command, Core, Document, HistorySnapshot, HistoryTransition, Operation, Track, TrackId,
-        TrackKind,
-    };
-
+    use crate::operation_actor::Core;
+    use kinewright_core::{Command, Document, Operation, Track, TrackId, TrackKind};
     #[test]
     fn c4b_compact_history_preserves_absolute_accepted_batch_position() {
-        for discard in [0, 2] {
-            let core = Core::spawn(Document::default()).unwrap();
-            for command in [
-                Command::Undo,
-                Command::Redo,
-                Command::Do(Operation::AddTrack {
-                    track: Track {
-                        id: TrackId(1),
-                        kind: TrackKind::Video,
-                        sync_lock: false,
-                        clips: vec![],
-                    },
-                }),
-                Command::DoBatch(vec![Operation::SetTrackSyncLock {
-                    track: TrackId(1),
-                    locked: true,
-                }]),
-                Command::Undo,
-                Command::Redo,
-            ] {
-                core.request(command).unwrap();
-            }
-            let history = core.export_history().unwrap();
-            let absolute = u64::try_from(history.batches.len()).unwrap();
-            assert_eq!(absolute, 6, "empty Undo/Redo remain accepted positions");
-            let floored = if discard == 0 {
-                history
-            } else {
-                HistoryTransition::floor_after(&history, discard).unwrap()
-            };
-            let attachment = crate::ProjectAttachment::new(&core).unwrap();
-            attachment.restore_history(floored).unwrap();
-            let accepted = attachment.capture().unwrap();
-            let captured = CapturedHistory::from_cut(&accepted);
-            assert_eq!(captured.position, Some(absolute));
-            let wire = serde_json::to_vec(accepted.history()).unwrap();
-            let decoded: HistorySnapshot = serde_json::from_slice(&wire).unwrap();
-            let restored = Core::spawn(Document::default()).unwrap();
-            let restored_owner = crate::ProjectAttachment::new(&restored).unwrap();
-            restored_owner.restore_history(decoded).unwrap();
-            let replayed = restored_owner.capture().unwrap();
-            assert_eq!(replayed.history(), accepted.history());
-            assert_eq!(
-                CapturedHistory::from_cut(&replayed).position,
-                captured.position
-            );
-            assert_eq!(replayed.history().floor_offset, discard as u64);
+        let core = Core::for_test(Document::default()).unwrap();
+        for command in [
+            Command::Undo,
+            Command::Redo,
+            Command::Do(Operation::AddTrack {
+                track: Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: false,
+                    clips: vec![],
+                },
+            }),
+            Command::DoBatch(vec![Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: true,
+            }]),
+            Command::Undo,
+            Command::Redo,
+        ] {
+            core.request(command).unwrap();
         }
+        let attachment = crate::ProjectAttachment::new(&core).unwrap();
+        let accepted = attachment.capture().unwrap();
+        let captured = CapturedHistory::from_cut(&accepted);
+        assert_eq!(
+            captured.position,
+            Some(6),
+            "EMPTY_UNDO_REDO_KEEP_ABSOLUTE_ACCEPTED_POSITION"
+        );
+        let wire = core.portable_history().unwrap();
+        let branch = wire.branch.clone();
+        let revision = wire.revision;
+        let pool = crate::operation_history::HistoryPool::new(
+            crate::operation_history::PoolLimits::default(),
+        );
+        let restored = Core::open(wire.validate(&pool).unwrap(), branch, revision).unwrap();
+        let replayed = crate::ProjectAttachment::new(&restored)
+            .unwrap()
+            .capture()
+            .unwrap();
+        assert_eq!(
+            CapturedHistory::from_cut(&replayed).position,
+            captured.position,
+            "PORTABLE_REOPEN_KEEPS_ACCEPTED_POSITION"
+        );
+        assert_eq!(
+            replayed.identity(),
+            accepted.identity(),
+            "PORTABLE_REOPEN_KEEPS_COMBINED_IDENTITY"
+        );
     }
 }

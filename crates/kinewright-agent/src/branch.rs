@@ -1,10 +1,11 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use kinewright_core::{
-    BatchError, Command, Core, CoreDisconnected, Document, Event, IncidentCode, IncidentEvidence,
+    BatchError, Command, CoreDisconnected, Document, Event, IncidentCode, IncidentEvidence,
     IncidentObservation, IncidentSubject, OpError, Operation, Query, QueryResult,
     RejectionIncident, TimelineRevision,
 };
+use kinewright_project::operation_actor::Core;
 use thiserror::Error;
 
 /// An isolated edit lineage owned by one agent thread.
@@ -23,7 +24,7 @@ pub struct BranchComparison {
     pub branch_revision: TimelineRevision,
     pub base_document: Arc<Document>,
     pub document: Arc<Document>,
-    pub operations: Arc<Vec<Operation>>,
+    pub operations: Arc<kinewright_project::operation_history::OwnerOperations>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +53,10 @@ pub enum BranchError {
     InvalidBase(#[from] OpError),
     #[error("branch returned an unexpected response")]
     UnexpectedResponse,
+    #[error(transparent)]
+    Actor(#[from] kinewright_project::operation_actor::Error),
+    #[error(transparent)]
+    Refused(#[from] kinewright_project::operation_actor::Refusal),
     #[error("cherry-pick operation index {index} is outside the one-based range 1..={maximum}")]
     InvalidOperationIndex { index: usize, maximum: usize },
     #[error("cherry-pick operation index {0} occurs more than once")]
@@ -81,6 +86,8 @@ impl BranchError {
             Self::InvalidBase(error) => error.incident_code(),
             Self::CoreDisconnected(_)
             | Self::UnexpectedResponse
+            | Self::Actor(_)
+            | Self::Refused(_)
             | Self::InvalidOperationIndex { .. }
             | Self::HistoryCapacity
             | Self::DuplicateOperationIndex(_) => {
@@ -115,6 +122,8 @@ impl BranchError {
             },
             Self::CoreDisconnected(_)
             | Self::UnexpectedResponse
+            | Self::Actor(_)
+            | Self::Refused(_)
             | Self::InvalidOperationIndex { .. }
             | Self::HistoryCapacity
             | Self::DuplicateOperationIndex(_) => IncidentEvidence::Branch {
@@ -134,7 +143,50 @@ impl BranchError {
     }
 }
 
+fn fresh_origin() -> Result<kinewright_project::operation_history::CreationOrigin, BranchError> {
+    Ok(kinewright_project::operation_history::CreationOrigin {
+        branch: kinewright_project::bundle_records::BranchId::fresh()
+            .map_err(|_| BranchError::UnexpectedResponse)?,
+        batch: kinewright_project::bundle_records::BatchId::fresh()
+            .map_err(|_| BranchError::UnexpectedResponse)?,
+    })
+}
 impl TimelineBranch {
+    /// Use a private actor as a comparison branch.
+    ///
+    /// # Errors
+    /// Returns the actor refusal if its baseline cannot be read.
+    pub fn from_preview(name: &str, core: Core) -> Result<Self, BranchError> {
+        let document = core.baseline_document()?;
+        Ok(Self {
+            name: name.into(),
+            base_revision: TimelineRevision::default(),
+            base_document: document,
+            core,
+        })
+    }
+    /// Fork the current live document as a delta branch.
+    ///
+    /// # Errors
+    /// Returns an actor, capacity or branch identity refusal.
+    pub fn fork(
+        name: impl Into<Arc<str>>,
+        live: &Core,
+        inherit_revision: bool,
+    ) -> Result<Self, BranchError> {
+        let (core, revision) = live.fork(
+            kinewright_project::operation_history::Role::Task,
+            fresh_origin()?,
+            inherit_revision,
+        )?;
+        let document = core.baseline_document()?;
+        Ok(Self {
+            name: name.into(),
+            base_revision: revision,
+            base_document: document,
+            core,
+        })
+    }
     pub(crate) fn from_registered(name: &str, base_document: Arc<Document>, core: Core) -> Self {
         Self {
             name: name.into(),
@@ -149,11 +201,18 @@ impl TimelineBranch {
     ///
     /// Returns an error if the base document is invalid.
     pub fn new(
+        pool: &kinewright_project::operation_history::HistoryPool,
         name: impl Into<Arc<str>>,
         base_revision: TimelineRevision,
         base_document: Arc<Document>,
     ) -> Result<Self, BranchError> {
-        let core = Core::spawn(Arc::clone(&base_document))?;
+        let core = Core::spawn(
+            pool,
+            kinewright_project::operation_history::Role::Task,
+            fresh_origin()?,
+            base_document,
+        )?;
+        let base_document = core.baseline_document()?;
         Ok(Self {
             name: name.into(),
             base_revision,
@@ -184,11 +243,19 @@ impl TimelineBranch {
     ///
     /// Returns an error if the base document is invalid.
     pub fn new_at(
+        pool: &kinewright_project::operation_history::HistoryPool,
         name: impl Into<Arc<str>>,
         base_revision: TimelineRevision,
         base_document: Arc<Document>,
     ) -> Result<Self, BranchError> {
-        let core = Core::spawn_at(Arc::clone(&base_document), base_revision)?;
+        let core = Core::spawn_at_revision(
+            pool,
+            kinewright_project::operation_history::Role::Task,
+            fresh_origin()?,
+            base_document,
+            base_revision,
+        )?;
+        let base_document = core.baseline_document()?;
         Ok(Self {
             name: name.into(),
             base_revision,
@@ -230,12 +297,7 @@ impl TimelineBranch {
         else {
             return Err(BranchError::UnexpectedResponse);
         };
-        let Event::QueryResult(QueryResult::AppliedOperations(operations)) = self
-            .core
-            .request(Command::Query(Query::AppliedOperations))?
-        else {
-            return Err(BranchError::UnexpectedResponse);
-        };
+        let operations = Arc::new(self.core.operations(false)?);
         Ok(BranchComparison {
             name: Arc::clone(&self.name),
             base_revision: self.base_revision,
@@ -256,7 +318,7 @@ impl TimelineBranch {
         if operations.is_empty() {
             return Ok(BranchApplyOutcome::NoChanges);
         }
-        apply_to_live(live, self.base_revision, (*operations).clone())
+        apply_to_live(live, self.base_revision, operations.operations().to_owned())
     }
 
     /// Apply selected branch operations to the live project as one transaction.
@@ -317,22 +379,19 @@ pub fn apply_to_live(
     expected: TimelineRevision,
     operations: Vec<Operation>,
 ) -> Result<BranchApplyOutcome, BranchError> {
-    kinewright_project::manual_history::OrdinaryHistoryLimits::default()
-        .check_batch(live, &operations)
-        .map_err(|error| match error {
-            kinewright_project::bundle::BundleError::Capacity(_) => BranchError::HistoryCapacity,
-            kinewright_project::bundle::BundleError::Io(error)
-                if error.kind() == std::io::ErrorKind::BrokenPipe =>
-            {
-                BranchError::CoreDisconnected(CoreDisconnected)
-            }
-            _ => BranchError::UnexpectedResponse,
-        })?;
     let operation_count = operations.len();
-    let outcome = match live.request(Command::DoBatchIfRevision {
-        expected,
-        operations,
-    })? {
+    let outcome = match live
+        .request(Command::DoBatchIfRevision {
+            expected,
+            operations,
+        })
+        .map_err(|refusal| {
+            if refusal.error.is_capacity() {
+                BranchError::HistoryCapacity
+            } else {
+                BranchError::Refused(refusal)
+            }
+        })? {
         Event::DocumentChanged { doc, revision, .. } => BranchApplyOutcome::Applied {
             revision,
             document: doc,
@@ -357,7 +416,7 @@ mod tests {
 
     #[test]
     fn history_capacity_legacy_merge_and_cherry_pick_refuse_before_live_mutation() {
-        let core = Core::spawn(Document {
+        let core = Core::for_test(Document {
             tracks: vec![kinewright_core::Track {
                 id: kinewright_core::TrackId(1),
                 kind: kinewright_core::TrackKind::Video,
@@ -383,17 +442,20 @@ mod tests {
             apply_to_live(
                 &core,
                 revision,
-                vec![Operation::SetTrackSyncLock {
-                    track: kinewright_core::TrackId(1),
-                    locked: true
-                }]
+                vec![
+                    Operation::SetTrackSyncLock {
+                        track: kinewright_core::TrackId(1),
+                        locked: true
+                    };
+                    65_536
+                ]
             ),
             Err(BranchError::HistoryCapacity)
         ));
         assert_eq!(
             core.export_history().unwrap(),
             before,
-            "COMMON_MERGE_AND_CHERRY_PICK_FUNNEL_PRESERVES_LIVE_HISTORY"
+            "OVERSIZED_MERGE_AND_CHERRY_PICK_PRESERVE_LIVE_HISTORY"
         );
     }
 
@@ -457,6 +519,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn comparison_views_share_the_actors_accounted_baseline() {
+        let pool = kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        );
+        let branch = TimelineBranch::new(
+            &pool,
+            "comparison",
+            TimelineRevision(0),
+            Arc::new(Document::default()),
+        )
+        .unwrap();
+        assert!(
+            Arc::ptr_eq(
+                &branch.base_document,
+                &branch.core.baseline_document().unwrap()
+            ),
+            "COMPARISON_VIEW_SHARES_THE_ACTORS_ACCOUNTED_BASELINE"
+        );
+        let fork = TimelineBranch::fork("fork", &branch.core, false).unwrap();
+        assert!(
+            Arc::ptr_eq(&fork.base_document, &fork.core.baseline_document().unwrap()),
+            "FORK_COMPARISON_HAS_NO_SECOND_BASELINE_ALLOCATION"
+        );
+        let preview = TimelineBranch::from_preview("preview", fork.core).unwrap();
+        assert!(
+            Arc::ptr_eq(
+                &preview.base_document,
+                &preview.core.baseline_document().unwrap()
+            ),
+            "PREVIEW_COMPARISON_HAS_NO_BOUNDARY_COPY"
+        );
+    }
+
     fn asset(id: u64) -> MediaAsset {
         MediaAsset {
             id: AssetId(id),
@@ -483,9 +579,17 @@ mod tests {
 
     #[test]
     fn merge_is_atomic_and_rejects_a_stale_base() {
-        let live = Core::spawn(Document::default()).unwrap();
+        let live = Core::for_test(Document::default()).unwrap();
         let (revision, document) = live_snapshot(&live);
-        let branch = TimelineBranch::new("Agent 1", revision, document).unwrap();
+        let branch = TimelineBranch::new(
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+            "Agent 1",
+            revision,
+            document,
+        )
+        .unwrap();
         branch
             .core()
             .request(Command::Do(Operation::AddAsset { asset: asset(1) }))
@@ -515,10 +619,26 @@ mod tests {
 
     #[test]
     fn sibling_branches_diverge_without_touching_live_state() {
-        let live = Core::spawn(Document::default()).unwrap();
+        let live = Core::for_test(Document::default()).unwrap();
         let (revision, document) = live_snapshot(&live);
-        let first = TimelineBranch::new("First", revision, Arc::clone(&document)).unwrap();
-        let second = TimelineBranch::new("Second", revision, document).unwrap();
+        let first = TimelineBranch::new(
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+            "First",
+            revision,
+            Arc::clone(&document),
+        )
+        .unwrap();
+        let second = TimelineBranch::new(
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+            "Second",
+            revision,
+            document,
+        )
+        .unwrap();
         first
             .core()
             .request(Command::Do(Operation::AddAsset { asset: asset(1) }))
@@ -541,9 +661,17 @@ mod tests {
 
     #[test]
     fn cherry_pick_preserves_branch_order_and_validates_indices_first() {
-        let live = Core::spawn(Document::default()).unwrap();
+        let live = Core::for_test(Document::default()).unwrap();
         let (revision, document) = live_snapshot(&live);
-        let branch = TimelineBranch::new("Agent 1", revision, document).unwrap();
+        let branch = TimelineBranch::new(
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+            "Agent 1",
+            revision,
+            document,
+        )
+        .unwrap();
         branch
             .core()
             .request(Command::DoBatch(vec![
@@ -583,10 +711,18 @@ mod tests {
     #[test]
     fn in2_a_branch_spawned_at_a_revision_reports_the_seed_and_leaves_new_alone() {
         const SEED: TimelineRevision = TimelineRevision(41);
-        let live = Core::spawn(Document::default()).unwrap();
+        let live = Core::for_test(Document::default()).unwrap();
         let (_, document) = live_snapshot(&live);
 
-        let seeded = TimelineBranch::new_at("investigator", SEED, Arc::clone(&document)).unwrap();
+        let seeded = TimelineBranch::new_at(
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+            "investigator",
+            SEED,
+            Arc::clone(&document),
+        )
+        .unwrap();
         assert_eq!(seeded.base_revision(), SEED);
         let before = seeded.compare().unwrap();
         assert_eq!(before.base_revision, SEED);
@@ -612,7 +748,15 @@ mod tests {
         assert_eq!(after.operations.len(), 1);
 
         // `TimelineBranch::new` is untouched, so no chat-panel assertion moves.
-        let plain = TimelineBranch::new("Agent 1", SEED, document).unwrap();
+        let plain = TimelineBranch::new(
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+            "Agent 1",
+            SEED,
+            document,
+        )
+        .unwrap();
         assert_eq!(plain.base_revision(), SEED);
         assert_eq!(
             plain.compare().unwrap().branch_revision,

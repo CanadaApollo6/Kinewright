@@ -241,7 +241,11 @@ impl HostCommandOwner {
         };
         owner.persist_durable_branch(&mut candidate)?;
         let base = owner.candidate_binding(candidate.branch_id())?;
-        let document = (*owner.durable_branch_history(&candidate)?.document).clone();
+        let document = (*owner
+            .durable_branch_history(&candidate)?
+            .history()
+            .document())
+        .clone();
         let inputs = owner
             .store()?
             .read_record::<BranchCheckpoint>(&base.checkpoint)?

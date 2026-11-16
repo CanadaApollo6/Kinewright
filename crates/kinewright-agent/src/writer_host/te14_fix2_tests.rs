@@ -692,9 +692,10 @@ fn te14_fix2_real_scale_measurements() {
         project.persist_durable_branch(&mut branch).unwrap();
         f.brief.scope.base = project.candidate_binding(branch.branch_id()).unwrap();
         f.brief.inputs = project.current_inputs_ref().clone();
-        let document = project.core().export_history().unwrap().document;
+        let document_capture = project.core().export_history().unwrap();
+        let document = &document_capture.history().document;
         f.brief.scope =
-            crate::orchestration::policy::director_scope(&document, f.brief.scope.base.clone())
+            crate::orchestration::policy::director_scope(document, f.brief.scope.base.clone())
                 .unwrap();
         project
             .store()

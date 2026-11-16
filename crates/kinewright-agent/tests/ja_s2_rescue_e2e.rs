@@ -74,9 +74,23 @@ fn rescue_reopen_recopy_retention_stress() {
         assert_eq!(owner.core().export_history().unwrap(), expected);
         std::fs::rename(hidden, drive).unwrap();
         agent.owner().reconcile_retained_destination(&path).unwrap();
-        assert!(Ja1EditingSession::open(&path).is_err());
+        assert!(
+            Ja1EditingSession::open(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            )
+            .is_err()
+        );
         drop(agent);
-        let mut reopened = Ja1EditingSession::open(&temp.path("c.kinewright")).unwrap();
+        let mut reopened = Ja1EditingSession::open(
+            &temp.path("c.kinewright"),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         assert_eq!(
             reopened.core().export_history().unwrap(),
             expected,
@@ -84,6 +98,12 @@ fn rescue_reopen_recopy_retention_stress() {
         );
         reopened.save_active().unwrap();
         drop(reopened);
-        LoadedBundle::read(&temp.path("b.kinewright")).unwrap();
+        LoadedBundle::read(
+            &temp.path("b.kinewright"),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
     }
 }

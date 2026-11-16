@@ -334,7 +334,7 @@ mod followups {
                 ));
             }
             let history = b.core.export_history().unwrap();
-            let kept_track = &history.document.tracks[0];
+            let kept_track = &history.history().document.tracks[0];
             if track {
                 assert_eq!(kept_track.id, kinewright_core::TrackId(81));
                 assert_eq!(kept_track.kind, kinewright_core::TrackKind::Audio);

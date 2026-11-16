@@ -1,14 +1,18 @@
-//! Person-visible acceptance uses the same history admission as Save and cold open.
+//! The executor and the accepted-message arena refuse before a person sees acceptance.
 #![cfg(all(feature = "test-util", target_os = "linux"))]
 use kinewright_core::*;
 use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+use kinewright_project::operation_actor::{Core, ManualPermit};
 use kinewright_project::{
-    bundle::{BundleWriteAdmission, LoadedBundle},
     editing_session::Ja1EditingSession,
+    operation_history::HistoryPool,
+    operation_protocol::{Lease, PENDING_COMMANDS},
     storage_budget::StorageLimits,
 };
-use std::collections::BTreeMap;
-
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, atomic::AtomicBool},
+};
 fn heavy_document(clips: i64) -> Document {
     let mut document = Document {
         tracks: vec![Track {
@@ -69,127 +73,198 @@ fn copies(clips: u64) -> Command {
             .collect(),
     )
 }
-fn revision(core: &Core) -> TimelineRevision {
-    let Event::QueryResult(QueryResult::Snapshot { revision, .. }) =
-        core.request(Command::Query(Query::Snapshot)).unwrap()
-    else {
-        panic!("snapshot query")
-    };
-    revision
+
+fn fixture(
+    clips: i64,
+) -> (
+    TempDirectory,
+    Ja1EditingSession,
+    Ja1EditingSession,
+    Lease,
+    ManualPermit,
+) {
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "manual-history-owner");
+    let core = Core::for_test(heavy_document(clips)).unwrap();
+    let mut writer = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
+    writer
+        .first_save(&temp.path("project.kinewright"), StorageLimits::default())
+        .unwrap();
+    let lease = writer
+        .issue_manual_lease("person".repeat(12), "local".repeat(12))
+        .unwrap();
+    let wire = core.portable_history().unwrap();
+    let branch = wire.branch.clone();
+    let revision = wire.revision;
+    let pool = HistoryPool::new(kinewright_project::operation_history::PoolLimits::default());
+    let gui = Core::open(wire.validate(&pool).unwrap(), branch, revision).unwrap();
+    let replica = Ja1EditingSession::new(temp.root(), &gui, StorageLimits::default()).unwrap();
+    let permit = replica
+        .bind_manual_producer(
+            lease.clone(),
+            writer.manual_input_context().unwrap(),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap();
+    (temp, writer, replica, lease, permit)
+}
+fn publish(
+    writer: &mut Ja1EditingSession,
+    replica: &Ja1EditingSession,
+    lease: &Lease,
+    permit: &ManualPermit,
+) {
+    let authority = writer.manual_authority(lease.clone()).unwrap();
+    let mut receipts = vec![];
+    for message in permit.pending().unwrap() {
+        let (receipt, report) = writer.commit_manual_history(&authority, &message).unwrap();
+        assert!(report.is_some(), "PERSON_ACK_FOLLOWS_ROOT_PUBLICATION");
+        receipts.push(receipt);
+    }
+    replica.acknowledge_manual(permit, receipts).unwrap();
+    assert!(
+        !writer.dirty().unwrap(),
+        "PUBLISHED_STREAM_ADVANCES_THE_WRITERS_SAVED_POSITION"
+    );
+    assert_eq!(
+        writer.core().snapshot_identity().unwrap(),
+        replica.core().snapshot_identity().unwrap(),
+        "DRAIN_EQUALS_THE_FULL_OWNER_IDENTITY"
+    );
 }
 #[test]
 fn manual_history_capacity_refuses_heavy_batch_before_ack_and_retries_smaller_edit_exactly() {
-    let temp = TempDirectory::new_in(&workspace_target_dir(), "manual-pre-edit-capacity");
-    let path = temp.path("source.kinewright");
-    let host = Core::spawn(heavy_document(20)).unwrap();
-    let mut owner =
-        Ja1EditingSession::activate(&path, BundleWriteAdmission::new_document(), &host, None)
-            .unwrap();
-    owner.save_active().unwrap();
-    let lease = owner
-        .issue_manual_lease("capacity-person".into(), "capacity-local".into())
-        .unwrap();
-    let gui = Core::spawn(Document::default()).unwrap();
-    gui.restore_history(host.export_history().unwrap()).unwrap();
-    let replica = Ja1EditingSession::new(temp.root(), &gui, StorageLimits::default()).unwrap();
-    let permit = replica
-        .bind_manual_producer(lease.clone(), owner.manual_input_context().unwrap())
-        .unwrap();
-    let before = gui.export_history().unwrap();
-    let encoded = serde_json::to_vec(&before).unwrap();
-    let before_revision = revision(&gui);
-    let before_change = gui.history_change_id().unwrap();
-    let root = std::fs::read(&path).unwrap();
-    let event = permit.request(copies(20)).unwrap();
-    assert!(
-        matches!(
-            event,
-            Event::MutationRefused {
-                reason: CoreMutationRefusal::ManualHistoryCapacity,
-                ..
-            }
-        ),
-        "MANUAL_REFUSAL_BEFORE_ACK"
-    );
-    assert_eq!(gui.export_history().unwrap(), before);
-    assert_eq!(
-        serde_json::to_vec(&gui.export_history().unwrap()).unwrap(),
-        encoded
-    );
-    assert_eq!(revision(&gui), before_revision);
-    assert_eq!(gui.history_change_id().unwrap(), before_change);
-    assert!(permit.pending().unwrap().is_empty());
-    assert_eq!(std::fs::read(&path).unwrap(), root);
-    let next = permit
+    let (temp, mut writer, replica, lease, permit) = fixture(20);
+    permit
         .request(Command::Do(Operation::SetTrackSyncLock {
             track: TrackId(1),
             locked: false,
         }))
         .unwrap();
-    assert!(matches!(next, Event::DocumentChanged { .. }));
-    let pending = permit.pending().unwrap();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].sequence, 1, "REFUSAL_DOES_NOT_ADVANCE_ENCODER");
-    owner.commit_manual_history(&lease, &pending[0]).unwrap();
-    let expected = gui.export_history().unwrap();
-    assert_eq!(host.export_history().unwrap(), expected);
-    drop(owner);
-    drop(replica);
-    drop(permit);
-    let loaded = LoadedBundle::read(&path).unwrap();
-    let reopened = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&reopened).unwrap();
-    assert_eq!(reopened.export_history().unwrap(), expected);
+    permit.request(Command::Undo).unwrap();
+    publish(&mut writer, &replica, &lease, &permit);
+    let before = replica.core().snapshot_identity().unwrap();
+    let change = replica.core().change_id().unwrap();
+    let root = std::fs::read(temp.path("project.kinewright")).unwrap();
+    let oversized = Operation::AddMarker {
+        marker: Marker {
+            id: MarkerId(999),
+            position: TimeCode(0),
+            label: "x".repeat(1 << 20),
+            color_token: 0,
+        },
+    };
+    let refusal = permit
+        .request(Command::DoBatch(vec![oversized]))
+        .unwrap_err();
+    assert_eq!(
+        refusal.error,
+        kinewright_project::operation_actor::Error::MutationRefused(
+            CoreMutationRefusal::ManualHistoryCapacity
+        ),
+        "MANUAL_REFUSAL_BEFORE_ACK"
+    );
+    assert_eq!(
+        refusal.error.to_string(),
+        CoreMutationRefusal::ManualHistoryCapacity.to_string(),
+        "MANUAL_CAPACITY_REFUSAL_HAS_ITS_TRUTHFUL_PERSON_MESSAGE"
+    );
+    assert_eq!(
+        replica.core().snapshot_identity().unwrap(),
+        before,
+        "REFUSED_STEP_PRESERVES_REDO_LINEAGE_LEDGER_AND_RESOURCES"
+    );
+    assert_eq!(replica.core().change_id().unwrap(), change);
+    assert!(permit.pending().unwrap().is_empty());
+    assert_eq!(
+        std::fs::read(temp.path("project.kinewright")).unwrap(),
+        root
+    );
+    permit.request(Command::Redo).unwrap();
+    assert_eq!(
+        permit.pending().unwrap()[0].decode().unwrap().sequence,
+        3,
+        "REFUSAL_DOES_NOT_ADVANCE_ENCODER"
+    );
+    publish(&mut writer, &replica, &lease, &permit);
+    let expected = replica.core().snapshot_identity().unwrap();
+    drop(writer);
+    let reopened = Ja1EditingSession::open(
+        &temp.path("project.kinewright"),
+        &HistoryPool::new(kinewright_project::operation_history::PoolLimits::default()),
+    )
+    .unwrap();
+    assert_eq!(
+        reopened.core().snapshot_identity().unwrap(),
+        expected,
+        "MANUAL_ACCEPTED_STATE_COLD_OPENS_EXACTLY"
+    );
 }
 #[test]
 fn manual_history_capacity_ten_clip_control_publishes_and_cold_reopens_full_undo() {
-    let temp = TempDirectory::new_in(&workspace_target_dir(), "manual-heavy-control");
-    let path = temp.path("source.kinewright");
-    let host = Core::spawn(heavy_document(10)).unwrap();
-    let mut owner =
-        Ja1EditingSession::activate(&path, BundleWriteAdmission::new_document(), &host, None)
-            .unwrap();
-    owner.save_active().unwrap();
-    let lease = owner
-        .issue_manual_lease("capacity-person".into(), "capacity-local".into())
-        .unwrap();
-    let gui = Core::spawn(Document::default()).unwrap();
-    gui.restore_history(host.export_history().unwrap()).unwrap();
-    let replica = Ja1EditingSession::new(temp.root(), &gui, StorageLimits::default()).unwrap();
-    let permit = replica
-        .bind_manual_producer(lease.clone(), owner.manual_input_context().unwrap())
-        .unwrap();
-    let event = permit.request(copies(10)).unwrap();
-    assert!(matches!(event, Event::DocumentChanged { .. }), "{event:?}");
-    let expected = gui.export_history().unwrap();
-    let pending = permit.pending().unwrap();
-    owner.commit_manual_history(&lease, &pending[0]).unwrap();
-    assert_eq!(host.export_history().unwrap(), expected);
-    drop(owner);
-    drop(replica);
-    drop(permit);
-    let loaded = LoadedBundle::read(&path).unwrap();
-    let reopened = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&reopened).unwrap();
-    assert_eq!(reopened.export_history().unwrap(), expected);
-    assert!(matches!(
-        reopened.request(Command::Undo).unwrap(),
-        Event::DocumentChanged { .. }
-    ));
+    let (temp, mut writer, replica, lease, permit) = fixture(10);
+    permit.request(copies(10)).unwrap();
+    publish(&mut writer, &replica, &lease, &permit);
+    let expected = replica.core().snapshot_identity().unwrap();
+    drop(writer);
+    let reopened = Ja1EditingSession::open(
+        &temp.path("project.kinewright"),
+        &HistoryPool::new(kinewright_project::operation_history::PoolLimits::default()),
+    )
+    .unwrap();
+    assert_eq!(reopened.core().snapshot_identity().unwrap(), expected);
+    reopened.core().request(Command::Undo).unwrap();
+    let undone = reopened.core().export_history().unwrap();
+    assert!(undone.history().undo.is_empty());
+    assert_eq!(undone.history().redo.len(), 1);
+    drop(undone);
+    reopened.core().request(Command::Redo).unwrap();
     assert_eq!(
-        reopened.export_history().unwrap().document,
-        expected.baseline
-    );
-    assert!(matches!(
-        reopened.request(Command::Redo).unwrap(),
-        Event::DocumentChanged { .. }
-    ));
-    assert_eq!(
-        reopened.export_history().unwrap().document,
-        expected.document
+        reopened
+            .core()
+            .export_history()
+            .unwrap()
+            .history()
+            .document
+            .tracks[0]
+            .clips[1]
+            .effects
+            .len(),
+        1
     );
 }
-
+#[test]
+fn manual_history_capacity_encoder_limit_rolls_back_the_staged_replay_proof() {
+    let (_temp, mut writer, replica, lease, permit) = fixture(10);
+    for index in 0..PENDING_COMMANDS {
+        permit
+            .request(Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: index % 2 == 0,
+            }))
+            .unwrap();
+    }
+    let before = replica.core().snapshot_identity().unwrap();
+    let change = replica.core().change_id().unwrap();
+    assert!(
+        permit
+            .request(Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: false
+            }))
+            .is_err(),
+        "FULL_ENCODER_REFUSES_BEFORE_ACCEPTANCE"
+    );
+    assert_eq!(replica.core().snapshot_identity().unwrap(), before);
+    assert_eq!(replica.core().change_id().unwrap(), change);
+    publish(&mut writer, &replica, &lease, &permit);
+    permit.request(Command::Undo).unwrap();
+    assert_eq!(
+        permit.pending().unwrap()[0].decode().unwrap().sequence,
+        65,
+        "DRAIN_REOPENS_THE_ORIGINAL_FIXED_ENCODER"
+    );
+    publish(&mut writer, &replica, &lease, &permit);
+}
 #[test]
 #[ignore = "on-demand: heavy-effect ordinary copy peak and largest accepted batch"]
 fn manual_history_heavy_copy_capacity_census() {
@@ -197,7 +272,8 @@ fn manual_history_heavy_copy_capacity_census() {
     for total in [10_u64, 20] {
         let mut largest = 0;
         for targets in 1..total {
-            let core = Core::spawn(heavy_document(i64::try_from(total).unwrap())).unwrap();
+            let core = kinewright_core::Core::spawn(heavy_document(i64::try_from(total).unwrap()))
+                .unwrap();
             assert!(matches!(
                 core.request(copies(targets + 1)).unwrap(),
                 Event::DocumentChanged { .. }
@@ -246,23 +322,19 @@ fn manual_history_capacity_unsaved_import_refuses_before_installing_document_or_
         kinewright_media::test_support::wav_f32(&vec![0.25; 4800], 48_000, 1),
     )
     .unwrap();
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     let limits = StorageLimits {
-        branch_history_bytes: 1,
+        owned_bytes: 1,
         ..StorageLimits::default()
     };
     let mut owner = Ja1EditingSession::new(temp.root(), &core, limits).unwrap();
-    let before = core.export_history().unwrap();
+    let before = core.snapshot_identity().unwrap();
     let inputs = owner.current_inputs_ref().clone();
-    let result = owner.import_owned_media(&source);
     assert!(
-        matches!(
-            result,
-            Err(kinewright_project::bundle::BundleError::Capacity(_))
-        ),
-        "import must run the ordinary history predicate"
+        owner.import_owned_media(&source).is_err(),
+        "OWNED_BYTE_REFUSAL_PRECEDES_DOCUMENT_ACCEPTANCE"
     );
-    assert_eq!(core.export_history().unwrap(), before);
+    assert_eq!(core.snapshot_identity().unwrap(), before);
     assert_eq!(
         owner.current_inputs_ref(),
         &inputs,
@@ -271,104 +343,28 @@ fn manual_history_capacity_unsaved_import_refuses_before_installing_document_or_
 }
 
 #[test]
-fn manual_history_capacity_gui_lease_keeps_the_writers_lower_effective_bound() {
-    let temp = TempDirectory::new_in(&workspace_target_dir(), "manual-lower-policy");
-    let host = Core::spawn(heavy_document(10)).unwrap();
-    let limits = StorageLimits {
-        branch_history_bytes: 10 << 20,
-        ..StorageLimits::default()
-    };
-    let mut owner = Ja1EditingSession::new(temp.root(), &host, limits.clone()).unwrap();
-    owner
-        .first_save(&temp.path("lower.kinewright"), limits.clone())
-        .unwrap();
-    let lease = owner
-        .issue_manual_lease("lower-person".into(), "lower-local".into())
-        .unwrap();
+fn manual_history_capacity_gui_lease_cannot_override_the_installed_counter_or_profile() {
+    let (temp, writer, replica, lease, _permit) = fixture(10);
+    let writer_profile = writer.core().export_history().unwrap().creation_sizing();
+    let gui_profile = replica.core().export_history().unwrap().creation_sizing();
     assert_eq!(
-        lease.history_limits,
-        kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(&limits).unwrap()
+        writer_profile, gui_profile,
+        "BOTH_PEERS_USE_THE_SAME_FIXED_CREATION_PROFILE"
     );
-    let gui = Core::spawn(Document::default()).unwrap();
-    gui.restore_history(host.export_history().unwrap()).unwrap();
-    let replica = Ja1EditingSession::new(temp.root(), &gui, StorageLimits::default()).unwrap();
-    let permit = replica
-        .bind_manual_producer(lease, owner.manual_input_context().unwrap())
-        .unwrap();
-    let before = gui.export_history().unwrap();
-    assert!(matches!(
-        permit.request(copies(10)).unwrap(),
-        Event::MutationRefused {
-            reason: CoreMutationRefusal::ManualHistoryCapacity,
-            ..
-        }
-    ));
-    assert_eq!(gui.export_history().unwrap(), before);
-    assert!(permit.pending().unwrap().is_empty());
-}
-
-#[test]
-fn manual_history_capacity_encoder_limit_rolls_back_the_staged_replay_proof() {
-    let temp = TempDirectory::new_in(&workspace_target_dir(), "manual-encoder-capacity");
-    let host = Core::spawn(heavy_document(2)).unwrap();
-    let limits = StorageLimits {
-        command_bytes: 16 << 10,
-        ..StorageLimits::default()
-    };
-    let mut owner = Ja1EditingSession::new(temp.root(), &host, limits.clone()).unwrap();
-    owner
-        .first_save(&temp.path("source.kinewright"), limits.clone())
-        .unwrap();
-    let lease = owner
-        .issue_manual_lease("encoder-person".into(), "encoder-local".into())
-        .unwrap();
-    let gui = Core::spawn(Document::default()).unwrap();
-    gui.restore_history(host.export_history().unwrap()).unwrap();
-    let replica = Ja1EditingSession::new(temp.root(), &gui, StorageLimits::default()).unwrap();
-    let permit = replica
-        .bind_manual_producer(lease.clone(), owner.manual_input_context().unwrap())
-        .unwrap();
-    let before = gui.export_history().unwrap();
-    let mut effect = before.document.tracks[0].clips[0].effects[0].clone();
-    effect.id = EffectId(2);
-    let operation = Operation::AddEffect {
-        clip: ClipId(2),
-        effect,
-    };
-    let shadow = Core::spawn(std::sync::Arc::clone(&before.baseline)).unwrap();
-    shadow.restore_history(before.clone()).unwrap();
-    assert!(matches!(
-        shadow.request(Command::Do(operation.clone())).unwrap(),
-        Event::DocumentChanged { .. }
-    ));
-    kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(&limits)
-        .unwrap()
-        .check(&shadow.export_history().unwrap())
-        .unwrap();
-    assert!(matches!(
-        permit.request(Command::Do(operation)).unwrap(),
-        Event::MutationRefused {
-            reason: CoreMutationRefusal::ManualHistoryCapacity,
-            ..
-        }
-    ));
-    assert_eq!(gui.export_history().unwrap(), before);
-    assert!(permit.pending().unwrap().is_empty());
-    assert!(matches!(
-        permit
-            .request(Command::Do(Operation::SetTrackSyncLock {
-                track: TrackId(1),
-                locked: false
-            }))
-            .unwrap(),
-        Event::DocumentChanged { .. }
-    ));
-    let pending = permit.pending().unwrap();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].sequence, 1);
-    owner.commit_manual_history(&lease, &pending[0]).unwrap();
-    assert_eq!(
-        host.export_history().unwrap(),
-        gui.export_history().unwrap()
+    let peer = Core::peer_for_test(writer.core().portable_history().unwrap()).unwrap();
+    let receiver = Ja1EditingSession::new(temp.root(), &peer, StorageLimits::default()).unwrap();
+    let before = peer.change_id().unwrap();
+    let mut forged = lease;
+    forged.next_key.position += 1;
+    assert!(
+        receiver
+            .bind_manual_producer(
+                forged,
+                writer.manual_input_context().unwrap(),
+                Arc::new(AtomicBool::new(true))
+            )
+            .is_err(),
+        "LEASE_CANNOT_OVERRIDE_THE_INSTALLED_COMMAND_COUNTER"
     );
+    assert_eq!(peer.change_id().unwrap(), before);
 }

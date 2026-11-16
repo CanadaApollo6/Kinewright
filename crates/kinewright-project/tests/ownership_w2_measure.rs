@@ -9,9 +9,10 @@
 
 use std::path::Path;
 
-use kinewright_core::{Command, Core, Document, Event, Operation, Track, TrackId, TrackKind};
+use kinewright_core::{Command, Document, Event, Operation, Track, TrackId, TrackKind};
 use kinewright_media::test_support::TempDirectory;
 use kinewright_project::bundle::{BundleWriteAdmission, ProjectBundle};
+use kinewright_project::operation_actor::Core;
 
 const BATCHES: u64 = 3_000;
 const SAVES: u64 = 40;
@@ -43,11 +44,16 @@ fn w2_long_session_save_cost() {
             .collect(),
         ..Document::default()
     };
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     for i in 0..BATCHES {
         edit(&core, i);
     }
-    let mut owner = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let mut owner = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let inputs = owner.empty_inputs().unwrap().reference.clone();
     owner.save(&core, &inputs).unwrap();
     for i in 0..3 {
@@ -61,7 +67,7 @@ fn w2_long_session_save_cost() {
         owner.save(&core, &inputs).unwrap();
         elapsed += started.elapsed();
     }
-    let batches = core.export_history().unwrap().batches.len();
+    let batches = core.export_history().unwrap().history().undo.len();
     println!(
         "W2_SAVE batches={batches} saves={SAVES} per_save_ms={:.2}",
         elapsed.as_secs_f64() * 1e3 / f64::from(u32::try_from(SAVES).unwrap()),

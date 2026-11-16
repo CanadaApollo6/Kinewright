@@ -247,7 +247,8 @@ fn te1_media_only_frame_request(core: &Core, frame: i64) -> serde_json::Value {
 }
 
 fn te1_media_only_video_object(f: &Fixture, core: &Core) -> std::path::PathBuf {
-    let document = core.export_history().unwrap().document;
+    let document_capture = core.export_history().unwrap();
+    let document = &document_capture.history().document;
     let clip = document
         .tracks
         .iter()
@@ -534,35 +535,13 @@ fn te1_media_nonmedia_document(
     document
 }
 
-fn te1_media_nonmedia_charge(value: &serde_json::Value) -> u64 {
-    64 + match value {
-        serde_json::Value::String(value) => value.len() as u64,
-        serde_json::Value::Array(values) => values.iter().map(te1_media_nonmedia_charge).sum(),
-        serde_json::Value::Object(values) => values
-            .iter()
-            .map(|(key, value)| 128 + key.len() as u64 + te1_media_nonmedia_charge(value))
-            .sum(),
-        _ => 0,
-    }
-}
-
 fn te1_media_nonmedia_estimates(f: &Fixture, run: &RunId, core: &Core) {
-    let template = core.export_history().unwrap().document;
+    let template_capture = core.export_history().unwrap();
+    let template = &template_capture.history().document;
     let history_cost = |document: &kinewright_core::Document| {
-        let value = serde_json::to_value(kinewright_core::HistorySnapshot {
-            replay_proof: None,
-            floor_offset: 0,
-            baseline: Arc::new(document.clone()),
-            document: Arc::new(document.clone()),
-            batches: vec![],
-            cursor: kinewright_core::HistoryCursor {
-                undo: vec![],
-                redo: vec![],
-            },
-        })
-        .unwrap();
-        let bytes = serde_json::to_vec(&value).unwrap();
-        2 * bytes.len() as u64 + te1_media_nonmedia_charge(&value)
+        let encoded = serde_json::to_vec(document).unwrap().len() as u64;
+        let live = kinewright_core::undo::document_capacity_bytes(document).unwrap();
+        encoded.max(live)
     };
     let owner = f.host.owner.upgrade().unwrap();
     let projection = f.projection(run);
@@ -570,12 +549,12 @@ fn te1_media_nonmedia_estimates(f: &Fixture, run: &RunId, core: &Core) {
     let mut task = projection.tasks[1].clone();
     for chain in [false, true] {
         let mut maximum = 1;
-        while history_cost(&te1_media_nonmedia_document(&template, maximum + 1, chain))
-            <= kinewright_project::run_admission::HISTORY_BYTES
+        while history_cost(&te1_media_nonmedia_document(template, maximum + 1, chain))
+            <= kinewright_core::undo::RoleBounds::ORDINARY.document_bytes
         {
             maximum += 1;
         }
-        let document = te1_media_nonmedia_document(&template, maximum, chain);
+        let document = te1_media_nonmedia_document(template, maximum, chain);
         task.brief.scope.objects = if chain {
             [format!("clip:{}", 99 + maximum)].into()
         } else {
@@ -621,24 +600,11 @@ fn te1_media_nonmedia_policy(
     let operation_bytes = serde_json::to_vec(&operations[0]).unwrap().len();
     let maximum_request_ops = u32::try_from(((4 << 20) - 1024) / (operation_bytes + 1)).unwrap();
     let estimated_validation_seconds = batch_seconds * f64::from(maximum_request_ops) / 128.0;
-    let private = Core::spawn(document.clone()).unwrap();
     let started = Instant::now();
-    private
-        .restore_history(kinewright_core::HistorySnapshot {
-            replay_proof: None,
-            floor_offset: 0,
-            baseline: Arc::new(document.clone()),
-            document: Arc::new(document.clone()),
-            batches: vec![],
-            cursor: kinewright_core::HistoryCursor {
-                undo: vec![],
-                redo: vec![],
-            },
-        })
-        .unwrap();
+    let _private = Core::for_test(document.clone()).unwrap();
     let restore_seconds = started.elapsed().as_secs_f64();
     println!(
-        "TE1_NONMEDIA_POLICY chain={chain} operations=128 validate_seconds={batch_seconds:.6} empty_journal_restore_seconds={restore_seconds:.6} operation_bytes={operation_bytes} maximum_request_ops={maximum_request_ops} estimated_validation_seconds={estimated_validation_seconds:.6}"
+        "TE1_NONMEDIA_POLICY chain={chain} operations=128 validate_seconds={batch_seconds:.6} owner_create_seconds={restore_seconds:.6} operation_bytes={operation_bytes} maximum_request_ops={maximum_request_ops} estimated_validation_seconds={estimated_validation_seconds:.6}"
     );
 }
 

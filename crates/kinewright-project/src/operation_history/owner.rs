@@ -286,6 +286,10 @@ impl OwnerBoundary {
         &self.document
     }
     #[must_use]
+    pub fn document_arc(&self) -> Arc<Document> {
+        Arc::clone(&self.document)
+    }
+    #[must_use]
     pub const fn lineage(&self) -> &Lineage {
         &self.lineage
     }
@@ -306,6 +310,10 @@ struct Plan {
     )>,
 }
 impl OwnerHistory {
+    pub(crate) fn promote_live(&mut self) -> Result<(), Error> {
+        self.reservation.promote_replacing(None)
+    }
+
     pub fn new<D: Into<Arc<Document>>>(
         pool: &HistoryPool,
         role: Role,
@@ -329,7 +337,7 @@ impl OwnerHistory {
         )
     }
     /// Measurement seam: limits may only be lowered, never raised past a role.
-    #[cfg(any(test, feature = "history-metrics"))]
+    #[cfg(any(test, feature = "test-util", feature = "history-metrics"))]
     pub fn measured<D: Into<Arc<Document>>>(
         pool: &HistoryPool,
         role: Role,
@@ -444,6 +452,7 @@ impl OwnerHistory {
             document,
             seeds,
             &workspace,
+            true,
         )
     }
     #[allow(
@@ -460,6 +469,7 @@ impl OwnerHistory {
         document: Arc<Document>,
         seeds: Lineage,
         workspace: &super::Workspace,
+        live: bool,
     ) -> Result<Self, Error> {
         let role = kind.role();
         let baseline_live = kinewright_core::undo::document_capacity_bytes(&document)?
@@ -473,7 +483,12 @@ impl OwnerHistory {
                 .max(source_sizing.map_or(0, |s| s.baseline_owners)),
             initial_batch,
         };
-        let reservation = pool.admit_sized(sizing)?.into_core()?;
+        let reservation = pool.admit_sized(sizing)?;
+        let reservation = if live {
+            reservation.into_core()?
+        } else {
+            reservation
+        };
         let limits = reservation.limits();
         if !workspace.covers(pool, limits.envelope.workspace) {
             return Err(Error::Reservation);
@@ -536,11 +551,17 @@ impl OwnerHistory {
     }
     /// A child is a fresh `NeverFold` delta on the parent's current state. Its
     /// original occurrence identities survive; parent history is not imported.
-    pub(crate) fn fork_current(&self, role: Role) -> Result<Self, Error> {
+    pub(crate) fn fork_current(&self, role: Role, live: bool) -> Result<Self, Error> {
+        let epoch = self
+            .core
+            .position()
+            .epoch
+            .checked_add(1)
+            .ok_or(kinewright_core::undo::Error::CounterExhausted)?;
         let kind = match role {
             Role::Task => super::CreationKind::Task,
             Role::Candidate => super::CreationKind::LiveCandidate,
-            Role::Ordinary => return Err(Error::InvalidPolicy),
+            Role::Ordinary => super::CreationKind::Ordinary,
         };
         let workspace = self.reservation.workspace()?;
         let mut seeds = self.seeds();
@@ -562,7 +583,7 @@ impl OwnerHistory {
         // Construction runs under the existing scratch window until the full
         // child lease is admitted. There is no extra parent capture or gap in
         // accounting, and no lease is grown or transferred.
-        Self::assemble(
+        let mut child = Self::assemble(
             &self.reservation.pool(),
             kind,
             role.policy(),
@@ -572,7 +593,13 @@ impl OwnerHistory {
             Arc::clone(self.core.document()),
             seeds,
             &workspace,
-        )
+            live,
+        )?;
+        // A fresh delta has no parent command facts, but its baseline was
+        // captured after the parent epoch. Resetting this to zero would make
+        // an inherited effect look certainly absent under the install ruling.
+        child.core.begin_install_epoch_at(epoch)?;
+        Ok(child)
     }
     /// Evaluation endpoints opt in before spawning their actor. Product
     /// constructors leave the complete activity recorder disabled.
@@ -1146,6 +1173,28 @@ pub(super) fn baseline_charge(
 pub struct OwnerOperations {
     pub(super) operations: Vec<Operation>,
     pub(super) _reservation: HistoryReservation,
+}
+impl OwnerOperations {
+    #[must_use]
+    pub fn operations(&self) -> &[Operation] {
+        &self.operations
+    }
+}
+impl std::fmt::Debug for OwnerOperations {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.operations.fmt(f)
+    }
+}
+impl PartialEq for OwnerOperations {
+    fn eq(&self, other: &Self) -> bool {
+        self.operations == other.operations
+    }
+}
+impl Eq for OwnerOperations {}
+impl serde::Serialize for OwnerOperations {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.operations.serialize(serializer)
+    }
 }
 impl std::ops::Deref for OwnerOperations {
     type Target = [Operation];

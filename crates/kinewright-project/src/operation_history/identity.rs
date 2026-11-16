@@ -19,6 +19,14 @@ impl SnapshotIdentity {
         hash.finalize()
     }
 }
+impl std::fmt::Display for SnapshotIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for byte in self.digest() {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
 impl SnapshotData {
     pub(super) fn identity(&self) -> Result<SnapshotIdentity, Error> {
         Ok(SnapshotIdentity {

@@ -6,10 +6,11 @@ use std::collections::BTreeMap;
 
 use eframe::egui;
 use kinewright_core::{
-    AssetId, AutomationCurve, Clip, ClipContent, ClipId, Command, Core, Document, Effect, EffectId,
+    AssetId, AutomationCurve, Clip, ClipContent, ClipId, Command, Document, Effect, EffectId,
     Event, Keyframe, KeyframeInterpolation, MediaAsset, MediaKind, Operation, ParamValue, Rational,
     TimeCode, Track, TrackId, TrackKind, apply_batch,
 };
+use kinewright_project::operation_actor::Core;
 
 use super::*;
 
@@ -395,7 +396,7 @@ fn rc2_one_slider_drag_on_a_keyed_param_is_one_undo_entry() {
         80,
     );
     let doc = document(vec![clip(1, 0, 0..30, vec![effect.clone()])]);
-    let core = Core::spawn(doc.clone()).unwrap();
+    let core = Core::for_test(doc.clone()).unwrap();
     let ctx = egui::Context::default();
     crate::theme::install(&ctx);
     // N5 K4: the slider shows the value at the playhead (linear 50→100 at
@@ -737,7 +738,7 @@ fn rc2_paste_with_keys_and_values_only_onto_a_shorter_clip() {
 #[test]
 fn rc2_plan_apply_is_one_undo_entry() {
     let doc = document(vec![clip(1, 0, 0..60, Vec::new())]);
-    let core = Core::spawn(doc.clone()).unwrap();
+    let core = Core::for_test(doc.clone()).unwrap();
     let plan = kinewright_agent::plan_motion(
         &doc,
         kinewright_core::TimelineRevision(0),

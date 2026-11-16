@@ -170,9 +170,7 @@ impl HostAttachment {
     pub(in crate::ja1_attachment) fn manual_stream_inflight_for_test(&self) -> bool {
         self.manual_inflight.is_some()
     }
-    pub(in crate::ja1_attachment) fn take_child_for_test(&mut self) -> std::process::Child {
-        self.child.take().expect("owned fixture host")
-    }
+
     pub(in crate::ja1_attachment) fn manual_identity_for_test(&self) -> String {
         self.manual_client.clone()
     }
@@ -272,8 +270,11 @@ impl crate::ja1_attachment::Ja1Attachment {
         let host = self.host.as_ref().expect("launched host");
         let snapshot = HostSnapshot::capture(self.owner.core()).unwrap();
         let asset_id = kinewright_core::AssetId(
-            snapshot
-                .history
+            self.owner
+                .core()
+                .export_history()
+                .unwrap()
+                .history()
                 .document
                 .media_pool
                 .iter()

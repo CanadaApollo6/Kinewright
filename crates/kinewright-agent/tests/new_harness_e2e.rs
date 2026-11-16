@@ -32,10 +32,11 @@ use kinewright_agent::{
     QwenDriver,
 };
 use kinewright_core::{
-    AgentDriver, AgentEvent, AssetId, Clip, ClipId, Command, Core, Document, Event, MediaAsset,
+    AgentDriver, AgentEvent, AssetId, Clip, ClipId, Command, Document, Event, MediaAsset,
     MediaKind, Query, QueryResult, Rational, SessionConfig, TimeCode, Track, TrackId, TrackKind,
 };
 use kinewright_media::FfmpegMediaEngine;
+use kinewright_project::operation_actor::Core;
 
 fn run_split_delete(driver: &dyn AgentDriver, label: &str, model: Option<String>) {
     if std::env::var("KINEWRIGHT_NEW_AGENT_TEST").as_deref() != Ok("1") {
@@ -49,7 +50,7 @@ fn run_split_delete(driver: &dyn AgentDriver, label: &str, model: Option<String>
 
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let original = fixture_document();
-    let core = Core::spawn(original.clone()).unwrap();
+    let core = Core::for_test(original.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let confirmations = server.confirmations();
     let mut session = match driver.start_session(SessionConfig {

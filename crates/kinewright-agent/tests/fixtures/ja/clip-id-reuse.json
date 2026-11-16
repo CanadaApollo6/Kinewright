@@ -58,7 +58,7 @@
       "args": {
         "id": "original-local-id",
         "observation": 1,
-        "pointer": "/trace/document/tracks/0/clips/0/id",
+        "pointer": "/trace/history/document/tracks/0/clips/0/id",
         "oracle": "one",
         "evidence_class": "control"
       }

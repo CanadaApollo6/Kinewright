@@ -158,7 +158,16 @@ impl HostCommandOwner {
             )
             .into());
         };
-        let mut document = (*snapshot.history.document).clone();
+        let kinewright_core::Event::QueryResult(kinewright_core::QueryResult::Document(current)) =
+            self.core()
+                .request(kinewright_core::Command::Query(
+                    kinewright_core::Query::Document,
+                ))
+                .map_err(|e| HostError::Protocol(e.to_string()))?
+        else {
+            return Err(HostError::Protocol("document query".into()));
+        };
+        let mut document = (*current).clone();
         operation
             .apply(&mut document)
             .map_err(|error| HostError::Protocol(error.to_string()))?;
@@ -196,7 +205,7 @@ impl HostCommandOwner {
         reply.manual_inputs = Some(prepared.manifest.clone());
         reply.manual_lease = Some(lease.clone());
         self.prepared_owned_media = Some(prepared);
-        self.manual = Some(lease);
+        self.manual = Some(self.owner()?.manual_authority(lease)?);
         Ok(())
     }
 }

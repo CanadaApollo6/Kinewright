@@ -236,7 +236,7 @@ impl Ja1EditingSession {
         let merge_receipt = history
             .merge_envelope
             .as_ref()
-            .map(|envelope| self.manual_transition_receipt(envelope))
+            .map(|envelope| self.active_bundle()?.receipt_lookup(envelope))
             .transpose()?;
         let merged = merge_receipt.as_ref().is_some_and(|receipt| {
             matches!(
@@ -270,14 +270,14 @@ impl Ja1EditingSession {
             .get(&source.branch)
             .is_some_and(|checkpoint| {
                 checkpoint.head_id == source.head
-                    && checkpoint.document_hash == source.document_hash
+                    && checkpoint.document_ref.sha256 == source.document_hash
             });
         let manual = bundle.checkpoint(bundle.manual_branch_id())?;
         let open_on_timeline = bundle.manual_branch_id() == &source.branch
             || bundle
                 .branches
                 .get(&source.branch)
-                .is_some_and(|checkpoint| checkpoint.history_digest == manual.history_digest);
+                .is_some_and(|checkpoint| checkpoint.identity == manual.identity);
         let reviewed_on = bundle.root.as_ref().and_then(|root| {
             root.retained_task_reviews
                 .iter()
@@ -419,7 +419,8 @@ mod tests {
             &kinewright_media::test_support::workspace_target_dir(),
             "te13-fix2-unsaved",
         );
-        let core = kinewright_core::Core::spawn(kinewright_core::Document::default()).unwrap();
+        let core =
+            crate::operation_actor::Core::for_test(kinewright_core::Document::default()).unwrap();
         let owner = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
         assert!(owner.active_bundle().is_err());
         let discovery = owner.retained_task_discovery();
@@ -439,7 +440,8 @@ mod tests {
             &kinewright_media::test_support::workspace_target_dir(),
             "te13-fix2-cache",
         );
-        let core = kinewright_core::Core::spawn(kinewright_core::Document::default()).unwrap();
+        let core =
+            crate::operation_actor::Core::for_test(kinewright_core::Document::default()).unwrap();
         let mut owner =
             Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
         owner
@@ -519,6 +521,7 @@ mod tests {
         let merge = CommandEnvelope {
             switch: None,
             manual: None,
+            context: None,
             version: 1,
             action: "edit".into(),
             id: CommandId {
@@ -612,7 +615,7 @@ mod tests {
         .unwrap();
         commit_orchestration(&mut owner, update, None).unwrap();
         assert_eq!(
-            owner.manual_transition_receipt(&merge).unwrap(),
+            owner.command_receipt(&merge).unwrap(),
             ReceiptLookup::Absent
         );
         let before = owner.retained_task_work().unwrap();
@@ -630,7 +633,7 @@ mod tests {
             .retired = true;
         assert_eq!(owner.root_sha256().unwrap(), root);
         assert_eq!(
-            owner.manual_transition_receipt(&merge).unwrap(),
+            owner.command_receipt(&merge).unwrap(),
             ReceiptLookup::RetiredUnresolved
         );
         let after = owner.retained_task_work().unwrap();
@@ -662,7 +665,8 @@ mod tests {
 #[test]
 fn te13_fix3_unsupported_session_refuses_without_io() {
     let temp = kinewright_media::test_support::TempDirectory::new("te13-unsupported");
-    let core = kinewright_core::Core::spawn(kinewright_core::Document::default()).unwrap();
+    let core =
+        crate::operation_actor::Core::for_test(kinewright_core::Document::default()).unwrap();
     let (result, trace) = crate::io_observer::observe(|| {
         Ja1EditingSession::new(
             temp.root(),

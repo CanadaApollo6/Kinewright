@@ -4,6 +4,7 @@
 )]
 use kinewright_core::*;
 use kinewright_media::test_support::TempDirectory;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{BundleError, BundleWriteAdmission, LoadedBundle, ProjectBundle},
     bundle_commit::{BundleCommit, CommitOutcome},
@@ -39,8 +40,13 @@ fn setup(path: &Path) -> (Core, ProjectBundle, ObjectRef) {
         sync_lock: true,
         clips: vec![],
     });
-    let core = Core::spawn(doc).unwrap();
-    let mut bundle = ProjectBundle::activate(path, BundleWriteAdmission::new_document()).unwrap();
+    let core = Core::for_test(doc).unwrap();
+    let mut bundle = ProjectBundle::activate(
+        path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let inputs = bundle.empty_inputs().unwrap();
     let input_ref = inputs.reference.clone();
     bundle.save(&core, &input_ref).unwrap();
@@ -159,7 +165,7 @@ fn tmpfs_refuses_named_and_session_storage_with_zero_mutations() {
 #[test]
 fn reused_lut_id_retains_both_content_identities_through_first_save_and_recovery() {
     let temp = temp("r1-lut-reuse");
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     let a = b"exact LUT A";
     let b = b"different LUT B";
     let lut = |bytes: &[u8]| LutAsset {
@@ -231,15 +237,30 @@ fn reused_lut_id_retains_both_content_identities_through_first_save_and_recovery
     let owner = copy
         .into_destination()
         .unwrap_or_else(|_| panic!("first save pending"));
+    assert_eq!(
+        core.export_history().unwrap().history().undo,
+        history.history().undo
+    );
+    assert_eq!(
+        core.export_history().unwrap().history().redo,
+        history.history().redo
+    );
+    let installed_identity = owner.checkpoint(owner.manual_branch_id()).unwrap().identity;
+    drop(history);
     drop(owner);
     drop(good);
     drop(bad);
     drop(seals);
     drop(session);
-    let loaded = LoadedBundle::read(&destination).unwrap();
-    let restored = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&restored).unwrap();
-    assert_eq!(restored.export_history().unwrap(), history);
+    let mut loaded = LoadedBundle::read(
+        &destination,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let restored = loaded.open_manual().unwrap();
+    assert_eq!(restored.snapshot_identity().unwrap(), installed_identity);
     let mut owner = loaded.into_writer().unwrap();
     let mut wrong_current = entries[0].clone();
     wrong_current.entry_id = "lut:1".into();
@@ -251,12 +272,28 @@ fn reused_lut_id_retains_both_content_identities_through_first_save_and_recovery
             entries: vec![wrong_current],
         })
         .unwrap();
+    owner
+        .save(&restored, &incomplete.reference)
+        .expect("EXACT_ORIGINAL_LUT_CONTEXT_STILL_OWNS_THE_CURRENT_PAYLOAD");
     let root_before = fs::read(&destination).unwrap();
+    let b_path = destination
+        .with_extension("kinewright-assets")
+        .join("studio/objects")
+        .join(kinewright_media::sha256_bytes(b));
+    let exact_b = fs::read(&b_path).unwrap();
+    fs::write(&b_path, b"corrupted current LUT B").unwrap();
     assert!(
-        owner.save(&restored, &incomplete.reference).is_err(),
-        "current LUT B borrowed its identity from a historical context instead of its active manifest"
+        LoadedBundle::read(
+            &destination,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default()
+            )
+        )
+        .is_err(),
+        "COLD_OPEN_VERIFIES_THE_EXACT_CURRENT_LUT_B_BYTES"
     );
     assert_eq!(fs::read(&destination).unwrap(), root_before);
+    fs::write(&b_path, exact_b).unwrap();
     for entry in entries {
         let bytes = fs::read(
             destination
@@ -327,11 +364,16 @@ fn post_ack_gc_failure_never_changes_committed_outcome_and_retries() {
             .any(|e| e.operation == "injected_failure")
     );
     assert_eq!(
-        LoadedBundle::read(&path)
-            .unwrap()
-            .root()
-            .unwrap()
-            .generation,
+        LoadedBundle::read(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default()
+            )
+        )
+        .unwrap()
+        .root()
+        .unwrap()
+        .generation,
         report.generation
     );
     bundle.collect_after_ack().unwrap();
@@ -351,8 +393,20 @@ fn realistic_history_saves_every_edit_and_advances_durable_floor() {
         });
     }
     assert!(serde_json::to_vec(&doc).unwrap().len() >= 50_000);
-    let core = Core::spawn(doc).unwrap();
-    let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let core = Core::for_test_with_bounds(
+        doc,
+        kinewright_core::undo::RoleBounds {
+            step_cap: 8,
+            ..kinewright_core::undo::RoleBounds::ORDINARY
+        },
+    )
+    .unwrap();
+    let mut bundle = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let inputs = bundle.empty_inputs().unwrap();
     let input_ref = inputs.reference.clone();
     bundle.save(&core, &input_ref).unwrap();
@@ -373,6 +427,7 @@ fn realistic_history_saves_every_edit_and_advances_durable_floor() {
         let envelope = kinewright_project::receipts::CommandEnvelope {
             switch: None,
             manual: None,
+            context: None,
             version: 1,
             action: "edit".into(),
             id: kinewright_project::receipts::CommandId {
@@ -406,25 +461,33 @@ fn realistic_history_saves_every_edit_and_advances_durable_floor() {
                 .unwrap()
                 .inspection_document()
                 .unwrap(),
-            &*core.export_history().unwrap().document
+            &*core.export_history().unwrap().history().document
         );
     }
     // Full recovery visits every exact receipt checkpoint once after all saves.
-    let loaded = LoadedBundle::read(&path).unwrap();
+    let loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     assert_eq!(
         loaded.admission().inspection_document().unwrap(),
-        &*core.export_history().unwrap().document
-    );
-    let checkpoint = bundle.checkpoint(bundle.manual_branch_id()).unwrap();
-    assert!(
-        checkpoint.floor_generation > 0,
-        "history grew without advancing its durable floor"
+        &*core.export_history().unwrap().history().document
     );
     let history = bundle.branch_history(bundle.manual_branch_id()).unwrap();
-    assert!(history.floor_offset > 0);
-    assert!(!history.cursor.undo.is_empty());
-    assert_eq!(history.document, core.export_history().unwrap().document);
+    assert_eq!(
+        history.history().undo().len(),
+        8,
+        "ONLY_THE_EXECUTOR_FOLDS_AT_ITS_STEP_CAP"
+    );
+    assert_eq!(
+        history.history().document().as_ref(),
+        core.export_history().unwrap().history().document.as_ref()
+    );
 }
+
 #[test]
 fn legacy_large_document_keeps_its_previous_open_size_contract() {
     let temp = temp("r1-legacy-large");
@@ -447,32 +510,23 @@ fn legacy_large_document_keeps_its_previous_open_size_contract() {
 #[test]
 fn baseline_change_is_not_a_continuation_of_a_zero_batch_checkpoint() {
     let temp = temp("r1-baseline-continuation");
-    let (core, mut bundle, inputs) = setup(&temp.path("edit.kinewright"));
-    let mut history = core.export_history().unwrap();
-    let mut doc = (*history.baseline).clone();
-    doc.resolution = (1280, 720);
-    history.baseline = std::sync::Arc::new(doc);
-    history.document = history.baseline.clone();
-    bundle
-        .attach_core(&core)
-        .unwrap()
-        .restore_history(history.clone())
-        .unwrap();
+    let (core, bundle, _) = setup(&temp.path("edit.kinewright"));
+    let before = core.snapshot_identity().unwrap();
+    let mut encoded = serde_json::to_value(core.portable_history().unwrap()).unwrap();
+    let mut body: serde_json::Value =
+        serde_json::from_str(encoded["snapshot"]["body"].as_str().unwrap()).unwrap();
+    body["history"]["baseline"]["resolution"] = serde_json::json!([1280, 720]);
+    body["history"]["document"]["resolution"] = serde_json::json!([1280, 720]);
+    encoded["snapshot"]["body"] = serde_json::json!(serde_json::to_string(&body).unwrap());
+    let forged: kinewright_project::operation_actor::PortableHistory =
+        serde_json::from_value(encoded).unwrap();
     assert!(
-        bundle.save(&core, &inputs).is_err(),
-        "different baseline accepted as a continuation"
+        forged.validate(bundle.history_pool()).is_err(),
+        "CHANGED_BASELINE_CANNOT_USE_THE_OLD_COMBINED_IDENTITY"
     );
-    history.floor_offset = 1;
-    bundle
-        .attach_core(&core)
-        .unwrap()
-        .restore_history(history)
-        .unwrap();
-    assert!(
-        bundle.save(&core, &inputs).is_err(),
-        "unproved floor offset bypassed baseline continuity"
-    );
+    assert_eq!(core.snapshot_identity().unwrap(), before);
 }
+
 #[test]
 fn save_as_new_destination_syncs_each_child_and_parent_before_root() {
     let temp = temp("r1-destination-ancestors");
@@ -509,17 +563,31 @@ fn save_as_new_destination_syncs_each_child_and_parent_before_root() {
         components >= 5,
         "destination ancestor creation was not exercised"
     );
-    let loaded = LoadedBundle::read(&destination).unwrap();
+    let loaded = LoadedBundle::read(
+        &destination,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     assert_eq!(
         loaded.admission().inspection_document().unwrap(),
-        &*core.export_history().unwrap().document
+        &*core.export_history().unwrap().history().document
     );
     drop(loaded);
     let retry = temp.path("retry/parents/copy.kinewright");
     assert!(io_observer::fail_once("destination_parent_sync", || source.save_as(&retry)).is_err());
     assert!(!retry.exists());
     source.save_as(&retry).unwrap();
-    assert!(LoadedBundle::read(&retry).is_ok());
+    assert!(
+        LoadedBundle::read(
+            &retry,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default()
+            )
+        )
+        .is_ok()
+    );
 }
 #[test]
 fn migration_retries_b3_lost_b5_and_corrupt_backup_without_duplicate_identity() {
@@ -531,10 +599,11 @@ fn migration_retries_b3_lost_b5_and_corrupt_backup_without_duplicate_identity() 
             .into_bytes();
         fs::write(&path, &bytes).unwrap();
         let admission = BundleWriteAdmission::read(&path).unwrap();
-        let mut bundle = ProjectBundle::activate(&path, admission.clone()).unwrap();
+        let core = Core::for_test(admission.legacy_document().unwrap()).unwrap();
+        let mut bundle =
+            ProjectBundle::activate(&path, admission.clone(), core.history_pool()).unwrap();
         let id = bundle.project_id().clone();
         let branch = bundle.manual_branch_id().clone();
-        let core = Core::spawn(admission.legacy_document().unwrap()).unwrap();
         let inputs = bundle.empty_inputs().unwrap();
         assert!(io_observer::fail_once(failure, || bundle.save(&core, &inputs.reference)).is_err());
         if failure == "root_before_publish" {
@@ -546,8 +615,12 @@ fn migration_retries_b3_lost_b5_and_corrupt_backup_without_duplicate_identity() 
         }
         drop(inputs);
         drop(bundle);
-        let mut retry =
-            ProjectBundle::activate(&path, BundleWriteAdmission::read(&path).unwrap()).unwrap();
+        let mut retry = ProjectBundle::activate(
+            &path,
+            BundleWriteAdmission::read(&path).unwrap(),
+            core.history_pool(),
+        )
+        .unwrap();
         assert_eq!(retry.project_id(), &id);
         assert_eq!(retry.manual_branch_id(), &branch);
         let inputs = retry.empty_inputs().unwrap();
@@ -572,8 +645,19 @@ fn migration_retries_b3_lost_b5_and_corrupt_backup_without_duplicate_identity() 
             .unwrap(),
             bytes
         );
-        assert!(LoadedBundle::read(&path).is_ok());
+        assert!(
+            LoadedBundle::read(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            )
+            .is_ok()
+        );
     }
+    let pool = kinewright_project::operation_history::HistoryPool::new(
+        kinewright_project::operation_history::PoolLimits::default(),
+    );
     {
         let temp = temp("r1-migration-backup-failure");
         let path = temp.path("legacy.kinewright");
@@ -584,7 +668,8 @@ fn migration_retries_b3_lost_b5_and_corrupt_backup_without_duplicate_identity() 
         assert!(
             io_observer::fail_once("object_file_sync", || ProjectBundle::activate(
                 &path,
-                BundleWriteAdmission::read(&path).unwrap()
+                BundleWriteAdmission::read(&path).unwrap(),
+                &pool
             ))
             .is_err()
         );
@@ -593,7 +678,10 @@ fn migration_retries_b3_lost_b5_and_corrupt_backup_without_duplicate_identity() 
             bytes,
             "failed backup changed the only original"
         );
-        assert!(ProjectBundle::activate(&path, BundleWriteAdmission::read(&path).unwrap()).is_ok());
+        assert!(
+            ProjectBundle::activate(&path, BundleWriteAdmission::read(&path).unwrap(), &pool)
+                .is_ok()
+        );
     }
     let temp = temp("r1-migration-damage");
     let path = temp.path("legacy.kinewright");
@@ -602,14 +690,16 @@ fn migration_retries_b3_lost_b5_and_corrupt_backup_without_duplicate_identity() 
         .into_bytes();
     fs::write(&path, &bytes).unwrap();
     let bundle =
-        ProjectBundle::activate(&path, BundleWriteAdmission::read(&path).unwrap()).unwrap();
+        ProjectBundle::activate(&path, BundleWriteAdmission::read(&path).unwrap(), &pool).unwrap();
     drop(bundle);
     let backup = path
         .with_extension("kinewright-assets")
         .join("studio/objects")
         .join(kinewright_media::sha256_bytes(&bytes));
     fs::write(&backup, b"corrupt backup").unwrap();
-    assert!(ProjectBundle::activate(&path, BundleWriteAdmission::read(&path).unwrap()).is_err());
+    assert!(
+        ProjectBundle::activate(&path, BundleWriteAdmission::read(&path).unwrap(), &pool).is_err()
+    );
     assert_eq!(fs::read(&path).unwrap(), bytes);
     assert_eq!(fs::read(&backup).unwrap(), b"corrupt backup");
 }
@@ -625,7 +715,15 @@ fn verified_reopen_retires_unreachable_generated_orphans_and_their_charges() {
         .join("studio/objects")
         .join(kinewright_media::sha256_bytes(bytes));
     fs::write(&orphan, bytes).unwrap();
-    let mut reopened = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
+    let mut reopened = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
     let before = reopened.store().usage().unwrap();
     assert_eq!(before.unclassified_bytes, bytes.len() as u64);
     reopened.collect_after_ack().unwrap();
@@ -655,7 +753,15 @@ fn verified_reopen_retires_over_quota_orphan_before_admission() {
     file.set_len(StorageLimits::default().owned_bytes + 1)
         .unwrap();
     drop(file);
-    let mut writer = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
+    let mut writer = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
     assert!(
         !orphan.exists(),
         "orphan quota prevented verified recovery cleanup"

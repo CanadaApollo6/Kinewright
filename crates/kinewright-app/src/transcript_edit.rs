@@ -430,9 +430,10 @@ mod tests {
     use std::path::PathBuf;
 
     use kinewright_core::{
-        AssetId, ClipContent, Command, Core, Event, LinkId, Marker, MarkerId, MediaAsset,
-        MediaKind, Rational, Track, TrackKind, apply_batch,
+        AssetId, ClipContent, Command, Event, LinkId, Marker, MarkerId, MediaAsset, MediaKind,
+        Rational, Track, TrackKind, apply_batch,
     };
+    use kinewright_project::operation_actor::Core;
 
     use super::*;
 
@@ -621,7 +622,7 @@ mod tests {
     fn batch_applies_cleanly_and_one_undo_restores_the_exact_snapshot() {
         let original = fixture();
         let operations = transcript_word_cut_operations(&original, &[cut(1, 30, 60)]).unwrap();
-        let core = Core::spawn(original.clone()).unwrap();
+        let core = Core::for_test(original.clone()).unwrap();
         assert!(matches!(
             core.request(Command::DoBatch(operations)).unwrap(),
             Event::DocumentChanged { .. }
@@ -706,7 +707,7 @@ mod tests {
         apply_batch(&mut applied, &operations).unwrap();
         assert_ne!(applied, original);
 
-        let core = Core::spawn(original.clone()).unwrap();
+        let core = Core::for_test(original.clone()).unwrap();
         assert!(matches!(
             core.request(Command::DoBatch(operations)).unwrap(),
             Event::DocumentChanged { .. }

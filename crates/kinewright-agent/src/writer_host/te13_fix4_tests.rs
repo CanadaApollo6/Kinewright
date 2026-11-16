@@ -511,7 +511,7 @@ fn te13_fix4_stop_between_real_switch_prepare_and_confirm() {
             ))
             .unwrap();
         project.persist_durable_branch(&mut branch).unwrap();
-        let expected = branch.core().export_history().unwrap();
+        let expected = serde_json::to_value(branch.core().export_history().unwrap()).unwrap();
         let branch_id = branch.branch_id().clone();
         project.close_durable_branch(&branch).unwrap();
         let mut reply = HostReply::default();
@@ -560,11 +560,7 @@ fn te13_fix4_stop_between_real_switch_prepare_and_confirm() {
         "TE13_FIX4_SWITCH_CONFIRMED_AFTER_STOP"
     );
     assert!(!owner.switch_frozen);
-    assert_eq!(
-        owner.core().export_history().unwrap(),
-        expected,
-        "TE13_FIX4_SWITCH_EXACT_HISTORY"
-    );
+    assert_recovered_task_owner(owner.core(), expected, "TE13_FIX4_SWITCH_EXACT_HISTORY");
     let mut repeated = HostReply::default();
     owner
         .confirm_switch(client, &installed, &mut repeated)

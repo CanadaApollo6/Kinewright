@@ -17,9 +17,9 @@ use kinewright_core::{
     AgentDriver, AgentEvent, Analysis, AssetId, AssetSilences, AssetTranscript, AudioBusId,
     AudioLoudness, AudioQcReport, AudioQcRequest, AudioRepairReport, AudioRepairRequest,
     CaptionMotion, Clip, ClipContent, ClipId, ColorQcCheck, ColorQcReport, ColorQcRequest, Command,
-    Core, DeliveryAudioVerification, DeliveryConformanceReport, DeliveryEncodeDepth,
-    DeliveryProfile, DeliveryVerification, DeliveryVerificationRequest, Document, EffectId, Event,
-    Export, ExportCancellation, ExportSettings, HarnessInfo, MatteCoverageStatistics, MediaKind,
+    DeliveryAudioVerification, DeliveryConformanceReport, DeliveryEncodeDepth, DeliveryProfile,
+    DeliveryVerification, DeliveryVerificationRequest, Document, EffectId, Event, Export,
+    ExportCancellation, ExportSettings, HarnessInfo, MatteCoverageStatistics, MediaKind,
     MixLevelReport, MixLevelRequest, MixSpectrumPoint, MixWindowLevelReport, MixWindowRequest,
     NormalizedRoi, Operation, ParamValue, Playback, Query, QueryResult, RgbaImage, SessionConfig,
     SkinDiagnostics, TimeCode, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
@@ -27,6 +27,7 @@ use kinewright_core::{
     delivery_conformance, document_for_delivery_profile, map_source_range_to_project,
     matte_coverage_statistics, measure_color_qc, qa_document,
 };
+use kinewright_project::operation_actor::Core;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -1044,7 +1045,7 @@ impl PreparedFixture {
             .validate()
             .map_err(|error| EvalError::Fixture(error.to_string()))?;
         media.set_document(Arc::new(original_document.clone()));
-        let core = Core::spawn(original_document.clone())
+        let core = Core::for_test(original_document.clone())
             .map_err(|error| EvalError::Fixture(error.to_string()))?;
         let playback: Arc<dyn Playback> = media.clone();
         let analysis: Arc<dyn Analysis> = media.clone();

@@ -76,6 +76,7 @@ impl Adapter {
             let request = CommandEnvelope {
                 switch: None,
                 manual: None,
+                context: None,
                 version: 1,
                 action: "edit".into(),
                 id: CommandId {
@@ -151,6 +152,7 @@ impl Adapter {
             let request = CommandEnvelope {
                 switch: None,
                 manual: None,
+                context: None,
                 version: 1,
                 action: "comment".into(),
                 id: CommandId {

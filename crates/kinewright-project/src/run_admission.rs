@@ -686,24 +686,14 @@ impl crate::bundle::ProjectBundle {
                 .read_record::<crate::bundle_records::BranchCheckpoint>(
                     &director.brief.scope.base.checkpoint,
                 )?;
-            // Every native branch starts at this cut with an empty journal. The
-            // person's retained Undo stream is neither copied nor clamped here.
-            let document = self
-                .store
-                .read_record::<kinewright_core::Document>(&checkpoint.document_ref)?;
-            let seed = kinewright_core::Core::spawn(std::sync::Arc::new((*document).clone()))
-                .map_err(|error| BundleError::Corrupt(error.to_string()))?;
-            let history = seed
-                .export_history()
-                .map_err(crate::bundle::history_error)?;
-            if crate::task_history_admission::check_history(&history, self.store.limits()).is_err()
-                || crate::history_size::payload(&history.document)?
-                    > crate::task_history_admission::DOCUMENT_BYTES
-            {
-                return Err(BundleError::RunAdmission(
-                    "Task history is too large to start this run safely. Save your work, then reduce the document size before trying again.",
-                ));
-            }
+            // Reuse the exact creation-sizing function before the run can spend.
+            // The real actor is still created at its existing launch boundary.
+            let reader = checkpoint
+                .open(&self.store, self.history_pool())?
+                .into_reader()?;
+            let seed = reader.fork(crate::operation_history::Role::Task)?;
+            drop(reader);
+            drop(seed);
             if arm {
                 self.store.set_run_budget(true);
             }

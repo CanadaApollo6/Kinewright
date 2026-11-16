@@ -657,7 +657,13 @@ fn s3_read_only_production_fixture_and_store_identity_ledger() {
     use kinewright_project::{bundle::LoadedBundle, c0_fixtures::build_c0_fixture_pair};
     let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "c0-readonly-real");
     for fixture in build_c0_fixture_pair(temp.root()).unwrap() {
-        let loaded = LoadedBundle::read(&fixture.path).unwrap();
+        let loaded = LoadedBundle::read(
+            &fixture.path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         let document_ref = loaded.manual_checkpoint().unwrap().document_ref.clone();
         let owner = loaded.into_writer().unwrap();
         let manifest = owner
@@ -759,7 +765,14 @@ fn s3_read_only_windows_certification_keeps_write_refusal_zero_mutation() {
     );
     let destination = fixture.root.path("must-remain-absent.kinewright");
     let before = std::fs::read_dir(fixture.root.root()).unwrap().count();
-    assert!(ProjectBundle::activate(&destination, BundleWriteAdmission::new_document()).is_err());
+    assert!(
+        ProjectBundle::activate(
+            &destination,
+            BundleWriteAdmission::new_document(),
+            core.history_pool()
+        )
+        .is_err()
+    );
     assert!(!destination.exists());
     assert_eq!(
         std::fs::read_dir(fixture.root.root()).unwrap().count(),

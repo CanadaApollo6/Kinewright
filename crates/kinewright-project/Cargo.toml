@@ -55,3 +55,7 @@ workspace = true
 [[example]]
 name = "undo_owner_bench"
 required-features = ["test-util", "history-metrics"]
+
+[[example]]
+name = "undo_product_bench"
+required-features = ["test-util", "history-metrics"]

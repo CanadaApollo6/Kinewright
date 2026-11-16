@@ -1841,6 +1841,20 @@ pub(crate) mod feedback_capture {
         reason = "Stateful durability witnesses retain their complete owner and restart sequence"
     )]
     mod tests {
+        fn open_saved_core(
+            owner: &kinewright_project::bundle::ProjectBundle,
+        ) -> kinewright_project::operation_actor::Core {
+            let checkpoint = owner.checkpoint(owner.manual_branch_id()).unwrap();
+            kinewright_project::operation_actor::Core::open(
+                checkpoint
+                    .open(owner.store(), owner.history_pool())
+                    .unwrap(),
+                checkpoint.branch_id.clone(),
+                checkpoint.revision,
+            )
+            .unwrap()
+        }
+
         use super::*;
         use kinewright_media::{
             test_support::{TempDirectory, workspace_target_dir},
@@ -1910,10 +1924,15 @@ pub(crate) mod feedback_capture {
         fn setup(root: &Path) -> (ProjectBundle, FeedbackAnchor) {
             std::fs::create_dir_all(root).unwrap();
             let [fixture, _] = build_c0_fixture_pair(root).unwrap();
-            let mut owner = LoadedBundle::read(&fixture.path)
-                .unwrap()
-                .into_writer()
-                .unwrap();
+            let mut owner = LoadedBundle::read(
+                &fixture.path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap()
+            .into_writer()
+            .unwrap();
             let key = snapshot(&mut owner);
             let anchor = FeedbackAnchor {
                 snapshot: key,
@@ -2016,11 +2035,16 @@ pub(crate) mod feedback_capture {
                 bytes,
             )
         }
-        fn move_for_asr(owner: &mut ProjectBundle, core: &kinewright_core::Core, frame: i64) {
+        fn move_for_asr(
+            owner: &mut ProjectBundle,
+            core: &kinewright_project::operation_actor::Core,
+            frame: i64,
+        ) {
             let document = owner
                 .branch_history(owner.manual_branch_id())
                 .unwrap()
-                .document
+                .history()
+                .document()
                 .clone();
             let clip = document.tracks[0].clips[0].id;
             assert!(matches!(
@@ -2039,9 +2063,7 @@ pub(crate) mod feedback_capture {
                 .unwrap();
         }
         fn advance_voice_head(owner: &mut ProjectBundle) {
-            let history = owner.branch_history(owner.manual_branch_id()).unwrap();
-            let core = kinewright_core::Core::spawn(Arc::clone(&history.document)).unwrap();
-            core.restore_history((*history).clone()).unwrap();
+            let core = open_saved_core(owner);
             move_for_asr(owner, &core, 1);
         }
         #[test]
@@ -2080,10 +2102,15 @@ pub(crate) mod feedback_capture {
             owner.collect_after_ack().unwrap();
             drop(a);
             drop(owner);
-            let owner = LoadedBundle::read(&root.path("c0-red.kinewright"))
-                .unwrap()
-                .into_writer()
-                .unwrap();
+            let owner = LoadedBundle::read(
+                &root.path("c0-red.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap()
+            .into_writer()
+            .unwrap();
             let b = SavedAudio::reopen(&owner, &note).unwrap();
             assert_eq!(b.voice.original_asr_ref, Some(reference.clone()));
             assert_eq!(&*owner.store().read_evidence(&reference).unwrap(), &bytes);
@@ -2153,10 +2180,15 @@ pub(crate) mod feedback_capture {
             owner.collect_after_ack().unwrap();
             drop(b);
             drop(owner);
-            let owner = LoadedBundle::read(&root.path("c0-red.kinewright"))
-                .unwrap()
-                .into_writer()
-                .unwrap();
+            let owner = LoadedBundle::read(
+                &root.path("c0-red.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap()
+            .into_writer()
+            .unwrap();
             let b = SavedAudio::reopen(&owner, &note).unwrap();
             assert_eq!(b.voice.original_asr_ref, Some(reference.clone()));
             assert_eq!(&*owner.store().read_evidence(&reference).unwrap(), &bytes);
@@ -2205,10 +2237,15 @@ pub(crate) mod feedback_capture {
             );
             drop(a);
             drop(owner);
-            let owner = LoadedBundle::read(&root.path("c0-red.kinewright"))
-                .unwrap()
-                .into_writer()
-                .unwrap();
+            let owner = LoadedBundle::read(
+                &root.path("c0-red.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap()
+            .into_writer()
+            .unwrap();
             let b = SavedAudio::reopen(&owner, &note).unwrap();
             assert_eq!(b.voice.chosen_transcript_revision, Some(y_ref.clone()));
             assert_eq!(
@@ -2226,18 +2263,7 @@ pub(crate) mod feedback_capture {
             let chosen = evidence(&mut owner, b"chosen before refusal", &[]).unwrap();
             let reference = chosen.reference.clone();
             let stale = envelope(&mut owner);
-            let core = kinewright_core::Core::spawn(
-                (*owner
-                    .branch_history(owner.manual_branch_id())
-                    .unwrap()
-                    .document)
-                    .clone(),
-            )
-            .unwrap();
-            core.restore_history(
-                (*owner.branch_history(owner.manual_branch_id()).unwrap()).clone(),
-            )
-            .unwrap();
+            let core = open_saved_core(&owner);
             move_for_asr(&mut owner, &core, 1);
             assert!(matches!(
                 a.choose_transcript(&mut owner, &stale, reference.clone()),
@@ -2279,18 +2305,7 @@ pub(crate) mod feedback_capture {
             let key = a.start_job(&owner, 0).unwrap();
             let (reference, bytes) = original_asr(&a, &key);
             let stale = envelope(&mut owner);
-            let core = kinewright_core::Core::spawn(
-                (*owner
-                    .branch_history(owner.manual_branch_id())
-                    .unwrap()
-                    .document)
-                    .clone(),
-            )
-            .unwrap();
-            core.restore_history(
-                (*owner.branch_history(owner.manual_branch_id()).unwrap()).clone(),
-            )
-            .unwrap();
+            let core = open_saved_core(&owner);
             move_for_asr(&mut owner, &core, 1);
             let usage = owner.store().usage().unwrap();
             let pressure = owner
@@ -2386,10 +2401,15 @@ pub(crate) mod feedback_capture {
             drop(b);
             drop(core);
             drop(owner);
-            let owner = LoadedBundle::read(&root.path("c0-red.kinewright"))
-                .unwrap()
-                .into_writer()
-                .unwrap();
+            let owner = LoadedBundle::read(
+                &root.path("c0-red.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap()
+            .into_writer()
+            .unwrap();
             let b = SavedAudio::reopen(&owner, &note).unwrap();
             assert_eq!(b.voice.original_asr_ref, Some(reference.clone()));
             assert_eq!(b.voice.chosen_transcript_revision, Some(chosen_ref));
@@ -2403,18 +2423,7 @@ pub(crate) mod feedback_capture {
             let key = a.start_job(&owner, 0).unwrap();
             let (reference, bytes) = original_asr(&a, &key);
             let stale = envelope(&mut owner);
-            let core = kinewright_core::Core::spawn(
-                (*owner
-                    .branch_history(owner.manual_branch_id())
-                    .unwrap()
-                    .document)
-                    .clone(),
-            )
-            .unwrap();
-            core.restore_history(
-                (*owner.branch_history(owner.manual_branch_id()).unwrap()).clone(),
-            )
-            .unwrap();
+            let core = open_saved_core(&owner);
             move_for_asr(&mut owner, &core, 1);
             assert!(matches!(
                 a.accept_asr(&mut owner, &stale, &key, &key, &mut Some(asr())),
@@ -2422,10 +2431,15 @@ pub(crate) mod feedback_capture {
             ));
             drop(core);
             drop(owner);
-            let owner = LoadedBundle::read(&root.path("c0-red.kinewright"))
-                .unwrap()
-                .into_writer()
-                .unwrap();
+            let owner = LoadedBundle::read(
+                &root.path("c0-red.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap()
+            .into_writer()
+            .unwrap();
             assert!(
                 matches!(a.start_job(&owner, 1), Err(BundleError::HistoryChanged)),
                 "S3_VOICE_VIEW_EXPIRES_WITH_OWNER"
@@ -2481,10 +2495,15 @@ pub(crate) mod feedback_capture {
             ));
             drop(owner);
             drop(pressure);
-            let mut owner = LoadedBundle::read(&root.path("c0-red.kinewright"))
-                .unwrap()
-                .into_writer()
-                .unwrap();
+            let mut owner = LoadedBundle::read(
+                &root.path("c0-red.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap()
+            .into_writer()
+            .unwrap();
             assert!(
                 matches!(a.start_job(&owner, 1), Err(BundleError::HistoryChanged)),
                 "S3_VOICE_FAILED_DROP_EXPIRES_OLD_VIEW"
@@ -2642,10 +2661,15 @@ pub(crate) mod feedback_capture {
                 drop(chosen);
                 drop(saved);
                 drop(owner);
-                let owner = LoadedBundle::read(&root.path("c0-red.kinewright"))
-                    .unwrap()
-                    .into_writer()
-                    .unwrap();
+                let owner = LoadedBundle::read(
+                    &root.path("c0-red.kinewright"),
+                    &kinewright_project::operation_history::HistoryPool::new(
+                        kinewright_project::operation_history::PoolLimits::default(),
+                    ),
+                )
+                .unwrap()
+                .into_writer()
+                .unwrap();
                 assert_eq!(&*owner.store().read_evidence(&reference).unwrap(), &bytes);
             }
         }
@@ -2658,18 +2682,7 @@ pub(crate) mod feedback_capture {
             let key = saved.start_job(&owner, 0).unwrap();
             let (reference, bytes) = original_asr(&saved, &key);
             let stale = envelope(&mut owner);
-            let core = kinewright_core::Core::spawn(
-                (*owner
-                    .branch_history(owner.manual_branch_id())
-                    .unwrap()
-                    .document)
-                    .clone(),
-            )
-            .unwrap();
-            core.restore_history(
-                (*owner.branch_history(owner.manual_branch_id()).unwrap()).clone(),
-            )
-            .unwrap();
+            let core = open_saved_core(&owner);
             move_for_asr(&mut owner, &core, 1);
             assert!(matches!(
                 saved.accept_asr(&mut owner, &stale, &key, &key, &mut Some(asr())),
@@ -2712,10 +2725,15 @@ pub(crate) mod feedback_capture {
             drop(core);
             drop(saved);
             drop(owner);
-            let owner = LoadedBundle::read(&root.path("c0-red.kinewright"))
-                .unwrap()
-                .into_writer()
-                .unwrap();
+            let owner = LoadedBundle::read(
+                &root.path("c0-red.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap()
+            .into_writer()
+            .unwrap();
             let reopened = SavedAudio::reopen(&owner, &note).unwrap();
             assert_eq!(reopened.voice.original_asr_ref, Some(reference.clone()));
             assert_eq!(&*owner.store().read_evidence(&reference).unwrap(), &bytes);
@@ -2750,18 +2768,7 @@ pub(crate) mod feedback_capture {
                     true,
                 )
                 .unwrap();
-            let core = kinewright_core::Core::spawn(
-                (*owner
-                    .branch_history(owner.manual_branch_id())
-                    .unwrap()
-                    .document)
-                    .clone(),
-            )
-            .unwrap();
-            core.restore_history(
-                (*owner.branch_history(owner.manual_branch_id()).unwrap()).clone(),
-            )
-            .unwrap();
+            let core = open_saved_core(&owner);
             move_for_asr(&mut owner, &core, 1);
             assert_ne!(e.expected_head.as_ref(), owner.manual_head());
             let before_retry = owner.root().unwrap().generation;
@@ -2793,10 +2800,15 @@ pub(crate) mod feedback_capture {
             let audio = saved.voice.audio_ref.clone();
             drop(saved);
             drop(owner);
-            let owner = LoadedBundle::read(&root.path("c0-red.kinewright"))
-                .unwrap()
-                .into_writer()
-                .unwrap();
+            let owner = LoadedBundle::read(
+                &root.path("c0-red.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap()
+            .into_writer()
+            .unwrap();
             let saved = SavedAudio::reopen(&owner, &note).unwrap();
             assert!(!saved.complete);
             assert_eq!(
@@ -2893,10 +2905,15 @@ pub(crate) mod feedback_capture {
             let _inference = INFERENCE_TESTS.lock().unwrap();
             let root = TempDirectory::new_in(&workspace_target_dir(), "s3-voice-retention");
             let receipt = crash(root.root(), false);
-            let mut owner = LoadedBundle::read(&root.path("c0-red.kinewright"))
-                .unwrap()
-                .into_writer()
-                .unwrap();
+            let mut owner = LoadedBundle::read(
+                &root.path("c0-red.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap()
+            .into_writer()
+            .unwrap();
             let mut saved = SavedAudio::reopen(&owner, &receipt.note).unwrap();
             assert_eq!(saved.anchor, receipt.anchor, "S3_VOICE_ANCHOR_RESTART");
             assert_eq!(
@@ -3053,10 +3070,15 @@ pub(crate) mod feedback_capture {
         fn s3_commentary_retention() {
             let root = TempDirectory::new_in(&workspace_target_dir(), "s3-commentary-retention");
             let receipt = crash(root.root(), true);
-            let mut owner = LoadedBundle::read(&root.path("c0-red.kinewright"))
-                .unwrap()
-                .into_writer()
-                .unwrap();
+            let mut owner = LoadedBundle::read(
+                &root.path("c0-red.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap()
+            .into_writer()
+            .unwrap();
             let mut saved = SavedAudio::reopen(&owner, &receipt.note).unwrap();
             let log_ref = saved.voice.playhead_log_ref.clone().unwrap();
             assert_eq!(

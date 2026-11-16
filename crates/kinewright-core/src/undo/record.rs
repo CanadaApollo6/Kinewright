@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, sync::Arc};
 
 /// Immutable capture. Documents are shared with the live history; command payloads are owned by the capture.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
     pub baseline: Arc<Document>,
@@ -366,6 +366,10 @@ impl Serialize for History {
 }
 
 impl ValidatedSnapshot {
+    #[must_use]
+    pub fn document(&self) -> &Document {
+        &self.record.document
+    }
     pub fn with_merge_destination(mut self, input: u64) -> Result<Self, Error> {
         if self.record.policy != RetentionPolicy::NeverFold {
             return Err(Error::InvalidMetadata);

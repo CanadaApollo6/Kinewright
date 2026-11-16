@@ -445,7 +445,7 @@ fn te13_fix2_standalone_freeze_storage_refusal_can_retry() {
 #[test]
 fn te13_fix2_stop_disposed_delivery_keeps_unreviewed_task_work() {
     let r = c5_fix10_run();
-    let expected = r.core.export_history().unwrap();
+    let expected = serde_json::to_value(r.core.export_history().unwrap()).unwrap();
     let finish = te13_control(&r.editor, &r.child, &r.core);
     let reply = r.editor.wire("finish_task", finish);
     assert_eq!(reply.is_error, Some(false));
@@ -499,5 +499,5 @@ fn te13_fix2_stop_disposed_delivery_keeps_unreviewed_task_work() {
         ),
         "TE13_FIX2_DISPOSED_DELIVERY_RECOVERS"
     );
-    assert_eq!(project.core().export_history().unwrap(), expected);
+    assert_recovered_task_owner(project.core(), expected, "TE13_FIX2_DISPOSED_DELIVERY_EXACT");
 }

@@ -2,9 +2,8 @@
 #[cfg(target_os = "linux")]
 use super::{Call, Trace, error, fixtures};
 #[cfg(target_os = "linux")]
-use kinewright_core::{
-    Core, Document, Export, ExportCancellation, ExportSettings, Playback, TimeCode,
-};
+use kinewright_core::{Document, Export, ExportCancellation, ExportSettings, Playback, TimeCode};
+use kinewright_project::operation_actor::Core;
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
 use serde_json::Value;
@@ -150,7 +149,7 @@ fn histories(
     history: &kinewright_core::HistorySnapshot,
     _data: &Value,
 ) -> io::Result<(bool, bool)> {
-    let reopened = Core::spawn(std::sync::Arc::clone(&history.baseline)).map_err(error)?;
+    let reopened = Core::for_test(std::sync::Arc::clone(&history.baseline)).map_err(error)?;
     reopened.restore_history(history.clone()).map_err(error)?;
     let history_reopened =
         reopened.export_history().map_err(error)? == *history && *history.document == *actual;

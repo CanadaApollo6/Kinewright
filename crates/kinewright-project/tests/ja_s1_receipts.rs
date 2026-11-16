@@ -1,9 +1,10 @@
 #![cfg(all(feature = "test-util", target_os = "linux"))]
 use kinewright_core::{
-    Command, Core, Document, Event, JournalCommand, Operation, Query, QueryResult,
-    TimelineRevision, Track, TrackId, TrackKind,
+    Command, Document, Event, JournalCommand, Operation, Query, QueryResult, TimelineRevision,
+    Track, TrackId, TrackKind,
 };
 use kinewright_media::test_support::TempDirectory;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{BundleError, BundleWriteAdmission, LoadedBundle, ProjectBundle},
     bundle_records::{ObjectRef, RecordKind},
@@ -22,8 +23,13 @@ fn setup(path: &Path) -> (Core, ProjectBundle, ObjectRef) {
         sync_lock: true,
         clips: vec![],
     });
-    let core = Core::spawn(document).unwrap();
-    let mut bundle = ProjectBundle::activate(path, BundleWriteAdmission::new_document()).unwrap();
+    let core = Core::for_test(document).unwrap();
+    let mut bundle = ProjectBundle::activate(
+        path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let inputs = bundle.empty_inputs().unwrap();
     let reference = inputs.reference.clone();
     bundle.save(&core, &reference).unwrap();
@@ -43,6 +49,7 @@ fn envelope(bundle: &mut ProjectBundle, core: &Core, inputs: &ObjectRef) -> Comm
     CommandEnvelope {
         switch: None,
         manual: None,
+        context: None,
         version: 1,
         action: "edit".into(),
         id: CommandId {
@@ -106,9 +113,14 @@ fn execute_comment(
         .unwrap()
 }
 fn restart(path: &Path) -> (Core, ProjectBundle, ObjectRef) {
-    let loaded = LoadedBundle::read(path).unwrap();
-    let core = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&core).unwrap();
+    let mut loaded = LoadedBundle::read(
+        path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let core = loaded.open_manual().unwrap();
     let inputs = loaded.root().unwrap().input_manifest_ref.clone();
     (core, loaded.into_writer().unwrap(), inputs)
 }
@@ -163,7 +175,7 @@ fn edit_and_comment_lost_replies_reconcile_before_stale_admission() {
     drop(sealed);
     let edit = envelope(&mut bundle, &core, &inputs);
     let original = committed(bundle.command(&edit, &core, &inputs, &[]).unwrap());
-    assert_eq!(core.export_history().unwrap().cursor.undo.len(), 1);
+    assert_eq!(core.export_history().unwrap().history().undo.len(), 1);
     let text = "  Café\u{a0}🧭  \n\tsecond e\u{301}\r\n".as_bytes();
     let strokes = b" [ [3,5], [13,21] ]\r\n";
     let request = comment(envelope(&mut bundle, &core, &inputs), text, strokes);
@@ -369,12 +381,12 @@ fn ambiguous_commit_keeps_pending_until_receipt_reconciliation() {
     let control = envelope(&mut bundle, &core, &inputs);
     committed(bundle.command(&control, &core, &inputs, &[]).unwrap());
     assert_eq!(
-        core.export_history().unwrap().cursor.undo.len(),
+        core.export_history().unwrap().history().undo.len(),
         1,
         "retained-reply positive control"
     );
     let request = envelope(&mut bundle, &core, &inputs);
-    let before = core.export_history().unwrap();
+    let before = core.snapshot_identity().unwrap();
     let (result, trace) = io_observer::observe(|| {
         io_observer::fail_once("root_parent_sync", || {
             bundle.command(&request, &core, &inputs, &[])
@@ -388,7 +400,7 @@ fn ambiguous_commit_keeps_pending_until_receipt_reconciliation() {
             .iter()
             .any(|e| e.operation == "injected_failure")
     );
-    assert_eq!(core.export_history().unwrap(), before);
+    assert_eq!(core.snapshot_identity().unwrap(), before);
     assert_eq!(
         bundle.receipt_lookup(&request).unwrap(),
         ReceiptLookup::Pending
@@ -398,11 +410,11 @@ fn ambiguous_commit_keeps_pending_until_receipt_reconciliation() {
         ReceiptLookup::Pending
     );
     bundle
-        .install_reconciled_command(&core, before.clone())
+        .install_reconciled_command(&core, bundle.attach_core(&core).unwrap().capture().unwrap())
         .unwrap();
     let result = committed(bundle.command(&request, &core, &inputs, &[]).unwrap());
     assert!(matches!(result.result, ReceiptResult::Edit { .. }));
-    assert_eq!(core.export_history().unwrap().cursor.undo.len(), 2);
+    assert_eq!(core.export_history().unwrap().history().undo.len(), 2);
 }
 
 #[test]
@@ -473,6 +485,10 @@ fn invalid_comment_does_not_enter_pending_or_pause_the_next_command() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one receipt lifecycle compares warm IO and an independent cold open after the native owner switch"
+)]
 fn unchanged_comment_validates_fresh_open_and_coalesces_directory_syncs() {
     let temp = TempDirectory::new_in(
         std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
@@ -546,9 +562,14 @@ fn unchanged_comment_validates_fresh_open_and_coalesces_directory_syncs() {
     );
     drop(bundle);
     let path = temp.path("edit.kinewright");
-    let loaded = LoadedBundle::read(&path).unwrap();
-    let reopened_core = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&reopened_core).unwrap();
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let reopened_core = loaded.open_manual().unwrap();
     let mut reopened = loaded.into_writer().unwrap();
     for reconciled in [false, true] {
         if reconciled {

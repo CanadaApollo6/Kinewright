@@ -27,22 +27,22 @@ pub(crate) struct RetainedBorrowedSource {
 pub(crate) struct BorrowedSnapshotOverlap {
     pub(crate) reservation: crate::storage_budget::StorageReservation,
     pub(crate) snapshot: Option<BorrowedSnapshotBinding>,
-    pub(crate) history: Option<crate::storage_budget::StorageReservation>,
 }
 
 /// Exact foreground snapshot admitted by the originating source owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BorrowedSnapshotBinding {
-    pub history_sha256: String,
+    pub identity: crate::operation_history::SnapshotIdentity,
     pub encoded_bytes: u64,
 }
 impl BorrowedSnapshotBinding {
-    pub fn from_history(history: &kinewright_core::HistorySnapshot) -> Result<Self, BundleError> {
-        let bytes = serde_json::to_vec(history).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+    pub fn from_history(
+        history: &crate::operation_actor::PortableHistory,
+    ) -> Result<Self, BundleError> {
         Ok(Self {
-            history_sha256: kinewright_media::sha256_bytes(&bytes),
-            encoded_bytes: bytes.len() as u64,
+            identity: history.identity(),
+            encoded_bytes: history.encoded_bytes()?,
         })
     }
 }
@@ -54,12 +54,34 @@ pub struct BorrowedSourceService {
     retained: Weak<RetainedBorrowedSource>,
 }
 impl BorrowedSourceService {
+    pub(crate) fn admitted_snapshot(
+        &self,
+        source: &BorrowedSourceDescriptor,
+        identity: crate::operation_history::SnapshotIdentity,
+    ) -> Result<Option<BorrowedSnapshotBinding>, BundleError> {
+        let retained = self
+            .retained
+            .upgrade()
+            .filter(|r| r.accepting_reads.load(Ordering::SeqCst) && r.descriptor == *source)
+            .ok_or_else(|| {
+                BundleError::Identity("source retention was not re-established".into())
+            })?;
+        let overlap = retained
+            .overlap
+            .lock()
+            .map_err(|_| BundleError::Capacity("snapshot overlap poisoned"))?;
+        Ok(overlap
+            .snapshot
+            .as_ref()
+            .filter(|binding| binding.identity == identity)
+            .cloned())
+    }
     /// GUI-only admission: reserve a checked delta on the actual source ledger,
     /// then commit one exact binding without replacing any existing hold or pin.
     pub fn ensure_snapshot(
         &self,
         source: &BorrowedSourceDescriptor,
-        history: &kinewright_core::HistorySnapshot,
+        history: &crate::operation_actor::PortableHistory,
     ) -> Result<BorrowedSnapshotBinding, BundleError> {
         let retained = self
             .retained
@@ -68,9 +90,7 @@ impl BorrowedSourceService {
             .ok_or_else(|| {
                 BundleError::Identity("source retention was not re-established".into())
             })?;
-        let encoded_bytes = history
-            .encoded_bytes()
-            .map_err(crate::bundle::history_error)?;
+        let encoded_bytes = history.encoded_bytes()?;
         let mut overlap = retained
             .overlap
             .lock()
@@ -80,11 +100,6 @@ impl BorrowedSourceService {
             .reserve_snapshot_growth(&overlap.reservation, encoded_bytes)?;
         let _scratch = retained.reads.reserve_snapshot_scratch(encoded_bytes)?;
         let snapshot = BorrowedSnapshotBinding::from_history(history)?;
-        let history_charge = if overlap.snapshot.as_ref() == Some(&snapshot) {
-            None
-        } else {
-            Some(retained.reads.reserve_snapshot_history(history)?)
-        };
         if snapshot.encoded_bytes != encoded_bytes {
             return Err(BundleError::Identity(
                 "snapshot encoded length changed during admission".into(),
@@ -95,9 +110,6 @@ impl BorrowedSourceService {
         }
         overlap.reservation.absorb_copy_growth(extension)?;
         overlap.snapshot = Some(snapshot.clone());
-        if let Some(charge) = history_charge {
-            overlap.history = Some(charge);
-        }
         Ok(snapshot)
     }
 

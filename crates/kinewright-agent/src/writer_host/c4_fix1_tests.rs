@@ -390,7 +390,7 @@ fn astra_c4_save_as_reopen_original_recovery() {
             .is_empty(),
         "C4_COPY_PLAIN_RUN_INDEX"
     );
-    let original = Ja1EditingSession::open(&temp.path("project.kinewright")).unwrap();
+    let original = Ja1EditingSession::open(&temp.path("project.kinewright"), &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
     let recovered = original.orchestration_projection(&run).unwrap().unwrap();
     assert!(
         recovered
@@ -572,16 +572,16 @@ fn s4b_c4_fix1_foreign_missing_and_live_original_retry() {
         } = f;
         drop(host);
         let original_owner = if live {
-            Some(Ja1EditingSession::open(&original).unwrap())
+            Some(Ja1EditingSession::open(&original, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap())
         } else {
             std::fs::rename(&original, temp.path("moved.kinewright")).unwrap();
             None
         };
         let active_path = if live {
             let path = temp.path("unrelated.kinewright");
-            let core = Core::spawn(Document::default()).unwrap();
+            let core = Core::for_test(Document::default()).unwrap();
             let mut bundle =
-                ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+                ProjectBundle::activate(&path, BundleWriteAdmission::new_document(), core.history_pool()).unwrap();
             let inputs = bundle.empty_inputs().unwrap().reference.clone();
             bundle.save(&core, &inputs).unwrap();
             path
@@ -656,7 +656,7 @@ fn s4b_c4_fix1_foreign_missing_and_live_original_retry() {
             "C4_FOREIGN_RETRY_FINISH",
         );
         assert!(!machine.join("run.json").exists());
-        let original = Ja1EditingSession::open(&original).unwrap();
+        let original = Ja1EditingSession::open(&original, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
         let recovered = original.orchestration_projection(&run).unwrap().unwrap();
         assert!(
             recovered
@@ -992,7 +992,7 @@ fn s4b_c4_fix1_merge_crash_cuts() {
             let kinewright_project::receipts::ReceiptLookup::Committed(receipt) = owner
                 .owner()
                 .unwrap()
-                .manual_transition_receipt(&envelope)
+                .command_receipt(&envelope)
                 .unwrap()
             else {
                 panic!("C4_MERGE_COMMITTED_RECEIPT");

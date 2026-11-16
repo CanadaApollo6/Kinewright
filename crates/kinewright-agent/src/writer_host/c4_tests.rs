@@ -738,14 +738,12 @@ fn s4b_c4_mcp_history_survives_attempt_restart_merge_and_stop() {
             &saved.source.checkpoint,
         )
         .unwrap();
-    let history = owner
+    let history = checkpoint.open(owner
         .owner()
         .unwrap()
         .store()
-        .unwrap()
-        .resolve_history(&checkpoint.history_ref)
-        .unwrap();
-    assert_eq!(*history, expected, "C4_MCP_HISTORY_AFTER_STOP_REOPEN");
+        .unwrap(), &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap().into_reader().unwrap().into_capture().unwrap();
+    assert_eq!(history, expected, "C4_MCP_HISTORY_AFTER_STOP_REOPEN");
     assert_eq!(
         owner.core().export_history().unwrap(),
         manual,
@@ -760,7 +758,7 @@ fn s4b_c4_mcp_history_survives_attempt_restart_merge_and_stop() {
         "C4_MCP_HISTORY task_exact=true task_redo=true manual_exact=true manual_redo=true merge_once=true choice_exact=true"
     );
 }
-fn c4_mcp_edit_redo(specialist: &C4Mcp, core: &Core) -> kinewright_core::HistorySnapshot {
+fn c4_mcp_edit_redo(specialist: &C4Mcp, core: &Core) -> kinewright_project::operation_history::OwnerSnapshot {
     for id in [1, 2] {
         let revision = grant_test_revision(core);
         let prepared=specialist.raw("prepare_edit_plan",serde_json::json!({"expected_revision":revision,"operations":[{"op":"add_marker","marker":{"id":id,"position":id,"label":format!("marker {id}"),"color_token":0}}]}));
@@ -786,7 +784,7 @@ fn c4_mcp_edit_redo(specialist: &C4Mcp, core: &Core) -> kinewright_core::History
         "C4_SPECIALIST_MCP_UNDO {undo:?}"
     );
     let expected = core.export_history().unwrap();
-    assert!(!expected.cursor.redo.is_empty(), "C4_MCP_REDO_TAIL");
+    assert!(!expected.history().redo.is_empty(), "C4_MCP_REDO_TAIL");
     eprintln!("C4_MCP_EDIT_ACK redo=true");
     expected
 }

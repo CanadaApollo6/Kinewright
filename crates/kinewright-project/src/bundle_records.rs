@@ -50,6 +50,15 @@ identity!(BranchId);
 identity!(HeadId);
 identity!(BatchId);
 identity!(SessionId);
+impl BatchId {
+    pub(crate) fn command(id: &CommandId) -> Result<Self, BundleError> {
+        let bytes = serde_json::to_vec(&("kinewright/command-origin/v1", id))
+            .map_err(crate::bundle::encoding_error)?;
+        Ok(Self(
+            kinewright_media::sha256_bytes(&bytes)[..32].to_owned(),
+        ))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -190,9 +199,11 @@ impl ObjectRef {
     }
 }
 
+pub use crate::operation_checkpoint::Checkpoint as BranchCheckpoint;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BranchCheckpoint {
+pub struct LegacyBranchCheckpoint {
     pub branch_id: BranchId,
     pub head_id: HeadId,
     pub document_ref: ObjectRef,
@@ -218,7 +229,7 @@ pub struct BranchCheckpoint {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SpecialistBaseRecord {
+pub struct LegacySpecialistBaseRecord {
     pub history_role: crate::history_record::HistoryRole,
     pub target_branch: BranchId,
     pub base_head: HeadId,
@@ -226,6 +237,17 @@ pub struct SpecialistBaseRecord {
     pub original_baseline_ref: ObjectRef,
     pub frozen_checkpoint_ref: ObjectRef,
     pub full_applied_delta: Vec<Operation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpecialistBaseRecord {
+    pub history_role: crate::operation_history::Role,
+    pub target_branch: BranchId,
+    pub base_head: HeadId,
+    pub base_document_hash: String,
+    pub original_baseline_ref: ObjectRef,
+    pub frozen_checkpoint_ref: ObjectRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

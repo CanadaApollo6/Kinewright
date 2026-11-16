@@ -104,7 +104,7 @@ fn borrowed_encoding_matches_owned_protocol_and_retains_no_typed_payload_copy() 
         "BORROWED_OUTBOX_MATCHES_OWNED_NORMALISED_MESSAGE"
     );
     assert_eq!(
-        serde_json::to_string(&encoded).unwrap(),
+        serde_json::from_str::<String>(&serde_json::to_string(&encoded).unwrap()).unwrap(),
         serde_json::to_string(&expected).unwrap(),
         "RAW_OUTBOX_BYTES_ARE_CANONICAL_MESSAGE_BYTES"
     );
@@ -421,4 +421,27 @@ fn rebinding_keeps_all_retained_senders_in_the_original_arena() {
     producer
         .execute(&mut owner, action(99), context(99))
         .unwrap();
+}
+
+#[test]
+fn pending_message_roundtrips_inside_an_internally_tagged_command() {
+    #[derive(Serialize, Deserialize)]
+    #[serde(tag = "command")]
+    enum Envelope {
+        Commit { pending: EncodedMessage },
+    }
+    let (mut owner, mut producer) = bound();
+    producer
+        .execute(&mut owner, edit(true), context(2))
+        .unwrap();
+    let pending = producer.pending().remove(0);
+    let expected = pending.decode().unwrap();
+    let wire = serde_json::to_vec(&Envelope::Commit { pending }).unwrap();
+    let Envelope::Commit { pending } = serde_json::from_slice(&wire)
+        .expect("PENDING_MESSAGE_DECODES_INSIDE_TAGGED_FOREGROUND_COMMAND");
+    assert_eq!(
+        pending.decode().unwrap(),
+        expected,
+        "TAGGED_TRANSPORT_PRESERVES_ORIGINAL_COMMAND_AND_CHAIN"
+    );
 }

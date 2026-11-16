@@ -567,10 +567,11 @@ mod bounded_store {
 
 mod durable_bundle {
     use super::*;
-    #[cfg(target_os = "linux")]
-    use kinewright_core::{Command, Core, Document, Operation, Track, TrackId, TrackKind};
+    use kinewright_core::{Command, Document, Operation, Track, TrackId, TrackKind};
     #[cfg(target_os = "linux")]
     use kinewright_project::bundle::{BundleWriteAdmission, LoadedBundle, ProjectBundle};
+    #[cfg(target_os = "linux")]
+    use kinewright_project::operation_actor::Core;
     use std::path::{Path, PathBuf};
 
     #[cfg(target_os = "linux")]
@@ -587,10 +588,14 @@ mod durable_bundle {
     }
     #[cfg(target_os = "linux")]
     fn initial_bundle(path: &Path) -> (Core, ProjectBundle) {
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         edit(&core);
-        let mut bundle =
-            ProjectBundle::activate(path, BundleWriteAdmission::new_document()).unwrap();
+        let mut bundle = ProjectBundle::activate(
+            path,
+            BundleWriteAdmission::new_document(),
+            core.history_pool(),
+        )
+        .unwrap();
         let inputs = bundle.empty_inputs().unwrap();
         bundle.save(&core, &inputs.reference).unwrap();
         drop(inputs);
@@ -735,13 +740,28 @@ mod durable_bundle {
             }
             fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
             let before = inventory(temp.root());
-            let (result, trace) = io_observer::observe(|| LoadedBundle::read(&path));
+            let (result, trace) = io_observer::observe(|| {
+                LoadedBundle::read(
+                    &path,
+                    &kinewright_project::operation_history::HistoryPool::new(
+                        kinewright_project::operation_history::PoolLimits::default(),
+                    ),
+                )
+            });
             assert!(result.is_err(), "unsupported {case} admitted");
             assert!(trace.events.is_empty(), "{case} mutated before refusal");
             assert_eq!(inventory(temp.root()), before, "{case}");
         }
         fs::write(&path, original).unwrap();
-        assert!(LoadedBundle::read(&path).is_ok());
+        assert!(
+            LoadedBundle::read(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            )
+            .is_ok()
+        );
     }
     #[test]
     #[cfg(target_os = "linux")]
@@ -753,7 +773,13 @@ mod durable_bundle {
         let path = temp.path("studio.kinewright");
         let (_core, bundle) = initial_bundle(&path);
         drop(bundle);
-        let loaded = LoadedBundle::read(&path).unwrap();
+        let loaded = LoadedBundle::read(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         let checkpoint = loaded.manual_checkpoint().unwrap().clone();
         drop(loaded);
         let document = temp.path(&format!(
@@ -763,7 +789,7 @@ mod durable_bundle {
         let usable = fs::read(&document).unwrap();
         let history = temp.path(&format!(
             "studio.kinewright-assets/studio/objects/{}",
-            checkpoint.history_ref.sha256
+            checkpoint.owner_ref.sha256
         ));
         let original = fs::read(&history).unwrap();
         let damaged =
@@ -773,12 +799,25 @@ mod durable_bundle {
         assert_ne!(original, damaged);
         fs::write(&history, &damaged).unwrap();
         let before = inventory(temp.root());
-        let (result, trace) = io_observer::observe(|| LoadedBundle::read(&path));
+        let (result, trace) = io_observer::observe(|| {
+            LoadedBundle::read(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+        });
         assert!(result.is_err());
         assert!(trace.events.is_empty());
         assert_eq!(inventory(temp.root()), before);
-        let (assessment, trace) =
-            io_observer::observe(|| kinewright_project::bundle_recovery::assess(&path));
+        let (assessment, trace) = io_observer::observe(|| {
+            kinewright_project::bundle_recovery::assess(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+        });
         let kinewright_project::bundle_recovery::RecoveryAssessment::Quarantined {
             admission,
             branches,
@@ -790,7 +829,7 @@ mod durable_bundle {
         };
         assert_eq!(branches.len(), 1);
         assert_eq!(branches[0].branch_id, checkpoint.branch_id);
-        assert_eq!(branches[0].history_ref, checkpoint.history_ref);
+        assert_eq!(branches[0].history_ref, checkpoint.owner_ref);
         assert!(verified_document_bytes.contains(&checkpoint.document_ref));
         assert_eq!(admission.raw_bytes(), fs::read(&path).unwrap());
         assert!(trace.events.is_empty());
@@ -1174,10 +1213,11 @@ mod durable_bundle {
         .to_vec();
         fs::write(&path, &original).unwrap();
         let admission = BundleWriteAdmission::read(&path).unwrap();
-        let core = Core::spawn(admission.legacy_document().unwrap()).unwrap();
+        let core = Core::for_test(admission.legacy_document().unwrap()).unwrap();
         edit(&core);
         let (writer, trace) = io_observer::observe(|| {
-            let mut bundle = ProjectBundle::activate(&path, admission).unwrap();
+            let mut bundle =
+                ProjectBundle::activate(&path, admission, core.history_pool()).unwrap();
             let mut seals = vec![];
             let mut entries = vec![];
             for (entry_id, bytes) in [
@@ -1233,9 +1273,14 @@ mod durable_bundle {
             report.root_sha256
         });
         assert!(!trace.overflowed);
-        let loaded = LoadedBundle::read(&path).unwrap();
-        let restored = Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&restored).unwrap();
+        let mut loaded = LoadedBundle::read(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
+        let restored = loaded.open_manual().unwrap();
         assert_eq!(
             restored.export_history().unwrap(),
             core.export_history().unwrap(),
@@ -1494,9 +1539,14 @@ mod durable_bundle {
         const WORKER: &str = "JA_S1_BUNDLE_CRASH_WORKER";
         if let Some(path) = std::env::var_os(WORKER) {
             let path = PathBuf::from(path);
-            let loaded = LoadedBundle::read(&path).unwrap();
-            let core = Core::spawn(Document::default()).unwrap();
-            loaded.restore_manual(&core).unwrap();
+            let mut loaded = LoadedBundle::read(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap();
+            let core = loaded.open_manual().unwrap();
             let mut bundle = loaded.into_writer().unwrap();
             core.send(Command::Do(Operation::AddTrack {
                 track: Track {
@@ -1506,6 +1556,11 @@ mod durable_bundle {
                     clips: vec![],
                 },
             }))
+            .unwrap();
+            fs::write(
+                path.with_extension("expected-identity.json"),
+                serde_json::to_vec(&core.snapshot_identity().unwrap()).unwrap(),
+            )
             .unwrap();
             let inputs = bundle.empty_inputs().unwrap();
             bundle.save(&core, &inputs.reference).unwrap();
@@ -1592,22 +1647,34 @@ mod durable_bundle {
                 Some(9),
                 "only the recorded fixture worker was killed"
             );
-            let loaded = LoadedBundle::read(&path).unwrap();
+            let mut loaded = LoadedBundle::read(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap();
             let generation = loaded.root().unwrap().generation;
             assert!(
                 generation == 1 || generation == 2,
                 "{point} selected an unrelated generation"
             );
-            let restored = Core::spawn(Document::default()).unwrap();
-            loaded.restore_manual(&restored).unwrap();
+            let restored = loaded.open_manual().unwrap();
+            let expected = if generation == 1 {
+                original.identity().unwrap()
+            } else {
+                serde_json::from_slice(
+                    &fs::read(path.with_extension("expected-identity.json")).unwrap(),
+                )
+                .unwrap()
+            };
+            assert_eq!(restored.snapshot_identity().unwrap(), expected, "{point}");
             assert_eq!(
-                restored.export_history().unwrap(),
-                if generation == 1 {
-                    original.clone()
-                } else {
-                    next.clone()
-                },
-                "{point}"
+                restored.export_history().unwrap().history().document,
+                if generation == 1 { &original } else { &next }
+                    .history()
+                    .document,
+                "CHILD_PUBLICATION_PRESERVES_THE_EXPECTED_DOCUMENT {point}"
             );
             if point == "bundle_B5" {
                 assert_eq!(
@@ -1630,9 +1697,9 @@ mod durable_bundle {
         // Conversion accepts the current plain-file shape.
         fs::write(&path, &bytes).unwrap();
         let admission = BundleWriteAdmission::read(&path).unwrap();
-        let core = Core::spawn(admission.legacy_document().unwrap()).unwrap();
+        let core = Core::for_test(admission.legacy_document().unwrap()).unwrap();
         edit(&core);
-        let mut bundle = ProjectBundle::activate(&path, admission).unwrap();
+        let mut bundle = ProjectBundle::activate(&path, admission, core.history_pool()).unwrap();
         let id = bundle.project_id().clone();
         let branch = bundle.manual_branch_id().clone();
         let inputs = bundle.empty_inputs().unwrap();
@@ -1640,11 +1707,16 @@ mod durable_bundle {
         assert_eq!(report.generation, 1);
         drop(inputs);
         drop(bundle);
-        let loaded = LoadedBundle::read(&path).unwrap();
+        let mut loaded = LoadedBundle::read(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         assert_eq!(loaded.root().unwrap().project_id, id);
         assert_eq!(loaded.root().unwrap().manual_branch_id, branch);
-        let restored = Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&restored).unwrap();
+        let restored = loaded.open_manual().unwrap();
         assert_eq!(
             restored.export_history().unwrap(),
             core.export_history().unwrap()
@@ -1657,12 +1729,12 @@ mod durable_bundle {
         let backup_path = temp.path(&format!("edit.kinewright-assets/studio/objects/{backup}"));
         assert_eq!(fs::read(&backup_path).unwrap(), bytes.as_bytes());
         let inputs = bundle.empty_inputs().unwrap();
-        bundle.save(&core, &inputs.reference).unwrap();
+        bundle.save(&restored, &inputs.reference).unwrap();
         drop(inputs);
         drop(bundle);
         assert_eq!(fs::read(&backup_path).unwrap(), bytes.as_bytes());
         let admission = BundleWriteAdmission::read(&path).unwrap();
-        let bundle = ProjectBundle::activate(&path, admission).unwrap();
+        let bundle = ProjectBundle::activate(&path, admission, core.history_pool()).unwrap();
         assert_eq!(bundle.project_id(), &id);
         assert_eq!(bundle.manual_branch_id(), &branch);
     }
@@ -1671,7 +1743,7 @@ mod durable_bundle {
 #[cfg(windows)]
 #[test]
 fn windows_portable_fixtures_refuse_durability_without_mutation() {
-    use kinewright_core::{Command, Core, Document, JournalCommand, TimelineRevision};
+    use kinewright_core::{Command, Document, JournalCommand, TimelineRevision};
     use kinewright_project::{bundle::BundleWriteAdmission, headless::save_headless_bundle};
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../kinewright-agent/tests/fixtures/ja");
@@ -1705,7 +1777,7 @@ fn windows_portable_fixtures_refuse_durability_without_mutation() {
                         .unwrap()
                         .document
                 });
-        let core = Core::spawn_at(
+        let core = Core::for_test_at_revision(
             document,
             TimelineRevision(fixture["initial"]["revision"].as_u64().unwrap()),
         )

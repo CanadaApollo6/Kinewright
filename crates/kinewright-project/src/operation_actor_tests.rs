@@ -636,6 +636,64 @@ fn manual_actor_fences_raw_handles_and_stale_permits_without_changing_pending_wo
     assert!(!locked(&core));
 }
 #[test]
+fn snapshot_install_revokes_the_old_stream_before_a_fresh_manual_lease() {
+    let pool = HistoryPool::new(PoolLimits::default());
+    let origin = origin();
+    let core = Core::spawn(&pool, Role::Ordinary, origin, document()).unwrap();
+    let attachment = core.attach(&Proof).unwrap();
+    let permit = attachment
+        .manual_permit(
+            &Proof,
+            None,
+            producer_lease(&core, core.creation_branch().unwrap(), 1),
+            crate::operation_inputs::ManualInputs::fixture(),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap();
+    assert!(permit.is_current().unwrap());
+    let cut = attachment.freeze(&Proof).unwrap();
+    attachment
+        .install_snapshot(
+            &Proof,
+            cut,
+            core.export_history().unwrap().validate().unwrap(),
+        )
+        .unwrap();
+    assert!(!permit.is_current().unwrap(), "INSTALL_REVOKES_OLD_STREAM");
+    let cut = attachment.capture(&Proof).unwrap();
+    let fresh = attachment
+        .manual_permit(
+            &Proof,
+            Some(cut),
+            producer_lease(&core, core.creation_branch().unwrap(), 2),
+            crate::operation_inputs::ManualInputs::fixture(),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap();
+    assert!(fresh.is_current().unwrap());
+    assert!(matches!(
+        permit.request(Command::Do(lock(true))),
+        Err(Refusal {
+            error: Error::MutationRefused(CoreMutationRefusal::ManualPermitRequired),
+            ..
+        })
+    ));
+    assert!(matches!(
+        fresh.request(Command::Do(lock(true))).unwrap(),
+        Event::DocumentChanged { .. }
+    ));
+    let pending = fresh.pending().unwrap();
+    assert_eq!(
+        pending[0].decode().unwrap().accepted,
+        kinewright_core::undo::CommandKey {
+            epoch: core.change_id().unwrap().position.epoch,
+            position: 0,
+        },
+        "NEW_STREAM_ACCEPTS_THE_INSTALLED_EPOCHS_FIRST_KEY"
+    );
+}
+
+#[test]
 fn manual_actor_records_only_normalised_successes_and_explicit_close() {
     let pool = HistoryPool::new(PoolLimits::default());
     let origin = origin();
@@ -860,14 +918,9 @@ fn manual_input_admission_is_atomic_after_kernel_validation_and_keeps_external_l
         "UNHASHED_MEDIA_REMAINS_AN_EXTERNAL_LOCATOR"
     );
     let accepted = permit.pending().unwrap().remove(0).decode().unwrap();
-    assert_eq!(
-        accepted.context.inputs,
-        vec![
-            crate::operation_inputs::ManualInputs::fixture()
-                .reference()
-                .clone()
-        ],
-        "ACCEPTED_COMMAND_OWNS_ITS_CERTIFIED_INPUT_CONTEXT"
+    assert!(
+        accepted.context.inputs.is_empty(),
+        "EXTERNAL_LOCATOR_NEVER_CLAIMS_OWNED_INPUT_CONTEXT"
     );
 }
 
@@ -904,13 +957,12 @@ fn an_install_requires_draining_the_original_outbox_and_rebinding_its_new_epoch(
     let selected = core.export_history().unwrap().validate().unwrap();
     attachment.install_snapshot(&Proof, cut, selected).unwrap();
     let installed = attachment.freeze(&Proof).unwrap();
-    assert_eq!(
-        attachment.resume(&Proof, installed),
-        Err(Error::Protocol(
-            crate::operation_protocol::Conflict::AcceptedKey
-        )),
-        "INSTALL_CANNOT_RESUME_THE_PREVIOUS_EPOCH_STREAM"
+    attachment.resume(&Proof, installed).unwrap();
+    assert!(
+        core.request(Command::Undo).is_err() && permit.request(Command::Undo).is_err(),
+        "INSTALL_CANNOT_RESUME_THE_PREVIOUS_EPOCH_STREAM_OR_A_RAW_PRODUCER"
     );
+    let installed = attachment.freeze(&Proof).unwrap();
     let replacement = attachment
         .manual_permit(
             &Proof,
@@ -1338,6 +1390,11 @@ fn delta_fork_preserves_the_current_occurrences_without_a_parent_capture() {
         snapshot.history().undo.is_empty() && snapshot.history().redo.is_empty(),
         "DELTA_FORK_STARTS_WITH_EMPTY_STACKS"
     );
+    assert_eq!(
+        snapshot.history().epoch,
+        before.position.epoch + 1,
+        "ACTOR_FORK_ADVANCES_THE_PARENT_CAPTURE_EPOCH"
+    );
     assert_eq!(child.change_id().unwrap().revision, TimelineRevision(0));
     drop(snapshot);
     let track = match child.request(Command::Query(Query::Document)).unwrap() {
@@ -1506,4 +1563,41 @@ fn native_publications_are_identical_to_the_peers_selected_install() {
             );
         }
     }
+}
+
+#[test]
+fn the_bound_owner_can_reacquire_a_frozen_attachment_without_thawing_it() {
+    struct Other;
+    let pool = HistoryPool::new(PoolLimits::default());
+    let core = small(&pool, Role::Ordinary);
+    core.request(Command::Do(lock(true))).unwrap();
+    let owner = core.attach(&Proof).unwrap();
+    let cut = owner.freeze(&Proof).unwrap();
+    drop(owner);
+    let owner = core
+        .attach(&Proof)
+        .expect("FROZEN_PUBLICATION_REACQUIRES_THE_SAME_OWNER");
+    assert!(
+        core.attach(&Other).is_err(),
+        "FROZEN_PUBLICATION_NEVER_TRANSFERS_AUTHORITY"
+    );
+    assert_eq!(
+        core.attachment_state().unwrap(),
+        AttachmentState::Frozen,
+        "REACQUIRING_AN_OWNER_DOES_NOT_RESUME_EDITING"
+    );
+    let same = owner
+        .freeze_published(
+            &Proof,
+            cut.identity(),
+            cut.change().position,
+            cut.change().revision,
+        )
+        .unwrap();
+    assert_eq!(
+        same, cut,
+        "PUBLISHED_SHADOW_CUT_HAS_THE_SAME_COMBINED_IDENTITY"
+    );
+    owner.resume(&Proof, same).unwrap();
+    assert!(locked(&core));
 }

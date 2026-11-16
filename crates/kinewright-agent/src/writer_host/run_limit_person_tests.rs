@@ -88,7 +88,7 @@ fn person_latched_fixture_inner(
             owner.persist_durable_branch(&mut candidate).unwrap();
             f.brief.scope.base = owner.candidate_binding(candidate.branch_id()).unwrap();
         }
-        owner.core().export_history().unwrap().document
+        document_for_test(owner.core())
     };
     f.brief.scope =
         crate::orchestration::policy::director_scope(&document, f.brief.scope.base.clone())
@@ -160,7 +160,7 @@ fn person_latched_fixture_inner(
             Ok(mut branch) => {
                 for _ in 0..16 {
                     let locked =
-                        branch.core().export_history().unwrap().document.tracks[0].sync_lock;
+                        branch.core().export_history().unwrap().history().document.tracks[0].sync_lock;
                     assert!(matches!(
                         branch
                             .core()
@@ -270,7 +270,7 @@ fn person_latched_fixture_inner(
     (f, run, client)
 }
 
-fn person_history_redo(core: &Core, marker: u64) -> kinewright_core::HistorySnapshot {
+fn person_history_redo(core: &Core, marker: u64) -> kinewright_project::operation_actor::PortableHistory {
     for command in [
         kinewright_core::Command::Do(history_marker(marker)),
         kinewright_core::Command::Do(history_marker(marker + 1)),
@@ -284,7 +284,7 @@ fn person_history_redo(core: &Core, marker: u64) -> kinewright_core::HistorySnap
             "PERSON_MANUAL_EDIT"
         );
     }
-    core.export_history().unwrap()
+    core.portable_history().unwrap()
 }
 
 fn person_voice_wav() -> Vec<u8> {
@@ -307,7 +307,7 @@ fn person_voice_wav() -> Vec<u8> {
     bytes
 }
 
-fn person_save(f: &Fixture, marker: u64) -> kinewright_core::HistorySnapshot {
+fn person_save(f: &Fixture, marker: u64) -> kinewright_project::operation_actor::PortableHistory {
     let history = {
         let host = f.host.owner.upgrade().unwrap();
         let owner = host.lock().unwrap();
@@ -316,15 +316,15 @@ fn person_save(f: &Fixture, marker: u64) -> kinewright_core::HistorySnapshot {
     let saved = ok(
         f.editor
             .request(HostCommand::Save {
-                snapshot: HostSnapshot::from_history(history.clone()).unwrap(),
+                snapshot: host_snapshot_for_test(&f.host),
             })
             .unwrap(),
         "PERSON_SAVE_APPLIED",
     );
     assert!(saved.saved.is_some(), "PERSON_VERIFIED_SAVE");
     assert_eq!(
-        saved.history.as_ref(),
-        Some(&history),
+        saved.history.as_ref().map(kinewright_project::operation_actor::PortableHistory::identity),
+        Some(history.identity()),
         "PERSON_SAVE_EXACT_REDO"
     );
     let host = f.host.owner.upgrade().unwrap();
@@ -403,7 +403,8 @@ fn person_metadata(f: &Fixture) -> kinewright_project::studio_records::SnapshotK
     {
         let host = f.host.owner.upgrade().unwrap();
         let owner = host.lock().unwrap();
-        let document = owner.core().export_history().unwrap().document;
+        let document_capture = owner.core().export_history().unwrap();
+        let document = &document_capture.history().document;
         revision.anchor.fps.numerator = document.fps.numerator();
         revision.anchor.fps.denominator = document.fps.denominator();
     }
@@ -523,7 +524,7 @@ fn run_limit_person_save_feedback_version_and_dirty_copy_survive_latches() {
                     ),
                     "PERSON_LATER_MANUAL_EDIT"
                 );
-                owner.core().export_history().unwrap()
+                owner.core().portable_history().unwrap()
             };
             let saved = ok(
                 f.editor
@@ -538,9 +539,9 @@ fn run_limit_person_save_feedback_version_and_dirty_copy_survive_latches() {
             let Fixture { host, temp, .. } = f;
             drop(host);
             for (path, expected) in [(&original, &dirty), (&destination, &final_history)] {
-                let reopened = Ja1EditingSession::open(path).unwrap();
+                let reopened = Ja1EditingSession::open(path, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
                 assert_eq!(
-                    &reopened.core().export_history().unwrap(),
+                    &reopened.core().portable_history().unwrap(),
                     expected,
                     "PERSON_CLOSE_REOPEN {latch:?} phase={phase}"
                 );
@@ -574,7 +575,7 @@ fn run_limit_person_admission_is_unavailable_to_task_producers() {
         .lock()
         .unwrap()
         .core()
-        .export_history()
+        .portable_history()
         .unwrap();
     let before = f.projection(&run);
     let denied = model
@@ -723,8 +724,7 @@ fn run_limit_person_gui_history_publication_survives_the_run_latch() {
                 .unwrap(),
             "PERSON_GUI_ACQUIRE",
         );
-        let gui = Core::spawn(Document::default()).unwrap();
-        gui.restore_history(before).unwrap();
+        let gui = kinewright_project::operation_actor::Core::peer_for_test(before).unwrap();
         let replica = Ja1EditingSession::new(
             f.temp.root(),
             &gui,
@@ -732,7 +732,7 @@ fn run_limit_person_gui_history_publication_survives_the_run_latch() {
         )
         .unwrap();
         let permit = replica
-            .bind_manual_producer(lease.manual_lease.unwrap(), lease.manual_inputs.unwrap())
+            .bind_manual_producer(lease.manual_lease.unwrap(), lease.manual_inputs.unwrap(), std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)))
             .unwrap();
         for command in [
             kinewright_core::Command::Do(history_marker(702)),
@@ -781,7 +781,7 @@ fn run_limit_person_gui_history_publication_survives_the_run_latch() {
         let path = f.temp.path("project.kinewright");
         let Fixture { host, temp, .. } = f;
         drop(host);
-        let reopened = Ja1EditingSession::open(&path).unwrap();
+        let reopened = Ja1EditingSession::open(&path, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
         assert_eq!(reopened.core().export_history().unwrap(), expected);
         drop(reopened);
         drop(temp);

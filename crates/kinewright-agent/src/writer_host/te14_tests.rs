@@ -130,7 +130,7 @@ fn te14_scoped_context_expands_the_outside_view_dependency() {
         "TE14_READ_CANNOT_EXPAND_EDIT_AUTHORITY"
     );
     let core = te13_core(&f, &run, &parent.task);
-    assert!(core.export_history().unwrap().cursor.undo.is_empty());
+    assert!(core.export_history().unwrap().history().undo.is_empty());
 }
 #[test]
 fn te14_neighbouring_words_match_the_full_transcript_decision() {
@@ -634,7 +634,7 @@ fn te14_media_fixture() -> (Fixture, RunId, TaskId, Core, C4Mcp, std::path::Path
         owner.persist_durable_branch(&mut candidate).unwrap();
         f.brief.scope.base = owner.candidate_binding(candidate.branch_id()).unwrap();
         f.brief.inputs = owner.current_inputs_ref().clone();
-        (*owner.core().export_history().unwrap().document).clone()
+        (*owner.core().export_history().unwrap().history().document).clone()
     };
     let operations = vec![
         Operation::AddTrack {

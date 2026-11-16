@@ -2,7 +2,8 @@ use crate::{
     bundle::BundleError, bundle_records::ProjectId, namespace::ProjectNamespace,
     storage_budget::StorageLimits, store::ProjectStore,
 };
-use kinewright_core::{Core, Document, Marker, MarkerId, TimeCode};
+use kinewright_core::Core;
+use kinewright_core::{Document, Marker, MarkerId, TimeCode};
 use kinewright_media::test_support::TempDirectory;
 
 #[test]

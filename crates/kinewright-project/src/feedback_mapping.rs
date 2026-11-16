@@ -3,7 +3,7 @@
 
 use crate::{
     bundle::{BundleError, ProjectBundle},
-    bundle_records::{BranchCheckpoint, LineageRecord, ObjectRef, OccurrenceId},
+    bundle_records::{BranchCheckpoint, ObjectRef, OccurrenceId},
     studio_records::{
         CommentResolution, FeedbackRevision, ResolveFeedback, SpatialStatus, TemporalStatus,
     },
@@ -66,12 +66,27 @@ impl ProjectBundle {
         let candidate = self
             .store()
             .read_record::<Document>(&checkpoint.document_ref)?;
-        let old_lineage = self
+        let original_checkpoint = self
             .store()
-            .read_record::<LineageRecord>(&snapshot.descriptor.lineage_ref)?;
-        let new_lineage = self
-            .store()
-            .read_record::<LineageRecord>(&checkpoint.lineage_ref)?;
+            .read_record::<BranchCheckpoint>(&snapshot.descriptor.checkpoint_ref)?;
+        let old_reader = original_checkpoint
+            .open(self.store(), self.history_pool())?
+            .into_reader()?;
+        let depth = old_reader.history().undo().len();
+        let old_boundary = old_reader.into_boundary(depth)?;
+        let old_lineage = old_boundary.lineage();
+        let new_reader = checkpoint
+            .open(self.store(), self.history_pool())?
+            .into_reader()?;
+        let future = revision
+            .anchor
+            .target
+            .as_ref()
+            .and_then(|target| target.occurrence_id.as_ref())
+            .is_some_and(|occurrence| new_reader.occurrence_in_redo(occurrence));
+        let depth = new_reader.history().undo().len();
+        let new_boundary = new_reader.into_boundary(depth)?;
+        let new_lineage = new_boundary.lineage();
         let mut result = MappedFeedback {
             resolution: CommentResolution {
                 original_ref: request.comment_revision_ref.clone(),
@@ -96,7 +111,7 @@ impl ProjectBundle {
         let Some(occurrence) = &target.occurrence_id else {
             return Ok(result);
         };
-        if old_lineage.current.get(&target.local_clip_id) != Some(occurrence)
+        if old_lineage.occurrences.get(&target.local_clip_id) != Some(occurrence)
             || revision.anchor.snapshot.document_hash != snapshot.descriptor.document_ref.sha256
             || revision.anchor.fps.numerator != origin.fps.numerator()
             || revision.anchor.fps.denominator != origin.fps.denominator()
@@ -144,15 +159,15 @@ impl ProjectBundle {
             return Ok(result);
         }
         // Undo can leave the occurrence only in redo; absent ancestry cannot prove removal.
-        let mut removal_proven = !is_future_occurrence(occurrence, &new_lineage);
+        let mut removal_proven = !future;
         for track in &candidate.tracks {
             for clip in &track.clips {
-                let Some(current) = new_lineage.current.get(&clip.id) else {
+                let Some(current) = new_lineage.occurrences.get(&clip.id) else {
                     removal_proven = false;
                     continue;
                 };
-                if !descends_from(current, occurrence, &new_lineage)
-                    && !descends_from(occurrence, current, &old_lineage)
+                if !descends_from(current, occurrence, new_lineage)
+                    && !descends_from(occurrence, current, old_lineage)
                 {
                     continue;
                 }
@@ -279,7 +294,11 @@ fn drawn_points(bytes: &[u8]) -> Result<Vec<[f64; 2]>, BundleError> {
     }
 }
 
-fn descends_from(current: &OccurrenceId, origin: &OccurrenceId, lineage: &LineageRecord) -> bool {
+fn descends_from(
+    current: &OccurrenceId,
+    origin: &OccurrenceId,
+    lineage: &crate::operation_history::Lineage,
+) -> bool {
     let mut next = current;
     // The persisted, bounded ancestry owns the edges. The bound also refuses cycles.
     for _ in 0..=lineage.split_ancestry.len() {
@@ -296,14 +315,6 @@ fn descends_from(current: &OccurrenceId, origin: &OccurrenceId, lineage: &Lineag
         next = parent;
     }
     false
-}
-
-fn is_future_occurrence(occurrence: &OccurrenceId, lineage: &LineageRecord) -> bool {
-    lineage
-        .redo
-        .iter()
-        .flat_map(|map| map.values())
-        .any(|known| known == occurrence)
 }
 
 #[cfg(test)]
@@ -332,7 +343,7 @@ mod tests {
             creation_batch_id: crate::bundle_records::BatchId::fresh().unwrap(),
             result_ordinal: 1,
         };
-        let mut lineage = LineageRecord {
+        let mut lineage = crate::bundle_records::LineageRecord {
             branch_origin: branch,
             baseline: std::collections::BTreeMap::default(),
             current: std::collections::BTreeMap::default(),
@@ -341,10 +352,20 @@ mod tests {
             split_ancestry: vec![],
         };
         assert!(
-            is_future_occurrence(&child, &lineage),
+            lineage
+                .redo
+                .iter()
+                .flat_map(|map| map.values())
+                .any(|known| known == &child),
             "S3_UNPROVEN_ANCESTRY_IS_NOT_REMOVAL"
         );
         lineage.redo.clear();
-        assert!(!is_future_occurrence(&child, &lineage));
+        assert!(
+            !lineage
+                .redo
+                .iter()
+                .flat_map(|map| map.values())
+                .any(|known| known == &child)
+        );
     }
 }

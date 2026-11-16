@@ -13,7 +13,7 @@ struct StudioOwnedColour {
     app: KinewrightApp,
     _engine: Arc<FfmpegMediaEngine>,
     path: std::path::PathBuf,
-    saved: kinewright_core::HistorySnapshot,
+    saved: kinewright_project::operation_history::OwnerSnapshot,
     observation: IncidentObservation,
 }
 
@@ -104,11 +104,14 @@ fn studio_owned_colour_finish(mut fixture: StudioOwnedColour, incident: Incident
         "the owned document stays saveable: {saved:?} {}",
         attachment.message
     );
-    let restored = kinewright_core::Core::spawn(Document::default()).unwrap();
-    kinewright_project::bundle::LoadedBundle::read(&fixture.path)
-        .unwrap()
-        .restore_manual(&restored)
-        .unwrap();
+    let mut loaded = kinewright_project::bundle::LoadedBundle::read(
+        &fixture.path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let restored = loaded.open_manual().unwrap();
     assert_eq!(restored.export_history().unwrap(), fixture.saved);
     assert!(app.projects[0].ja1.as_mut().unwrap().close());
     app.projects[0].ja1 = None;

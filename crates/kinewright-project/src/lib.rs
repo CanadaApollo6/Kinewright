@@ -23,6 +23,8 @@ pub mod operation_checkpoint;
 pub mod operation_history;
 pub mod operation_inputs;
 pub mod operation_protocol;
+mod operation_publication;
+mod operation_wire;
 pub mod rescue_record;
 pub use history_save::{AttemptBinding, ProjectAttachment};
 #[cfg(feature = "test-util")]

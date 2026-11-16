@@ -7,9 +7,10 @@ use kinewright_agent::{
         HostSnapshot, SessionRoots, WriterHost,
     },
 };
-use kinewright_core::{Core, Document};
+use kinewright_core::Document;
 use kinewright_media::test_support::TempDirectory;
 use kinewright_project::bundle::BundleError;
+use kinewright_project::operation_actor::Core;
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, Write},
@@ -151,6 +152,30 @@ fn config(path: &Path, named: Option<PathBuf>) -> HostConfig {
         origin: HostOrigin::Headless,
     }
 }
+#[cfg(target_os = "linux")]
+fn handoff_config(
+    source: &mut kinewright_project::editing_session::Ja1EditingSession,
+    root: &Path,
+) -> (HostConfig, kinewright_agent::writer_host::SourceServer) {
+    use kinewright_agent::writer_host::{HostSourceBinding, SourceServer};
+    let prepared = source.prepare_host_attachment().unwrap();
+    let callback = match prepared.source_service {
+        Some(service) => SourceServer::start(service).unwrap(),
+        None => SourceServer::start_context(|| Ok(())).unwrap(),
+    };
+    let mut configuration = config(root, prepared.named_path);
+    configuration.origin = HostOrigin::Gui {
+        initial_snapshot: Some(HostSnapshot::from_history(prepared.history).unwrap()),
+        expected_root_sha256: prepared.expected_root_sha256,
+        expected_project_id: prepared.project_id,
+        retention: HostSourceBinding {
+            inputs: prepared.source.as_ref().map(|_| prepared.inputs),
+            source: prepared.source,
+            callback: callback.bootstrap(),
+        },
+    };
+    (configuration, callback)
+}
 fn successful(
     client: &HostClient,
     command: HostCommand,
@@ -164,7 +189,7 @@ fn successful(
     reply
 }
 fn snapshot() -> HostSnapshot {
-    HostSnapshot::capture(&Core::spawn(Document::default()).unwrap()).unwrap()
+    HostSnapshot::capture(&Core::for_test(Document::default()).unwrap()).unwrap()
 }
 fn credential(auth: &HostAuth) -> String {
     serde_json::to_value(auth)
@@ -379,18 +404,29 @@ fn roots_and_forwarded_roots_cover_all_file_surfaces() {
     let named = {
         use kinewright_project::bundle::{BundleWriteAdmission, ProjectBundle};
         let path = narrower.join("source.kinewright");
-        let mut owner =
-            ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
+        let mut owner = ProjectBundle::activate(
+            &path,
+            BundleWriteAdmission::new_document(),
+            core.history_pool(),
+        )
+        .unwrap();
         let inputs = owner.empty_inputs().unwrap().reference.clone();
-        owner
-            .save(&Core::spawn(Document::default()).unwrap(), &inputs)
-            .unwrap();
+        owner.save(&core, &inputs).unwrap();
         Some(path)
     };
     #[cfg(not(target_os = "linux"))]
     let named = None;
     let host = WriterHost::start(config(root.root(), named)).unwrap();
     let client = host.client();
+    let snapshot = || {
+        HostSnapshot::from_history(
+            successful(&client, HostCommand::ReadHistory)
+                .history
+                .unwrap(),
+        )
+        .unwrap()
+    };
     #[cfg(target_os = "linux")]
     successful(
         &client,
@@ -673,7 +709,7 @@ fn host_failure_preserves_originating_context_or_refuses_recovery() {
         };
         use std::io::Read as _;
         let root = temp(&format!("c8-lifetime-{mode}"));
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         edit_gui_history_with_redo(&core);
         let mut origin =
             Ja1EditingSession::new(root.root(), &core, StorageLimits::default()).unwrap();
@@ -753,7 +789,7 @@ fn host_failure_preserves_originating_context_or_refuses_recovery() {
         let mut private_pipe = child.stdin.take().unwrap();
         let mut configuration = config(root.root(), None);
         configuration.origin = HostOrigin::Gui {
-            initial_snapshot: HostSnapshot::from_history(prepared.history.clone()).unwrap(),
+            initial_snapshot: Some(HostSnapshot::from_history(prepared.history.clone()).unwrap()),
             retention: kinewright_agent::writer_host::HostSourceBinding {
                 source: Some(descriptor.clone()),
                 inputs: Some(inputs.clone()),
@@ -819,9 +855,7 @@ fn host_failure_preserves_originating_context_or_refuses_recovery() {
             .request(HostCommand::FirstSave {
                 destination: source_root.join("inside-source.kinewright"),
                 snapshot: HostSnapshot {
-                    history_sha256: kinewright_media::sha256_bytes(
-                        &serde_json::to_vec(&prepared.history).unwrap(),
-                    ),
+                    history_sha256: prepared.history.identity().to_string(),
                     history: prepared.history.clone(),
                 },
                 source: descriptor.clone(),
@@ -843,9 +877,7 @@ fn host_failure_preserves_originating_context_or_refuses_recovery() {
             HostCommand::FirstSave {
                 destination: path.clone(),
                 snapshot: HostSnapshot {
-                    history_sha256: kinewright_media::sha256_bytes(
-                        &serde_json::to_vec(&prepared.history).unwrap(),
-                    ),
+                    history_sha256: prepared.history.identity().to_string(),
                     history: prepared.history.clone(),
                 },
                 source: descriptor.clone(),
@@ -892,7 +924,7 @@ fn host_failure_preserves_originating_context_or_refuses_recovery() {
         );
         let mut replacement = config(root.root(), Some(path.clone()));
         replacement.origin = HostOrigin::Gui {
-            initial_snapshot: HostSnapshot::from_history(prepared.history.clone()).unwrap(),
+            initial_snapshot: Some(HostSnapshot::from_history(prepared.history.clone()).unwrap()),
             retention: kinewright_agent::writer_host::HostSourceBinding {
                 source: Some(descriptor.clone()),
                 inputs: Some(inputs.clone()),
@@ -903,12 +935,17 @@ fn host_failure_preserves_originating_context_or_refuses_recovery() {
                 .as_ref()
                 .map(|report| report.root_sha256.clone()),
             expected_project_id: Some(
-                LoadedBundle::read(&path)
-                    .unwrap()
-                    .root()
-                    .unwrap()
-                    .project_id
-                    .clone(),
+                LoadedBundle::read(
+                    &path,
+                    &kinewright_project::operation_history::HistoryPool::new(
+                        kinewright_project::operation_history::PoolLimits::default(),
+                    ),
+                )
+                .unwrap()
+                .root()
+                .unwrap()
+                .project_id
+                .clone(),
             ),
         };
         let prior = admission::tree(root.root());
@@ -921,7 +958,7 @@ fn host_failure_preserves_originating_context_or_refuses_recovery() {
         assert!(trace.events.is_empty());
         assert_eq!(admission::tree(root.root()), prior);
         origin.host_lost().unwrap();
-        let cut = core.export_history().unwrap();
+        let cut = serde_json::to_value(core.export_history().unwrap()).unwrap();
         assert!(origin.freeze_host_cut().is_err());
         for operation in 0..3 {
             let before = admission::tree(root.root());
@@ -943,7 +980,10 @@ fn host_failure_preserves_originating_context_or_refuses_recovery() {
                 "unproved replacement retention accepted route {operation}"
             );
             assert_eq!(admission::tree(root.root()), before);
-            assert_eq!(core.export_history().unwrap(), cut);
+            assert_eq!(
+                serde_json::to_value(core.export_history().unwrap()).unwrap(),
+                cut
+            );
             assert_eq!(charged_identity(origin.source().unwrap().store()), identity);
         }
         let mut retained_bytes = Vec::new();
@@ -969,10 +1009,26 @@ fn host_failure_preserves_originating_context_or_refuses_recovery() {
         assert_eq!(retired.reserved_bytes, 0);
         assert_eq!(retired.reserved_copy_bytes, 0);
         assert!(!retired.damaged_accounting);
-        let loaded = LoadedBundle::read(&path).unwrap();
-        let durable = Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&durable).unwrap();
-        assert_eq!(durable.export_history().unwrap(), cut);
+        let mut loaded = LoadedBundle::read(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
+        let durable = loaded.open_manual().unwrap();
+        let actual = serde_json::to_value(durable.export_history().unwrap()).unwrap();
+        let mut expected = cut;
+        assert!(
+            actual["history"]["epoch"].as_u64().unwrap()
+                > expected["history"]["epoch"].as_u64().unwrap(),
+            "FIRST_SAVE_DESTINATION_STARTS_ITS_OWN_EPOCH"
+        );
+        expected["history"]["epoch"] = actual["history"]["epoch"].clone();
+        assert_eq!(
+            actual, expected,
+            "FIRST_SAVE_RETAINS_EVERY_ORIGINAL_COMMAND_AND_OWNER_FACT"
+        );
         assert_eq!(
             std::fs::read(
                 path.parent()
@@ -1015,14 +1071,25 @@ fn named_gui_bootstrap_preserves_unsaved_history_and_saved_identity() {
     };
     let root = temp("c8-named-bootstrap");
     let path = root.path("named.kinewright");
-    let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let original = Core::for_test(Document::default()).unwrap();
+    let mut bundle = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        original.history_pool(),
+    )
+    .unwrap();
     let inputs = bundle.empty_inputs().unwrap().reference.clone();
-    let saved = bundle
-        .save(&Core::spawn(Document::default()).unwrap(), &inputs)
-        .unwrap();
+    let saved = bundle.save(&original, &inputs).unwrap();
+    drop(original);
     drop(bundle);
     let before = std::fs::read(&path).unwrap();
-    let mut gui = Ja1EditingSession::open(&path).unwrap();
+    let mut gui = Ja1EditingSession::open(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     let core = gui.core().clone();
     edit_gui_history_with_redo(&core);
     let prepared = gui.prepare_host_attachment().unwrap();
@@ -1042,7 +1109,7 @@ fn named_gui_bootstrap_preserves_unsaved_history_and_saved_identity() {
             inputs: None,
             callback: callback.bootstrap(),
         },
-        initial_snapshot: HostSnapshot::from_history(prepared.history.clone()).unwrap(),
+        initial_snapshot: Some(HostSnapshot::from_history(prepared.history.clone()).unwrap()),
         expected_root_sha256: prepared.expected_root_sha256,
         expected_project_id: prepared.project_id,
     };
@@ -1057,7 +1124,10 @@ fn named_gui_bootstrap_preserves_unsaved_history_and_saved_identity() {
     assert!(gui.dirty().unwrap());
     assert_eq!(std::fs::read(&path).unwrap(), before);
     host.orderly();
-    assert_eq!(core.export_history().unwrap(), prepared.history);
+    assert_eq!(
+        core.snapshot_identity().unwrap(),
+        prepared.history.identity()
+    );
     drop(callback);
     assert!(gui.close_originating_source().unwrap());
 }
@@ -1073,7 +1143,7 @@ fn lost_callback_refuses_all_host_publication_routes() {
         bundle_records::BranchId, editing_session::Ja1EditingSession, storage_budget::StorageLimits,
     };
     let root = temp("c8-retention-proof-loss");
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     let mut origin = Ja1EditingSession::new(root.root(), &core, StorageLimits::default()).unwrap();
     let prepared = origin.prepare_host_attachment().unwrap();
     let descriptor = prepared.source.unwrap();
@@ -1085,7 +1155,7 @@ fn lost_callback_refuses_all_host_publication_routes() {
     let bootstrap = callback.bootstrap();
     let mut configuration = config(root.root(), None);
     configuration.origin = HostOrigin::Gui {
-        initial_snapshot: HostSnapshot::from_history(prepared.history.clone()).unwrap(),
+        initial_snapshot: Some(HostSnapshot::from_history(prepared.history.clone()).unwrap()),
         retention: HostSourceBinding {
             source: Some(descriptor.clone()),
             inputs: Some(prepared.inputs.clone()),
@@ -1096,9 +1166,7 @@ fn lost_callback_refuses_all_host_publication_routes() {
     };
     let mut host = HostCommandOwner::open(configuration).unwrap();
     let snapshot = HostSnapshot {
-        history_sha256: kinewright_media::sha256_bytes(
-            &serde_json::to_vec(&prepared.history).unwrap(),
-        ),
+        history_sha256: prepared.history.identity().to_string(),
         history: prepared.history,
     };
     let saved = host.execute(
@@ -1115,6 +1183,8 @@ fn lost_callback_refuses_all_host_publication_routes() {
         saved.error.is_none() && saved.saved.is_some(),
         "actual source/host positive publication must run first"
     );
+    drop(saved);
+    let source_snapshot = core.snapshot_identity().unwrap();
     let identity = charged_identity(origin.source().unwrap().store());
     let before = admission::tree(root.root());
     drop(callback); // Lose only the transport. The actual GUI source and its charges survive.
@@ -1167,8 +1237,9 @@ fn lost_callback_refuses_all_host_publication_routes() {
         assert_eq!(admission::tree(root.root()), before);
         assert_eq!(charged_identity(origin.source().unwrap().store()), identity);
         assert_eq!(
-            core.export_history().unwrap(),
-            origin.core().export_history().unwrap()
+            core.snapshot_identity().unwrap(),
+            source_snapshot,
+            "RETENTION_LOSS_LEAVES_THE_COMPLETE_SOURCE_OWNER_UNCHANGED"
         );
     }
     let queried = host.execute(HostCommand::ReadHistory, roots(root.root()));
@@ -1210,7 +1281,9 @@ fn w14_headless_and_agent_admission_precedes_mutation() {
             let current = current
                 .switch_attachment
                 .ok_or(BundleError::HistoryBarrierInvariant)?;
-            current.verify()?;
+            current.verify(&kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ))?;
             assert_eq!(current.history, history);
             let confirmed = host.execute(
                 HostCommand::ConfirmSwitch {
@@ -1225,7 +1298,7 @@ fn w14_headless_and_agent_admission_precedes_mutation() {
             assert!(confirmed.manual_lease.is_some());
         }
         let snapshot = HostSnapshot {
-            history_sha256: kinewright_media::sha256_bytes(&serde_json::to_vec(&history).unwrap()),
+            history_sha256: history.identity().to_string(),
             history,
         };
         let reply = host.execute(
@@ -1250,9 +1323,13 @@ fn g04_two_process_lock_save_alias_and_discovery() {
         };
         let root = temp("c8-real-writers");
         let path = root.path("a.kinewright");
-        let core = Core::spawn(Document::default()).unwrap();
-        let mut owner =
-            ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
+        let mut owner = ProjectBundle::activate(
+            &path,
+            BundleWriteAdmission::new_document(),
+            core.history_pool(),
+        )
+        .unwrap();
         let inputs = owner.empty_inputs().unwrap().reference.clone();
         owner.save(&core, &inputs).unwrap();
         drop(owner);
@@ -1261,7 +1338,7 @@ fn g04_two_process_lock_save_alias_and_discovery() {
             .history
             .unwrap();
         let snapshot = HostSnapshot {
-            history_sha256: kinewright_media::sha256_bytes(&serde_json::to_vec(&captured).unwrap()),
+            history_sha256: captured.identity().to_string(),
             history: captured,
         };
         successful(
@@ -1305,9 +1382,15 @@ fn g04_two_process_lock_save_alias_and_discovery() {
         let mut next = ProcessHost::start(config(root.root(), Some(path.clone())));
         successful(&next.client, HostCommand::Save { snapshot });
         next.orderly();
-        let loaded = LoadedBundle::read_with_limits_probe(&path, StorageLimits::default()).unwrap();
-        let reader = Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&reader).unwrap();
+        let mut loaded = LoadedBundle::read_with_limits_probe(
+            &path,
+            StorageLimits::default(),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
+        let reader = loaded.open_manual().unwrap();
         assert_eq!(
             reader.export_history().unwrap(),
             core.export_history().unwrap()
@@ -1347,14 +1430,14 @@ fn g05l_two_clients_one_editor_ordered_history() {
         }],
         ..Document::default()
     };
-    let gui = Core::spawn(document).unwrap();
+    let gui = Core::for_test(document).unwrap();
     let path = root.path("manual.kinewright");
     let mut source = Ja1EditingSession::new(root.root(), &gui, StorageLimits::default()).unwrap();
     source.first_save(&path, StorageLimits::default()).unwrap();
-    let _transfer = source.prepare_host_attachment().unwrap();
+    let (configuration, _origin_callback) = handoff_config(&mut source, root.root());
     let cut = source.freeze_host_cut().unwrap();
     source.complete_host_cut(&cut, None, None).unwrap();
-    let host = WriterHost::start(config(root.root(), Some(path.clone()))).unwrap();
+    let host = WriterHost::start(configuration).unwrap();
     let first = host.client();
     let second = HostClient::connect(
         first.endpoint().clone(),
@@ -1408,7 +1491,11 @@ fn g05l_two_clients_one_editor_ordered_history() {
         "a role refusal before root admission cannot disclose protected project metadata"
     );
     let permit = source
-        .bind_manual_producer(lease.clone(), input_context)
+        .bind_manual_producer(
+            lease.clone(),
+            input_context,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        )
         .unwrap();
     let saved_before = successful(&first, HostCommand::Status)
         .status
@@ -1433,12 +1520,10 @@ fn g05l_two_clients_one_editor_ordered_history() {
     }
     let accepted = permit.pending().unwrap();
     let expected = gui.export_history().unwrap();
-    assert_eq!(expected.cursor.undo.len(), 1);
-    assert_eq!(expected.batches.len(), 3);
-    assert_ne!(
-        saved_before,
-        kinewright_project::manual_history::history_sha256(&expected).unwrap()
-    );
+    assert_eq!(expected.history().undo.len(), 1);
+    assert_eq!(expected.history().undo[0].commands().len(), 3);
+    let expected = expected.identity().unwrap();
+    assert_ne!(saved_before, expected.to_string());
     assert_eq!(
         successful(&first, HostCommand::Status)
             .status
@@ -1457,72 +1542,35 @@ fn g05l_two_clients_one_editor_ordered_history() {
             .error
             .is_some()
     );
-    assert!(matches!(
-        gui.request(Edit::Undo).unwrap(),
-        Event::MutationRefused { .. }
-    ));
-    for field in ["digest", "sequence", "batch_id"] {
-        let mut mismatch = accepted[0].clone();
-        match field {
-            "digest" => mismatch.digest.push('f'),
-            "sequence" => mismatch.sequence += 1,
-            _ => mismatch.batch_id.push('f'),
-        }
-        assert!(
-            first
-                .request(HostCommand::CommitHistory {
-                    client: identity.clone(),
-                    messages: vec![mismatch]
-                })
-                .unwrap()
-                .error
-                .is_some(),
-            "the actor-stamped {field} must match its original envelope"
-        );
-    }
-    let mut tampered = accepted[0].clone();
-    let mut envelope = kinewright_project::manual_history::AcceptedManualCommand::decode(&tampered)
-        .unwrap()
-        .envelope;
-    envelope.manual.as_mut().unwrap().predecessor =
-        Some(kinewright_project::bundle_records::BatchId::fresh().unwrap());
-    tampered.envelope = serde_json::to_vec(&envelope).unwrap();
-    tampered.digest = serde_json::to_value(envelope.digest().unwrap())
-        .unwrap()
-        .as_str()
-        .unwrap()
-        .into();
     assert!(
-        first
-            .request(HostCommand::CommitHistory {
-                client: identity.clone(),
-                messages: vec![tampered]
-            })
-            .unwrap()
-            .error
-            .is_some(),
-        "the exact predecessor is mandatory even with matching history bytes"
+        gui.request(Edit::Undo).is_err(),
+        "UNPERMITTED_RAW_HANDLE_CANNOT_EDIT_BOUND_MANUAL_CORE"
     );
-    for pointer in [
-        "/manual/after_sha256",
-        "/manual/cursor_sha256",
-        "/manual/batch/undo_entries",
+    for (pointer, replacement, rechain) in [
+        ("/tip", json!(vec![0; 32]), false),
+        ("/sequence", json!(900), false),
+        ("/context/creation/batch", json!("f".repeat(32)), false),
+        ("/predecessor", json!(vec![0; 32]), true),
+        ("/accepted/position", json!(900), true),
+        ("/id/sequence", json!(900), true),
+        ("/publisher", json!("Portable"), true),
     ] {
-        let mut tampered = accepted[0].clone();
-        let mut value: Value = serde_json::from_slice(&tampered.envelope).unwrap();
-        *value.pointer_mut(pointer).unwrap() = if pointer.ends_with("undo_entries") {
-            json!(900)
-        } else {
-            json!("0".repeat(64))
-        };
-        let envelope: kinewright_project::receipts::CommandEnvelope =
-            serde_json::from_value(value).unwrap();
-        tampered.envelope = serde_json::to_vec(&envelope).unwrap();
-        tampered.digest = serde_json::to_value(envelope.digest().unwrap())
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .into();
+        let mut wire = serde_json::to_value(accepted[0].decode().unwrap()).unwrap();
+        *wire.pointer_mut(pointer).unwrap() = replacement;
+        if rechain {
+            let mut message: kinewright_project::operation_protocol::Message =
+                serde_json::from_value(wire).unwrap();
+            let mut hash = kinewright_hash::Sha256::new();
+            hash.update(b"kinewright/accepted-chain/v1\0");
+            hash.update(
+                &serde_json::to_vec(&(message.predecessor, message.digest().unwrap())).unwrap(),
+            );
+            message.tip = hash.finalize();
+            wire = serde_json::to_value(message).unwrap();
+        }
+        let tampered =
+            serde_json::from_value(serde_json::json!(serde_json::to_string(&wire).unwrap()))
+                .unwrap();
         let before = std::fs::read(&path).unwrap();
         assert!(
             first
@@ -1533,21 +1581,34 @@ fn g05l_two_clients_one_editor_ordered_history() {
                 .unwrap()
                 .error
                 .is_some(),
-            "tampered accepted result was published: {pointer}"
+            "FORGED_NATIVE_STREAM_FIELD_REFUSED: {pointer}"
         );
-        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "FORGED_NATIVE_STREAM_LEAVES_ROOT_UNCHANGED: {pointer}"
+        );
     }
-    let bypass = first
-        .request(HostCommand::Save {
-            snapshot: HostSnapshot::capture(&gui).unwrap(),
-        })
-        .unwrap();
+    let snapshot = HostSnapshot::capture(&gui).unwrap();
+    let wire = serde_json::to_value(&snapshot.history).unwrap();
+    let received: kinewright_project::operation_actor::PortableHistory =
+        serde_json::from_value(wire.clone()).unwrap();
+    assert!(
+        received
+            .validate(&kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default()
+            ))
+            .is_ok(),
+        "HONEST_COALESCED_SENDER_SNAPSHOT_IS_OPENABLE: {wire}"
+    );
+    let bypass = first.request(HostCommand::Save { snapshot }).unwrap();
     assert_eq!(
         bypass.error.unwrap().code,
         "manual_stream_required",
         "a foreground snapshot cannot replace accepted manual messages"
     );
     let mut latencies = Vec::new();
+    let mut acknowledgements = Vec::new();
     for (message, started) in accepted.iter().zip(times) {
         let reply = successful(
             &first,
@@ -1557,38 +1618,51 @@ fn g05l_two_clients_one_editor_ordered_history() {
             },
         );
         latencies.push(started.elapsed().as_secs_f64() * 1000.0);
-        assert_eq!(reply.manual_ack, vec![message.clone()]);
-        let published = LoadedBundle::read(&path).unwrap();
-        let restored = Core::spawn(Document::default()).unwrap();
-        published.restore_manual(&restored).unwrap();
+        assert_native_receipts(&reply.manual_ack, std::slice::from_ref(message));
+        let mut published = LoadedBundle::read(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
+        let restored = published.open_manual().unwrap();
         let durable = restored.export_history().unwrap();
-        let envelope = kinewright_project::manual_history::AcceptedManualCommand::decode(message)
-            .unwrap()
-            .envelope;
-        let metadata = envelope.manual.as_ref().unwrap();
-        assert_eq!(
-            kinewright_project::manual_history::history_sha256(&durable).unwrap(),
-            metadata.after_sha256
-        );
-        assert_eq!(durable.batches.last(), Some(&metadata.batch));
+        let original = message.decode().unwrap();
         assert_eq!(
             published
                 .manual_checkpoint()
                 .unwrap()
-                .batch_ids
-                .last()
+                .stream
+                .as_ref()
                 .unwrap()
-                .as_str(),
-            message.batch_id
+                .receipts()
+                .last()
+                .unwrap(),
+            &reply.manual_ack[0],
+            "PUBLISHED_RECEIPT_NAMES_EACH_INTERMEDIATE_DRAG"
         );
-        assert_eq!(reply.saved.unwrap().history_sha256, metadata.after_sha256);
+        assert!(
+            durable
+                .origins()
+                .iter()
+                .any(|origin| origin.key == original.accepted
+                    && origin.creation == original.context.creation),
+            "DURABLE_COMMAND_RETAINS_ITS_ORIGINAL_IDENTITY"
+        );
+        assert_eq!(
+            reply.saved.unwrap().history_sha256,
+            durable.identity().unwrap().to_string()
+        );
+        acknowledgements.extend(reply.manual_ack);
     }
     source
-        .acknowledge_manual(&permit, accepted.clone())
+        .acknowledge_manual(&permit, acknowledgements)
         .unwrap();
     let durable = manual_history_from(&path);
     assert_eq!(
-        durable, expected,
+        durable.identity().unwrap(),
+        expected,
         "no intermediate drag message may disappear"
     );
     let before_retry = std::fs::read(&path).unwrap();
@@ -1599,7 +1673,7 @@ fn g05l_two_clients_one_editor_ordered_history() {
             messages: accepted.clone(),
         },
     );
-    assert_eq!(retry.manual_ack, accepted);
+    assert_native_receipts(&retry.manual_ack, &accepted);
     assert_eq!(
         std::fs::read(&path).unwrap(),
         before_retry,
@@ -1618,8 +1692,10 @@ fn g05l_two_clients_one_editor_ordered_history() {
                 messages: messages.clone(),
             },
         );
-        assert_eq!(reply.manual_ack, messages);
-        source.acknowledge_manual(&permit, messages).unwrap();
+        assert_native_receipts(&reply.manual_ack, &messages);
+        source
+            .acknowledge_manual(&permit, reply.manual_ack)
+            .unwrap();
         assert_eq!(manual_history_from(&path), gui.export_history().unwrap());
     }
     // A contiguous transport prefix can include many original drag messages.
@@ -1643,22 +1719,28 @@ fn g05l_two_clients_one_editor_ordered_history() {
             messages: messages.clone(),
         },
     );
-    assert_eq!(reply.manual_ack, messages);
+    assert_native_receipts(&reply.manual_ack, &messages);
     source
-        .acknowledge_manual(&permit, messages.clone())
+        .acknowledge_manual(&permit, reply.manual_ack)
         .unwrap();
-    let loaded = LoadedBundle::read(&path).unwrap();
+    let loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     assert_eq!(manual_history_from(&path), gui.export_history().unwrap());
-    assert!(
-        loaded
-            .manual_checkpoint()
-            .unwrap()
-            .batch_ids
-            .iter()
-            .rev()
-            .zip(messages.iter().rev())
-            .all(|(id, message)| id.as_str() == message.batch_id)
-    );
+    let receipts: Vec<_> = loaded
+        .manual_checkpoint()
+        .unwrap()
+        .stream
+        .as_ref()
+        .unwrap()
+        .receipts()
+        .cloned()
+        .collect();
+    assert_native_receipts(&receipts[receipts.len() - messages.len()..], &messages);
     // Report-only uninterrupted drag timing: accept, then exact durable receipt.
     latencies.clear();
     for frame in 0..32 {
@@ -1684,8 +1766,10 @@ fn g05l_two_clients_one_editor_ordered_history() {
             },
         );
         latencies.push(started.elapsed().as_secs_f64() * 1000.0);
-        assert_eq!(reply.manual_ack, messages);
-        source.acknowledge_manual(&permit, messages).unwrap();
+        assert_native_receipts(&reply.manual_ack, &messages);
+        source
+            .acknowledge_manual(&permit, reply.manual_ack)
+            .unwrap();
     }
     if let Some(output) = std::env::var_os("JA_MANUAL_LATENCY_OUTPUT") {
         std::fs::write(output, serde_json::to_vec_pretty(&json!({"accept_to_ack_ms": latencies, "samples":32, "model":"uninterrupted 32-message coalesced drag, sequential accept then durable loopback acknowledgement, test/debug profile"})).unwrap()).unwrap();
@@ -1694,13 +1778,15 @@ fn g05l_two_clients_one_editor_ordered_history() {
 }
 
 #[cfg(target_os = "linux")]
-fn manual_history_from(path: &Path) -> kinewright_core::HistorySnapshot {
-    let core = Core::spawn(Document::default()).unwrap();
-    kinewright_project::bundle::LoadedBundle::read(path)
-        .unwrap()
-        .restore_manual(&core)
-        .unwrap();
-    core.export_history().unwrap()
+fn manual_history_from(path: &Path) -> kinewright_project::operation_history::OwnerSnapshot {
+    let mut loaded = kinewright_project::bundle::LoadedBundle::read(
+        path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    loaded.open_manual().unwrap().export_history().unwrap()
 }
 
 #[cfg(target_os = "linux")]
@@ -1715,7 +1801,7 @@ fn g05l_disk_barrier_keeps_acceptance_local_and_saved_exact() {
         editing_session::Ja1EditingSession, io_observer, storage_budget::StorageLimits,
     };
     let root = temp("c9-disk-barrier");
-    let gui = Core::spawn(Document {
+    let gui = Core::for_test(Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -1728,10 +1814,10 @@ fn g05l_disk_barrier_keeps_acceptance_local_and_saved_exact() {
     let path = root.path("barrier.kinewright");
     let mut source = Ja1EditingSession::new(root.root(), &gui, StorageLimits::default()).unwrap();
     source.first_save(&path, StorageLimits::default()).unwrap();
-    source.prepare_host_attachment().unwrap();
+    let (configuration, _origin_callback) = handoff_config(&mut source, root.root());
     let cut = source.freeze_host_cut().unwrap();
     source.complete_host_cut(&cut, None, None).unwrap();
-    let mut host = HostCommandOwner::open(config(root.root(), Some(path.clone()))).unwrap();
+    let mut host = HostCommandOwner::open(configuration).unwrap();
     let identity = "c".repeat(64);
     let reply = host.execute(
         HostCommand::AcquireManual {
@@ -1742,7 +1828,11 @@ fn g05l_disk_barrier_keeps_acceptance_local_and_saved_exact() {
     assert!(reply.error.is_none(), "{:?}", reply.error);
     let saved = reply.status.saved_digest.unwrap();
     let permit = source
-        .bind_manual_producer(reply.manual_lease.unwrap(), reply.manual_inputs.unwrap())
+        .bind_manual_producer(
+            reply.manual_lease.unwrap(),
+            reply.manual_inputs.unwrap(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        )
         .unwrap();
     let command = |locked| Edit::DoBatchCoalesced {
         operations: vec![Operation::SetTrackSyncLock {
@@ -1794,10 +1884,10 @@ fn g05l_disk_barrier_keeps_acceptance_local_and_saved_exact() {
     ));
     assert!(matches!(
         events.recv_timeout(Duration::from_secs(1)).unwrap(),
-        Event::DocumentChanged {
+        Ok(Event::DocumentChanged {
             journal_command: Some(_),
             ..
-        }
+        })
     ));
     assert_eq!(
         permit.pending().unwrap().len(),
@@ -1811,14 +1901,15 @@ fn g05l_disk_barrier_keeps_acceptance_local_and_saved_exact() {
     assert_ne!(reply.status.saved_digest.as_deref(), Some(saved.as_str()));
     assert_ne!(
         reply.status.saved_digest.as_deref(),
-        Some(
-            kinewright_project::manual_history::history_sha256(&gui.export_history().unwrap())
-                .unwrap()
-                .as_str()
-        ),
+        Some(gui.snapshot_identity().unwrap().to_string().as_str()),
         "the later accepted suffix cannot be labelled Saved"
     );
-    assert_eq!(manual_history_from(&path).batches.len(), 1);
+    assert_eq!(
+        manual_history_from(&path).history().undo[0]
+            .commands()
+            .len(),
+        1
+    );
     source
         .acknowledge_manual(&permit, reply.manual_ack)
         .unwrap();
@@ -1843,7 +1934,7 @@ fn g05l_ack_prefix_is_the_independently_reopened_history() {
     use kinewright_core::{Command as Edit, Operation, Track, TrackId, TrackKind};
     use kinewright_project::{editing_session::Ja1EditingSession, storage_budget::StorageLimits};
     let root = temp("c9-ack");
-    let gui = Core::spawn(Document {
+    let gui = Core::for_test(Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -1856,15 +1947,19 @@ fn g05l_ack_prefix_is_the_independently_reopened_history() {
     let path = root.path("ack.kinewright");
     let mut source = Ja1EditingSession::new(root.root(), &gui, StorageLimits::default()).unwrap();
     source.first_save(&path, StorageLimits::default()).unwrap();
-    source.prepare_host_attachment().unwrap();
+    let (configuration, _origin_callback) = handoff_config(&mut source, root.root());
     let cut = source.freeze_host_cut().unwrap();
     source.complete_host_cut(&cut, None, None).unwrap();
-    let host = WriterHost::start(config(root.root(), Some(path.clone()))).unwrap();
+    let host = WriterHost::start(configuration).unwrap();
     let client = host.client();
     let id = "d".repeat(64);
     let grant = successful(&client, HostCommand::AcquireManual { client: id.clone() });
     let permit = source
-        .bind_manual_producer(grant.manual_lease.unwrap(), grant.manual_inputs.unwrap())
+        .bind_manual_producer(
+            grant.manual_lease.unwrap(),
+            grant.manual_inputs.unwrap(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        )
         .unwrap();
     let baseline = manual_history_from(&path);
     for locked in [false, true, false] {
@@ -1887,23 +1982,29 @@ fn g05l_ack_prefix_is_the_independently_reopened_history() {
             messages: messages.clone(),
         },
     );
-    assert_eq!(reply.manual_ack, messages);
+    assert_native_receipts(&reply.manual_ack, &messages);
     assert_eq!(
         manual_history_from(&path),
         gui.export_history().unwrap(),
         "acknowledged prefix must already be independently durable, including intermediate messages"
     );
-    let loaded = kinewright_project::bundle::LoadedBundle::read(&path).unwrap();
-    assert_eq!(loaded.manual_checkpoint().unwrap().batch_ids.len(), 3);
-    assert!(
-        loaded
-            .manual_checkpoint()
-            .unwrap()
-            .batch_ids
-            .iter()
-            .zip(&messages)
-            .all(|(batch, message)| batch.as_str() == message.batch_id)
-    );
+    let loaded = kinewright_project::bundle::LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let receipts: Vec<_> = loaded
+        .manual_checkpoint()
+        .unwrap()
+        .stream
+        .as_ref()
+        .unwrap()
+        .receipts()
+        .cloned()
+        .collect();
+    assert_native_receipts(&receipts, &messages);
     source
         .acknowledge_manual(&permit, reply.manual_ack)
         .unwrap();
@@ -1924,7 +2025,7 @@ fn g05l_input_context_is_admitted_before_local_acceptance() {
         storage_budget::StorageLimits,
     };
     let root = temp("c9-input-context");
-    let gui = Core::spawn(Document::default()).unwrap();
+    let gui = Core::for_test(Document::default()).unwrap();
     let mut source = Ja1EditingSession::new(root.root(), &gui, StorageLimits::default()).unwrap();
     let store = source.source_mut().unwrap();
     let (asset, entry, media, _expected_bytes) =
@@ -1941,10 +2042,10 @@ fn g05l_input_context_is_admitted_before_local_acceptance() {
     source.first_save(&path, StorageLimits::default()).unwrap();
     drop(inputs);
     drop(media);
-    source.prepare_host_attachment().unwrap();
+    let (configuration, _origin_callback) = handoff_config(&mut source, root.root());
     let cut = source.freeze_host_cut().unwrap();
     source.complete_host_cut(&cut, None, None).unwrap();
-    let host = WriterHost::start(config(root.root(), Some(path.clone()))).unwrap();
+    let host = WriterHost::start(configuration).unwrap();
     let client = host.client();
     let id = "e".repeat(64);
     let grant = successful(&client, HostCommand::AcquireManual { client: id.clone() });
@@ -1954,25 +2055,35 @@ fn g05l_input_context_is_admitted_before_local_acceptance() {
     changed_context.owner_epoch += 1;
     assert!(
         source
-            .bind_manual_producer(lease.clone(), changed_context)
+            .bind_manual_producer(
+                lease.clone(),
+                changed_context,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true))
+            )
             .is_err(),
         "input context must match the exact admitted record bytes"
     );
-    let permit = source.bind_manual_producer(lease, input_context).unwrap();
+    let permit = source
+        .bind_manual_producer(
+            lease,
+            input_context,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        )
+        .unwrap();
     let mut unadmitted = asset.clone();
     unadmitted.id = AssetId(701);
     let before = gui.export_history().unwrap();
-    assert!(before.document.media_pool.is_empty());
+    assert!(before.history().document.media_pool.is_empty());
     let root_before = std::fs::read(&path).unwrap();
     assert!(
         matches!(
             permit
                 .request(Edit::Do(Operation::AddAsset { asset: unadmitted }))
-                .unwrap(),
-            Event::MutationRefused {
-                reason: CoreMutationRefusal::ManualInputRequired,
-                ..
-            }
+                .unwrap_err()
+                .error,
+            kinewright_project::operation_actor::Error::MutationRefused(
+                CoreMutationRefusal::ManualInputRequired
+            )
         ),
         "unadmitted import must refuse before local acceptance"
     );
@@ -1996,7 +2107,7 @@ fn g05l_input_context_is_admitted_before_local_acceptance() {
             messages: messages.clone(),
         },
     );
-    assert_eq!(reply.manual_ack, messages);
+    assert_native_receipts(&reply.manual_ack, &messages);
     source
         .acknowledge_manual(&permit, reply.manual_ack)
         .unwrap();
@@ -2096,4 +2207,36 @@ fn g05l_parent_replacement_does_not_prove_absence() {
 #[test]
 fn g05l_absent_suffix_pressure_publishes_one_shared_floor() {
     c10::pressure_floor();
+}
+
+#[cfg(target_os = "linux")]
+fn assert_native_receipts(
+    receipts: &[kinewright_project::operation_protocol::Receipt],
+    messages: &[kinewright_project::operation_protocol::EncodedMessage],
+) {
+    assert_eq!(
+        receipts.len(),
+        messages.len(),
+        "NATIVE_ACK_COVERS_THE_EXACT_PREFIX"
+    );
+    for (receipt, encoded) in receipts.iter().zip(messages) {
+        let message = encoded.decode().unwrap();
+        assert_eq!(
+            (
+                &receipt.id,
+                receipt.sequence,
+                receipt.accepted,
+                receipt.tip,
+                receipt.command
+            ),
+            (
+                &message.id,
+                message.sequence,
+                message.accepted,
+                message.tip,
+                message.digest().unwrap()
+            ),
+            "NATIVE_ACK_NAMES_THE_EXACT_ORIGINAL_COMMAND"
+        );
+    }
 }
