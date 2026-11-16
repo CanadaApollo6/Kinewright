@@ -81,10 +81,10 @@ pub struct AuditSettings {
     pub short_repeat_words: usize,
     pub gap_us: u64,
     pub speaking_percentile: u8,
-    pub below_speech_cdb: u16,
     pub quietest_sound_cdb: i16,
     pub min_sound_run_us: u64,
-    pub word_edge_us: u64,
+    /// A spoken word start accounts for the next second by default; ends are unused.
+    pub word_start_tolerance_us: u64,
     pub neighbor_us: u64,
     pub max_neighbor_gap_us: u64,
     pub max_phrase_us: u64,
@@ -117,10 +117,9 @@ impl Default for AuditSettings {
             short_repeat_words: 5,
             gap_us: 400_000,
             speaking_percentile: 85,
-            below_speech_cdb: 1_200,
             quietest_sound_cdb: -4_500,
             min_sound_run_us: 100_000,
-            word_edge_us: 50_000,
+            word_start_tolerance_us: 1_000_000,
             neighbor_us: 2_000_000,
             max_neighbor_gap_us: 12_000_000,
             max_phrase_us: 8_000_000,
@@ -191,8 +190,17 @@ fn zero(value: &u64) -> bool {
     *value == 0
 }
 
+/// Measured voice without a nearby source word onset is evidence to review,
+/// not proof of omitted speech. Long word tails can outlast this tolerance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HoleBasis {
+    MeasuredVoiceWithoutNearbyWordStart { after_word_start_us: u64 },
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct Report {
+    pub hole_basis: HoleBasis,
     pub duration_us: u64,
     /// Audit policy snapshot; each input Dialogue retains its own guard policy.
     #[serde(skip_serializing_if = "default_policy")]
@@ -441,7 +449,8 @@ fn validate(settings: &AuditSettings) -> Result<(), AuditError> {
         || settings.max_phrase_us < settings.min_sound_run_us
         || settings.room_tone_jump_cdb > super::LEVEL_FLOOR.unsigned_abs()
         || settings.quiet_phrase_contrast_cdb > super::LEVEL_FLOOR.unsigned_abs()
-        || settings.word_edge_us >= settings.gap_us.div_ceil(2)
+        || settings.word_start_tolerance_us == 0
+        || settings.word_start_tolerance_us > 30_000_000
         || settings.playback_us.is_some_and(|r| r[0] >= r[1])
     {
         return Err(AuditError::Settings);
@@ -535,7 +544,7 @@ pub fn audit<D: Borrow<Dialogue>>(
     let played = leftovers::played(&recordings, &pieces, &tokens);
     joins::inspect(&recordings, &pieces, settings, &mut collector);
     leftovers::inspect(&recordings, &played, &tokens, settings, &mut collector);
-    gaps::inspect(&recordings, &pieces, &played, settings, &mut collector);
+    gaps::inspect(&recordings, &pieces, settings, &mut collector);
     let mut keys = BTreeSet::new();
     let mut listed = Counts::default();
     for item in &collector.items {
@@ -564,6 +573,9 @@ pub fn audit<D: Borrow<Dialogue>>(
         }
     }
     Ok(Report {
+        hole_basis: HoleBasis::MeasuredVoiceWithoutNearbyWordStart {
+            after_word_start_us: settings.word_start_tolerance_us,
+        },
         hole_groups,
         duration_us: duration,
         settings: *settings,

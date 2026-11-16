@@ -650,3 +650,85 @@ Successful isolated shipping targets were removed; `target/` is 18 GiB.
 No Media source changed. Full slow-suite execution, Windows execution,
 provider/paid/dry launches, renderer conformance and real-recording R3 are
 NOT RUN. R3 and word-end ruling 6 remain with the Media worker. M5 stays off.
+
+## Measured holes without recogniser word ends
+
+Hole detection previously subtracted approximate word intervals from playback.
+It now subtracts support windows from spoken source word starts, then measures
+voice-flagged source spans outside them. The default window is one second after
+a start, not a word duration. A continuous voice span needs 100 ms in playback,
+including across source joins. Silence and non-voice background are not holes.
+`holes` counts source portions of these voice spans; `sounding_holes` counts
+portions contributing to a playback-contiguous above-threshold voice run of
+at least 100 ms. Shared playback groups retain their existing source-attribution convention.
+
+The sounding threshold is the prepared recording's relative quiet RMS maximum,
+with a strict greater-than comparison. Its stored speech median and threshold
+are in each Hole. The old all-hop percentile/fixed-floor sounding threshold and
+word-end padding settings are removed. `word_start_tolerance_us` replaces the
+padding setting (default 1,000,000; valid 1 through 30,000,000). Every report
+states `hole_basis: {kind: measured_voice_without_nearby_word_start,
+after_word_start_us: 1000000}`, including when default settings are omitted.
+
+This is review evidence, not proof of omitted speech: VAD or onset errors and
+voice continuing more than a second after the last start can still warn.
+Conversely, a missing word inside the tolerance is not distinguished from the
+known word's tail. One second is an explicit policy choice, not a measured end.
+The detector reads no supplied word end. Other audit checks are unchanged.
+
+Merge with dq1 `7229e6cf`: keep its recogniser provenance, cache invalidation and
+approximate `word_timing` qualification. Use this branch's detector and Hole
+documentation; replace `HoleBasis::ApproximateTranscriptIntervals` with this
+measured-voice variant;
+update/remove `dialogue_audit_stub_ends_label_timing_dependent_hole_counts` in
+favour of `dialogue_audit_word_end_changes_do_not_change_measured_holes`.
+Keep this branch's measured-hole wire assertions/size results and dq1's separate
+legacy transcript qualification. No Media source is changed here.
+
+Counts below are `(holes, sounding_holes)` on synthetic fixtures; these are not
+R3 results on the recording.
+
+| Fixture | Before | After |
+| --- | --- | --- |
+| Same audio, 80 ms word-end stub | (1, 1) | (0, 0) |
+| Same audio, longer supplied end | (0, 0) | (0, 0) |
+| Silence outside the known word | (1, 0) | (0, 0) |
+| Loud non-voice background | (1, 1) | (0, 0) |
+| Untranscribed voice at −55 dBFS, speech median −50 | (1, 0) | (1, 1) |
+| Untranscribed VAD voice below the relative threshold | (1, 0) | (1, 0) |
+
+The two first regressions failed before at `DQ_HOLES_IGNORE_WORD_ENDS` and
+`DQ_HOLES_MEASURE_VOICE`. The Core audit now passes 36 tests, including the
+reported/custom tolerance and cropped-source control; joined 80+80 ms portions
+still meet the minimum together and do not meet it in isolation. Caps tests now
+mark the measured sound as voice, preserving source/run/count assertions.
+
+The quiet 60-join size fixtures previously used one nine-second transcript token
+per phrase. They now give the known delivery frequent onsets, with unique compact
+word IDs. This names distinct words on the two sides and enlarges the dictionary.
+No byte bound was raised: Core flags/all are 164/32,682 bytes; Agent result
+flags/all are 1,074/32,648, with selected Core reports 164/31,870. The old exact
+93/20,260-byte Agent goldens were updated to those measured report sizes.
+The four-kilobyte global summary control passes at 4,070 bytes.
+
+Final gates (logs/result JSON in `target/dq-holes/`):
+
+| Gate | Result | Wall time |
+| --- | --- | --- |
+| Core full suite | 915 passed / 0 failed / 2 ignored | 31.49 s |
+| Agent full suite | 1,765 / 0 / 166 | 1,079.76 s |
+| Agent dialogue module | 58 / 0 / 1 | 27.68 s |
+| Workspace all-target clippy, default / `te1-eval`, warnings denied | Pass / pass | 17.08 / 16.17 s |
+| Workspace build / test no-run | Pass / pass | 36.35 / 67.92 s |
+| Cargo fmt / explicit included-file rustfmt | Pass / pass | 3.77 / 0.04 s |
+| Pin tests | 2 / 0 / 0, 8,856 named fields | 67.51 s |
+| Windows/shipping matrix | Four cross-clippy modes, three Linux builds, three MSVC checks pass | 380.01 s |
+
+Slow-test lint agrees (140 slow tests, 161 ignored entries, 27 equipped skip
+sites); parser/shard selftests pass 52/23. Feature-disabled shipping builds retain
+three existing Agent warnings; warnings-denied clippy is clean. The pin is
+unchanged, including model-visible leaves and OPEN model/option values.
+All eight changed Rust source hashes still match the verified files.
+Successful shipping targets were removed; `target/` is 33 GiB.
+No Media source changed. Full slow-suite and Windows execution, provider/paid/dry
+launches, and the real-recording rehearsal are NOT RUN here. M5 remains off.

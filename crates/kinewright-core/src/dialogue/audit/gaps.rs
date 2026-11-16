@@ -1,27 +1,31 @@
 // Derived from Scarlet packages/mcp/src/gap-sound.ts and dialogue-leftovers.ts at 2cbab542; see LICENSES/scarlet-MIT.txt.
 use super::{
-    AuditSettings, Collector, Dialogue, Item, Level, Location, Piece, PlayedWord, RecordingId,
-    Text, WordKey, measured, text_append,
+    AuditSettings, Collector, Dialogue, Item, Level, Location, Piece, RecordingId, Text, WordKey,
+    measured, text_append,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
+/// A measured voice span outside the configured word-onset support windows.
 pub struct Hole {
     pub location: Location,
-    /// One wordless playback interval may have several source portions.
+    /// One continuous voice interval may have several source portions.
     #[serde(skip)]
     pub gap_play_us: [u64; 2],
     /// Index into `Report.hole_groups`. Shared extent is serialized only once.
     pub group: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Nearest spoken source onsets, not word-end boundaries.
     pub after: Option<WordKey>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub before: Option<WordKey>,
     /// JSON is `[RMS centidB, peak centidB]`; its window is `location.source_us`.
     #[serde(serialize_with = "hole_level")]
     pub level: Level,
+    /// Stored median RMS of voice-flagged hops in this recording.
     pub speaking_cdb: i16,
+    /// Strict RMS threshold, shifted by the recording's stored speech level.
     pub threshold_cdb: i16,
     #[serde(skip_serializing_if = "super::zero")]
     pub sound_us: u64,
@@ -47,7 +51,6 @@ struct SoundPortion {
 fn sound_portions(
     recordings: &BTreeMap<RecordingId, &Dialogue>,
     gaps: &[Gap],
-    speech: &BTreeMap<RecordingId, i16>,
     settings: &AuditSettings,
 ) -> Vec<SoundPortion> {
     let mut result: Vec<_> = (0..gaps.len()).map(|_| SoundPortion::default()).collect();
@@ -73,27 +76,13 @@ fn sound_portions(
     for (i, gap) in gaps.iter().enumerate() {
         let location = gap.location;
         let recording = &recordings[&location.recording];
-        let threshold = (i32::from(speech[&location.recording])
-            - i32::from(settings.below_speech_cdb))
-        .max(i32::from(settings.quietest_sound_cdb));
-        let pad_after = gap
-            .after
-            .is_some_and(|k| recordings[&k.0].words()[k.1].end_micros == location.source_us[0]);
-        let pad_before = gap
-            .before
-            .is_some_and(|k| recordings[&k.0].words()[k.1].start_micros == location.source_us[1]);
-        let a = location.source_us[0]
-            .saturating_add(if pad_after { settings.word_edge_us } else { 0 })
-            .min(location.source_us[1]);
-        let b = location.source_us[1]
-            .saturating_sub(if pad_before { settings.word_edge_us } else { 0 })
-            .max(a);
-        for sample in measured::samples(recording, a, b) {
+        let threshold = recording.thresholds().quiet_rms_max;
+        for sample in measured::samples(recording, location.source_us[0], location.source_us[1]) {
             let play = location.play_us[0] + sample.start - location.source_us[0];
             if until != Some(play) {
                 close(&mut open, &mut duration, &mut result);
             }
-            if i32::from(sample.hop.rms_dbfs_hundredths) >= threshold {
+            if sample.hop.voice && sample.hop.rms_dbfs_hundredths > threshold {
                 duration += sample.end - sample.start;
                 if let Some((_, span)) = open
                     .last_mut()
@@ -131,38 +120,83 @@ struct Gap {
     before: Option<WordKey>,
 }
 
-fn gaps(recordings: &BTreeMap<RecordingId, &Dialogue>, pieces: &[Piece]) -> Vec<Gap> {
+fn voice_gaps(
+    recording: &Dialogue,
+    p: Piece,
+    range: [u64; 2],
+    after: Option<WordKey>,
+    before: Option<WordKey>,
+    out: &mut Vec<Gap>,
+) {
+    let mut start = None;
+    for sample in measured::samples(recording, range[0], range[1]) {
+        if sample.hop.voice {
+            start.get_or_insert(sample.start);
+        } else if let Some(a) = start.take() {
+            out.push(Gap {
+                location: p.location(a, sample.start),
+                after,
+                before,
+            });
+        }
+    }
+    if let Some(a) = start {
+        out.push(Gap {
+            location: p.location(a, range[1]),
+            after,
+            before,
+        });
+    }
+}
+
+fn gaps(
+    recordings: &BTreeMap<RecordingId, &Dialogue>,
+    pieces: &[Piece],
+    tolerance: u64,
+) -> Vec<Gap> {
     let mut gaps = Vec::new();
     for &p in pieces {
+        let recording = recordings[&p.recording];
         let mut at = p.source.start_micros;
         let mut after = None;
-        for (i, w) in recordings[&p.recording]
+        // Include earlier onsets whose support reaches this kept source range.
+        // A source cut never makes an ASR end into a measured speech boundary.
+        for (i, w) in recording
             .words()
             .iter()
             .enumerate()
-            .filter(|(_, w)| {
-                w.is_spoken()
-                    && w.end_micros > p.source.start_micros
-                    && w.start_micros < p.source.end_micros
-            })
+            .filter(|(_, w)| w.is_spoken())
         {
+            if w.start_micros >= p.source.end_micros {
+                break;
+            }
             let until = w.start_micros.min(p.source.end_micros);
             if at < until {
-                gaps.push(Gap {
-                    location: p.location(at, until),
+                voice_gaps(
+                    recording,
+                    p,
+                    [at, until],
                     after,
-                    before: Some(WordKey(p.recording, i)),
-                });
+                    Some(WordKey(p.recording, i)),
+                    &mut gaps,
+                );
             }
-            at = at.max(w.end_micros.min(p.source.end_micros));
+            at = at.max(
+                w.start_micros
+                    .saturating_add(tolerance)
+                    .min(p.source.end_micros),
+            );
             after = Some(WordKey(p.recording, i));
         }
         if at < p.source.end_micros {
-            gaps.push(Gap {
-                location: p.location(at, p.source.end_micros),
+            voice_gaps(
+                recording,
+                p,
+                [at, p.source.end_micros],
                 after,
-                before: None,
-            });
+                None,
+                &mut gaps,
+            );
         }
     }
     gaps
@@ -171,18 +205,10 @@ fn gaps(recordings: &BTreeMap<RecordingId, &Dialogue>, pieces: &[Piece]) -> Vec<
 fn holes(
     recordings: &BTreeMap<RecordingId, &Dialogue>,
     pieces: &[Piece],
-    heard: &[PlayedWord],
     settings: &AuditSettings,
     collector: &mut Collector,
 ) {
-    let gaps = gaps(recordings, pieces);
-    let speech: BTreeMap<_, _> = pieces
-        .iter()
-        .map(|p| p.recording)
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .map(|id| (id, measured::speaking_level(recordings[&id], settings)))
-        .collect();
+    let gaps = gaps(recordings, pieces, settings.word_start_tolerance_us);
     let mut first = 0;
     while first < gaps.len() {
         let mut end = first + 1;
@@ -194,25 +220,19 @@ fn holes(
             gaps[first].location.play_us[0],
             gaps[end - 1].location.play_us[1],
         ];
-        if play[1] - play[0] >= settings.gap_us {
-            let left = heard.partition_point(|w| w.end <= play[0]);
-            let right = heard.partition_point(|w| w.start < play[1]);
-            let after = gaps[first]
-                .after
-                .or_else(|| left.checked_sub(1).map(|i| heard[i].key));
-            let before = gaps[end - 1]
-                .before
-                .or_else(|| heard.get(right).map(|w| w.key));
-            let sounds = sound_portions(recordings, &gaps[first..end], &speech, settings);
+        if play[1] - play[0] >= settings.min_sound_run_us {
+            let after = gaps[first].after;
+            let before = gaps[end - 1].before;
+            let sounds = sound_portions(recordings, &gaps[first..end], settings);
             for (gap, sound) in gaps[first..end].iter().zip(sounds) {
                 let location = gap.location;
                 let recording = &recordings[&location.recording];
-                let speech = speech[&location.recording];
-                let threshold = i32::from(speech)
-                    .saturating_sub(i32::from(settings.below_speech_cdb))
-                    .max(i32::from(settings.quietest_sound_cdb));
-                let threshold =
-                    i16::try_from(threshold).expect("threshold is bounded by valid levels");
+                let speech = recording
+                    .profile()
+                    .levels()
+                    .speech_rms_hundredths
+                    .expect("prepared dialogue has a measured speech level");
+                let threshold = recording.thresholds().quiet_rms_max;
                 collector.push(Item::Hole(Hole {
                     location,
                     gap_play_us: play,
@@ -354,10 +374,9 @@ fn quiet_phrases(
 pub(super) fn inspect(
     recordings: &BTreeMap<RecordingId, &Dialogue>,
     pieces: &[Piece],
-    heard: &[PlayedWord],
     settings: &AuditSettings,
     collector: &mut Collector,
 ) {
-    holes(recordings, pieces, heard, settings, collector);
+    holes(recordings, pieces, settings, collector);
     quiet_phrases(recordings, pieces, settings, collector);
 }
