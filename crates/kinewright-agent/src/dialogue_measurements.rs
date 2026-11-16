@@ -152,19 +152,28 @@ impl CachedDialogueMeasurements {
 }
 fn budget(value: &BoundDialogue, word_capacity: usize, key_capacity: usize) -> usize {
     let dialogue = value.dialogue();
+    let thresholds = dialogue.thresholds();
     let (mut dips, mut in_dip) = (0_usize, false);
+    let (mut sound_components, mut in_sound) = (0_usize, false);
     for hop in dialogue.profile().hops() {
-        let dip = hop.rms_dbfs_hundredths <= dialogue.settings().dip_dbfs_hundredths;
+        let dip = thresholds
+            .dip_dbfs_hundredths
+            .is_some_and(|limit| hop.rms_dbfs_hundredths <= limit);
         if dip && !in_dip {
             dips += 1;
         }
         in_dip = dip;
+        let sound = hop.rms_dbfs_hundredths > thresholds.quiet_rms_max;
+        if sound && !in_sound {
+            sound_components += 1;
+        }
+        in_sound = sound;
     }
-    // Charge payloads and conservative capacities for Core's four run vectors.
+    // Charge payloads and conservative capacities for Core's five run vectors.
     // Gaps retain at most the quiet and valley runs before deduplication.
     let quiet = dialogue.quiet_runs().len();
     let valleys = dialogue.valleys().len();
-    let runs = [quiet, valleys, quiet + valleys, dips]
+    let runs = [quiet, valleys, quiet + valleys, dips, sound_components]
         .into_iter()
         .map(|count| (count * 2).max(4))
         .sum::<usize>();

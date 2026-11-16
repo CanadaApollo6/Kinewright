@@ -387,11 +387,11 @@ fn rehearsal_level_shift_covers_all_thresholds_and_quantiles_are_exact() {
             s.quiet_rms_max,
             s.quiet_peak_max,
             s.valley_rms_max,
-            s.valley_peak_max,
-            s.dip_dbfs_hundredths
+            s.valley_peak_max
         ],
-        [-7_001, -5_603, -8_398, -6_842, -8_500]
+        [-7_001, -5_603, -8_398, -6_842]
     );
+    assert_eq!(s.dip_dbfs_hundredths, Some(-7_001));
     let p = SoundProfile::from_hops(
         10_000,
         120_000,
@@ -421,7 +421,7 @@ fn rehearsal_level_shift_covers_all_thresholds_and_quantiles_are_exact() {
 }
 
 #[test]
-fn rehearsal_thresholds_below_the_level_floor_do_not_invent_dips() {
+fn rehearsal_missing_noise_floor_does_not_invent_dips() {
     let p = SoundProfile::from_hops(
         10_000,
         1_000_000,
@@ -442,7 +442,7 @@ fn rehearsal_thresholds_below_the_level_floor_do_not_invent_dips() {
         Settings::default(),
     )
     .unwrap();
-    assert_eq!(d.thresholds().dip_dbfs_hundredths, -15_500);
+    assert_eq!(d.thresholds().dip_dbfs_hundredths, None);
     assert!(d.guard(130_000, AudibleSide::Out).is_err());
 }
 #[test]

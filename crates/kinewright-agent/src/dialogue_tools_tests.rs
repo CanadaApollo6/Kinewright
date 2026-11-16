@@ -402,9 +402,11 @@ mod dialogue_tool_tests {
             end_micros,
         })
         .collect();
-        value(words, 2_560_000, |t| {
+        // Keep real quiet margins in the mixed-clock fixture, including beyond
+        // the clip tail; the intentionally unsafe earlier frame remains refused.
+        value(words, 2_640_000, |t| {
             level(
-                (1_490_000..1_550_000).contains(&t)
+                (1_470_000..1_580_000).contains(&t)
                     || (2_000_000..2_300_000).contains(&t)
                     || t >= 2_500_000,
             )
@@ -584,11 +586,18 @@ mod dialogue_tool_tests {
             "DQ_TOOLS_PADDING_REPORTED"
         );
         let fps = Rational::new(100, 1).unwrap();
+        // Frequent word onsets describe the continuous delivery; one nine-second
+        // token would correctly trigger the new onset-based hole warning.
         let tokens = (0..=60)
-            .map(|i| Word {
-                text: format!("passage{i}"),
-                start_micros: i * 9_800_000 + 200_000,
-                end_micros: i * 9_800_000 + 8_800_000,
+            .flat_map(|i| {
+                (0..17).map(move |k| {
+                    let start_micros = i * 9_800_000 + 200_000 + k * 500_000;
+                    Word {
+                        text: format!("w{}", i * 17 + k),
+                        start_micros,
+                        end_micros: start_micros + 300_000,
+                    }
+                })
             })
             .collect();
         let measurement = value(tokens, 600_000_000, |t| {
@@ -628,9 +637,15 @@ mod dialogue_tool_tests {
         );
         assert!(flag_bytes < 2048, "DQ_TOOLS_DEFAULT_SIZE");
         assert!(all_bytes < 32768, "DQ_TOOLS_ALL_SIZE");
-        // The mandatory approximate-interval qualifier adds 48 bytes to each report.
-        assert_eq!(core_flags, 141, "DQ_TOOLS_QUALIFIED_CORE_FLAGS");
-        assert_eq!(core_all, 20_308, "DQ_TOOLS_QUALIFIED_CORE_ALL");
+        // Measured basis plus distinct nearest-word addresses in the onset fixture.
+        assert_eq!(core_flags, 164, "DQ_TOOLS_MEASURED_CORE_FLAGS");
+        assert_eq!(core_all, 31_870, "DQ_TOOLS_MEASURED_CORE_ALL");
+        assert_eq!(
+            content(&flags)["check"]["segments"][0]["report"]["total"]["holes"]
+                .as_u64()
+                .unwrap_or(0),
+            0
+        );
         assert!(content(&flags)["check"]["segments"][0]["report"]["items"].is_null());
         assert_eq!(
             content(&flags)["check"]["segments"][0]["report"]["total"]["joins"],
@@ -922,9 +937,11 @@ mod dialogue_tool_tests {
     }
     include!("dialogue_tools_review_tests.rs");
     include!("dialogue_tools_guide_tests.rs");
+    include!("dialogue_tools_hole_tests.rs");
     include!("dialogue_tools_rehearsal_core_tests.rs");
     include!("dialogue_tools_rehearsal_batch_tests.rs");
     include!("dialogue_tools_rehearsal_read_tests.rs");
     include!("dialogue_tools_item12_tests.rs");
     include!("dialogue_tools_item13_tests.rs");
+    include!("dialogue_tools_r4_tests.rs");
 }

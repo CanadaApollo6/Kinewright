@@ -94,18 +94,6 @@ pub(super) fn percentile(mut values: Vec<i16>, percent: u8) -> Option<i16> {
     Some(*values.select_nth_unstable(index).1)
 }
 
-pub(super) fn speaking_level(recording: &Dialogue, settings: &AuditSettings) -> i16 {
-    percentile(
-        recording
-            .profile()
-            .hops()
-            .map(|h| h.rms_dbfs_hundredths)
-            .collect(),
-        settings.speaking_percentile,
-    )
-    .expect("validated complete nonempty profile")
-}
-
 pub(super) fn phrase_level(
     recording: &Dialogue,
     from: usize,

@@ -47,7 +47,7 @@ pub struct Side {
     pub low_air_us: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edge_in_sound: Option<EdgeInSound>,
-    /// Independent warning: depends on Dialogue Settings `dip_dbfs_hundredths`,
+    /// Independent warning: depends on the measured dip threshold,
     /// `dip_reach_micros` and `word_margin_micros` (not the audit policy).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dip_intrusion: Option<DipIntrusion>,

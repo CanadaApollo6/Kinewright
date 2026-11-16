@@ -87,6 +87,7 @@ struct AddressSpan {
 }
 struct Cut {
     addresses: [AddressSpan; 2],
+    request: CutRequest,
     index: usize,
     track: TrackId,
     clip: ClipId,
@@ -273,6 +274,7 @@ fn resolve(
     value: &BoundDialogue,
 ) -> Result<Cut, Refusal> {
     let (first, last, overrule, mut req) = selected(removal);
+    let evidence_request = req;
     if first.clip != last.clip || first.binding != last.binding || first.index > last.index {
         return Err(Refusal::Word);
     }
@@ -391,6 +393,10 @@ fn resolve(
             "requested edges are outside the clip's audible span",
         ));
     }
+    value
+        .dialogue
+        .validate_cut(evidence_request, proposal)
+        .map_err(Refusal::from)?;
     let start = project_at(doc, clip, proposal[0], AudibleSide::Out)?;
     let end = if tail && overrule.is_none() {
         played.project.end
@@ -402,6 +408,7 @@ fn resolve(
         Removal::Pause { .. } => value.dialogue.settings().minimum_pause_cut_micros,
     };
     Ok(Cut {
+        request: evidence_request,
         addresses: [first, last].map(|a| {
             let word = &words[a.index];
             AddressSpan {
@@ -508,6 +515,7 @@ fn heard_join(
 }
 #[derive(Clone, Copy)]
 struct CreatedCut {
+    request: CutRequest,
     original_start: TimeCode,
     air: Option<[bool; 2]>,
     index: usize,
@@ -538,7 +546,7 @@ fn keeps(
     asset: kinewright_core::AssetId,
     proposal: [ExactMicros; 2],
     minimum: u64,
-) -> Result<(), Refusal> {
+) -> Result<[ExactMicros; 2], Refusal> {
     let a = edges[0]
         .filter(|(id, _)| *id == asset)
         .map_or(proposal[0], |(_, t)| t);
@@ -559,7 +567,18 @@ fn keeps(
             "the final frame mapping would remove extra material",
         ));
     }
-    Ok(())
+    Ok([a, b])
+}
+fn verify_selection(
+    values: &BTreeMap<kinewright_core::AssetId, Arc<BoundDialogue>>,
+    removed: &CreatedCut,
+    heard: HeardEdges,
+) -> Result<(), Refusal> {
+    let extent = keeps(heard, removed.asset, removed.proposal, removed.minimum)?;
+    values[&removed.asset]
+        .dialogue
+        .validate_cut(removed.request, extent)
+        .map_err(Refusal::from)
 }
 struct Trial {
     document: Document,
@@ -638,6 +657,7 @@ fn try_cut(
                 })
                 .collect();
             geometry.push(CreatedCut {
+                request: cut.request,
                 original_start: cut.start,
                 air: cut.air.map(|a| [a.left.is_some(), a.right.is_some()]),
                 index: cut.index,
@@ -664,7 +684,11 @@ fn try_cut(
                     continue;
                 }
             };
-            if let Err(reason) = keeps(heard, cut.asset, cut.proposal, cut.minimum) {
+            let current = geometry
+                .iter()
+                .find(|c| c.index == cut.index)
+                .expect("current removal");
+            if let Err(reason) = verify_selection(values, current, heard) {
                 last = Some(reason);
                 continue;
             }
@@ -681,7 +705,7 @@ fn try_cut(
                         provider,
                         [!flags[0], !flags[1]],
                     )?;
-                    keeps(heard, c.asset, c.proposal, c.minimum)
+                    verify_selection(values, c, heard)
                 });
             if let Err(reason) = prior {
                 last = Some(reason);
@@ -1011,7 +1035,7 @@ pub(crate) fn plan(
             provider,
             [!flags[0], !flags[1]],
         )?;
-        keeps(heard, c.asset, c.proposal, c.minimum)?;
+        verify_selection(&bindings, c, heard)?;
         if let Outcome::Ready {
             edges,
             kept_air_micros,
@@ -1137,6 +1161,11 @@ mod tests {
             .unwrap(),
         );
         let make = |index, at, requested_end, overrule| CreatedCut {
+            request: CutRequest::RemoveWords {
+                from: 0,
+                to: 0,
+                leave_micros: None,
+            },
             original_start: TimeCode(at),
             air: None,
             index,

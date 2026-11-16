@@ -188,7 +188,8 @@ mod dialogue_measurement_tests {
             self, AuditSettings, Detail, KeptRange, RecordingId,
         };
         assert_eq!(
-            checked["segments"][0]["report"]["hole_basis"], "approximate_transcript_intervals",
+            checked["segments"][0]["report"]["hole_basis"],
+            json!({"kind":"measured_voice_without_nearby_word_start","after_word_start_us":1_000_000}),
             "DQ_WORD_END_DISPATCHED_HOLE_BASIS"
         );
         let document = service.snapshot().unwrap().1;
