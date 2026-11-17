@@ -23,7 +23,7 @@
 //!
 //! # Why the tags go through `setparams` and not through `-color_*`
 //!
-//! On the pinned `FFmpeg` 8 (`third_party/ffmpeg/bin/ffmpeg`,
+//! On the pinned `FFmpeg` 8 (`third_party/ffmpeg-testgen/bin/ffmpeg-testgen`,
 //! `n8.0-23-gd1f31a829d-20251022`, `libavcodec 62.11.100`) the *output-option*
 //! form `-color_primaries bt709 -color_trc bt709` is **silently ignored** and
 //! `ffprobe` reports `unknown`: frame properties from the filter chain win

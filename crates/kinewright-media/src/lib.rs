@@ -5,6 +5,7 @@ mod audio;
 mod builtin_looks;
 mod cache;
 mod clock;
+mod codec_policy;
 pub mod color_pipeline;
 mod compositor;
 mod conversion;

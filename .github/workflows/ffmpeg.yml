@@ -1,0 +1,74 @@
+name: Minimal FFmpeg source builds
+on:
+  workflow_call:
+
+jobs:
+  minimal-ffmpeg:
+    name: Minimal FFmpeg (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Source admission witnesses
+        run: python -B scripts/test_ffmpeg_build.py
+      - name: Identify FFmpeg cache ABI
+        run: python scripts/ffmpeg-cache-platform.py
+      - uses: actions/cache@v4
+        id: ffmpeg
+        with:
+          path: |
+            third_party/ffmpeg
+            third_party/ffmpeg-recorder
+            third_party/ffmpeg-testgen
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ env.FFMPEG_CACHE_ABI }}-ms1-${{ hashFiles('scripts/build-ffmpeg.py', 'scripts/ffmpeg-profile.json', 'scripts/prepare-ffmpeg-windows.ps1', 'scripts/ffmpeg-cache-platform.py') }}
+      - name: MSYS2 build tools
+        if: runner.os == 'Windows' && steps.ffmpeg.outputs.cache-hit != 'true'
+        uses: msys2/setup-msys2@v2
+        with:
+          install: make diffutils pkgconf nasm
+      - name: Build MSVC static dependencies
+        if: runner.os == 'Windows' && steps.ffmpeg.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./scripts/prepare-ffmpeg-windows.ps1
+      - name: Build Windows profiles
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./scripts/setup-ffmpeg.ps1
+          python scripts/build-ffmpeg.py --profile testgen
+          if ($LASTEXITCODE -ne 0) { throw 'testgen build failed' }
+          python scripts/inspect-ffmpeg.py third_party/ffmpeg --check
+          if ($LASTEXITCODE -ne 0) { throw 'library inspection failed' }
+      - name: Linux source build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config nasm libx264-dev libx265-dev libdav1d-dev zlib1g-dev libvpx-dev libfreetype6-dev libharfbuzz-dev libpulse-dev libasound2-dev libxcb1-dev libxcb-shm0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - name: Build Linux profiles
+        if: runner.os == 'Linux'
+        run: |
+          source scripts/setup-ffmpeg.sh
+          python3 scripts/build-ffmpeg.py --profile testgen
+          python3 scripts/inspect-ffmpeg.py third_party/ffmpeg --check
+      - name: Test fixture generator pipes
+        shell: bash
+        run: |
+          suffix=""
+          if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
+          "third_party/ffmpeg-testgen/bin/ffmpeg-testgen${suffix}" -hide_banner -loglevel error -f lavfi -i color=s=16x16:d=0.1 -frames:v 1 -c:v rawvideo -f rawvideo pipe:1 > /dev/null
+      - name: Verify recorder registry
+        run: python -B scripts/check-ffmpeg-recorder.py
+      - name: Check profile separation
+        shell: bash
+        run: |
+          test ! -e third_party/ffmpeg/bin/ffmpeg
+          test ! -e third_party/ffmpeg/bin/ffmpeg.exe
+          test ! -e third_party/ffmpeg-recorder/bin/ffmpeg-testgen
+          test ! -e third_party/ffmpeg-recorder/bin/ffmpeg-testgen.exe

@@ -9,8 +9,6 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $originalPath = $env:Path
 
-$FfmpegUrl = 'https://github.com/System233/ffmpeg-msvc-prebuilt/releases/download/ffmpeg-8.0.1-r3/ffmpeg-8.0.1-r3_x64-windows-shared-gpl.zip'
-$FfmpegSha256 = '3399afab045f6bc64301001d4f5ca1aba3d6df96948cc1799028cf2f24ede433'
 $PkgconfVersion = '3.0.1.post0'
 $LibclangVersion = '18.1.1'
 
@@ -19,13 +17,12 @@ $thirdParty = [System.IO.Path]::GetFullPath((Join-Path $repoRoot 'third_party'))
 $ffmpegRoot = [System.IO.Path]::GetFullPath((Join-Path $thirdParty 'ffmpeg'))
 $pkgconfRoot = [System.IO.Path]::GetFullPath((Join-Path $thirdParty 'pkgconf'))
 $libclangRoot = [System.IO.Path]::GetFullPath((Join-Path $thirdParty 'libclang'))
-$archive = [System.IO.Path]::GetFullPath((Join-Path $thirdParty 'ffmpeg.zip'))
 
 if (-not $SkipBuildCachePrune) {
     & (Join-Path $PSScriptRoot 'clean-build-cache.ps1') -MaximumGiB $BuildCacheLimitGiB
 }
 
-foreach ($path in @($ffmpegRoot, $pkgconfRoot, $libclangRoot, $archive)) {
+foreach ($path in @($ffmpegRoot, $pkgconfRoot, $libclangRoot)) {
     if (-not $path.StartsWith($thirdParty, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to modify a path outside $thirdParty`: $path"
     }
@@ -81,47 +78,6 @@ if (-not $vcvarsPath -or -not $env:INCLUDE -or -not $env:LIB) {
 
 New-Item -ItemType Directory -Path $thirdParty -Force | Out-Null
 
-$marker = Join-Path $ffmpegRoot '.archive-sha256'
-$installedHash = if (Test-Path -LiteralPath $marker) {
-    (Get-Content -LiteralPath $marker -Raw).Trim()
-} else {
-    ''
-}
-
-if ($installedHash -ne $FfmpegSha256) {
-    if (Test-Path -LiteralPath $ffmpegRoot) {
-        Remove-Item -LiteralPath $ffmpegRoot -Recurse -Force
-    }
-    if (Test-Path -LiteralPath $archive) {
-        Remove-Item -LiteralPath $archive -Force
-    }
-
-    Write-Host 'Downloading pinned FFmpeg 8.0.1 MSVC shared GPL build...'
-    $download = @'
-import sys
-import urllib.request
-
-request = urllib.request.Request(sys.argv[1], headers={'User-Agent': 'Kinewright-M0'})
-with urllib.request.urlopen(request, timeout=60) as source, open(sys.argv[2], 'wb') as target:
-    while chunk := source.read(1024 * 1024):
-        target.write(chunk)
-'@
-    & $python.Source -c $download $FfmpegUrl $archive
-    if ($LASTEXITCODE -ne 0) {
-        throw 'FFmpeg download failed.'
-    }
-
-    $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actualHash -ne $FfmpegSha256) {
-        throw "FFmpeg archive SHA-256 mismatch. Expected $FfmpegSha256, got $actualHash."
-    }
-
-    New-Item -ItemType Directory -Path $ffmpegRoot -Force | Out-Null
-    Expand-Archive -LiteralPath $archive -DestinationPath $ffmpegRoot -Force
-    Set-Content -LiteralPath $marker -Value $FfmpegSha256 -NoNewline
-    Remove-Item -LiteralPath $archive -Force
-}
-
 $pkgConfig = Join-Path $pkgconfRoot 'pkgconf\.bin\pkgconf.exe'
 $libclang = Get-ChildItem -LiteralPath $libclangRoot -Filter 'libclang.dll' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
 
@@ -152,14 +108,27 @@ if (-not $libclang) {
     Write-Host "Using existing libclang under third_party."
 }
 
+# Build with MSVC in MSYS2, linking the explicit static vcpkg dependencies.
+$deps = Join-Path $thirdParty 'ffmpeg-deps/installed/x64-windows-static'
+$env:PKG_CONFIG = $pkgConfig
+$env:PKG_CONFIG_PATH = "$deps/lib/pkgconfig"
+$env:INCLUDE = "$deps/include;$env:INCLUDE"
+$env:LIB = "$deps/lib;$env:LIB"
+$env:Path = "$vcvarsPath;C:\msys64\usr\bin;$(Split-Path -Parent $pkgConfig);$originalPath"
+foreach ($profile in @('libraries', 'recorder')) {
+    & $python.Source (Join-Path $PSScriptRoot 'build-ffmpeg.py') --profile $profile
+    if ($LASTEXITCODE -ne 0) { throw "FFmpeg $profile build failed" }
+}
+
 $pkgConfigBin = Split-Path -Parent $pkgConfig
 $pkgConfigPath = Join-Path $ffmpegRoot 'lib\pkgconfig'
-$ffmpegBin = Join-Path $ffmpegRoot 'bin'
+$ffmpegBin = Join-Path $thirdParty 'ffmpeg-recorder/bin'
+$ffmpegDlls = Join-Path $ffmpegRoot 'bin'
 
 foreach ($required in @(
     (Join-Path $ffmpegRoot 'include\libavcodec\avcodec.h'),
     (Join-Path $ffmpegRoot 'lib\avcodec.lib'),
-    (Join-Path $ffmpegBin 'avcodec-62.dll'),
+    (Join-Path $ffmpegDlls 'avcodec-62.dll'),
     $pkgConfig
 )) {
     if (-not (Test-Path -LiteralPath $required)) {
@@ -177,7 +146,7 @@ $env:PKG_CONFIG = $pkgConfig
 $env:PKG_CONFIG_PATH = $pkgConfigPath
 $env:LIBCLANG_PATH = $libclang.DirectoryName
 $env:FFMPEG_DIR = $ffmpegRoot
-$env:Path = "$ffmpegBin;$pkgConfigBin;$env:Path"
+$env:Path = "$ffmpegDlls;$ffmpegBin;$pkgConfigBin;$env:Path"
 $env:BINDGEN_EXTRA_CLANG_ARGS = (($env:INCLUDE -split ';' | Where-Object { $_ }) | ForEach-Object { '-I"{0}"' -f $_ }) -join ' '
 
 $codecVersion = & $pkgConfig --modversion libavcodec

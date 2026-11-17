@@ -9,11 +9,11 @@ build into `third_party/ffmpeg` — no system FFmpeg install is required.
 
 ### Prerequisites
 
-- A 64-bit GNU/Linux distribution with glibc 2.28 or newer. The dependency
+- A 64-bit GNU/Linux distribution with glibc matching the source-build host or newer. The dependency
   installer supports Ubuntu 22.04+, Debian 12+, current Arch, CachyOS, and
   Omarchy.
 - Rust installed by `rustup`, using `stable` (`rust-version = "1.92"`).
-- Python 3, `pkg-config`, a C/C++ toolchain, CMake, and the packages listed in
+- Python 3.12+, `pkg-config`, a C/C++ toolchain, CMake, and the packages listed in
   `scripts/install-linux-deps.sh` (ALSA, Vulkan/Mesa, X11/Wayland, GTK 3,
   libclang).
 
@@ -25,6 +25,7 @@ implementation. A display (or Xvfb) is required only to *launch* the GUI.
 ```bash
 ./scripts/install-linux-deps.sh
 source ./scripts/setup-ffmpeg.sh
+python3 scripts/build-ffmpeg.py --profile testgen
 cargo build --workspace
 cargo test --workspace
 cargo run -p kinewright-app
@@ -40,20 +41,22 @@ cargo test --workspace --features kinewright-media/slow-tests,kinewright-agent/s
 Programme documents whose exit gate says `cargo test --workspace` mean the fast
 tier unless they say otherwise; CI runs the slow tier on every push to `main`.
 
-`source` the setup script in the same shell as Cargo. It downloads the pinned
-FFmpeg 8.0 x86_64 shared GPL build (the same 8.0 ABI Windows links), verifies
-its SHA-256, extracts it to `third_party/ffmpeg`, and exports `FFMPEG_DIR`,
-`PKG_CONFIG_PATH`, `PATH`, `RUSTFLAGS`, and `LD_LIBRARY_PATH` for
-`ffmpeg-sys-next` and the FFmpeg CLI. The native linker flag keeps a newer
-system FFmpeg from taking precedence over the pinned ABI when another native
-crate publishes `/usr/lib` as a global Cargo search path.
+`source` the setup script in the same shell as Cargo. It builds the pinned minimal
+FFmpeg 8.0.3 libraries and a separate recording-only CLI from verified upstream
+source. See [MS1 minimal FFmpeg](MS1-MINIMAL-FFMPEG.md) for the exact profile,
+checksum, prerequisites and measurements. The build uses four make jobs and the
+shared heavy-build lock. An unchanged install is reused.
 
-The script downloads this exact shared GPL build:
+For tests, provision the isolated fixture generator separately:
 
-- Provider: mifi FFmpeg-Builds (BtbN linux64 gpl-shared 8.0)
-- FFmpeg: `n8.0-latest`, linux64, shared, GPL
-- Archive: `ffmpeg-n8.0-latest-linux64-gpl-shared-8.0.tar.xz`
-- SHA-256: `c201d31f5c8a3b169345101c63ca70f71442848a271bec4a16ca29a1876e5cb1`
+```bash
+python3 scripts/build-ffmpeg.py --profile testgen
+```
+
+The test tools never appear on the app PATH or in shipping bundles. The source
+build requires Python 3.12+ and explicitly listed codec development libraries.
+The glibc floor follows the Linux build host; use the CI Ubuntu output for release
+packaging, rather than a rolling-distribution development build.
 
 #### Why FFmpeg 8 is pinned
 
@@ -75,7 +78,7 @@ libraries, and CLI, then verifies that `libavcodec` ABI 62 was selected.
 ```text
 PKG_CONFIG_PATH=<repo>/third_party/ffmpeg/lib/pkgconfig
 FFMPEG_DIR=<repo>/third_party/ffmpeg
-PATH=<repo>/third_party/ffmpeg/bin:<existing PATH>
+PATH=<repo>/third_party/ffmpeg-recorder/bin:<existing PATH>
 LD_LIBRARY_PATH=<repo>/third_party/ffmpeg/lib:<existing LD_LIBRARY_PATH>
 RUSTFLAGS=-Lnative=<repo>/third_party/ffmpeg/lib <existing RUSTFLAGS>
 ```
@@ -110,9 +113,10 @@ FFmpeg at build time and loads its DLLs at test and run time.
 - Windows 10 or newer.
 - Visual Studio 2019 Build Tools or newer with **Desktop development with C++**.
 - Rust installed by `rustup`, using `stable-x86_64-pc-windows-msvc`.
-- Python 3.10 or newer available as `python`.
+- Python 3.12 or newer available as `python`.
+- MSYS2 with make, diffutils, pkgconf, and nasm.
 
-No system FFmpeg, vcpkg, pkg-config, or LLVM installation is required.
+No system FFmpeg is used. The source-build dependencies are listed below.
 
 ### Clean-clone setup
 
@@ -120,7 +124,9 @@ Open PowerShell in the repository root and run:
 
 ```powershell
 rustup default stable-x86_64-pc-windows-msvc
+& .\scripts\prepare-ffmpeg-windows.ps1
 & .\scripts\setup-ffmpeg.ps1
+python scripts/build-ffmpeg.py --profile testgen
 cargo build --workspace
 cargo test --workspace
 cargo run -p kinewright-app
@@ -164,20 +170,18 @@ The standalone cleaner supports the same size gate:
 .\scripts\clean-build-cache.ps1 -MaximumGiB 6
 ```
 
-The script downloads this exact shared GPL build:
+Before the first source build, install MSYS2 make, diffutils, pkgconf and nasm, then run:
 
-- Provider: System233 FFmpeg MSVC Prebuilt
-- FFmpeg: `8.0.1-r3`, x64, shared, GPL
-- Archive: `ffmpeg-8.0.1-r3_x64-windows-shared-gpl.zip`
-- SHA-256: `3399afab045f6bc64301001d4f5ca1aba3d6df96948cc1799028cf2f24ede433`
+```powershell
+& .\scripts\prepare-ffmpeg-windows.ps1
+& .\scripts\setup-ffmpeg.ps1
+python scripts/build-ffmpeg.py --profile testgen
+```
 
-It extracts the archive to `third_party/ffmpeg`, then installs these pinned
-build helpers locally:
-
-- `pkgconf==3.0.1.post0` to `third_party/pkgconf`
-- `libclang==18.1.1` to `third_party/libclang`
-
-All three directories are ignored by Git.
+This builds the explicit static MSVC dependencies using pinned vcpkg, then the
+same verified FFmpeg source and profile as Linux. Python 3.12+ is required.
+`setup-ffmpeg.ps1` provisions the pinned pkgconf and libclang helpers locally.
+See [MS1 minimal FFmpeg](MS1-MINIMAL-FFMPEG.md) for the complete build contract.
 
 ### Environment variables
 
@@ -188,7 +192,7 @@ PKG_CONFIG=<repo>\third_party\pkgconf\pkgconf\.bin\pkgconf.exe
 PKG_CONFIG_PATH=<repo>\third_party\ffmpeg\lib\pkgconfig
 LIBCLANG_PATH=<directory containing provisioned libclang.dll>
 FFMPEG_DIR=<repo>\third_party\ffmpeg
-PATH=<repo>\third_party\ffmpeg\bin;<repo>\third_party\pkgconf\pkgconf\.bin;<MSVC PATH>;<existing PATH>
+PATH=<repo>\third_party\ffmpeg\bin;<repo>\third_party\ffmpeg-recorder\bin;<repo>\third_party\pkgconf\pkgconf\.bin;<MSVC PATH>;<existing PATH>
 BINDGEN_EXTRA_CLANG_ARGS=<MSVC and Windows SDK include directories from vcvars64.bat>
 ```
 

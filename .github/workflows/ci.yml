@@ -25,6 +25,9 @@ on:
   workflow_dispatch:
 
 jobs:
+  minimal-ffmpeg:
+    uses: ./.github/workflows/ffmpeg.yml
+
   pf1-wrapper:
     name: Linux PF1 wrapper witnesses
     runs-on: ubuntu-latest
@@ -47,6 +50,7 @@ jobs:
         run: python3 scripts/pf1/test_lane.py
 
   windows:
+    needs: minimal-ffmpeg
     name: Windows workspace
     timeout-minutes: 60
     runs-on: windows-latest
@@ -54,6 +58,19 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Identify FFmpeg cache ABI
+        run: python scripts/ffmpeg-cache-platform.py
+      - name: Restore minimal FFmpeg profiles
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            third_party/ffmpeg
+            third_party/ffmpeg-recorder
+            third_party/ffmpeg-testgen
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ env.FFMPEG_CACHE_ABI }}-ms1-${{ hashFiles('scripts/build-ffmpeg.py', 'scripts/ffmpeg-profile.json', 'scripts/prepare-ffmpeg-windows.ps1', 'scripts/ffmpeg-cache-platform.py') }}
+          fail-on-cache-miss: true
+
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -148,6 +165,7 @@ jobs:
           if-no-files-found: warn
 
   windows-slow:
+    needs: minimal-ffmpeg
     name: Windows slow tier
     runs-on: windows-latest
     timeout-minutes: 45
@@ -160,6 +178,19 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Identify FFmpeg cache ABI
+        run: python scripts/ffmpeg-cache-platform.py
+      - name: Restore minimal FFmpeg profiles
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            third_party/ffmpeg
+            third_party/ffmpeg-recorder
+            third_party/ffmpeg-testgen
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ env.FFMPEG_CACHE_ABI }}-ms1-${{ hashFiles('scripts/build-ffmpeg.py', 'scripts/ffmpeg-profile.json', 'scripts/prepare-ffmpeg-windows.ps1', 'scripts/ffmpeg-cache-platform.py') }}
+          fail-on-cache-miss: true
+
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -187,6 +218,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "slow_tests.py slow exited $LASTEXITCODE" }
 
   linux:
+    needs: minimal-ffmpeg
     name: Linux workspace
     timeout-minutes: 60
     runs-on: ubuntu-latest
@@ -194,6 +226,19 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Identify FFmpeg cache ABI
+        run: python scripts/ffmpeg-cache-platform.py
+      - name: Restore minimal FFmpeg profiles
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            third_party/ffmpeg
+            third_party/ffmpeg-recorder
+            third_party/ffmpeg-testgen
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ env.FFMPEG_CACHE_ABI }}-ms1-${{ hashFiles('scripts/build-ffmpeg.py', 'scripts/ffmpeg-profile.json', 'scripts/prepare-ffmpeg-windows.ps1', 'scripts/ffmpeg-cache-platform.py') }}
+          fail-on-cache-miss: true
+
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -287,6 +332,7 @@ jobs:
           cargo clippy --workspace --all-targets -- -D warnings || exit 1
 
   linux-slow:
+    needs: minimal-ffmpeg
     name: Linux slow tier
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -299,6 +345,19 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Identify FFmpeg cache ABI
+        run: python scripts/ffmpeg-cache-platform.py
+      - name: Restore minimal FFmpeg profiles
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            third_party/ffmpeg
+            third_party/ffmpeg-recorder
+            third_party/ffmpeg-testgen
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ env.FFMPEG_CACHE_ABI }}-ms1-${{ hashFiles('scripts/build-ffmpeg.py', 'scripts/ffmpeg-profile.json', 'scripts/prepare-ffmpeg-windows.ps1', 'scripts/ffmpeg-cache-platform.py') }}
+          fail-on-cache-miss: true
+
 
       - name: Equip guardian user session
         run: |

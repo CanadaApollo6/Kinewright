@@ -2865,8 +2865,8 @@ mod tests {
     #[test]
     fn rejects_a_delivery_pixel_format_this_build_does_not_advertise() {
         crate::initialize_ffmpeg().expect("FFmpeg initializes");
-        let codec = ffmpeg::encoder::find_by_name("mpeg1video")
-            .expect("mpeg1video is part of every FFmpeg build");
+        let codec =
+            ffmpeg::decoder::find_by_name("mjpeg").expect("MJPEG import decoder is present");
         let error = checked_delivery_pixel_format(
             codec,
             DeliveryEncodeDepth::Ten,
@@ -2877,14 +2877,7 @@ mod tests {
         assert_eq!(typed.code(), "delivery_encoder_pixel_format_unavailable");
         assert_eq!(typed.field(), "pixel_format");
         assert_eq!(typed.allowed_values(), "yuv420p10le");
-        assert!(
-            typed
-                .observed()
-                .split(' ')
-                .any(|format| format == "yuv420p"),
-            "the refusal must report what the encoder does advertise: {}",
-            typed.observed()
-        );
+        assert_eq!(typed.observed(), "no advertised pixel formats");
         assert!(
             !typed.observed().contains("yuv420p10le"),
             "this stand-in encoder must genuinely lack the 10-bit lane: {}",

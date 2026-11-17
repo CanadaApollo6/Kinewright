@@ -51,7 +51,6 @@ if ($dlls.Count -eq 0) {
 
 $requiredDllPatterns = @(
     'avcodec-*.dll',
-    'avdevice-*.dll',
     'avfilter-*.dll',
     'avformat-*.dll',
     'avutil-*.dll',
@@ -83,7 +82,7 @@ foreach ($dll in $dlls) {
 }
 
 # The FFmpeg CLI powers in-editor recording (screen/camera/mic capture).
-$ffmpegCli = Join-Path $ffmpegBin 'ffmpeg.exe'
+$ffmpegCli = Join-Path $repoRoot 'third_party/ffmpeg-recorder/bin/ffmpeg.exe'
 if (-not (Test-Path -LiteralPath $ffmpegCli -PathType Leaf)) {
     throw "Pinned FFmpeg build is missing ffmpeg.exe (required for in-editor recording)"
 }
@@ -95,10 +94,8 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'crates\kinewright-app\assets\licens
 Copy-Item -LiteralPath (Join-Path $repoRoot 'crates\kinewright-app\assets\licenses\JetBrains-Mono-OFL.txt') -Destination $licensesDir
 Copy-Item -LiteralPath (Join-Path $repoRoot 'packaging\windows\LICENSES\README.txt') -Destination $licensesDir
 
-$ffmpegBuildInfo = Join-Path $FfmpegDir 'BUILD_INFO'
-if (Test-Path -LiteralPath $ffmpegBuildInfo -PathType Leaf) {
-    Copy-Item -LiteralPath $ffmpegBuildInfo -Destination (Join-Path $licensesDir 'FFmpeg-BUILD-INFO.txt')
-}
+Copy-Item -LiteralPath (Join-Path $FfmpegDir 'configure.txt') -Destination (Join-Path $licensesDir 'FFmpeg-libraries-configure.txt')
+Copy-Item -LiteralPath (Join-Path $repoRoot 'third_party/ffmpeg-recorder/configure.txt') -Destination (Join-Path $licensesDir 'FFmpeg-recorder-configure.txt')
 
 $fileInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($stagedExe)
 if ($fileInfo.ProductName -ne 'Kinewright') {

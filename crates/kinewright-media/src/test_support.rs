@@ -300,14 +300,14 @@ fn ffmpeg_cli_filename(tool: &str) -> String {
     }
 }
 
-/// Path to a provisioned `FFmpeg` CLI tool (`ffmpeg` or `ffprobe`).
+/// Path to an isolated test-only `FFmpeg` CLI tool.
 #[must_use]
 pub fn ffmpeg_tool(tool: &str) -> PathBuf {
-    let filename = ffmpeg_cli_filename(tool);
-    std::env::var_os("FFMPEG_DIR").map_or_else(
+    let filename = ffmpeg_cli_filename(&format!("{tool}-testgen"));
+    std::env::var_os("KINEWRIGHT_FFMPEG_TESTGEN_DIR").map_or_else(
         || {
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../third_party/ffmpeg/bin")
+                .join("../../third_party/ffmpeg-testgen/bin")
                 .join(&filename)
         },
         |directory| PathBuf::from(directory).join("bin").join(&filename),
@@ -337,6 +337,8 @@ pub fn run_ffmpeg<S: AsRef<OsStr>>(arguments: &[S], output: &Path) {
         ffmpeg.display()
     );
     let result = Command::new(ffmpeg)
+        // Visual-scene fixtures refer to the bundled font from the workspace root.
+        .current_dir(workspace_target_dir().parent().expect("workspace root"))
         .args(["-hide_banner", "-loglevel", "error", "-y"])
         .args(arguments)
         .arg(output)

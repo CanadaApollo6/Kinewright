@@ -181,7 +181,7 @@ pub(crate) fn start_recording(
     directory: &Path,
 ) -> Result<ActiveRecording, String> {
     let ffmpeg = find_ffmpeg()
-        .ok_or_else(|| "FFmpeg was not found (bundled beside Kinewright, or on PATH)".to_owned())?;
+        .ok_or_else(|| "The recording component is missing. Reinstall Kinewright.".to_owned())?;
     std::fs::create_dir_all(directory)
         .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
     let path = next_recording_path(directory, mode.extension());
@@ -215,7 +215,13 @@ fn start_feedback_recording(
     input: &FeedbackInput,
     directory: &Path,
 ) -> Result<ActiveRecording, String> {
-    let ffmpeg = find_ffmpeg().ok_or_else(|| "FFmpeg was not found".to_owned())?;
+    let ffmpeg = match input {
+        FeedbackInput::Microphone(_) => find_ffmpeg().ok_or_else(|| {
+            "The recording component is missing. Reinstall Kinewright.".to_owned()
+        })?,
+        #[cfg(all(test, target_os = "linux"))]
+        FeedbackInput::Wav(_) => kinewright_media::test_support::ffmpeg_executable(),
+    };
     std::fs::create_dir_all(directory).map_err(|e| e.to_string())?;
     let path = next_recording_path(directory, "wav");
     let log = std::fs::File::create(path.with_extension("log")).map_err(|e| e.to_string())?;
@@ -752,49 +758,23 @@ fn parse_dshow_devices(stderr: &str) -> CaptureDevices {
     devices
 }
 
-/// The bundled CLI first (beside our executable in installs, under
-/// `third_party` in dev checkouts), then whatever PATH offers.
+/// Resolve only the owned recorder: installed beside the app, or in this checkout.
 fn find_ffmpeg() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("KINEWRIGHT_FFMPEG") {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-    let names = ffmpeg_cli_names();
-    if let Ok(exe) = std::env::current_exe() {
-        for ancestor in exe.ancestors().skip(1) {
-            for name in names {
-                let beside = ancestor.join(name);
-                if beside.is_file() {
-                    return Some(beside);
-                }
-                let nested = ancestor.join("bin").join(name);
-                if nested.is_file() {
-                    return Some(nested);
-                }
-                let dev = ancestor.join("third_party/ffmpeg/bin").join(name);
-                if dev.is_file() {
-                    return Some(dev);
-                }
-            }
-        }
-    }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).find_map(|directory| {
-        names
-            .iter()
-            .map(|name| directory.join(name))
-            .find(|candidate| candidate.is_file())
-    })
-}
-
-fn ffmpeg_cli_names() -> &'static [&'static str] {
-    if cfg!(windows) {
-        &["ffmpeg.exe"]
+    let name = if cfg!(windows) {
+        "ffmpeg.exe"
     } else {
-        &["ffmpeg"]
+        "ffmpeg"
+    };
+    if let Ok(exe) = std::env::current_exe() {
+        let beside = exe.with_file_name(name);
+        if beside.is_file() {
+            return Some(beside);
+        }
     }
+    let dev = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../third_party/ffmpeg-recorder/bin")
+        .join(name);
+    dev.is_file().then_some(dev)
 }
 
 /// Recordings are user-visible files, grouped by a filesystem-safe project name.
@@ -3435,6 +3415,41 @@ pub(crate) mod feedback_capture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ms1_recording_ignores_external_cli_override() {
+        const CHILD: &str = "KINEWRIGHT_MS1_LOCATOR_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let executable = find_ffmpeg().expect("owned recorder is provisioned");
+            let expected = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../third_party/ffmpeg-recorder/bin")
+                .canonicalize()
+                .unwrap();
+            assert_eq!(
+                executable.canonicalize().unwrap().parent(),
+                Some(expected.as_path())
+            );
+            return;
+        }
+        let directory = kinewright_media::test_support::TempDirectory::new("ms1-historical-cli");
+        let historical = directory.path("historical-ffmpeg");
+        std::fs::write(&historical, []).unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "recording::tests::ms1_recording_ignores_external_cli_override",
+            ])
+            .env(CHILD, "1")
+            .env("KINEWRIGHT_FFMPEG", historical)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     /// `IN1b` §7 item 16, label 10 of 17, **driven** (review-app-2 S3).
     ///

@@ -70,18 +70,13 @@ if [[ ! -f "$source_bin" ]]; then
     exit 1
 fi
 
-ffmpeg_bin_dir="$ffmpeg_dir/bin"
 ffmpeg_lib_dir="$ffmpeg_dir/lib"
-if [[ ! -d "$ffmpeg_bin_dir" ]]; then
-    echo "FFmpeg bin directory not found: $ffmpeg_bin_dir" >&2
-    exit 1
-fi
 if [[ ! -d "$ffmpeg_lib_dir" ]]; then
     echo "FFmpeg lib directory not found: $ffmpeg_lib_dir" >&2
     exit 1
 fi
 
-required_libs=(libavcodec.so libavdevice.so libavfilter.so libavformat.so libavutil.so libswresample.so libswscale.so)
+required_libs=(libavcodec.so libavfilter.so libavformat.so libavutil.so libswresample.so libswscale.so)
 for lib in "${required_libs[@]}"; do
     if [[ ! -e "$ffmpeg_lib_dir/$lib" ]]; then
         echo "Pinned FFmpeg build is missing required library: $lib" >&2
@@ -89,7 +84,7 @@ for lib in "${required_libs[@]}"; do
     fi
 done
 
-ffmpeg_cli="$ffmpeg_bin_dir/ffmpeg"
+ffmpeg_cli="$repo_root/third_party/ffmpeg-recorder/bin/ffmpeg"
 if [[ ! -f "$ffmpeg_cli" ]]; then
     echo "Pinned FFmpeg build is missing ffmpeg (required for in-editor recording)" >&2
     exit 1
@@ -109,21 +104,15 @@ cp "$source_bin" "$stage_dir/Kinewright"
 chmod +x "$stage_dir/Kinewright"
 cp "$ffmpeg_cli" "$stage_dir/ffmpeg"
 chmod +x "$stage_dir/ffmpeg"
-if [[ -f "$ffmpeg_bin_dir/ffprobe" ]]; then
-    cp "$ffmpeg_bin_dir/ffprobe" "$stage_dir/ffprobe"
-    chmod +x "$stage_dir/ffprobe"
-fi
-
 # Copy the libav family and every SONAME symlink the loader needs.
 find "$ffmpeg_lib_dir" -maxdepth 1 \( -name 'libav*.so*' -o -name 'libsw*.so*' \) -exec cp -a {} "$stage_dir/lib/" \;
+
+python3 "$repo_root/scripts/copy-ffmpeg-deps.py" "$ffmpeg_dir" "$repo_root/third_party/ffmpeg-recorder" "$stage_dir/lib"
 
 if command -v patchelf >/dev/null 2>&1; then
     for binary in "$stage_dir/Kinewright" "$stage_dir/ffmpeg"; do
         patchelf --set-rpath '$ORIGIN/lib' "$binary"
     done
-    if [[ -f "$stage_dir/ffprobe" ]]; then
-        patchelf --set-rpath '$ORIGIN/lib' "$stage_dir/ffprobe"
-    fi
     for lib in "$stage_dir/lib"/lib*.so*; do
         if [[ -f "$lib" && ! -L "$lib" ]]; then
             patchelf --set-rpath '$ORIGIN' "$lib"
@@ -135,6 +124,8 @@ fi
 
 cp "$repo_root/LICENSE" "$licenses_dir/Kinewright-GPL-3.0.txt"
 cp "$ffmpeg_license" "$licenses_dir/FFmpeg-GPL.txt"
+cp "$ffmpeg_dir/configure.txt" "$licenses_dir/FFmpeg-libraries-configure.txt"
+cp "$repo_root/third_party/ffmpeg-recorder/configure.txt" "$licenses_dir/FFmpeg-recorder-configure.txt"
 cp "$repo_root/crates/kinewright-app/assets/licenses/Inter-OFL.txt" "$licenses_dir/"
 cp "$repo_root/crates/kinewright-app/assets/licenses/JetBrains-Mono-OFL.txt" "$licenses_dir/"
 cp "$repo_root/packaging/linux/LICENSES/README.txt" "$licenses_dir/"

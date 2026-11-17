@@ -1912,6 +1912,8 @@ pub struct SourceColorRefusal {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MediaError {
+    #[error("unsupported_codec: {codec} is outside the supported media profile")]
+    UnsupportedCodec { codec: String },
     #[error(
         "owned_media_admission_required: activate Studio to preview or analyse this project's owned media"
     )]
@@ -2085,6 +2087,7 @@ impl MediaError {
     #[must_use]
     pub const fn recovery_code(&self) -> Option<&'static str> {
         match self {
+            Self::UnsupportedCodec { .. } => Some("unsupported_codec"),
             Self::UnsupportedDecoderFormat { .. } => Some("unsupported_decoder_format"),
             Self::DeliveryColor(error) => Some(error.code()),
             Self::DeliveryVerification(error) => Some(error.code()),

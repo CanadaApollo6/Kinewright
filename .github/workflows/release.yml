@@ -9,7 +9,11 @@ permissions:
   contents: write
 
 jobs:
+  minimal-ffmpeg:
+    uses: ./.github/workflows/ffmpeg.yml
+
   windows-installer:
+    needs: minimal-ffmpeg
     name: Windows installer
     runs-on: windows-latest
     timeout-minutes: 60
@@ -21,6 +25,19 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Identify FFmpeg cache ABI
+        run: python scripts/ffmpeg-cache-platform.py
+      - name: Restore minimal FFmpeg profiles
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            third_party/ffmpeg
+            third_party/ffmpeg-recorder
+            third_party/ffmpeg-testgen
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ env.FFMPEG_CACHE_ABI }}-ms1-${{ hashFiles('scripts/build-ffmpeg.py', 'scripts/ffmpeg-profile.json', 'scripts/prepare-ffmpeg-windows.ps1', 'scripts/ffmpeg-cache-platform.py') }}
+          fail-on-cache-miss: true
+
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -130,6 +147,7 @@ jobs:
           }
 
   linux-tarball:
+    needs: minimal-ffmpeg
     name: Linux tarball
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -137,6 +155,19 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Identify FFmpeg cache ABI
+        run: python scripts/ffmpeg-cache-platform.py
+      - name: Restore minimal FFmpeg profiles
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            third_party/ffmpeg
+            third_party/ffmpeg-recorder
+            third_party/ffmpeg-testgen
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ env.FFMPEG_CACHE_ABI }}-ms1-${{ hashFiles('scripts/build-ffmpeg.py', 'scripts/ffmpeg-profile.json', 'scripts/prepare-ffmpeg-windows.ps1', 'scripts/ffmpeg-cache-platform.py') }}
+          fail-on-cache-miss: true
+
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

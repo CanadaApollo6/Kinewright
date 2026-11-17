@@ -804,12 +804,7 @@ pub(crate) fn stream_timestamp_to_global(timestamp: i64, time_base: ffmpeg::Rati
 pub(crate) fn media_input(path: &Path) -> Result<ffmpeg::format::context::Input, MediaError> {
     crate::locator::before_decoder_open()?;
     crate::quiet_ffmpeg_log();
-    ffmpeg::format::input(path).map_err(|error| {
-        MediaError::Backend(format!(
-            "could not open media {}: {error}; the file may be truncated or its format may be unsupported",
-            path.display()
-        ))
-    })
+    crate::owned_io::bridge::path_input(path, false)
 }
 
 thread_local! {
@@ -832,7 +827,7 @@ struct ReaderStop {
 /// Amendment R43 (RS-1): libavformat's `AVIOInterruptCB`, called before each
 /// real read of the file (open, stream probing, seek, packet read): true
 /// ends that IO with `AVERROR_EXIT`.
-fn reader_interrupted() -> bool {
+pub(crate) fn reader_interrupted() -> bool {
     READER_STOP.with_borrow(|reader| {
         reader.as_ref().is_some_and(|reader| {
             #[cfg(test)]
@@ -858,14 +853,7 @@ fn reader_input(
         path: path.to_path_buf(),
     }));
     crate::locator::before_decoder_open()?;
-    ffmpeg::format::input_with_interrupt(path, reader_interrupted).map_err(|error| {
-        #[cfg(test)]
-        interrupt_seam::exited(path, error);
-        MediaError::Backend(format!(
-            "could not open media {}: {error}; the file may be truncated or its format may be unsupported",
-            path.display()
-        ))
-    })
+    crate::owned_io::bridge::path_input(path, true)
 }
 
 /// Amendment R43 (RS-1) test seam: hold a reader inside the interrupt
@@ -975,7 +963,7 @@ pub(crate) mod interrupt_seam {
             .sum()
     }
 
-    pub(super) fn exited(path: &Path, error: ffmpeg_next::Error) {
+    pub(crate) fn exited(path: &Path, error: ffmpeg_next::Error) {
         if matches!(error, ffmpeg_next::Error::Exit) {
             let mut armed = armed();
             for armed in armed.iter_mut().filter(|armed| armed.path == path) {

@@ -195,7 +195,9 @@ impl DecodeInput {
     reason = "map_err transfers the owned decoder error"
 )]
 fn media_io_error(error: OwnedIoError) -> kinewright_core::MediaError {
-    if matches!(error, OwnedIoError::TemporarilyUnavailable) {
+    if let OwnedIoError::UnsupportedCodec(codec) = error {
+        kinewright_core::MediaError::UnsupportedCodec { codec }
+    } else if matches!(error, OwnedIoError::TemporarilyUnavailable) {
         ReadAuthority::temporarily_unavailable()
     } else {
         kinewright_core::MediaError::Backend(error.to_string())
@@ -211,6 +213,7 @@ pub enum OwnedIoError {
     TemporarilyUnavailable,
     Cancelled,
     Decoder(String),
+    UnsupportedCodec(String),
 }
 
 impl fmt::Display for OwnedIoError {
@@ -222,6 +225,7 @@ impl fmt::Display for OwnedIoError {
             Self::Unavailable(message) => write!(f, "certified input unavailable: {message}"),
             Self::TemporarilyUnavailable => f.write_str("certified input temporarily unavailable"),
             Self::Cancelled => f.write_str("certified input cancelled"),
+            Self::UnsupportedCodec(codec) => write!(f, "unsupported_codec: {codec}"),
             Self::Decoder(message) => write!(f, "certified decoder: {message}"),
         }
     }
@@ -1037,6 +1041,7 @@ impl CertifiedInput {
                 stream.parameters().medium(),
                 ffmpeg::media::Type::Video | ffmpeg::media::Type::Audio
             ) {
+                bridge::check_codec(stream.parameters().id())?;
                 let bound = bridge::decoder_bound(&stream.parameters())?;
                 input
                     .probe_charges
@@ -1327,7 +1332,7 @@ impl CertifiedAudioDecoder {
 }
 
 #[allow(unsafe_code)]
-mod bridge {
+pub(crate) mod bridge {
     use super::{
         AVIO_BUFFER_BYTES, Arc, AtomicBool, CHUNK_BYTES, CODEC_BUFFER_COUNT, DecoderBound,
         MAX_AUDIO_CHANNELS, MAX_AUDIO_FRAME_SAMPLES, MAX_CERTIFIED_STREAMS, MAX_DECODER_DIMENSION,
@@ -1336,13 +1341,88 @@ mod bridge {
     #[cfg(test)]
     use super::{CertifiedInput, Ordering};
     use ffmpeg::ffi;
+    #[cfg(test)]
+    use std::ffi::CStr;
     use std::{
-        ffi::{CStr, c_char, c_int, c_void},
+        ffi::{c_char, c_int, c_void},
         panic::{AssertUnwindSafe, catch_unwind},
         ptr::{self, NonNull},
     };
 
-    const SINGLE_OBJECT_DEMUXERS: &CStr = c"avi,mov,matroska,webm,wav,mp3,flac,ogg,aac,nut,mpegts,mpeg,mpegvideo,image2,png_pipe,jpeg_pipe,webp_pipe,bmp_pipe,tiff_pipe";
+    pub(super) fn check_codec(id: ffmpeg::codec::Id) -> Result<(), OwnedIoError> {
+        crate::codec_policy::check(id).map_err(|_| OwnedIoError::UnsupportedCodec(id.name().into()))
+    }
+
+    pub(crate) fn path_input(
+        path: &std::path::Path,
+        interruptible: bool,
+    ) -> Result<ffmpeg::format::context::Input, kinewright_core::MediaError> {
+        use kinewright_core::MediaError;
+        let filename = std::ffi::CString::new(
+            path.to_str()
+                .ok_or_else(|| MediaError::Backend("media path is not UTF-8".into()))?,
+        )
+        .map_err(|e| MediaError::Backend(e.to_string()))?;
+        let open_error = |code| {
+            MediaError::Backend(format!(
+                "could not open media {}: {}; the file may be truncated or its format may be unsupported",
+                path.display(),
+                ffmpeg::Error::from(code),
+            ))
+        };
+        unsafe {
+            let mut format = ffi::avformat_alloc_context();
+            if format.is_null() {
+                return Err(MediaError::Backend("format allocation failed".into()));
+            }
+            if interruptible {
+                (*format).interrupt_callback.callback = Some(path_interrupt);
+            }
+            let mut options = ptr::null_mut();
+            for (key, value) in [
+                (c"codec_whitelist", crate::codec_policy::CODECS.as_c_str()),
+                (c"format_whitelist", crate::codec_policy::FORMATS.as_c_str()),
+                (c"protocol_whitelist", c"file"),
+            ] {
+                if ffi::av_dict_set(&raw mut options, key.as_ptr(), value.as_ptr(), 0) < 0 {
+                    ffi::av_dict_free(&raw mut options);
+                    ffi::avformat_free_context(format);
+                    return Err(MediaError::Backend(
+                        "format policy allocation failed".into(),
+                    ));
+                }
+            }
+            let opened = ffi::avformat_open_input(
+                &raw mut format,
+                filename.as_ptr(),
+                ptr::null(),
+                &raw mut options,
+            );
+            ffi::av_dict_free(&raw mut options);
+            if opened < 0 {
+                #[cfg(test)]
+                crate::decode::interrupt_seam::exited(path, ffmpeg::Error::from(opened));
+                return Err(open_error(opened));
+            }
+            let mut input = ffmpeg::format::context::Input::wrap(format);
+            for stream in input.streams() {
+                crate::codec_policy::check(stream.parameters().id())?;
+            }
+            let result = ffi::avformat_find_stream_info(input.as_mut_ptr(), ptr::null_mut());
+            for stream in input.streams() {
+                crate::codec_policy::check(stream.parameters().id())?;
+            }
+            if result < 0 {
+                #[cfg(test)]
+                crate::decode::interrupt_seam::exited(path, ffmpeg::Error::from(result));
+                return Err(open_error(result));
+            }
+            Ok(input)
+        }
+    }
+    unsafe extern "C" fn path_interrupt(_: *mut c_void) -> c_int {
+        c_int::from(crate::decode::reader_interrupted())
+    }
 
     pub(super) fn set_still_dimensions(
         input: &mut ffmpeg::format::context::Input,
@@ -1433,6 +1513,7 @@ mod bridge {
         parameters: ffmpeg::codec::Parameters,
         bound: DecoderBound,
     ) -> Result<ffmpeg::codec::context::Context, OwnedIoError> {
+        check_codec(parameters.id())?;
         let mut context =
             ffmpeg::codec::context::Context::from_parameters(parameters).map_err(decoder_error)?;
         context.set_threading(ffmpeg::codec::threading::Config {
@@ -1450,6 +1531,9 @@ mod bridge {
         input: &mut ffmpeg::format::context::Input,
         bounds: &[Option<DecoderBound>],
     ) -> Result<(), OwnedIoError> {
+        for stream in input.streams() {
+            check_codec(stream.parameters().id())?;
+        }
         let mut options = vec![ptr::null_mut(); bounds.len()];
         unsafe {
             // options.c refuses new streams before allocating their decoder context.
@@ -1457,6 +1541,12 @@ mod bridge {
                 i32::try_from(bounds.len()).expect("bounded reserved stream count");
             for (option, bound) in options.iter_mut().zip(bounds) {
                 ffi::av_dict_set(option, c"threads".as_ptr(), c"1".as_ptr(), 0);
+                ffi::av_dict_set(
+                    option,
+                    c"codec_whitelist".as_ptr(),
+                    crate::codec_policy::CODECS.as_ptr(),
+                    0,
+                );
                 if let Some(bound) = bound {
                     ffi::av_dict_set_int(
                         option,
@@ -1531,11 +1621,12 @@ mod bridge {
                     i32::try_from(MAX_CERTIFIED_STREAMS).expect("bounded stream count");
                 (*format).probesize = 32_768;
                 (*format).format_probesize = 32_768;
-                let formats = SINGLE_OBJECT_DEMUXERS;
+                let formats = crate::codec_policy::FORMATS.as_c_str();
                 let protocols = c"none";
                 #[cfg(test)]
                 let (formats, protocols) = match avio.cursor.source.hooks.open_policy {
                     super::TestOpenPolicy::Production => (formats, protocols),
+                    super::TestOpenPolicy::WavOnly => (c"wav", protocols),
                     super::TestOpenPolicy::ProtocolGuard => (c"concat,hls,wav,mpegts", protocols),
                     super::TestOpenPolicy::FormatGuard => (formats, c"file"),
                     super::TestOpenPolicy::NestedOutputControl => (c"concat,wav", c"file"),
@@ -1555,7 +1646,13 @@ mod bridge {
                     formats.as_ptr(),
                     0,
                 );
-                if protocol_option < 0 || format_option < 0 {
+                let codec_option = ffi::av_dict_set(
+                    &raw mut options,
+                    c"codec_whitelist".as_ptr(),
+                    crate::codec_policy::CODECS.as_ptr(),
+                    0,
+                );
+                if protocol_option < 0 || format_option < 0 || codec_option < 0 {
                     ffi::av_dict_free(&raw mut options);
                     ffi::avformat_free_context(format);
                     return Err(OwnedIoError::Capacity("format policy allocation".into()));
@@ -1802,6 +1899,7 @@ mod bridge {
 enum TestOpenPolicy {
     #[default]
     Production,
+    WavOnly,
     ProtocolGuard,
     FormatGuard,
     NestedOutputControl,
@@ -2574,7 +2672,7 @@ mod tests {
                 "-c:a",
                 "pcm_s16le",
                 "-c:s",
-                "srt",
+                "subrip",
                 "-threads",
                 "1",
                 "-t",
@@ -2641,15 +2739,53 @@ mod tests {
     }
 
     #[test]
-    fn s3_certified_concat_counterfactual_accepts_uncertified_pcm() {
-        let (_directory, source) = nested_fixture(false, TestOpenPolicy::NestedOutputControl);
-        read_nested_audio(&source)
-            .expect("unrestricted concat fixture must decode its uncertified WAV");
-        assert!(
-            source.accepted_output_bytes() >= 96_000,
-            "counterfactual accepts the one-second WAV PCM"
-        );
+    fn ms1_format_whitelist_refuses_a_present_demuxer_before_stream_info() {
+        let (_directory, _path, mut source) = media_fixture("red");
+        assert!(source.probe(running()).is_ok(), "AVI positive control");
+        Arc::get_mut(&mut source.0).unwrap().hooks.open_policy = TestOpenPolicy::WavOnly;
+        let (result, probes) = super::observe_stream_info_probes(|| source.probe(running()));
+        assert!(matches!(result, Err(OwnedIoError::Decoder(_))));
+        assert_eq!(probes, 0);
         assert_eq!(source.0.hooks.nested_open_calls.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn ms1_playlist_demuxers_are_absent_even_without_the_format_guard() {
+        let (_directory, source) = nested_fixture(false, TestOpenPolicy::NestedOutputControl);
+        assert!(read_nested_audio(&source).is_err());
+        assert_eq!(source.accepted_output_bytes(), 0);
+        assert_eq!(source.0.hooks.nested_open_calls.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn ms1_certified_codec_refusal_precedes_probe_decode() {
+        crate::initialize_ffmpeg().unwrap();
+        assert!(ffmpeg::decoder::find(ffmpeg::codec::Id::H263).is_some());
+        assert!(ffmpeg::decoder::find(ffmpeg::codec::Id::QTRLE).is_none());
+        let directory = TempDirectory::new("ms1-codec-refusal");
+        for (codec, extension, size) in [("h263", "avi", "128x96"), ("qtrle", "mov", "32x32")] {
+            let path = directory.path(&format!("unsupported-{codec}.{extension}"));
+            run_ffmpeg(
+                &[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("color=s={size}:d=0.1"),
+                    "-c:v",
+                    codec,
+                ],
+                &path,
+            );
+            let input = source(&path);
+            let (result, probes) = super::observe_stream_info_probes(|| input.probe(running()));
+            assert!(
+                matches!(result, Err(OwnedIoError::UnsupportedCodec(ref name)) if name == codec)
+            );
+            assert_eq!(probes, 0);
+            assert!(
+                matches!(crate::decode::media_input(&path), Err(kinewright_core::MediaError::UnsupportedCodec { codec: name }) if name == codec)
+            );
+        }
     }
 
     #[test]
@@ -2667,7 +2803,7 @@ mod tests {
     }
 
     #[test]
-    fn s3_certified_nested_protocol_policy_is_inherited_by_concat() {
+    fn ms1_absent_concat_cannot_bypass_the_protocol_only_guard() {
         let (_directory, source) = nested_fixture(false, TestOpenPolicy::ProtocolGuard);
         let result = read_nested_audio(&source);
         assert_eq!(source.accepted_output_bytes(), 0, "C0_PROTOCOL_OUTPUT_ZERO");
@@ -2675,7 +2811,7 @@ mod tests {
             matches!(result, Err(OwnedIoError::Decoder(_))),
             "C0_PROTOCOL_REFUSED"
         );
-        // Concat does not call our callback. The inherited whitelist is the guard here.
+        // Concat is absent in MS1; this variant must still accept no secondary bytes.
         assert_eq!(source.0.hooks.nested_open_calls.load(Ordering::Acquire), 0);
     }
 
