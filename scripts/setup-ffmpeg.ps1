@@ -3,15 +3,17 @@ param(
     [ValidateRange(0.1, 1024)]
     [double]$BuildCacheLimitGiB = 6,
     [switch]$SkipBuildCachePrune,
-    [switch]$NemoCacheKeyOnly
+    [switch]$NemoCacheKeyOnly,
+    [switch]$ToolsOnly,
+    [switch]$NoBinaryCache,
+    # The CI FFmpeg producer builds only the FFmpeg profiles; consumers add NeMo-Speech.
+    [switch]$FfmpegOnly
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $originalPath = $env:Path
 
-$FfmpegUrl = 'https://github.com/System233/ffmpeg-msvc-prebuilt/releases/download/ffmpeg-9.0.2/ffmpeg-9.0.2_x64-windows-shared-gpl.zip'
-$FfmpegSha256 = 'ce3a3a052c9dfe5f941789e88dba0d14d10fbf9be6236cb0c4b71a2dfc0a00e5'
 $PkgconfVersion = '3.0.1.post0'
 $LibclangVersion = '18.1.1'
 
@@ -20,10 +22,8 @@ $thirdParty = [System.IO.Path]::GetFullPath((Join-Path $repoRoot 'third_party'))
 $ffmpegRoot = [System.IO.Path]::GetFullPath((Join-Path $thirdParty 'ffmpeg'))
 $pkgconfRoot = [System.IO.Path]::GetFullPath((Join-Path $thirdParty 'pkgconf'))
 $libclangRoot = [System.IO.Path]::GetFullPath((Join-Path $thirdParty 'libclang'))
-$archiveCache = if ($env:KINEWRIGHT_FFMPEG_ARCHIVE_CACHE) { $env:KINEWRIGHT_FFMPEG_ARCHIVE_CACHE } else { Join-Path $thirdParty 'ffmpeg-archives' }
-$archive = [System.IO.Path]::GetFullPath((Join-Path $archiveCache "$FfmpegSha256.zip"))
 
-if (-not $SkipBuildCachePrune -and -not $NemoCacheKeyOnly) {
+if (-not $ToolsOnly -and -not $SkipBuildCachePrune -and -not $NemoCacheKeyOnly) {
     & (Join-Path $PSScriptRoot 'clean-build-cache.ps1') -MaximumGiB $BuildCacheLimitGiB
 }
 
@@ -89,33 +89,6 @@ if ($NemoCacheKeyOnly) {
 
 New-Item -ItemType Directory -Path $thirdParty -Force | Out-Null
 
-$marker = Join-Path $ffmpegRoot '.archive-sha256'
-$installedHash = if (Test-Path -LiteralPath $marker) {
-    (Get-Content -LiteralPath $marker -Raw).Trim()
-} else {
-    ''
-}
-
-if ($installedHash -ne $FfmpegSha256) {
-    if (Test-Path -LiteralPath $ffmpegRoot) {
-        Remove-Item -LiteralPath $ffmpegRoot -Recurse -Force
-    }
-    & $python.Source (Join-Path $PSScriptRoot 'ffmpeg_archive.py') $FfmpegUrl $archive $FfmpegSha256
-    if ($LASTEXITCODE -ne 0) { throw 'FFmpeg archive fetch or verification failed.' }
-
-    $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actualHash -ne $FfmpegSha256) {
-        throw "FFmpeg archive SHA-256 mismatch. Expected $FfmpegSha256, got $actualHash."
-    }
-
-    New-Item -ItemType Directory -Path $ffmpegRoot -Force | Out-Null
-    Expand-Archive -LiteralPath $archive -DestinationPath $ffmpegRoot -Force
-    Set-Content -LiteralPath $marker -Value $FfmpegSha256 -NoNewline
-} elseif (Test-Path -LiteralPath $archive) {
-    & $python.Source (Join-Path $PSScriptRoot 'ffmpeg_archive.py') $FfmpegUrl $archive $FfmpegSha256
-    if ($LASTEXITCODE -ne 0) { throw 'Cached FFmpeg archive verification failed.' }
-}
-
 $pkgConfig = Join-Path $pkgconfRoot 'pkgconf\.bin\pkgconf.exe'
 $libclang = Get-ChildItem -LiteralPath $libclangRoot -Filter 'libclang.dll' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
 
@@ -146,14 +119,52 @@ if (-not $libclang) {
     Write-Host "Using existing libclang under third_party."
 }
 
+# Build with MSVC in MSYS2, linking the explicit static vcpkg dependencies.
+$deps = Join-Path $thirdParty 'ffmpeg-deps/installed/x64-windows-static'
+$env:PKG_CONFIG = $pkgConfig
+$env:PKG_CONFIG_PATH = "$deps/lib/pkgconfig"
+$env:INCLUDE = "$deps/include;$env:INCLUDE"
+$env:LIB = "$deps/lib;$env:LIB"
+$msvcBin = Split-Path -Parent (Get-Command cl.exe -ErrorAction Stop).Source
+# MSVC cl/link first, then one coherent MSYS make/sh/awk toolset, before inherited tools.
+$msysRoot = if ($env:KINEWRIGHT_MSYS_ROOT) { $env:KINEWRIGHT_MSYS_ROOT } else { 'C:\msys64' }
+$msysBin = Join-Path $msysRoot 'usr\bin'
+$env:Path = "$msvcBin;$msysBin;$vcvarsPath;$(Split-Path -Parent $pkgConfig);$originalPath"
+# Repeated ToolsOnly/setup calls must preserve search order without growing PATH.
+foreach ($name in @('Path', 'INCLUDE', 'LIB', 'LIBPATH')) {
+    $value = [Environment]::GetEnvironmentVariable($name, 'Process')
+    if ($value) {
+        $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $unique = ($value -split ';' | Where-Object { $_ -and $seen.Add($_) }) -join ';'
+        [Environment]::SetEnvironmentVariable($name, $unique, 'Process')
+    }
+}
+$env:VSLANG = '1033'
+function Export-BuildEnvironment {
+    if ($env:GITHUB_ENV) {
+        foreach ($name in @('Path','INCLUDE','LIB','LIBPATH','WindowsSdkDir','WindowsSDKVersion','VCToolsVersion','VSCMD_ARG_TGT_ARCH','VSLANG','PKG_CONFIG','PKG_CONFIG_PATH','LIBCLANG_PATH','FFMPEG_DIR','KINEWRIGHT_NEMO_DIR','BINDGEN_EXTRA_CLANG_ARGS')) {
+            $value = [Environment]::GetEnvironmentVariable($name, 'Process')
+            if ($value) { "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
+        }
+    }
+}
+if ($ToolsOnly) { Export-BuildEnvironment; return }
+$cacheArguments = @()
+if ($NoBinaryCache) { $cacheArguments += '--no-binary-cache' }
+foreach ($profile in @('libraries', 'recorder')) {
+    & $python.Source (Join-Path $PSScriptRoot 'build-ffmpeg.py') --profile $profile @cacheArguments
+    if ($LASTEXITCODE -ne 0) { throw "FFmpeg $profile build failed" }
+}
+
 $pkgConfigBin = Split-Path -Parent $pkgConfig
 $pkgConfigPath = Join-Path $ffmpegRoot 'lib\pkgconfig'
-$ffmpegBin = Join-Path $ffmpegRoot 'bin'
+$ffmpegBin = Join-Path $thirdParty 'ffmpeg-recorder/bin'
+$ffmpegDlls = Join-Path $ffmpegRoot 'bin'
 
 foreach ($required in @(
     (Join-Path $ffmpegRoot 'include\libavcodec\avcodec.h'),
     (Join-Path $ffmpegRoot 'lib\avcodec.lib'),
-    (Join-Path $ffmpegBin 'avcodec-63.dll'),
+    (Join-Path $ffmpegDlls 'avcodec-63.dll'),
     $pkgConfig
 )) {
     if (-not (Test-Path -LiteralPath $required)) {
@@ -171,11 +182,16 @@ $env:PKG_CONFIG = $pkgConfig
 $env:PKG_CONFIG_PATH = $pkgConfigPath
 $env:LIBCLANG_PATH = $libclang.DirectoryName
 $env:FFMPEG_DIR = $ffmpegRoot
-$env:Path = "$ffmpegBin;$pkgConfigBin;$env:Path"
+$env:Path = "$ffmpegDlls;$ffmpegBin;$pkgConfigBin;$env:Path"
 $env:BINDGEN_EXTRA_CLANG_ARGS = (($env:INCLUDE -split ';' | Where-Object { $_ }) | ForEach-Object { '-I"{0}"' -f $_ }) -join ' '
 
-& (Join-Path $PSScriptRoot 'setup-nemo-speech.ps1')
+if (-not $FfmpegOnly) { & (Join-Path $PSScriptRoot 'setup-nemo-speech.ps1') }
 
+if ($env:CI -eq 'true') {
+    & $python.Source (Join-Path $PSScriptRoot 'build-ffmpeg.py') --log-digests
+    if ($LASTEXITCODE -ne 0) { throw 'FFmpeg binary digest logging failed' }
+}
+Export-BuildEnvironment
 $codecVersion = & $pkgConfig --modversion libavcodec
 if ($LASTEXITCODE -ne 0) {
     throw 'pkg-config could not resolve libavcodec.'

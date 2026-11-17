@@ -1,0 +1,148 @@
+name: Verified-source FFmpeg profiles
+description: Build or reuse trusted same-repository CI binaries with the builder fingerprint.
+inputs:
+  producer:
+    description: Compute and publish the bundle key after provisioning dependency versions.
+    default: 'false'
+  cache-key:
+    description: Exact fingerprint supplied by the producer workflow.
+    default: ''
+  no-binary-cache:
+    description: Compile every profile from verified source for release/package jobs.
+    default: 'false'
+outputs:
+  key:
+    description: Shared fingerprint used by CI and local markers.
+    value: ${{ steps.fingerprint.outputs.key }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.13'
+    - name: Read the pinned source digest
+      id: source
+      shell: bash
+      run: |
+        python - <<'PY'
+        import json, os
+        from pathlib import Path
+        profile = json.loads(Path('scripts/ffmpeg-profile.json').read_text())
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+            output.write('sha256=' + profile['sha256'] + '\n')
+        PY
+    - name: Restore source tarball for digest verification
+      id: source-cache
+      if: github.repository == 'CanadaApollo6/Kinewright' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      uses: actions/cache/restore@v4
+      with:
+        path: target/ffmpeg-source/${{ steps.source.outputs.sha256 }}/source.tar.xz
+        key: ffmpeg-source-${{ steps.source.outputs.sha256 }}
+    - name: Verify or fetch source before use
+      shell: bash
+      run: python scripts/build-ffmpeg.py --fetch-source
+    - name: Save verified source from repository pushes
+      if: inputs.producer == 'true' && github.event_name == 'push' && github.repository == 'CanadaApollo6/Kinewright' && steps.source-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: target/ffmpeg-source/${{ steps.source.outputs.sha256 }}/source.tar.xz
+        key: ffmpeg-source-${{ steps.source.outputs.sha256 }}
+    - name: MSYS build tools
+      id: msys
+      if: runner.os == 'Windows'
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MSYS
+        cache: false
+        install: make diffutils pkgconf nasm
+    - name: Select the installed MSYS toolchain
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        MSYS_ROOT: ${{ steps.msys.outputs.msys2-location }}
+      run: |
+        if (-not (Test-Path "$env:MSYS_ROOT/usr/bin/make.exe")) { throw 'MSYS make was not installed' }
+        "KINEWRIGHT_MSYS_ROOT=$env:MSYS_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+    # The producer installs the same apt manifest, through the same cached path, as
+    # the shards that restore its key, so the dependency fingerprint matches.
+    - name: Linux FFmpeg dependencies
+      if: runner.os == 'Linux' && inputs.producer == 'true'
+      uses: ./.github/actions/ci-apt
+    - name: Producer Windows dependencies
+      if: runner.os == 'Windows' && inputs.producer == 'true'
+      shell: pwsh
+      run: |
+        ./scripts/prepare-ffmpeg-windows.ps1
+        ./scripts/setup-ffmpeg.ps1 -ToolsOnly
+    - name: Producer fingerprint
+      if: inputs.producer == 'true'
+      id: fingerprint
+      shell: bash
+      run: python scripts/build-ffmpeg.py --write-key
+    - name: Restore trusted same-repository binaries
+      id: cache
+      if: inputs.no-binary-cache != 'true' && github.repository == 'CanadaApollo6/Kinewright' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          third_party/ffmpeg
+          third_party/ffmpeg-recorder
+          third_party/ffmpeg-testgen
+          third_party/ffmpeg-deps/installed
+        key: ms1-${{ inputs.producer == 'true' && steps.fingerprint.outputs.key || inputs.cache-key }}
+        fail-on-cache-miss: false
+    - name: Consumer Windows dependencies
+      if: runner.os == 'Windows' && inputs.producer != 'true' && steps.cache.outputs.cache-hit != 'true'
+      shell: pwsh
+      run: ./scripts/prepare-ffmpeg-windows.ps1
+    - name: Windows source profiles
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        SOURCE_ONLY: ${{ inputs.no-binary-cache }}
+        PRODUCER: ${{ inputs.producer }}
+      run: |
+        ./scripts/setup-ffmpeg.ps1 -ToolsOnly
+        python scripts/build-ffmpeg.py --check-msvc-shell
+        if ($LASTEXITCODE -ne 0) { throw 'MSVC depfile shell witness failed' }
+        ./scripts/setup-ffmpeg.ps1 -SkipBuildCachePrune -NoBinaryCache:($env:SOURCE_ONLY -eq 'true') -FfmpegOnly:($env:PRODUCER -eq 'true')
+        if ($LASTEXITCODE -ne 0) { throw 'FFmpeg setup failed' }
+        $cacheArguments = @()
+        if ($env:SOURCE_ONLY -eq 'true') { $cacheArguments += '--no-binary-cache' }
+        python scripts/build-ffmpeg.py --profile testgen @cacheArguments
+        if ($LASTEXITCODE -ne 0) { throw 'testgen build failed' }
+    - name: Linux source profiles
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        SOURCE_ONLY: ${{ inputs.no-binary-cache }}
+        PRODUCER: ${{ inputs.producer }}
+      run: |
+        cache_arguments=()
+        if [[ "$SOURCE_ONLY" == true ]]; then cache_arguments+=(--no-binary-cache); fi
+        setup_arguments=("${cache_arguments[@]}")
+        if [[ "$PRODUCER" == true ]]; then setup_arguments+=(--ffmpeg-only); fi
+        source scripts/setup-ffmpeg.sh "${setup_arguments[@]}" || exit 1
+        set -euo pipefail
+        python scripts/build-ffmpeg.py --profile testgen "${cache_arguments[@]}"
+    - name: Audit and log every installed binary
+      shell: bash
+      run: |
+        python scripts/build-ffmpeg.py --log-digests
+        python scripts/inspect-ffmpeg.py third_party/ffmpeg --check
+        python -B scripts/check-ffmpeg-recorder.py
+        suffix=""
+        if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
+        "third_party/ffmpeg-testgen/bin/ffmpeg-testgen${suffix}" -hide_banner -loglevel error -f lavfi -i color=s=16x16:d=0.1 -frames:v 1 -c:v rawvideo -f rawvideo pipe:1 > /dev/null
+        test ! -e third_party/ffmpeg/bin/ffmpeg
+        test ! -e third_party/ffmpeg/bin/ffmpeg.exe
+    - name: Save binaries only from repository pushes
+      if: inputs.producer == 'true' && inputs.no-binary-cache != 'true' && github.event_name == 'push' && github.repository == 'CanadaApollo6/Kinewright' && steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          third_party/ffmpeg
+          third_party/ffmpeg-recorder
+          third_party/ffmpeg-testgen
+          third_party/ffmpeg-deps/installed
+        key: ms1-${{ steps.fingerprint.outputs.key }}

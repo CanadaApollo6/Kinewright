@@ -12,7 +12,7 @@ jobs:
   windows-installer:
     name: Windows installer
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 150
 
     defaults:
       run:
@@ -76,9 +76,13 @@ jobs:
             Write-Warning 'WiX was not detected, but it is not used by this release job.'
           }
 
+      - name: Compile verified FFmpeg source without binary cache
+        uses: ./.github/actions/ffmpeg
+        with:
+          no-binary-cache: 'true'
+
       - name: Provision FFmpeg, test, build, and package
         run: |
-          & .\scripts\setup-ffmpeg.ps1
           cargo test --workspace --locked
 
           $env:RUSTFLAGS = '-C target-feature=+crt-static'
@@ -87,7 +91,7 @@ jobs:
           Write-Host 'Kinewright.exe runtime dependencies:'
           dumpbin /dependents .\target\release\kinewright-app.exe
 
-          & .\scripts\package-windows.ps1 -Version $env:KINEWRIGHT_VERSION -IsccPath $env:KINEWRIGHT_ISCC
+          & .\scripts\package-windows.ps1 -Version $env:KINEWRIGHT_VERSION -IsccPath $env:KINEWRIGHT_ISCC -NoBinaryCache
           & .\scripts\test-windows-bundle.ps1 -BundleDir .\dist\windows-x64
 
           $installers = @(Get-ChildItem -LiteralPath .\dist\installer -File -Filter '*.exe')
@@ -132,7 +136,7 @@ jobs:
   linux-tarball:
     name: Linux tarball
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 150
 
     steps:
       - name: Check out repository
@@ -155,12 +159,16 @@ jobs:
           fi
           echo "KINEWRIGHT_VERSION=${version}" >> "${GITHUB_ENV}"
 
+      - name: Compile verified FFmpeg source without binary cache
+        uses: ./.github/actions/ffmpeg
+        with:
+          no-binary-cache: 'true'
+
       - name: Provision FFmpeg, test, build, and package
         run: |
-          source ./scripts/setup-ffmpeg.sh
           cargo test --workspace --locked
           cargo build --package kinewright-app --release --locked
-          ./scripts/package-linux.sh --version "${KINEWRIGHT_VERSION}"
+          ./scripts/package-linux.sh --version "${KINEWRIGHT_VERSION}" --no-binary-cache
           ./scripts/test-linux-bundle.sh --bundle-dir ./dist/linux-x64
           tarball="$(find ./dist/tarball -maxdepth 1 -type f -name '*.tar.gz')"
           if [[ -z "${tarball}" || "$(echo "${tarball}" | wc -l)" -ne 1 ]]; then

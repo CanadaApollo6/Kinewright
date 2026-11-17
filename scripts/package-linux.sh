@@ -3,7 +3,7 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 --version <semver> [--ffmpeg-dir DIR] [--target-dir DIR] [--output-dir DIR] [--stage-only]" >&2
+    echo "Usage: $0 --version <semver> [--ffmpeg-dir DIR] [--target-dir DIR] [--output-dir DIR] [--stage-only] --no-binary-cache" >&2
     exit 2
 }
 
@@ -12,6 +12,7 @@ ffmpeg_dir="${FFMPEG_DIR:-}"
 target_dir=""
 output_dir=""
 stage_only=0
+no_binary_cache=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -31,6 +32,10 @@ while [[ $# -gt 0 ]]; do
             output_dir="${2:-}"
             shift 2
             ;;
+        --no-binary-cache)
+            no_binary_cache=1
+            shift
+            ;;
         --stage-only)
             stage_only=1
             shift
@@ -46,11 +51,20 @@ if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
     exit 1
 fi
 
+if [[ "$no_binary_cache" -ne 1 ]]; then
+    echo 'Packaging requires --no-binary-cache: compile verified FFmpeg source, never CI binary-cache outputs.' >&2
+    exit 1
+fi
+
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
-if [[ -z "$ffmpeg_dir" ]]; then
-    ffmpeg_dir="$repo_root/third_party/ffmpeg"
+if [[ -n "$ffmpeg_dir" && "$(realpath -m "$ffmpeg_dir")" != "$repo_root/third_party/ffmpeg" ]]; then
+    echo 'Source-only packaging uses the owned verified FFmpeg install.' >&2
+    exit 1
 fi
+# Mandatory source rebuild: a CI marker or cache digest is not release provenance.
+source "$script_dir/setup-ffmpeg.sh" --no-binary-cache
+ffmpeg_dir="$FFMPEG_DIR"
 if [[ -z "$target_dir" ]]; then
     target_dir="$repo_root/target/release"
 fi
@@ -70,18 +84,13 @@ if [[ ! -f "$source_bin" ]]; then
     exit 1
 fi
 
-ffmpeg_bin_dir="$ffmpeg_dir/bin"
 ffmpeg_lib_dir="$ffmpeg_dir/lib"
-if [[ ! -d "$ffmpeg_bin_dir" ]]; then
-    echo "FFmpeg bin directory not found: $ffmpeg_bin_dir" >&2
-    exit 1
-fi
 if [[ ! -d "$ffmpeg_lib_dir" ]]; then
     echo "FFmpeg lib directory not found: $ffmpeg_lib_dir" >&2
     exit 1
 fi
 
-required_libs=(libavcodec.so libavdevice.so libavfilter.so libavformat.so libavutil.so libswresample.so libswscale.so)
+required_libs=(libavcodec.so libavfilter.so libavformat.so libavutil.so libswresample.so libswscale.so)
 nemo_dir="${KINEWRIGHT_NEMO_DIR:?Source scripts/setup-ffmpeg.sh before packaging}"
 for lib in libnemo_speech_asr.so libnemo_speech_asr_c.so; do
     if [[ ! -f "$nemo_dir/lib/$lib" ]]; then
@@ -96,7 +105,7 @@ for lib in "${required_libs[@]}"; do
     fi
 done
 
-ffmpeg_cli="$ffmpeg_bin_dir/ffmpeg"
+ffmpeg_cli="$repo_root/third_party/ffmpeg-recorder/bin/ffmpeg"
 if [[ ! -f "$ffmpeg_cli" ]]; then
     echo "Pinned FFmpeg build is missing ffmpeg (required for in-editor recording)" >&2
     exit 1
@@ -116,22 +125,16 @@ cp "$source_bin" "$stage_dir/Kinewright"
 chmod +x "$stage_dir/Kinewright"
 cp "$ffmpeg_cli" "$stage_dir/ffmpeg"
 chmod +x "$stage_dir/ffmpeg"
-if [[ -f "$ffmpeg_bin_dir/ffprobe" ]]; then
-    cp "$ffmpeg_bin_dir/ffprobe" "$stage_dir/ffprobe"
-    chmod +x "$stage_dir/ffprobe"
-fi
-
 # Copy the libav family and every SONAME symlink the loader needs.
 find "$ffmpeg_lib_dir" -maxdepth 1 \( -name 'libav*.so*' -o -name 'libsw*.so*' \) -exec cp -a {} "$stage_dir/lib/" \;
 cp -a "$nemo_dir"/lib/libnemo_speech_asr*.so* "$stage_dir/lib/"
+
+python3 "$repo_root/scripts/copy-ffmpeg-deps.py" "$ffmpeg_dir" "$repo_root/third_party/ffmpeg-recorder" "$stage_dir/lib"
 
 if command -v patchelf >/dev/null 2>&1; then
     for binary in "$stage_dir/Kinewright" "$stage_dir/ffmpeg"; do
         patchelf --set-rpath '$ORIGIN/lib' "$binary"
     done
-    if [[ -f "$stage_dir/ffprobe" ]]; then
-        patchelf --set-rpath '$ORIGIN/lib' "$stage_dir/ffprobe"
-    fi
     for lib in "$stage_dir/lib"/lib*.so*; do
         if [[ -f "$lib" && ! -L "$lib" ]]; then
             patchelf --set-rpath '$ORIGIN' "$lib"
@@ -144,6 +147,8 @@ fi
 cp "$repo_root/LICENSE" "$licenses_dir/Kinewright-GPL-3.0.txt"
 cp "$ffmpeg_license" "$licenses_dir/FFmpeg-GPL.txt"
 cp -a "$repo_root/LICENSES/." "$licenses_dir/"
+cp "$ffmpeg_dir/configure.txt" "$licenses_dir/FFmpeg-libraries-configure.txt"
+cp "$repo_root/third_party/ffmpeg-recorder/configure.txt" "$licenses_dir/FFmpeg-recorder-configure.txt"
 cp "$repo_root/crates/kinewright-app/assets/licenses/Inter-OFL.txt" "$licenses_dir/"
 cp "$repo_root/crates/kinewright-app/assets/licenses/JetBrains-Mono-OFL.txt" "$licenses_dir/"
 cp "$repo_root/packaging/linux/LICENSES/README.txt" "$licenses_dir/"

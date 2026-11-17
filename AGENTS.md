@@ -15,7 +15,9 @@ buildable here after provisioning FFmpeg and the native desktop libraries:
   (`cpal`), NeMo-Speech.cpp (separately provisioned shared CPU libraries), GTK 3 (`rfd`), and X11/Wayland
   (`eframe`/`winit`). `scripts/install-linux-deps.sh` plus
   `source scripts/setup-ffmpeg.sh` provide these. Do **not** run
-  `scripts/setup-ffmpeg.ps1` on Linux (it downloads the Windows MSVC build).
+  `scripts/setup-ffmpeg.ps1` on Linux (it produces the Windows MSVC build).
+  Setup builds only the minimal shared libraries and recording CLI; provision
+  the isolated fixture tools separately with the command below.
 
 Windows FFmpeg/GPU-dependent CI remains in `.github/workflows/ci.yml` on
 `windows-latest`. Linux CI runs the same workspace commands on `ubuntu-latest`.
@@ -38,6 +40,7 @@ added lints; move the pin on purpose, with a local `rustup update`). There is no
 ```bash
 ./scripts/install-linux-deps.sh          # once per machine
 source ./scripts/setup-ffmpeg.sh         # once per shell
+python3 scripts/build-ffmpeg.py --profile testgen  # test-only fixture tools
 cargo build --workspace
 cargo test  --workspace                  # fast tier: slow tests are skipped
 cargo test  --workspace --features kinewright-media/slow-tests,kinewright-agent/slow-tests,kinewright-app/slow-tests   # full suite

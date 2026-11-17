@@ -1,11 +1,16 @@
 # Releasing Kinewright
 
-Kinewright releases are built by `.github/workflows/release.yml`. A pushed tag matching `v*` runs the full Windows and Linux test suites, then publishes:
+Kinewright releases are built by `.github/workflows/release.yml`. A pushed tag matching `v*` runs the Windows and Linux workspace tests, then publishes:
 
 - a Windows installer that bundles the pinned GPL FFmpeg shared DLLs;
 - a Linux x64 tarball that bundles the pinned GPL FFmpeg shared libraries and CLI.
 
 Both jobs smoke-test the staged bundle with FFmpeg removed from `PATH`, and publish GitHub Actions artifacts plus GitHub Release assets.
+
+Release jobs compile the minimal profiles from verified source without the binary
+cache. Packaging requires `--no-binary-cache` (PowerShell `-NoBinaryCache`) and
+rebuilds the shipping profiles even when local markers match. Fixture tools stay
+in their test-only prefix and never enter a bundle. See [MS1](MS1-MINIMAL-FFMPEG.md).
 
 ## Installer toolchain
 
@@ -42,6 +47,7 @@ The installer is currently unsigned. Windows SmartScreen may warn until a code-s
 
 - `target/release/kinewright-app.exe` as `Kinewright.exe`;
 - every shared DLL from the pinned `third_party/ffmpeg/bin` build, beside the executable;
+- the recording-only CLI from `third_party/ffmpeg-recorder/bin`;
 - the Kinewright GPLv3 license;
 - the FFmpeg license, build metadata when present, attribution, and source-availability links.
 
@@ -51,21 +57,18 @@ The release build enables the MSVC static C runtime with `-C target-feature=+crt
 
 ## Local installer build
 
-Do not run `scripts/setup-ffmpeg.ps1` against the shared local `third_party` tree. Use the already provisioned paths and a Visual Studio developer PowerShell so `rc.exe` is available for the executable's icon and version resources.
+Use a separate release checkout or worktree with the prerequisites in
+[Building Kinewright](BUILDING.md). Provision its owned source-build profiles:
 
 ```powershell
-$env:FFMPEG_DIR = 'C:\Users\Riel St Amand\Documents\GitHub\Kinewright\third_party\ffmpeg'
-$env:PKG_CONFIG = 'C:\Users\Riel St Amand\Documents\GitHub\Kinewright\third_party\pkgconf\pkgconf\.bin\pkgconf.exe'
-$env:PKG_CONFIG_PATH = 'C:\Users\Riel St Amand\Documents\GitHub\Kinewright\third_party\ffmpeg\lib\pkgconfig'
-$env:LIBCLANG_PATH = 'C:\Users\Riel St Amand\Documents\GitHub\Kinewright\third_party\libclang\clang\native'
-$env:CARGO_HOME = 'C:\Users\Riel St Amand\Documents\GitHub\Kinewright\.cargo-home'
-$rustBin = 'C:\Users\Riel St Amand\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin'
-$env:Path = "$env:FFMPEG_DIR\bin;$rustBin;$env:Path"
+.\scripts\prepare-ffmpeg-windows.ps1
+.\scripts\setup-ffmpeg.ps1 -NoBinaryCache
+python scripts/build-ffmpeg.py --profile testgen --no-binary-cache
 
 cargo test --workspace --locked
 $env:RUSTFLAGS = '-C target-feature=+crt-static'
 cargo build --package kinewright-app --release --locked
-.\scripts\package-windows.ps1 -Version 0.1.0
+.\scripts\package-windows.ps1 -Version 0.1.0 -NoBinaryCache
 .\scripts\test-windows-bundle.ps1 -BundleDir .\dist\windows-x64
 Get-FileHash .\dist\installer\Kinewright-0.1.0-windows-x64-setup.exe -Algorithm SHA256
 ```
@@ -73,13 +76,13 @@ Get-FileHash .\dist\installer\Kinewright-0.1.0-windows-x64-setup.exe -Algorithm 
 Inno Setup 6 or 7 is required locally. Its own installer supports `/PORTABLE=1`, so it can be installed into a worktree-local tools directory without an uninstall entry. Pass its compiler explicitly when it is not on `PATH`:
 
 ```powershell
-.\scripts\package-windows.ps1 -Version 0.1.0 -IsccPath .\.tools\innosetup\ISCC.exe
+.\scripts\package-windows.ps1 -Version 0.1.0 -NoBinaryCache -IsccPath .\.tools\innosetup\ISCC.exe
 ```
 
 If local policy prevents running Inno Setup, stage and smoke-test the bundle without compiling the installer. The tag workflow remains the canonical installer builder.
 
 ```powershell
-.\scripts\package-windows.ps1 -Version 0.1.0 -StageOnly
+.\scripts\package-windows.ps1 -Version 0.1.0 -NoBinaryCache -StageOnly
 .\scripts\test-windows-bundle.ps1 -BundleDir .\dist\windows-x64
 ```
 
@@ -88,7 +91,7 @@ If local policy prevents running Inno Setup, stage and smoke-test the bundle wit
 `scripts/package-linux.sh` stages:
 
 - `target/release/kinewright-app` as `Kinewright`;
-- the pinned FFmpeg CLI as `ffmpeg` (and `ffprobe` when present);
+- the recording-only CLI as `ffmpeg`;
 - the libav/libsw shared libraries under `lib/`;
 - the Kinewright GPLv3 license, FFmpeg license, font licenses, a `.desktop` file, and the app icon.
 
@@ -97,10 +100,11 @@ If local policy prevents running Inno Setup, stage and smoke-test the bundle wit
 ### Local tarball build
 
 ```bash
-source ./scripts/setup-ffmpeg.sh
+source ./scripts/setup-ffmpeg.sh --no-binary-cache
+python3 scripts/build-ffmpeg.py --profile testgen --no-binary-cache
 cargo test --workspace --locked
 cargo build --package kinewright-app --release --locked
-./scripts/package-linux.sh --version 0.1.0
+./scripts/package-linux.sh --version 0.1.0 --no-binary-cache
 ./scripts/test-linux-bundle.sh --bundle-dir ./dist/linux-x64
 sha256sum ./dist/tarball/Kinewright-0.1.0-linux-x64.tar.gz
 ```
@@ -108,6 +112,6 @@ sha256sum ./dist/tarball/Kinewright-0.1.0-linux-x64.tar.gz
 Stage without creating the tarball:
 
 ```bash
-./scripts/package-linux.sh --version 0.1.0 --stage-only
+./scripts/package-linux.sh --version 0.1.0 --no-binary-cache --stage-only
 ./scripts/test-linux-bundle.sh --bundle-dir ./dist/linux-x64
 ```

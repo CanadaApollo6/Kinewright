@@ -9,8 +9,10 @@
 # an isolated manifest, so no off-Linux arm elsewhere in the crate is linted.
 #
 # Needs cargo-xwin (its SDK cache in ~/.cache/cargo-xwin) and the
-# x86_64-pc-windows-msvc target, and llvm-rc. The FFmpeg headers and import libraries are
-# the archive scripts/setup-ffmpeg.ps1 pins, checked against its SHA-256.
+# x86_64-pc-windows-msvc target, and llvm-rc. The FFmpeg headers and import libraries
+# come from a prebuilt FFmpeg 9.0.2 MSVC archive pinned here by SHA-256. It is a
+# lint-only header source on this Linux desktop; setup, CI and packaging build
+# FFmpeg from verified source (docs/MS1-MINIMAL-FFMPEG.md) and never use it.
 # This is a compile and lint check, not Windows execution.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
@@ -21,13 +23,14 @@ CARGO_TARGET_DIR="$PWD/target/shipping" bash scripts/ci-shipping-builds.sh
 # Cross-clippy does not enumerate MSVC libtest names. Keep the platform-scoped
 # manifest/accounting regression in this per-commit gate as well.
 nice -n 19 python3 -I scripts/ci_shards_selftest.py
-url=$(sed -n "s/^\$FfmpegUrl = '\(.*\)'$/\1/p" scripts/setup-ffmpeg.ps1)
-sha=$(sed -n "s/^\$FfmpegSha256 = '\(.*\)'$/\1/p" scripts/setup-ffmpeg.ps1)
-test -n "$url" && test -n "$sha"
+url='https://github.com/System233/ffmpeg-msvc-prebuilt/releases/download/ffmpeg-9.0.2/ffmpeg-9.0.2_x64-windows-shared-gpl.zip'
+sha='ce3a3a052c9dfe5f941789e88dba0d14d10fbf9be6236cb0c4b71a2dfc0a00e5'
 cache="$HOME/.cache/kinewright-winxbuild"
 if [ "$(cat "$cache/ffmpeg/.archive-sha256" 2>/dev/null)" != "$sha" ]; then
     mkdir -p "$cache/dl"
-    python3 scripts/ffmpeg_archive.py "$url" "$cache/dl/ffmpeg.zip" "$sha"
+    curl -fsSL --retry 3 -o "$cache/dl/ffmpeg.zip.part" "$url"
+    echo "$sha  $cache/dl/ffmpeg.zip.part" | sha256sum -c -
+    mv "$cache/dl/ffmpeg.zip.part" "$cache/dl/ffmpeg.zip"
     rm -rf "$cache/ffmpeg"
     mkdir -p "$cache/ffmpeg"
     unzip -q "$cache/dl/ffmpeg.zip" -d "$cache/ffmpeg"

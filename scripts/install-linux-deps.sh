@@ -11,6 +11,19 @@ apt_packages=(
     libstdc++-14-dev
     cmake
     pkg-config
+    nasm
+    libx264-dev
+    libx265-dev
+    libdav1d-dev
+    zlib1g-dev
+    libvpx-dev
+    libfreetype6-dev
+    libharfbuzz-dev
+    libpulse-dev
+    libxcb1-dev
+    libxcb-shm0-dev
+    libxcb-shape0-dev
+    libxcb-xfixes0-dev
     python3
     xz-utils
     libasound2-dev
@@ -71,6 +84,16 @@ elif command -v pacman >/dev/null 2>&1; then
         clang
         cmake
         pkgconf
+        nasm
+        x264
+        x265
+        dav1d
+        zlib
+        libvpx
+        freetype2
+        harfbuzz
+        libpulse
+        libxcb
         python
         xz
         alsa-lib

@@ -9,16 +9,24 @@ param(
     [string]$TargetDir,
     [string]$OutputDir,
     [string]$IsccPath,
-    [switch]$StageOnly
+    [switch]$StageOnly,
+    [switch]$NoBinaryCache
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-if ([string]::IsNullOrWhiteSpace($FfmpegDir)) {
-    $FfmpegDir = Join-Path $repoRoot 'third_party\ffmpeg'
+if (-not $NoBinaryCache) {
+    throw 'Packaging requires -NoBinaryCache: compile verified FFmpeg source, never CI binary-cache outputs.'
 }
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$ownedFfmpeg = Join-Path $repoRoot 'third_party\ffmpeg'
+if ($FfmpegDir -and -not [System.IO.Path]::GetFullPath($FfmpegDir).Equals($ownedFfmpeg, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Source-only packaging uses the owned verified FFmpeg install.'
+}
+# Mandatory source rebuild; cache marker/digest files cannot authorize a release.
+& (Join-Path $PSScriptRoot 'setup-ffmpeg.ps1') -NoBinaryCache -SkipBuildCachePrune
+$FfmpegDir = $env:FFMPEG_DIR
 if ([string]::IsNullOrWhiteSpace($TargetDir)) {
     $TargetDir = Join-Path $repoRoot 'target\release'
 }
@@ -52,7 +60,6 @@ if ($dlls.Count -eq 0) {
 
 $requiredDllPatterns = @(
     'avcodec-*.dll',
-    'avdevice-*.dll',
     'avfilter-*.dll',
     'avformat-*.dll',
     'avutil-*.dll',
@@ -97,7 +104,7 @@ foreach ($name in $nemoDlls) {
 }
 
 # The FFmpeg CLI powers in-editor recording (screen/camera/mic capture).
-$ffmpegCli = Join-Path $ffmpegBin 'ffmpeg.exe'
+$ffmpegCli = Join-Path $repoRoot 'third_party/ffmpeg-recorder/bin/ffmpeg.exe'
 if (-not (Test-Path -LiteralPath $ffmpegCli -PathType Leaf)) {
     throw "Pinned FFmpeg build is missing ffmpeg.exe (required for in-editor recording)"
 }
@@ -110,10 +117,8 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'crates\kinewright-app\assets\licens
 Copy-Item -LiteralPath (Join-Path $repoRoot 'crates\kinewright-app\assets\licenses\JetBrains-Mono-OFL.txt') -Destination $licensesDir
 Copy-Item -LiteralPath (Join-Path $repoRoot 'packaging\windows\LICENSES\README.txt') -Destination $licensesDir
 
-$ffmpegBuildInfo = Join-Path $FfmpegDir 'BUILD_INFO'
-if (Test-Path -LiteralPath $ffmpegBuildInfo -PathType Leaf) {
-    Copy-Item -LiteralPath $ffmpegBuildInfo -Destination (Join-Path $licensesDir 'FFmpeg-BUILD-INFO.txt')
-}
+Copy-Item -LiteralPath (Join-Path $FfmpegDir 'configure.txt') -Destination (Join-Path $licensesDir 'FFmpeg-libraries-configure.txt')
+Copy-Item -LiteralPath (Join-Path $repoRoot 'third_party/ffmpeg-recorder/configure.txt') -Destination (Join-Path $licensesDir 'FFmpeg-recorder-configure.txt')
 
 $fileInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($stagedExe)
 if ($fileInfo.ProductName -ne 'Kinewright') {

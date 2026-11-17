@@ -199,7 +199,9 @@ impl DecodeInput {
     reason = "map_err transfers the owned decoder error"
 )]
 fn media_io_error(error: OwnedIoError) -> kinewright_core::MediaError {
-    if matches!(error, OwnedIoError::TemporarilyUnavailable) {
+    if let OwnedIoError::UnsupportedCodec(codec) = error {
+        kinewright_core::MediaError::UnsupportedCodec { codec }
+    } else if matches!(error, OwnedIoError::TemporarilyUnavailable) {
         ReadAuthority::temporarily_unavailable()
     } else {
         kinewright_core::MediaError::Backend(error.to_string())
@@ -215,6 +217,7 @@ pub enum OwnedIoError {
     TemporarilyUnavailable,
     Cancelled,
     Decoder(String),
+    UnsupportedCodec(String),
 }
 
 impl fmt::Display for OwnedIoError {
@@ -226,6 +229,7 @@ impl fmt::Display for OwnedIoError {
             Self::Unavailable(message) => write!(f, "certified input unavailable: {message}"),
             Self::TemporarilyUnavailable => f.write_str("certified input temporarily unavailable"),
             Self::Cancelled => f.write_str("certified input cancelled"),
+            Self::UnsupportedCodec(codec) => write!(f, "unsupported_codec: {codec}"),
             Self::Decoder(message) => write!(f, "certified decoder: {message}"),
         }
     }
@@ -1078,24 +1082,10 @@ impl CertifiedInput {
         if input.format.nb_streams() as usize > MAX_CERTIFIED_STREAMS {
             return Err(OwnedIoError::Capacity("too many certified streams".into()));
         }
-        // Every probe decoder needs a reservation and options before FFmpeg can open it.
-        let still_pipe = input.format.nb_streams() == 1
-            && matches!(input.format.format().name(), "png_pipe" | "jpeg_pipe");
-        if still_pipe {
-            let mut cursor = source.cursor(input.avio.cancel())?;
-            let mut header = vec![0_u8; AVIO_BUFFER_BYTES];
-            let count = cursor.read(&mut header)?;
-            let dimensions = still_dimensions(&header[..count])
-                .ok_or_else(|| decoder_error("unsupported or incomplete still header"))?;
-            bridge::set_still_dimensions(&mut input.format, dimensions)?;
-        }
-        if input.format.nb_streams() == 0
-            || (bridge::dynamic_stream_table(&input.format) && !still_pipe)
-        {
-            return Err(decoder_error(
-                "incomplete or dynamic stream table unsupported",
-            ));
-        }
+        // Every probe decoder needs a fixed stream table, a reservation and options.
+        let prepared = bridge::prepare_stream_table(&mut input.format);
+        input.check()?;
+        prepared?;
         let mut bounds = Vec::new();
         let mut stream_kinds = Vec::new();
         for stream in input.format.streams() {
@@ -1104,6 +1094,7 @@ impl CertifiedInput {
                 stream.parameters().medium(),
                 ffmpeg::media::Type::Video | ffmpeg::media::Type::Audio
             ) {
+                bridge::check_codec(stream.parameters().id())?;
                 let bound = bridge::decoder_bound(&stream.parameters())?;
                 input
                     .probe_charges
@@ -1394,7 +1385,7 @@ impl CertifiedAudioDecoder {
 }
 
 #[allow(unsafe_code)]
-mod bridge {
+pub(crate) mod bridge {
     use super::{
         AVIO_BUFFER_BYTES, Arc, AtomicBool, CHUNK_BYTES, CODEC_BUFFER_COUNT, DecoderBound,
         MAX_AUDIO_CHANNELS, MAX_AUDIO_FRAME_SAMPLES, MAX_CERTIFIED_STREAMS, MAX_DECODER_DIMENSION,
@@ -1403,8 +1394,10 @@ mod bridge {
     #[cfg(test)]
     use super::{CertifiedInput, Ordering};
     use ffmpeg::ffi;
+    #[cfg(test)]
+    use std::ffi::CStr;
     use std::{
-        ffi::{CStr, c_char, c_int, c_void},
+        ffi::{c_char, c_int, c_void},
         panic::{AssertUnwindSafe, catch_unwind},
         ptr::{self, NonNull},
     };
@@ -1469,18 +1462,92 @@ mod bridge {
         }
     }
 
-    const SINGLE_OBJECT_DEMUXERS: &CStr = c"avi,mov,matroska,webm,wav,mp3,flac,ogg,aac,nut,mpegts,mpeg,mpegvideo,image2,png_pipe,jpeg_pipe,webp_pipe,bmp_pipe,tiff_pipe";
+    pub(super) fn check_codec(id: ffmpeg::codec::Id) -> Result<(), OwnedIoError> {
+        crate::codec_policy::check(id).map_err(|_| OwnedIoError::UnsupportedCodec(id.name().into()))
+    }
+
+    pub(crate) fn path_input(
+        path: &std::path::Path,
+        interruptible: bool,
+    ) -> Result<ffmpeg::format::context::Input, kinewright_core::MediaError> {
+        use kinewright_core::MediaError;
+        let filename = std::ffi::CString::new(
+            path.to_str()
+                .ok_or_else(|| MediaError::Backend("media path is not UTF-8".into()))?,
+        )
+        .map_err(|e| MediaError::Backend(e.to_string()))?;
+        let open_error = |code| {
+            MediaError::Backend(format!(
+                "could not open media {}: {}; the file may be truncated or its format may be unsupported",
+                path.display(),
+                ffmpeg::Error::from(code),
+            ))
+        };
+        unsafe {
+            let mut format = ffi::avformat_alloc_context();
+            if format.is_null() {
+                return Err(MediaError::Backend("format allocation failed".into()));
+            }
+            if interruptible {
+                (*format).interrupt_callback.callback = Some(path_interrupt);
+            }
+            let mut options = ptr::null_mut();
+            for (key, value) in [
+                (c"codec_whitelist", crate::codec_policy::CODECS.as_c_str()),
+                (c"format_whitelist", crate::codec_policy::FORMATS.as_c_str()),
+                (c"protocol_whitelist", c"file"),
+            ] {
+                if ffi::av_dict_set(&raw mut options, key.as_ptr(), value.as_ptr(), 0) < 0 {
+                    ffi::av_dict_free(&raw mut options);
+                    ffi::avformat_free_context(format);
+                    return Err(MediaError::Backend(
+                        "format policy allocation failed".into(),
+                    ));
+                }
+            }
+            let opened = ffi::avformat_open_input(
+                &raw mut format,
+                filename.as_ptr(),
+                ptr::null(),
+                &raw mut options,
+            );
+            ffi::av_dict_free(&raw mut options);
+            if opened < 0 {
+                #[cfg(test)]
+                crate::decode::interrupt_seam::exited(path, ffmpeg::Error::from(opened));
+                return Err(open_error(opened));
+            }
+            let mut input = ffmpeg::format::context::Input::wrap(format);
+            find_stream_info(&mut input, &[]).map_err(|error| match error {
+                OwnedIoError::UnsupportedCodec(codec) => MediaError::UnsupportedCodec { codec },
+                OwnedIoError::Cancelled => {
+                    #[cfg(test)]
+                    crate::decode::interrupt_seam::exited(path, ffmpeg::Error::Exit);
+                    open_error(ffmpeg::Error::Exit.into())
+                }
+                error => MediaError::Backend(format!(
+                    "could not open media {}: {error}; the file may be truncated or its format may be unsupported",
+                    path.display(),
+                )),
+            })?;
+            Ok(input)
+        }
+    }
+    unsafe extern "C" fn path_interrupt(_: *mut c_void) -> c_int {
+        c_int::from(crate::decode::reader_interrupted())
+    }
 
     pub(super) fn set_still_dimensions(
         input: &mut ffmpeg::format::context::Input,
         (width, height): (u32, u32),
     ) -> Result<(), OwnedIoError> {
-        if width == 0
-            || height == 0
-            || width > MAX_DECODER_DIMENSION
-            || height > MAX_DECODER_DIMENSION
-        {
+        if width == 0 || height == 0 {
             return Err(OwnedIoError::Capacity("still dimensions".into()));
+        }
+        if width > MAX_DECODER_DIMENSION || height > MAX_DECODER_DIMENSION {
+            return Err(OwnedIoError::Capacity(format!(
+                "still image {width}x{height} exceeds the {MAX_DECODER_DIMENSION}px limit on either axis; downscale it and re-import",
+            )));
         }
         let mut parameters = input
             .stream(0)
@@ -1498,6 +1565,100 @@ mod bridge {
     pub(super) fn dynamic_stream_table(input: &ffmpeg::format::context::Input) -> bool {
         // SAFETY: a field read of the live format context `input` wraps.
         unsafe { (*input.as_ptr()).ctx_flags & ffi::AVFMTCTX_NOHEADER != 0 }
+    }
+
+    /// Admit the fixed table before the first packet/parser-capable `FFmpeg` call.
+    /// Image pipes are the sole exception, after the same bounded header check on every path.
+    pub(super) fn prepare_stream_table(
+        input: &mut ffmpeg::format::context::Input,
+    ) -> Result<(), OwnedIoError> {
+        let expected = match input.format().name() {
+            "png_pipe" => Some(ffmpeg::codec::Id::PNG),
+            "jpeg_pipe" => Some(ffmpeg::codec::Id::MJPEG),
+            _ => None,
+        };
+        if let Some(codec) = expected {
+            if input.nb_streams() != 1
+                || input
+                    .stream(0)
+                    .is_none_or(|stream| stream.parameters().id() != codec)
+            {
+                return Err(decoder_error("still-image stream table mismatch"));
+            }
+            check_codec(codec)?;
+            let mut header = vec![0_u8; AVIO_BUFFER_BYTES];
+            let count = unsafe {
+                let io = (*input.as_mut_ptr()).pb;
+                if io.is_null() {
+                    return Err(decoder_error("still-image IO missing"));
+                }
+                let position = ffi::avio_seek(io, 0, 1);
+                if position < 0 || ffi::avio_seek(io, 0, 0) < 0 {
+                    return Err(decoder_error("still-image header is not seekable"));
+                }
+                let count = ffi::avio_read(
+                    io,
+                    header.as_mut_ptr(),
+                    i32::try_from(header.len()).expect("bounded header"),
+                );
+                if count == i32::from(ffmpeg::Error::Exit) {
+                    return Err(OwnedIoError::Cancelled);
+                }
+                if ffi::avio_seek(io, position, 0) < 0 {
+                    return Err(decoder_error("still-image header rewind failed"));
+                }
+                usize::try_from(count)
+                    .map_err(|_| decoder_error("incomplete still-image header"))?
+            };
+            let header = &header[..count];
+            let signature_matches = match codec {
+                ffmpeg::codec::Id::PNG => header.starts_with(b"\x89PNG\r\n\x1a\n"),
+                ffmpeg::codec::Id::MJPEG => header.starts_with(&[0xff, 0xd8]),
+                _ => false,
+            };
+            if !signature_matches {
+                return Err(decoder_error("still-image demuxer/header mismatch"));
+            }
+            let dimensions = super::still_dimensions(header)
+                .ok_or_else(|| decoder_error("unsupported or incomplete still header"))?;
+            set_still_dimensions(input, dimensions)?;
+        } else if input.nb_streams() == 0 || dynamic_stream_table(input) {
+            return Err(decoder_error(
+                "incomplete or dynamic stream table unsupported",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn make_header_dynamic(input: &mut ffmpeg::format::context::Input) {
+        unsafe {
+            (*input.as_mut_ptr()).ctx_flags |= ffi::AVFMTCTX_NOHEADER;
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn corrupt_still_table(input: &mut ffmpeg::format::context::Input, second: bool) {
+        unsafe {
+            let stream = if second {
+                let stream = ffi::avformat_new_stream(input.as_mut_ptr(), ptr::null());
+                assert!(!stream.is_null());
+                stream
+            } else {
+                *(*input.as_mut_ptr()).streams
+            };
+            (*(*stream).codecpar).codec_id = if second {
+                ffi::AVCodecID::AV_CODEC_ID_PNG
+            } else {
+                ffi::AVCodecID::AV_CODEC_ID_MP3
+            };
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn parser_count(input: &ffmpeg::format::context::Input) -> usize {
+        input
+            .streams()
+            .filter(|stream| unsafe { !ffi::av_stream_get_parser(stream.as_ptr()).is_null() })
+            .count()
     }
 
     pub(super) fn decoder_bound(
@@ -1564,6 +1725,7 @@ mod bridge {
         parameters: ffmpeg::codec::Parameters,
         bound: DecoderBound,
     ) -> Result<ffmpeg::codec::context::Context, OwnedIoError> {
+        check_codec(parameters.id())?;
         let mut context =
             ffmpeg::codec::context::Context::from_parameters(parameters).map_err(decoder_error)?;
         context.set_threading(ffmpeg::codec::threading::Config {
@@ -1582,17 +1744,28 @@ mod bridge {
         input: &mut ffmpeg::format::context::Input,
         bounds: &[Option<DecoderBound>],
     ) -> Result<(), OwnedIoError> {
-        let mut options = vec![ptr::null_mut(); bounds.len()];
+        prepare_stream_table(input)?;
+        for stream in input.streams() {
+            check_codec(stream.parameters().id())?;
+        }
+        let mut options = vec![ptr::null_mut(); input.nb_streams() as usize];
         // SAFETY: `input` wraps a live format context borrowed exclusively.
         // `options` holds one dictionary pointer per stream (FFmpeg's contract
         // for `avformat_find_stream_info`), each freed before returning.
         unsafe {
             // options.c refuses new streams before allocating their decoder context.
-            (*input.as_mut_ptr()).max_streams =
-                i32::try_from(bounds.len()).expect("bounded reserved stream count");
-            for (option, bound) in options.iter_mut().zip(bounds) {
-                ffi::av_dict_set(option, c"threads".as_ptr(), c"1".as_ptr(), 0);
+            (*input.as_mut_ptr()).max_streams = i32::try_from(input.nb_streams())
+                .map_err(|_| decoder_error("stream count overflow"))?;
+            for (index, option) in options.iter_mut().enumerate() {
+                let bound = bounds.get(index).and_then(Option::as_ref);
+                ffi::av_dict_set(
+                    option,
+                    c"codec_whitelist".as_ptr(),
+                    crate::codec_policy::CODECS.as_ptr(),
+                    0,
+                );
                 if let Some(bound) = bound {
+                    ffi::av_dict_set(option, c"threads".as_ptr(), c"1".as_ptr(), 0);
                     ffi::av_dict_set_int(
                         option,
                         c"max_pixels".as_ptr(),
@@ -1612,6 +1785,12 @@ mod bridge {
             let result = ffi::avformat_find_stream_info(input.as_mut_ptr(), options.as_mut_ptr());
             for option in &mut options {
                 ffi::av_dict_free(option);
+            }
+            if result == i32::from(ffmpeg::Error::Exit) {
+                return Err(OwnedIoError::Cancelled);
+            }
+            for stream in input.streams() {
+                check_codec(stream.parameters().id())?;
             }
             if result < 0 {
                 return Err(decoder_error(ffmpeg::Error::from(result)));
@@ -1705,11 +1884,12 @@ mod bridge {
                     i32::try_from(MAX_CERTIFIED_STREAMS).expect("bounded stream count");
                 (*format).probesize = 32_768;
                 (*format).format_probesize = 32_768;
-                let formats = SINGLE_OBJECT_DEMUXERS;
+                let formats = crate::codec_policy::FORMATS.as_c_str();
                 let protocols = c"none";
                 #[cfg(test)]
                 let (formats, protocols) = match avio.cursor().source.hooks.open_policy {
                     super::TestOpenPolicy::Production => (formats, protocols),
+                    super::TestOpenPolicy::WavOnly => (c"wav", protocols),
                     super::TestOpenPolicy::ProtocolGuard => (c"concat,hls,wav,mpegts", protocols),
                     super::TestOpenPolicy::FormatGuard => (formats, c"file"),
                     super::TestOpenPolicy::NestedOutputControl => (c"concat,wav", c"file"),
@@ -1729,7 +1909,13 @@ mod bridge {
                     formats.as_ptr(),
                     0,
                 );
-                if protocol_option < 0 || format_option < 0 {
+                let codec_option = ffi::av_dict_set(
+                    &raw mut options,
+                    c"codec_whitelist".as_ptr(),
+                    crate::codec_policy::CODECS.as_ptr(),
+                    0,
+                );
+                if protocol_option < 0 || format_option < 0 || codec_option < 0 {
                     ffi::av_dict_free(&raw mut options);
                     ffi::avformat_free_context(format);
                     return Err(OwnedIoError::Capacity("format policy allocation".into()));
@@ -2052,6 +2238,7 @@ mod bridge {
 enum TestOpenPolicy {
     #[default]
     Production,
+    WavOnly,
     ProtocolGuard,
     FormatGuard,
     NestedOutputControl,
@@ -2762,36 +2949,151 @@ mod tests {
                 "-f",
                 "lavfi",
                 "-i",
-                "testsrc2=size=64x48:rate=25:duration=1",
-                "-c:v",
-                "mpeg2video",
-                "-g",
-                "1",
-                "-threads",
-                "1",
+                "sine=duration=0.1",
+                "-c:a",
+                "ac3",
                 "-f",
                 "mpeg",
             ],
             &path,
         );
         let source = source(&path);
-        let (format, avio) = bridge::Avio::open(source.cursor(running()).unwrap()).unwrap();
-        let header = CertifiedInput::from_parts(format, avio);
-        assert_eq!(
-            header.format.nb_streams(),
-            0,
-            "MPEG-PS opens without streams"
-        );
-        assert!(bridge::dynamic_stream_table(&header.format));
-        drop(header);
         let (result, calls) = observe_stream_info_probes(|| source.probe(running()));
-        assert_eq!(calls, 0, "C0_INCOMPLETE_PROBE_NOT_ENTERED");
-        assert!(
-            matches!(result, Err(OwnedIoError::Decoder(ref message))
-                if message == "incomplete or dynamic stream table unsupported"),
-            "C0_INCOMPLETE_TABLE_REFUSED: {result:?}",
-        );
+        assert!(result.is_err(), "MPEG-PS demuxer is absent");
+        assert_eq!(calls, 0, "parser-capable probe is never reached");
+        for interruptible in [false, true] {
+            let (result, calls) =
+                observe_stream_info_probes(|| bridge::path_input(&path, interruptible));
+            assert!(result.is_err());
+            assert_eq!(calls, 0);
+        }
         assert_eq!(source.accepted_output_bytes(), 0);
+    }
+
+    fn header_input(source: &CertifiedSource) -> CertifiedInput {
+        let (format, avio) = bridge::Avio::open(source.cursor(running()).unwrap()).unwrap();
+        CertifiedInput::from_parts(format, avio)
+    }
+
+    #[test]
+    fn ms1_dynamic_table_refuses_before_parser_entry() {
+        let directory = TempDirectory::new("ms1-dynamic-parser");
+        let path = directory.path("mpeg4.avi");
+        run_ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=s=32x24:d=0.1",
+                "-c:v",
+                "mpeg4",
+                "-threads",
+                "1",
+            ],
+            &path,
+        );
+        let source = source(&path);
+        let mut control = header_input(&source);
+        let (result, calls) =
+            observe_stream_info_probes(|| bridge::find_stream_info(&mut control.format, &[]));
+        assert!(result.is_ok());
+        assert_eq!(
+            calls, 1,
+            "positive control reaches the parser-capable entry"
+        );
+        let mut dynamic = header_input(&source);
+        bridge::make_header_dynamic(&mut dynamic.format);
+        assert_eq!(bridge::parser_count(&dynamic.format), 0);
+        let (result, calls) =
+            observe_stream_info_probes(|| bridge::find_stream_info(&mut dynamic.format, &[]));
+        assert_eq!(
+            calls, 0,
+            "NOHEADER must not reach FFmpeg's parser-capable probe"
+        );
+        assert!(
+            matches!(result, Err(OwnedIoError::Decoder(ref message)) if message == "incomplete or dynamic stream table unsupported")
+        );
+        assert_eq!(bridge::parser_count(&dynamic.format), 0);
+    }
+
+    #[test]
+    fn ms1_validated_stills_open_on_every_reader_path() {
+        let directory = TempDirectory::new("ms1-still-paths");
+        for (encoder, extension) in [("png", "png"), ("mjpeg", "jpg")] {
+            let path = directory.path(&format!("frame.{extension}"));
+            run_ffmpeg(
+                &[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=s=32x24:d=0.1",
+                    "-frames:v",
+                    "1",
+                    "-c:v",
+                    encoder,
+                    "-threads",
+                    "1",
+                ],
+                &path,
+            );
+            let source = source(&path);
+            let (result, calls) = observe_stream_info_probes(|| source.probe(running()));
+            assert!(result.is_ok(), "certified {extension}: {result:?}");
+            assert_eq!(calls, 1);
+            for interruptible in [false, true] {
+                let (result, calls) =
+                    observe_stream_info_probes(|| bridge::path_input(&path, interruptible));
+                assert!(
+                    result.is_ok(),
+                    "path {extension}: {}",
+                    result.err().unwrap()
+                );
+                assert_eq!(calls, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn ms1_png_pipe_rejects_second_or_different_stream_before_parser_entry() {
+        let directory = TempDirectory::new("ms1-still-header");
+        let path = directory.path("frame.png");
+        run_ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=s=32x24:d=0.1",
+                "-frames:v",
+                "1",
+                "-c:v",
+                "png",
+                "-threads",
+                "1",
+            ],
+            &path,
+        );
+        let source = source(&path);
+        let mut control = header_input(&source);
+        assert_eq!(control.format.format().name(), "png_pipe");
+        let (result, calls) =
+            observe_stream_info_probes(|| bridge::find_stream_info(&mut control.format, &[]));
+        assert!(result.is_ok(), "validated PNG control: {result:?}");
+        assert_eq!(calls, 1);
+        for second in [false, true] {
+            let mut rejected = header_input(&source);
+            bridge::corrupt_still_table(&mut rejected.format, second);
+            assert_eq!(bridge::parser_count(&rejected.format), 0);
+            let (result, calls) =
+                observe_stream_info_probes(|| bridge::find_stream_info(&mut rejected.format, &[]));
+            assert_eq!(
+                calls, 0,
+                "malformed PNG table must not reach the parser-capable probe"
+            );
+            assert!(
+                matches!(result, Err(OwnedIoError::Decoder(ref message)) if message == "still-image stream table mismatch")
+            );
+            assert_eq!(bridge::parser_count(&rejected.format), 0);
+        }
     }
 
     #[test]
@@ -2819,7 +3121,7 @@ mod tests {
                 "-c:a",
                 "pcm_s16le",
                 "-c:s",
-                "srt",
+                "subrip",
                 "-threads",
                 "1",
                 "-t",
@@ -2876,15 +3178,53 @@ mod tests {
     }
 
     #[test]
-    fn s3_certified_concat_counterfactual_accepts_uncertified_pcm() {
-        let (_directory, source) = nested_fixture(false, TestOpenPolicy::NestedOutputControl);
-        read_nested_audio(&source)
-            .expect("unrestricted concat fixture must decode its uncertified WAV");
-        assert!(
-            source.accepted_output_bytes() >= 96_000,
-            "counterfactual accepts the one-second WAV PCM"
-        );
+    fn ms1_format_whitelist_refuses_a_present_demuxer_before_stream_info() {
+        let (_directory, _path, mut source) = media_fixture("red");
+        assert!(source.probe(running()).is_ok(), "AVI positive control");
+        Arc::get_mut(&mut source.0).unwrap().hooks.open_policy = TestOpenPolicy::WavOnly;
+        let (result, probes) = super::observe_stream_info_probes(|| source.probe(running()));
+        assert!(matches!(result, Err(OwnedIoError::Decoder(_))));
+        assert_eq!(probes, 0);
         assert_eq!(source.0.hooks.nested_open_calls.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn ms1_playlist_demuxers_are_absent_even_without_the_format_guard() {
+        let (_directory, source) = nested_fixture(false, TestOpenPolicy::NestedOutputControl);
+        assert!(read_nested_audio(&source).is_err());
+        assert_eq!(source.accepted_output_bytes(), 0);
+        assert_eq!(source.0.hooks.nested_open_calls.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn ms1_certified_codec_refusal_precedes_probe_decode() {
+        crate::initialize_ffmpeg().unwrap();
+        assert!(ffmpeg::decoder::find(ffmpeg::codec::Id::H263).is_some());
+        assert!(ffmpeg::decoder::find(ffmpeg::codec::Id::QTRLE).is_none());
+        let directory = TempDirectory::new("ms1-codec-refusal");
+        for (codec, extension, size) in [("h263", "avi", "128x96"), ("qtrle", "mov", "32x32")] {
+            let path = directory.path(&format!("unsupported-{codec}.{extension}"));
+            run_ffmpeg(
+                &[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("color=s={size}:d=0.1"),
+                    "-c:v",
+                    codec,
+                ],
+                &path,
+            );
+            let input = source(&path);
+            let (result, probes) = super::observe_stream_info_probes(|| input.probe(running()));
+            assert!(
+                matches!(result, Err(OwnedIoError::UnsupportedCodec(ref name)) if name == codec)
+            );
+            assert_eq!(probes, 0);
+            assert!(
+                matches!(crate::decode::media_input(&path), Err(kinewright_core::MediaError::UnsupportedCodec { codec: name }) if name == codec)
+            );
+        }
     }
 
     #[test]
@@ -2902,7 +3242,7 @@ mod tests {
     }
 
     #[test]
-    fn s3_certified_nested_protocol_policy_is_inherited_by_concat() {
+    fn ms1_absent_concat_cannot_bypass_the_protocol_only_guard() {
         let (_directory, source) = nested_fixture(false, TestOpenPolicy::ProtocolGuard);
         let result = read_nested_audio(&source);
         assert_eq!(source.accepted_output_bytes(), 0, "C0_PROTOCOL_OUTPUT_ZERO");
@@ -2910,7 +3250,7 @@ mod tests {
             matches!(result, Err(OwnedIoError::Decoder(_))),
             "C0_PROTOCOL_REFUSED"
         );
-        // Concat does not call our callback. The inherited whitelist is the guard here.
+        // Concat is absent in MS1; this variant must still accept no secondary bytes.
         assert_eq!(source.0.hooks.nested_open_calls.load(Ordering::Acquire), 0);
     }
 

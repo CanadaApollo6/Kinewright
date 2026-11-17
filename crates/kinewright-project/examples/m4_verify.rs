@@ -23,14 +23,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map_or_else(|| PathBuf::from("target/m4-manual"), PathBuf::from);
     fs::create_dir_all(&output_dir)?;
     let ffmpeg_name = if cfg!(windows) {
-        "ffmpeg.exe"
+        "ffmpeg-testgen.exe"
     } else {
-        "ffmpeg"
+        "ffmpeg-testgen"
     };
-    let ffmpeg = std::env::var_os("FFMPEG_DIR").map_or_else(
+    let ffmpeg = std::env::var_os("KINEWRIGHT_FFMPEG_TESTGEN_DIR").map_or_else(
         || {
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../third_party/ffmpeg/bin")
+                .join("../../third_party/ffmpeg-testgen/bin")
                 .join(ffmpeg_name)
         },
         |directory| PathBuf::from(directory).join("bin").join(ffmpeg_name),

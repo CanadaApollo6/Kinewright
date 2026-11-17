@@ -11,6 +11,10 @@ on:
       shards:
         type: string
         required: true
+      ffmpeg-key:
+        description: Fingerprint of the minimal FFmpeg profiles built by ffmpeg.yml for this OS.
+        type: string
+        required: true
 
 env:
   PYTHONUTF8: '1'
@@ -39,6 +43,8 @@ jobs:
           python-version: '3.13'
       - uses: ./.github/actions/ci-native
         timeout-minutes: 8
+        with:
+          ffmpeg-key: ${{ inputs.ffmpeg-key }}
       - uses: ./.github/actions/ci-nextest
       - name: Count shards
         shell: bash
@@ -114,6 +120,8 @@ jobs:
           python-version: '3.13'
       - uses: ./.github/actions/ci-native
         timeout-minutes: 8
+        with:
+          ffmpeg-key: ${{ inputs.ffmpeg-key }}
       - uses: ./.github/actions/ci-nextest
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         id: download-tests
@@ -153,7 +161,7 @@ jobs:
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ci-fixtures
-          key: display-v1-${{ runner.os }}-${{ steps.requirements.outputs.display_cache_id }}-${{ hashFiles('.cargo/ci-test.toml', 'Cargo.toml', 'Cargo.lock', 'crates/kinewright-media/**', 'crates/kinewright-core/**', 'crates/kinewright-hash/**', 'scripts/setup-ffmpeg.*', 'scripts/ffmpeg_archive.py', 'scripts/ci_display_inputs.py') }}-${{ steps.requirements.outputs.display_workload }}
+          key: display-v1-${{ runner.os }}-${{ steps.requirements.outputs.display_cache_id }}-${{ hashFiles('.cargo/ci-test.toml', 'Cargo.toml', 'Cargo.lock', 'crates/kinewright-media/**', 'crates/kinewright-core/**', 'crates/kinewright-hash/**', 'scripts/setup-ffmpeg.*', 'scripts/build-ffmpeg.py', 'scripts/ffmpeg-profile.json', 'scripts/ci_display_inputs.py') }}-${{ steps.requirements.outputs.display_workload }}
       - if: steps.requirements.outputs.compiler_inputs == 'true'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         id: download-compiler

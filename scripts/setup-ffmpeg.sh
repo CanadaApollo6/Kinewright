@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Provision the pinned Linux FFmpeg 9.x shared GPL build into third_party/ffmpeg
+# Build the pinned minimal FFmpeg libraries and recording CLI from verified source
 # and export the environment ffmpeg-sys-next, tests, and the app need.
 #
 # Usage (same shell as cargo):
 #   source scripts/setup-ffmpeg.sh
 #
-# Executing the script still downloads and verifies the archive, then prints
+# Executing the script builds verified source, then prints
 # the exports. Source it so cargo sees PKG_CONFIG_PATH, FFMPEG_DIR, RUSTFLAGS,
 # and LD_LIBRARY_PATH in the current process — matching setup-ffmpeg.ps1.
 
@@ -34,55 +34,25 @@ if [[ "$sourced" -eq 1 ]]; then
 fi
 set -euo pipefail
 
-FFMPEG_URL='https://github.com/mifi/ffmpeg-builds/releases/download/9.0-2/ffmpeg-n9.0-latest-linux64-gpl-shared-9.0.tar.xz'
-FFMPEG_SHA256='3ffc4dafa2309adb18f5f598f5e23e84f3d400c1444f2538dcbcfb0d5c60b5ac'
-archive="${KINEWRIGHT_FFMPEG_ARCHIVE_CACHE:-$third_party/ffmpeg-archives}/$FFMPEG_SHA256.tar.xz"
-
-fail() {
-    echo "$*" >&2
-    if [[ "$sourced" -eq 1 ]]; then
-        return 1
-    fi
-    exit 1
-}
+fail() { echo "$*" >&2; }
 
 if [[ "$(uname -s)" != "Linux" ]]; then
-    fail 'scripts/setup-ffmpeg.sh provisions the Linux FFmpeg build. On Windows run scripts/setup-ffmpeg.ps1.'
+    fail 'scripts/setup-ffmpeg.sh builds the Linux FFmpeg profiles. On Windows run scripts/setup-ffmpeg.ps1.'
     return 1 2>/dev/null || exit 1
 fi
 
-if ! command -v python3 >/dev/null 2>&1; then
-    fail 'Python 3 is required to download the pinned FFmpeg archive.'
-    return 1 2>/dev/null || exit 1
-fi
-if ! command -v pkg-config >/dev/null 2>&1; then
-    fail 'pkg-config is required. Run scripts/install-linux-deps.sh first.'
-    return 1 2>/dev/null || exit 1
-fi
-if ! command -v tar >/dev/null 2>&1; then
-    fail 'tar is required to extract the pinned FFmpeg archive.'
-    return 1 2>/dev/null || exit 1
-fi
-
-mkdir -p "$third_party"
-marker="$ffmpeg_root/.archive-sha256"
-installed_hash=""
-if [[ -f "$marker" ]]; then
-    installed_hash="$(tr -d '[:space:]' < "$marker")"
-fi
-
-if [[ "$installed_hash" != "$FFMPEG_SHA256" ]]; then
-    nice -n 19 python3 -I "$script_dir/ffmpeg_archive.py" "$FFMPEG_URL" "$archive" "$FFMPEG_SHA256"
-    rm -rf "$ffmpeg_root"
-    mkdir -p "$ffmpeg_root"
-    tar -xJf "$archive" -C "$ffmpeg_root" --strip-components=1
-    printf '%s' "$FFMPEG_SHA256" > "$marker"
-elif [[ -f "$archive" ]]; then
-    nice -n 19 python3 -I "$script_dir/ffmpeg_archive.py" "$FFMPEG_URL" "$archive" "$FFMPEG_SHA256"
-fi
+ffmpeg_cache_args=()
+ffmpeg_with_nemo=1
+for argument in "$@"; do
+    if [[ "$argument" == --no-binary-cache ]]; then ffmpeg_cache_args+=(--no-binary-cache); fi
+    # The CI FFmpeg producer builds only the FFmpeg profiles; consumers add NeMo-Speech.
+    if [[ "$argument" == --ffmpeg-only ]]; then ffmpeg_with_nemo=0; fi
+done
+python3 "$script_dir/build-ffmpeg.py" --profile libraries "${ffmpeg_cache_args[@]}" || { return 1 2>/dev/null || exit 1; }
+python3 "$script_dir/build-ffmpeg.py" --profile recorder "${ffmpeg_cache_args[@]}" || { return 1 2>/dev/null || exit 1; }
 
 pkg_config_path="$ffmpeg_root/lib/pkgconfig"
-ffmpeg_bin="$ffmpeg_root/bin"
+ffmpeg_bin="$third_party/ffmpeg-recorder/bin"
 ffmpeg_lib="$ffmpeg_root/lib"
 
 for required in \
@@ -102,7 +72,9 @@ export FFMPEG_DIR="$ffmpeg_root"
 export PATH="$ffmpeg_bin${PATH:+:$PATH}"
 export LD_LIBRARY_PATH="$ffmpeg_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-source "$script_dir/setup-nemo-speech.sh" || { return 1 2>/dev/null || exit 1; }
+if [[ "$ffmpeg_with_nemo" -eq 1 ]]; then
+    source "$script_dir/setup-nemo-speech.sh" || { return 1 2>/dev/null || exit 1; }
+fi
 
 # Native crates such as alsa-sys can publish /usr/lib as a global Cargo linker
 # search path. On rolling distributions that ship a newer FFmpeg ABI, that path
@@ -119,13 +91,16 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
     {
         echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
         echo "FFMPEG_DIR=$FFMPEG_DIR"
-        echo "KINEWRIGHT_NEMO_DIR=$KINEWRIGHT_NEMO_DIR"
+        if [[ "$ffmpeg_with_nemo" -eq 1 ]]; then echo "KINEWRIGHT_NEMO_DIR=$KINEWRIGHT_NEMO_DIR"; fi
         echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
         echo "RUSTFLAGS=$RUSTFLAGS"
         echo "PATH=$PATH"
     } >> "$GITHUB_ENV"
 fi
 
+if [[ "${CI:-}" == true ]]; then
+    python3 "$script_dir/build-ffmpeg.py" --log-digests || { return 1 2>/dev/null || exit 1; }
+fi
 codec_version="$(pkg-config --modversion libavcodec)"
 case "$codec_version" in
     63.*) ;;

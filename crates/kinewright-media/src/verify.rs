@@ -238,12 +238,7 @@ fn read_plane_codes(
 fn verification_input(path: &Path) -> Result<ffmpeg::format::context::Input, MediaError> {
     crate::quiet_ffmpeg_log();
     crate::locator::before_decoder_open()?;
-    ffmpeg::format::input(path).map_err(|error| {
-        MediaError::Backend(format!(
-            "could not open delivery output {} for verification: {error}",
-            path.display()
-        ))
-    })
+    crate::owned_io::bridge::path_input(path, false)
 }
 
 /// The number of frames a written encode actually **presents**, in `O(GOP)`.

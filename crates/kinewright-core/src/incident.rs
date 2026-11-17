@@ -1707,7 +1707,8 @@ impl IncidentObservation {
             // so does their evidence, because one incident carries one code. Their own code is not lost: it is the
             // first token of every one of their rendered refusals and therefore
             // the first word of `observed`.
-            MediaError::MatteProof(_)
+            MediaError::UnsupportedCodec { .. }
+            | MediaError::MatteProof(_)
             | MediaError::MatteCoverage(_)
             | MediaError::Scope(_)
             | MediaError::Store { .. }

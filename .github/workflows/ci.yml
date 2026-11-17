@@ -30,6 +30,11 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  # Builds the project's minimal FFmpeg profiles from verified source once per OS and
+  # publishes their fingerprints; every job that needs FFmpeg restores them by key.
+  minimal-ffmpeg:
+    uses: ./.github/workflows/ffmpeg.yml
+
   pf1-wrapper:
     name: Linux PF1 wrapper witnesses
     runs-on: ubuntu-24.04
@@ -74,6 +79,7 @@ jobs:
 
   checks:
     name: ${{ matrix.os }} clippy and shipping builds
+    needs: minimal-ffmpeg
     strategy:
       fail-fast: false
       matrix:
@@ -94,6 +100,8 @@ jobs:
           python-version: '3.13'
       - uses: ./.github/actions/ci-native
         timeout-minutes: 8
+        with:
+          ffmpeg-key: ${{ runner.os == 'Linux' && needs.minimal-ffmpeg.outputs.linux-key || needs.minimal-ffmpeg.outputs.windows-key }}
       - name: Linux shipping builds
         if: runner.os == 'Linux'
         shell: bash
@@ -130,16 +138,20 @@ jobs:
 
   linux:
     name: Linux fast
+    needs: minimal-ffmpeg
     uses: ./.github/workflows/ci-tests.yml
     with:
       os: ubuntu-24.04
+      ffmpeg-key: ${{ needs.minimal-ffmpeg.outputs.linux-key }}
       tier: fast
       shards: '[0,1,2,3,4,5,6,7,8,9,10,11]'
   windows:
     name: Windows fast
+    needs: minimal-ffmpeg
     uses: ./.github/workflows/ci-tests.yml
     with:
       os: windows-latest
+      ffmpeg-key: ${{ needs.minimal-ffmpeg.outputs.windows-key }}
       tier: fast
       shards: '[0,1,2,3,4,5,6,7]'
   linux-slow:
@@ -149,9 +161,11 @@ jobs:
       (github.event_name == 'push' &&
        (github.ref == 'refs/heads/main' ||
         contains(github.event.head_commit.message, '[slow-tier]')))
+    needs: minimal-ffmpeg
     uses: ./.github/workflows/ci-tests.yml
     with:
       os: ubuntu-24.04
+      ffmpeg-key: ${{ needs.minimal-ffmpeg.outputs.linux-key }}
       tier: slow
       shards: '[0,1,2,3,4,5,6,7]'
   windows-slow:
@@ -161,14 +175,17 @@ jobs:
       (github.event_name == 'push' &&
        (github.ref == 'refs/heads/main' ||
         contains(github.event.head_commit.message, '[slow-tier]')))
+    needs: minimal-ffmpeg
     uses: ./.github/workflows/ci-tests.yml
     with:
       os: windows-latest
+      ffmpeg-key: ${{ needs.minimal-ffmpeg.outputs.windows-key }}
       tier: slow
       shards: '[0,1,2,3,4,5,6,7]'
 
   recognition-slow:
     name: ${{ matrix.os }} real EN recognition
+    needs: minimal-ffmpeg
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' &&
@@ -192,6 +209,8 @@ jobs:
           python-version: '3.13'
       - uses: ./.github/actions/ci-native
         timeout-minutes: 8
+        with:
+          ffmpeg-key: ${{ runner.os == 'Linux' && needs.minimal-ffmpeg.outputs.linux-key || needs.minimal-ffmpeg.outputs.windows-key }}
       - name: Read EN model pin from the application spec (Linux)
         if: runner.os == 'Linux'
         id: model-linux
@@ -242,7 +261,7 @@ jobs:
   result:
     name: CI result
     if: always()
-    needs: [pf1-wrapper, lint, checks, linux, windows, linux-slow, windows-slow, recognition-slow]
+    needs: [minimal-ffmpeg, pf1-wrapper, lint, checks, linux, windows, linux-slow, windows-slow, recognition-slow]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:

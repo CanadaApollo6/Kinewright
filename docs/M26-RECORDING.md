@@ -64,10 +64,9 @@ take back, the transcript is arriving and the words are cuttable.
 
 `ffmpeg` now stages beside `Kinewright` and ships in the Windows installer and
 Linux tarball (the GPL FFmpeg build was already bundled as shared libraries;
-recording needs the CLI too). At runtime the CLI resolves: `KINEWRIGHT_FFMPEG`
-override → beside the executable (installed layout) → `bin/` beside the
-executable → `third_party/ffmpeg/bin` above the executable (dev checkouts) →
-PATH.
+recording needs the CLI too). MS1 replaces that CLI with the capture-only build.
+It resolves beside the executable in installed layouts, or from this checkout's
+`third_party/ffmpeg-recorder/bin`. Environment overrides and PATH fallbacks are removed.
 
 ## Deferred
 

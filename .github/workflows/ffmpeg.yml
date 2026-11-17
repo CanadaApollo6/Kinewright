@@ -1,0 +1,43 @@
+name: Minimal FFmpeg source builds
+on:
+  workflow_call:
+    outputs:
+      linux-key:
+        description: Linux toolchain/dependency fingerprint.
+        value: ${{ jobs.linux.outputs.key }}
+      windows-key:
+        description: MSVC toolchain/dependency fingerprint.
+        value: ${{ jobs.windows.outputs.key }}
+jobs:
+  linux:
+    name: Minimal FFmpeg (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      key: ${{ steps.profiles.outputs.key }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check profile CBS dependencies before compiling
+        run: python -B scripts/test_ffmpeg_build.py SourceAdmission.test_profiles_supply_a_type_for_libavformat_cbs SourceAdmission.test_cbs_check_catches_missing_av1_even_with_vp9_enabled
+      - uses: ./.github/actions/ffmpeg
+        id: profiles
+        with:
+          producer: 'true'
+      - name: Source admission witnesses
+        run: python -B scripts/test_ffmpeg_build.py
+  windows:
+    name: Minimal FFmpeg (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    outputs:
+      key: ${{ steps.profiles.outputs.key }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check profile CBS dependencies before compiling
+        run: python -B scripts/test_ffmpeg_build.py SourceAdmission.test_profiles_supply_a_type_for_libavformat_cbs SourceAdmission.test_cbs_check_catches_missing_av1_even_with_vp9_enabled
+      - uses: ./.github/actions/ffmpeg
+        id: profiles
+        with:
+          producer: 'true'
+      - name: Source admission witnesses
+        run: python -B scripts/test_ffmpeg_build.py
