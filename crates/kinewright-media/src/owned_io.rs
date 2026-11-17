@@ -1015,24 +1015,10 @@ impl CertifiedInput {
         if input.format.nb_streams() as usize > MAX_CERTIFIED_STREAMS {
             return Err(OwnedIoError::Capacity("too many certified streams".into()));
         }
-        // Every probe decoder needs a reservation and options before FFmpeg can open it.
-        let still_pipe = input.format.nb_streams() == 1
-            && matches!(input.format.format().name(), "png_pipe" | "jpeg_pipe");
-        if still_pipe {
-            let mut cursor = source.cursor(input.avio.cancel())?;
-            let mut header = vec![0_u8; AVIO_BUFFER_BYTES];
-            let count = cursor.read(&mut header)?;
-            let dimensions = still_dimensions(&header[..count])
-                .ok_or_else(|| decoder_error("unsupported or incomplete still header"))?;
-            bridge::set_still_dimensions(&mut input.format, dimensions)?;
-        }
-        if input.format.nb_streams() == 0
-            || (bridge::dynamic_stream_table(&input.format) && !still_pipe)
-        {
-            return Err(decoder_error(
-                "incomplete or dynamic stream table unsupported",
-            ));
-        }
+        // Every probe decoder needs a fixed stream table, a reservation and options.
+        let prepared = bridge::prepare_stream_table(&mut input.format);
+        input.check()?;
+        prepared?;
         let mut bounds = Vec::new();
         let mut stream_kinds = Vec::new();
         for stream in input.format.streams() {
@@ -1405,18 +1391,18 @@ pub(crate) mod bridge {
                 return Err(open_error(opened));
             }
             let mut input = ffmpeg::format::context::Input::wrap(format);
-            for stream in input.streams() {
-                crate::codec_policy::check(stream.parameters().id())?;
-            }
-            let result = ffi::avformat_find_stream_info(input.as_mut_ptr(), ptr::null_mut());
-            for stream in input.streams() {
-                crate::codec_policy::check(stream.parameters().id())?;
-            }
-            if result < 0 {
-                #[cfg(test)]
-                crate::decode::interrupt_seam::exited(path, ffmpeg::Error::from(result));
-                return Err(open_error(result));
-            }
+            find_stream_info(&mut input, &[]).map_err(|error| match error {
+                OwnedIoError::UnsupportedCodec(codec) => MediaError::UnsupportedCodec { codec },
+                OwnedIoError::Cancelled => {
+                    #[cfg(test)]
+                    crate::decode::interrupt_seam::exited(path, ffmpeg::Error::Exit);
+                    open_error(ffmpeg::Error::Exit.into())
+                }
+                error => MediaError::Backend(format!(
+                    "could not open media {}: {error}; the file may be truncated or its format may be unsupported",
+                    path.display(),
+                )),
+            })?;
             Ok(input)
         }
     }
@@ -1428,12 +1414,13 @@ pub(crate) mod bridge {
         input: &mut ffmpeg::format::context::Input,
         (width, height): (u32, u32),
     ) -> Result<(), OwnedIoError> {
-        if width == 0
-            || height == 0
-            || width > MAX_DECODER_DIMENSION
-            || height > MAX_DECODER_DIMENSION
-        {
+        if width == 0 || height == 0 {
             return Err(OwnedIoError::Capacity("still dimensions".into()));
+        }
+        if width > MAX_DECODER_DIMENSION || height > MAX_DECODER_DIMENSION {
+            return Err(OwnedIoError::Capacity(format!(
+                "still image {width}x{height} exceeds the {MAX_DECODER_DIMENSION}px limit on either axis; downscale it and re-import",
+            )));
         }
         let mut parameters = input
             .stream(0)
@@ -1448,6 +1435,100 @@ pub(crate) mod bridge {
 
     pub(super) fn dynamic_stream_table(input: &ffmpeg::format::context::Input) -> bool {
         unsafe { (*input.as_ptr()).ctx_flags & ffi::AVFMTCTX_NOHEADER != 0 }
+    }
+
+    /// Admit the fixed table before the first packet/parser-capable `FFmpeg` call.
+    /// Image pipes are the sole exception, after the same bounded header check on every path.
+    pub(super) fn prepare_stream_table(
+        input: &mut ffmpeg::format::context::Input,
+    ) -> Result<(), OwnedIoError> {
+        let expected = match input.format().name() {
+            "png_pipe" => Some(ffmpeg::codec::Id::PNG),
+            "jpeg_pipe" => Some(ffmpeg::codec::Id::MJPEG),
+            _ => None,
+        };
+        if let Some(codec) = expected {
+            if input.nb_streams() != 1
+                || input
+                    .stream(0)
+                    .is_none_or(|stream| stream.parameters().id() != codec)
+            {
+                return Err(decoder_error("still-image stream table mismatch"));
+            }
+            check_codec(codec)?;
+            let mut header = vec![0_u8; AVIO_BUFFER_BYTES];
+            let count = unsafe {
+                let io = (*input.as_mut_ptr()).pb;
+                if io.is_null() {
+                    return Err(decoder_error("still-image IO missing"));
+                }
+                let position = ffi::avio_seek(io, 0, 1);
+                if position < 0 || ffi::avio_seek(io, 0, 0) < 0 {
+                    return Err(decoder_error("still-image header is not seekable"));
+                }
+                let count = ffi::avio_read(
+                    io,
+                    header.as_mut_ptr(),
+                    i32::try_from(header.len()).expect("bounded header"),
+                );
+                if count == i32::from(ffmpeg::Error::Exit) {
+                    return Err(OwnedIoError::Cancelled);
+                }
+                if ffi::avio_seek(io, position, 0) < 0 {
+                    return Err(decoder_error("still-image header rewind failed"));
+                }
+                usize::try_from(count)
+                    .map_err(|_| decoder_error("incomplete still-image header"))?
+            };
+            let header = &header[..count];
+            let signature_matches = match codec {
+                ffmpeg::codec::Id::PNG => header.starts_with(b"\x89PNG\r\n\x1a\n"),
+                ffmpeg::codec::Id::MJPEG => header.starts_with(&[0xff, 0xd8]),
+                _ => false,
+            };
+            if !signature_matches {
+                return Err(decoder_error("still-image demuxer/header mismatch"));
+            }
+            let dimensions = super::still_dimensions(header)
+                .ok_or_else(|| decoder_error("unsupported or incomplete still header"))?;
+            set_still_dimensions(input, dimensions)?;
+        } else if input.nb_streams() == 0 || dynamic_stream_table(input) {
+            return Err(decoder_error(
+                "incomplete or dynamic stream table unsupported",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn make_header_dynamic(input: &mut ffmpeg::format::context::Input) {
+        unsafe {
+            (*input.as_mut_ptr()).ctx_flags |= ffi::AVFMTCTX_NOHEADER;
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn corrupt_still_table(input: &mut ffmpeg::format::context::Input, second: bool) {
+        unsafe {
+            let stream = if second {
+                let stream = ffi::avformat_new_stream(input.as_mut_ptr(), ptr::null());
+                assert!(!stream.is_null());
+                stream
+            } else {
+                *(*input.as_mut_ptr()).streams
+            };
+            (*(*stream).codecpar).codec_id = if second {
+                ffi::AVCodecID::AV_CODEC_ID_PNG
+            } else {
+                ffi::AVCodecID::AV_CODEC_ID_MP3
+            };
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn parser_count(input: &ffmpeg::format::context::Input) -> usize {
+        input
+            .streams()
+            .filter(|stream| unsafe { !ffi::av_stream_get_parser(stream.as_ptr()).is_null() })
+            .count()
     }
 
     pub(super) fn decoder_bound(
@@ -1531,16 +1612,17 @@ pub(crate) mod bridge {
         input: &mut ffmpeg::format::context::Input,
         bounds: &[Option<DecoderBound>],
     ) -> Result<(), OwnedIoError> {
+        prepare_stream_table(input)?;
         for stream in input.streams() {
             check_codec(stream.parameters().id())?;
         }
-        let mut options = vec![ptr::null_mut(); bounds.len()];
+        let mut options = vec![ptr::null_mut(); input.nb_streams() as usize];
         unsafe {
             // options.c refuses new streams before allocating their decoder context.
-            (*input.as_mut_ptr()).max_streams =
-                i32::try_from(bounds.len()).expect("bounded reserved stream count");
-            for (option, bound) in options.iter_mut().zip(bounds) {
-                ffi::av_dict_set(option, c"threads".as_ptr(), c"1".as_ptr(), 0);
+            (*input.as_mut_ptr()).max_streams = i32::try_from(input.nb_streams())
+                .map_err(|_| decoder_error("stream count overflow"))?;
+            for (index, option) in options.iter_mut().enumerate() {
+                let bound = bounds.get(index).and_then(Option::as_ref);
                 ffi::av_dict_set(
                     option,
                     c"codec_whitelist".as_ptr(),
@@ -1548,6 +1630,7 @@ pub(crate) mod bridge {
                     0,
                 );
                 if let Some(bound) = bound {
+                    ffi::av_dict_set(option, c"threads".as_ptr(), c"1".as_ptr(), 0);
                     ffi::av_dict_set_int(
                         option,
                         c"max_pixels".as_ptr(),
@@ -1567,6 +1650,12 @@ pub(crate) mod bridge {
             let result = ffi::avformat_find_stream_info(input.as_mut_ptr(), options.as_mut_ptr());
             for option in &mut options {
                 ffi::av_dict_free(option);
+            }
+            if result == i32::from(ffmpeg::Error::Exit) {
+                return Err(OwnedIoError::Cancelled);
+            }
+            for stream in input.streams() {
+                check_codec(stream.parameters().id())?;
             }
             if result < 0 {
                 return Err(decoder_error(ffmpeg::Error::from(result)));
@@ -2610,41 +2699,156 @@ mod tests {
                 "-f",
                 "lavfi",
                 "-i",
-                "testsrc2=size=64x48:rate=25:duration=1",
-                "-c:v",
-                "mpeg2video",
-                "-g",
-                "1",
-                "-threads",
-                "1",
+                "sine=duration=0.1",
+                "-c:a",
+                "ac3",
                 "-f",
                 "mpeg",
             ],
             &path,
         );
         let source = source(&path);
+        let (result, calls) = observe_stream_info_probes(|| source.probe(running()));
+        assert!(result.is_err(), "MPEG-PS demuxer is absent");
+        assert_eq!(calls, 0, "parser-capable probe is never reached");
+        for interruptible in [false, true] {
+            let (result, calls) =
+                observe_stream_info_probes(|| bridge::path_input(&path, interruptible));
+            assert!(result.is_err());
+            assert_eq!(calls, 0);
+        }
+        assert_eq!(source.accepted_output_bytes(), 0);
+    }
+
+    fn header_input(source: &CertifiedSource) -> CertifiedInput {
         let (format, avio) = bridge::Avio::open(source.cursor(running()).unwrap()).unwrap();
-        let header = CertifiedInput {
+        CertifiedInput {
             format,
             avio,
             probe_charges: Vec::new(),
             decoder_bound: None,
-        };
+        }
+    }
+
+    #[test]
+    fn ms1_dynamic_table_refuses_before_parser_entry() {
+        let directory = TempDirectory::new("ms1-dynamic-parser");
+        let path = directory.path("mpeg4.avi");
+        run_ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=s=32x24:d=0.1",
+                "-c:v",
+                "mpeg4",
+                "-threads",
+                "1",
+            ],
+            &path,
+        );
+        let source = source(&path);
+        let mut control = header_input(&source);
+        let (result, calls) =
+            observe_stream_info_probes(|| bridge::find_stream_info(&mut control.format, &[]));
+        assert!(result.is_ok());
         assert_eq!(
-            header.format.nb_streams(),
-            0,
-            "MPEG-PS opens without streams"
+            calls, 1,
+            "positive control reaches the parser-capable entry"
         );
-        assert!(bridge::dynamic_stream_table(&header.format));
-        drop(header);
-        let (result, calls) = observe_stream_info_probes(|| source.probe(running()));
-        assert_eq!(calls, 0, "C0_INCOMPLETE_PROBE_NOT_ENTERED");
+        let mut dynamic = header_input(&source);
+        bridge::make_header_dynamic(&mut dynamic.format);
+        assert_eq!(bridge::parser_count(&dynamic.format), 0);
+        let (result, calls) =
+            observe_stream_info_probes(|| bridge::find_stream_info(&mut dynamic.format, &[]));
+        assert_eq!(
+            calls, 0,
+            "NOHEADER must not reach FFmpeg's parser-capable probe"
+        );
         assert!(
-            matches!(result, Err(OwnedIoError::Decoder(ref message))
-                if message == "incomplete or dynamic stream table unsupported"),
-            "C0_INCOMPLETE_TABLE_REFUSED: {result:?}",
+            matches!(result, Err(OwnedIoError::Decoder(ref message)) if message == "incomplete or dynamic stream table unsupported")
         );
-        assert_eq!(source.accepted_output_bytes(), 0);
+        assert_eq!(bridge::parser_count(&dynamic.format), 0);
+    }
+
+    #[test]
+    fn ms1_validated_stills_open_on_every_reader_path() {
+        let directory = TempDirectory::new("ms1-still-paths");
+        for (encoder, extension) in [("png", "png"), ("mjpeg", "jpg")] {
+            let path = directory.path(&format!("frame.{extension}"));
+            run_ffmpeg(
+                &[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=s=32x24:d=0.1",
+                    "-frames:v",
+                    "1",
+                    "-c:v",
+                    encoder,
+                    "-threads",
+                    "1",
+                ],
+                &path,
+            );
+            let source = source(&path);
+            let (result, calls) = observe_stream_info_probes(|| source.probe(running()));
+            assert!(result.is_ok(), "certified {extension}: {result:?}");
+            assert_eq!(calls, 1);
+            for interruptible in [false, true] {
+                let (result, calls) =
+                    observe_stream_info_probes(|| bridge::path_input(&path, interruptible));
+                assert!(
+                    result.is_ok(),
+                    "path {extension}: {}",
+                    result.err().unwrap()
+                );
+                assert_eq!(calls, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn ms1_png_pipe_rejects_second_or_different_stream_before_parser_entry() {
+        let directory = TempDirectory::new("ms1-still-header");
+        let path = directory.path("frame.png");
+        run_ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=s=32x24:d=0.1",
+                "-frames:v",
+                "1",
+                "-c:v",
+                "png",
+                "-threads",
+                "1",
+            ],
+            &path,
+        );
+        let source = source(&path);
+        let mut control = header_input(&source);
+        assert_eq!(control.format.format().name(), "png_pipe");
+        let (result, calls) =
+            observe_stream_info_probes(|| bridge::find_stream_info(&mut control.format, &[]));
+        assert!(result.is_ok(), "validated PNG control: {result:?}");
+        assert_eq!(calls, 1);
+        for second in [false, true] {
+            let mut rejected = header_input(&source);
+            bridge::corrupt_still_table(&mut rejected.format, second);
+            assert_eq!(bridge::parser_count(&rejected.format), 0);
+            let (result, calls) =
+                observe_stream_info_probes(|| bridge::find_stream_info(&mut rejected.format, &[]));
+            assert_eq!(
+                calls, 0,
+                "malformed PNG table must not reach the parser-capable probe"
+            );
+            assert!(
+                matches!(result, Err(OwnedIoError::Decoder(ref message)) if message == "still-image stream table mismatch")
+            );
+            assert_eq!(bridge::parser_count(&rejected.format), 0);
+        }
     }
 
     #[test]

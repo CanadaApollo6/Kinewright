@@ -59,19 +59,6 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Identify FFmpeg cache ABI
-        run: python scripts/ffmpeg-cache-platform.py
-      - name: Restore minimal FFmpeg profiles
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            third_party/ffmpeg
-            third_party/ffmpeg-recorder
-            third_party/ffmpeg-testgen
-          key: ${{ runner.os }}-${{ runner.arch }}-${{ env.FFMPEG_CACHE_ABI }}-ms1-${{ hashFiles('scripts/build-ffmpeg.py', 'scripts/ffmpeg-profile.json', 'scripts/prepare-ffmpeg-windows.ps1', 'scripts/ffmpeg-cache-platform.py') }}
-          fail-on-cache-miss: true
-
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -81,6 +68,7 @@ jobs:
       # Default key includes rustc (host/release/hash) and a hash of every
       # Cargo.lock / Cargo.toml, so a lockfile or toolchain bump misses.
       - name: Cache Rust
+        if: github.event_name == 'push' && github.repository == 'CanadaApollo6/Kinewright'
         uses: Swatinem/rust-cache@v2
 
       - name: Install Python
@@ -97,6 +85,11 @@ jobs:
       - name: Prepare sealed JA S1 predecessor controls
         shell: bash
         run: bash scripts/ja-s1-predecessor-controls.sh
+
+      - name: Prepare minimal FFmpeg profiles
+        uses: ./.github/actions/ffmpeg
+        with:
+          cache-key: ${{ needs.minimal-ffmpeg.outputs.windows-key }}
 
       - name: Provision FFmpeg, test (fast tier), and lint
         shell: pwsh
@@ -179,31 +172,24 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Identify FFmpeg cache ABI
-        run: python scripts/ffmpeg-cache-platform.py
-      - name: Restore minimal FFmpeg profiles
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            third_party/ffmpeg
-            third_party/ffmpeg-recorder
-            third_party/ffmpeg-testgen
-          key: ${{ runner.os }}-${{ runner.arch }}-${{ env.FFMPEG_CACHE_ABI }}-ms1-${{ hashFiles('scripts/build-ffmpeg.py', 'scripts/ffmpeg-profile.json', 'scripts/prepare-ffmpeg-windows.ps1', 'scripts/ffmpeg-cache-platform.py') }}
-          fail-on-cache-miss: true
-
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable-x86_64-pc-windows-msvc
 
       - name: Cache Rust
+        if: github.event_name == 'push' && github.repository == 'CanadaApollo6/Kinewright'
         uses: Swatinem/rust-cache@v2
 
       - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+
+      - name: Prepare minimal FFmpeg profiles
+        uses: ./.github/actions/ffmpeg
+        with:
+          cache-key: ${{ needs.minimal-ffmpeg.outputs.windows-key }}
 
       - name: Provision FFmpeg and run the slow tier
         shell: pwsh
@@ -227,19 +213,6 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Identify FFmpeg cache ABI
-        run: python scripts/ffmpeg-cache-platform.py
-      - name: Restore minimal FFmpeg profiles
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            third_party/ffmpeg
-            third_party/ffmpeg-recorder
-            third_party/ffmpeg-testgen
-          key: ${{ runner.os }}-${{ runner.arch }}-${{ env.FFMPEG_CACHE_ABI }}-ms1-${{ hashFiles('scripts/build-ffmpeg.py', 'scripts/ffmpeg-profile.json', 'scripts/prepare-ffmpeg-windows.ps1', 'scripts/ffmpeg-cache-platform.py') }}
-          fail-on-cache-miss: true
-
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -248,6 +221,7 @@ jobs:
       # Default key includes rustc (host/release/hash) and a hash of every
       # Cargo.lock / Cargo.toml, so a lockfile or toolchain bump misses.
       - name: Cache Rust
+        if: github.event_name == 'push' && github.repository == 'CanadaApollo6/Kinewright'
         uses: Swatinem/rust-cache@v2
 
       # The Azure Ubuntu mirror has stalled for 30+ minutes on the large debs
@@ -262,6 +236,7 @@ jobs:
 
       - name: Restore apt archives
         id: apt-cache
+        if: github.repository == 'CanadaApollo6/Kinewright' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         uses: actions/cache/restore@v4
         with:
           path: ~/apt-archives
@@ -291,7 +266,7 @@ jobs:
       # run most likely to time out later, and a post step saves only when
       # the whole job succeeds.
       - name: Save apt archives
-        if: steps.apt-cache.outputs.cache-hit != 'true'
+        if: github.event_name == 'push' && github.repository == 'CanadaApollo6/Kinewright' && steps.apt-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/apt-archives
@@ -311,6 +286,11 @@ jobs:
       - name: Prepare sealed JA S1 predecessor controls
         shell: bash
         run: bash scripts/ja-s1-predecessor-controls.sh
+
+      - name: Prepare minimal FFmpeg profiles
+        uses: ./.github/actions/ffmpeg
+        with:
+          cache-key: ${{ needs.minimal-ffmpeg.outputs.linux-key }}
 
       - name: Provision FFmpeg, build, test (fast tier), and lint
         run: |
@@ -346,19 +326,6 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Identify FFmpeg cache ABI
-        run: python scripts/ffmpeg-cache-platform.py
-      - name: Restore minimal FFmpeg profiles
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            third_party/ffmpeg
-            third_party/ffmpeg-recorder
-            third_party/ffmpeg-testgen
-          key: ${{ runner.os }}-${{ runner.arch }}-${{ env.FFMPEG_CACHE_ABI }}-ms1-${{ hashFiles('scripts/build-ffmpeg.py', 'scripts/ffmpeg-profile.json', 'scripts/prepare-ffmpeg-windows.ps1', 'scripts/ffmpeg-cache-platform.py') }}
-          fail-on-cache-miss: true
-
-
       - name: Equip guardian user session
         run: |
           sudo loginctl enable-linger "$(id -un)" || true
@@ -371,6 +338,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust
+        if: github.event_name == 'push' && github.repository == 'CanadaApollo6/Kinewright'
         uses: Swatinem/rust-cache@v2
 
       # The Azure Ubuntu mirror has stalled for 30+ minutes on the large debs
@@ -385,6 +353,7 @@ jobs:
 
       - name: Restore apt archives
         id: apt-cache
+        if: github.repository == 'CanadaApollo6/Kinewright' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         uses: actions/cache/restore@v4
         with:
           path: ~/apt-archives
@@ -414,11 +383,16 @@ jobs:
       # run most likely to time out later, and a post step saves only when
       # the whole job succeeds.
       - name: Save apt archives
-        if: steps.apt-cache.outputs.cache-hit != 'true'
+        if: github.event_name == 'push' && github.repository == 'CanadaApollo6/Kinewright' && steps.apt-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/apt-archives
           key: ${{ steps.apt-cache.outputs.cache-primary-key }}
+
+      - name: Prepare minimal FFmpeg profiles
+        uses: ./.github/actions/ffmpeg
+        with:
+          cache-key: ${{ needs.minimal-ffmpeg.outputs.linux-key }}
 
       - name: Provision FFmpeg and run the slow tier
         run: |

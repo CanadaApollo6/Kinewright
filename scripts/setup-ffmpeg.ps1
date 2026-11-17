@@ -2,7 +2,9 @@
 param(
     [ValidateRange(0.1, 1024)]
     [double]$BuildCacheLimitGiB = 6,
-    [switch]$SkipBuildCachePrune
+    [switch]$SkipBuildCachePrune,
+    [switch]$ToolsOnly,
+    [switch]$NoBinaryCache
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,7 +20,7 @@ $ffmpegRoot = [System.IO.Path]::GetFullPath((Join-Path $thirdParty 'ffmpeg'))
 $pkgconfRoot = [System.IO.Path]::GetFullPath((Join-Path $thirdParty 'pkgconf'))
 $libclangRoot = [System.IO.Path]::GetFullPath((Join-Path $thirdParty 'libclang'))
 
-if (-not $SkipBuildCachePrune) {
+if (-not $ToolsOnly -and -not $SkipBuildCachePrune) {
     & (Join-Path $PSScriptRoot 'clean-build-cache.ps1') -MaximumGiB $BuildCacheLimitGiB
 }
 
@@ -114,9 +116,34 @@ $env:PKG_CONFIG = $pkgConfig
 $env:PKG_CONFIG_PATH = "$deps/lib/pkgconfig"
 $env:INCLUDE = "$deps/include;$env:INCLUDE"
 $env:LIB = "$deps/lib;$env:LIB"
-$env:Path = "$vcvarsPath;C:\msys64\usr\bin;$(Split-Path -Parent $pkgConfig);$originalPath"
+$msvcBin = Split-Path -Parent (Get-Command cl.exe -ErrorAction Stop).Source
+# MSVC cl/link first, then one coherent MSYS make/sh/awk toolset, before inherited tools.
+$msysRoot = if ($env:KINEWRIGHT_MSYS_ROOT) { $env:KINEWRIGHT_MSYS_ROOT } else { 'C:\msys64' }
+$msysBin = Join-Path $msysRoot 'usr\bin'
+$env:Path = "$msvcBin;$msysBin;$vcvarsPath;$(Split-Path -Parent $pkgConfig);$originalPath"
+# Repeated ToolsOnly/setup calls must preserve search order without growing PATH.
+foreach ($name in @('Path', 'INCLUDE', 'LIB', 'LIBPATH')) {
+    $value = [Environment]::GetEnvironmentVariable($name, 'Process')
+    if ($value) {
+        $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $unique = ($value -split ';' | Where-Object { $_ -and $seen.Add($_) }) -join ';'
+        [Environment]::SetEnvironmentVariable($name, $unique, 'Process')
+    }
+}
+$env:VSLANG = '1033'
+function Export-BuildEnvironment {
+    if ($env:GITHUB_ENV) {
+        foreach ($name in @('Path','INCLUDE','LIB','LIBPATH','WindowsSdkDir','WindowsSDKVersion','VCToolsVersion','VSCMD_ARG_TGT_ARCH','VSLANG','PKG_CONFIG','PKG_CONFIG_PATH','LIBCLANG_PATH','FFMPEG_DIR','BINDGEN_EXTRA_CLANG_ARGS')) {
+            $value = [Environment]::GetEnvironmentVariable($name, 'Process')
+            if ($value) { "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
+        }
+    }
+}
+if ($ToolsOnly) { Export-BuildEnvironment; return }
+$cacheArguments = @()
+if ($NoBinaryCache) { $cacheArguments += '--no-binary-cache' }
 foreach ($profile in @('libraries', 'recorder')) {
-    & $python.Source (Join-Path $PSScriptRoot 'build-ffmpeg.py') --profile $profile
+    & $python.Source (Join-Path $PSScriptRoot 'build-ffmpeg.py') --profile $profile @cacheArguments
     if ($LASTEXITCODE -ne 0) { throw "FFmpeg $profile build failed" }
 }
 
@@ -149,6 +176,11 @@ $env:FFMPEG_DIR = $ffmpegRoot
 $env:Path = "$ffmpegDlls;$ffmpegBin;$pkgConfigBin;$env:Path"
 $env:BINDGEN_EXTRA_CLANG_ARGS = (($env:INCLUDE -split ';' | Where-Object { $_ }) | ForEach-Object { '-I"{0}"' -f $_ }) -join ' '
 
+if ($env:CI -eq 'true') {
+    & $python.Source (Join-Path $PSScriptRoot 'build-ffmpeg.py') --log-digests
+    if ($LASTEXITCODE -ne 0) { throw 'FFmpeg binary digest logging failed' }
+}
+Export-BuildEnvironment
 $codecVersion = & $pkgConfig --modversion libavcodec
 if ($LASTEXITCODE -ne 0) {
     throw 'pkg-config could not resolve libavcodec.'

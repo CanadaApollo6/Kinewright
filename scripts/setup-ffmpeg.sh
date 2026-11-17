@@ -36,8 +36,12 @@ set -euo pipefail
 
 fail() { echo "$*" >&2; }
 
-python3 "$script_dir/build-ffmpeg.py" --profile libraries || { return 1 2>/dev/null || exit 1; }
-python3 "$script_dir/build-ffmpeg.py" --profile recorder || { return 1 2>/dev/null || exit 1; }
+ffmpeg_cache_args=()
+for argument in "$@"; do
+    if [[ "$argument" == --no-binary-cache ]]; then ffmpeg_cache_args+=(--no-binary-cache); fi
+done
+python3 "$script_dir/build-ffmpeg.py" --profile libraries "${ffmpeg_cache_args[@]}" || { return 1 2>/dev/null || exit 1; }
+python3 "$script_dir/build-ffmpeg.py" --profile recorder "${ffmpeg_cache_args[@]}" || { return 1 2>/dev/null || exit 1; }
 
 pkg_config_path="$ffmpeg_root/lib/pkgconfig"
 ffmpeg_bin="$third_party/ffmpeg-recorder/bin"
@@ -81,6 +85,9 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
     } >> "$GITHUB_ENV"
 fi
 
+if [[ "${CI:-}" == true ]]; then
+    python3 "$script_dir/build-ffmpeg.py" --log-digests || { return 1 2>/dev/null || exit 1; }
+fi
 codec_version="$(pkg-config --modversion libavcodec)"
 case "$codec_version" in
     62.*) ;;

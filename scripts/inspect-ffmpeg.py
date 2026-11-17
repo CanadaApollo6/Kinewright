@@ -72,7 +72,7 @@ if '--check' in sys.argv:
     profile = json.loads((Path(__file__).parent / 'ffmpeg-profile.json').read_text())
     assert set(report['decoders']) == set(profile['decoders']) | {'h263'}, report['decoders']
     demuxer_names = {'mov': 'mov,mp4,m4a,3gp,3g2,mj2', 'matroska': 'matroska,webm',
-                     'mpegps': 'mpeg', 'image_png_pipe': 'png_pipe', 'image_jpeg_pipe': 'jpeg_pipe'}
+                     'image_png_pipe': 'png_pipe', 'image_jpeg_pipe': 'jpeg_pipe'}
     assert set(report['demuxers']) == {demuxer_names.get(n, n) for n in profile['demuxers']}, report['demuxers']
     parser_ids = {'mjpeg': ('mjpeg', 'jpegls'), 'mpeg4video': ('mpeg4',),
                   'mpegaudio': ('mp1', 'mp2', 'mp3', 'mp3adu'),

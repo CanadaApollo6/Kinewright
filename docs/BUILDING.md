@@ -93,7 +93,7 @@ After a release build:
 ```bash
 source ./scripts/setup-ffmpeg.sh
 cargo build --package kinewright-app --release --locked
-./scripts/package-linux.sh --version 0.1.0
+./scripts/package-linux.sh --version 0.1.0 --no-binary-cache
 ./scripts/test-linux-bundle.sh --bundle-dir ./dist/linux-x64
 ```
 

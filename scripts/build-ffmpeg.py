@@ -6,7 +6,9 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
+import shlex
 import subprocess
 import tarfile
 import tempfile
@@ -45,19 +47,157 @@ def configure(profile):
         args += ['--disable-shared', '--enable-static', '--enable-ffmpeg', '--enable-ffprobe',
                  '--disable-ffplay', '--enable-libfreetype', '--enable-libharfbuzz', '--enable-protocol=pipe', '--enable-zlib', '--enable-libdav1d', '--enable-libx265',
                  '--enable-libvpx', '--enable-decoder=' + ','.join(PROFILE['decoders'] + ['qtrle', 'wrapped_avframe', 'subrip']),
-                 '--enable-demuxer=' + ','.join(PROFILE['demuxers'] + ['rawvideo', 'concat', 'hls', 'srt']),
+                 '--enable-demuxer=' + ','.join(PROFILE['demuxers'] + ['mpegps', 'mpegts', 'rawvideo', 'concat', 'hls', 'srt']),
                  '--enable-parser=' + ','.join(PROFILE['parsers']),
-                 '--enable-encoder=libx264,libx265,libvpx_vp9,ffv1,mpeg2video,mpeg4,mjpeg,png,rawvideo,pcm_s16le,pcm_f32le,aac,qtrle,subrip',
+                 '--enable-encoder=libx264,libx265,libvpx_vp9,ffv1,mpeg2video,mpeg4,mjpeg,png,rawvideo,pcm_s16le,pcm_f32le,aac,ac3,qtrle,subrip',
                  '--enable-muxer=mp4,ipod,mov,matroska,webm,avi,nut,mpeg1system,mpeg2video,mpegts,image2,image2pipe,rawvideo,framehash,pcm_f32le,wav',
                  '--enable-bsfs', '--enable-filters', '--enable-indev=lavfi']
     if platform.system() == 'Windows':
         args += ['--toolchain=msvc', '--arch=x86_64', '--target-os=win64',
                  '--pkg-config=' + (ROOT / 'third_party/pkgconf/pkgconf/.bin/pkgconf.exe').as_posix(),
                  '--pkg-config-flags=--static']
+    tools = tool_commands()
+    args += [f'--{name}=' + shlex.join(tools[name]) for name in ['cc', 'cxx', 'ld', 'ar']]
     return args
 
 
+def tool_commands():
+    windows = platform.system() == 'Windows'
+    defaults = {'cc': 'cl.exe' if windows else 'gcc',
+                'cxx': 'cl.exe' if windows else 'g++',
+                'ld': 'link.exe' if windows else os.environ.get('CC', 'gcc'),
+                'ar': 'lib.exe' if windows else 'ar'}
+    result = {name: shlex.split(os.environ.get(name.upper(), default), posix=not windows)
+              for name, default in defaults.items()}
+    result.update(nasm=['nasm'], pkgconfig=[os.environ.get('PKG_CONFIG', 'pkg-config')],
+                  make=[str(Path(os.environ.get('KINEWRIGHT_MSYS_ROOT', 'C:/msys64')) / 'usr/bin/make.exe')] if windows else ['make'],
+                  shell=[str(Path(os.environ.get('KINEWRIGHT_MSYS_ROOT', 'C:/msys64')) / 'usr/bin/sh.exe')] if windows else ['bash'])
+    return result
+
+
+def canonical(value):
+    if isinstance(value, str):
+        return value.replace(str(ROOT), '<repo>').replace(ROOT.as_posix(), '<repo>')
+    if isinstance(value, list):
+        return [canonical(item) for item in value]
+    if isinstance(value, dict):
+        return {key: canonical(item) for key, item in value.items()}
+    return value
+
+
+def file_digest(path):
+    with Path(path).open('rb') as source:
+        return hashlib.file_digest(source, 'sha256').hexdigest()
+
+
+def tool_identity(command, version_arguments):
+    executable = shutil.which(command[0])
+    if executable is None:
+        raise SystemExit(f'Required build tool is missing: {command[0]}')
+    result = subprocess.run([*command, *version_arguments], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True,
+                            env=dict(os.environ, LC_ALL='C', VSLANG='1033'), check=False)
+    # GCC's linker version query prints a fresh LTO resolution scratch path.
+    # It is an invocation nonce, not a toolchain identity.
+    version = re.sub(r'(?<=-fresolution=)\S+', '<temporary>', result.stdout.strip())
+    if not version:
+        raise SystemExit(f'Cannot identify build tool: {command[0]}')
+    return dict(command=command, executable=str(Path(executable).resolve()),
+                sha256=file_digest(executable), version=version)
+
+
+def fingerprint():
+    """One bundle identity, used unchanged by CI cache keys and every local marker."""
+    ensure_nasm()
+    windows = platform.system() == 'Windows'
+    if windows:
+        os.environ['PKG_CONFIG_PATH'] = str(ROOT / 'third_party/ffmpeg-deps/installed/x64-windows-static/lib/pkgconfig')
+        os.environ['PKG_CONFIG'] = str(ROOT / 'third_party/pkgconf/pkgconf/.bin/pkgconf.exe')
+    commands = tool_commands()
+    identities = {}
+    for name, command in commands.items():
+        option = ['/Bv'] if windows and name in ['cc', 'cxx'] else (['/?'] if windows and name in ['ld', 'ar'] else ['--version'])
+        identities[name] = tool_identity(command, option)
+    if not windows:
+        linker = subprocess.check_output([*commands['cc'], '-print-prog-name=ld'], text=True).strip()
+        identities['linker'] = tool_identity([linker], ['--version'])
+        if any(name in Path(commands['ld'][0]).name for name in ['gcc', 'g++', 'clang', 'cc']):
+            identities['linker_driver'] = tool_identity(commands['ld'], [*shlex.split(os.environ.get('LDFLAGS', '')), '-Wl,--version'])
+    packages = ['x264', 'x265', 'dav1d', 'zlib', 'vpx', 'freetype2', 'harfbuzz']
+    if not windows:
+        packages += ['alsa', 'libpulse', 'xcb', 'xcb-shm', 'xcb-shape', 'xcb-xfixes']
+    dependencies = {}
+    for package in packages:
+        query = subprocess.run([*commands['pkgconfig'], '--modversion', package],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
+        if query.returncode != 0:
+            dependencies[package] = None
+            continue
+        dependency = {'version': query.stdout.strip()}
+        for option in ['--cflags', '--libs']:
+            flags_query = subprocess.run([*commands['pkgconfig'], *(['--static'] if windows else []), option, package],
+                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=True)
+            dependency[option[2:]] = flags_query.stdout.strip()
+        dependencies[package] = dependency
+    scripts = ['scripts/build-ffmpeg.py', 'scripts/ffmpeg-profile.json',
+               'scripts/setup-ffmpeg.sh', 'scripts/setup-ffmpeg.ps1',
+               'scripts/setup-ffmpeg-testgen.sh', 'scripts/prepare-ffmpeg-windows.ps1',
+               '.github/actions/ffmpeg/action.yml']
+    flags = {name: os.environ.get(name, '') for name in
+             ['CFLAGS', 'CPPFLAGS', 'CXXFLAGS', 'LDFLAGS', 'WindowsSdkDir', 'WindowsSDKVersion', 'VCToolsVersion']}
+    for name in ['INCLUDE', 'LIB', 'LIBPATH']:
+        if windows:
+            flags[name] = list(dict.fromkeys(os.environ.get(name, '').split(';')))
+    record = canonical(dict(schema=2, system=platform.system(), machine=platform.machine(),
+                            tools=identities, dependencies=dependencies, flags=flags,
+                            profile=PROFILE, configure={p: configure(p) for p in ['libraries', 'recorder', 'testgen']},
+                            scripts={name: file_digest(ROOT/name) for name in scripts}))
+    if not windows:
+        record['host'] = dict(distribution=platform.freedesktop_os_release(), libc=os.confstr('CS_GNU_LIBC_VERSION'))
+    encoded = json.dumps(record, sort_keys=True, separators=(',', ':')).encode()
+    return hashlib.sha256(encoded).hexdigest(), record
+
+
+def log_digests():
+    """Observation of trusted build/cache contents, not provenance authentication."""
+    prefixes = ['ffmpeg', 'ffmpeg-recorder', 'ffmpeg-testgen', 'ffmpeg-deps/installed', 'pkgconf', 'libclang', 'nasm']
+    for prefix in prefixes:
+        directory = ROOT/'third_party'/prefix
+        if not directory.exists():
+            continue
+        for path in sorted(directory.rglob('*')):
+            if not path.is_file() or path.is_symlink():
+                continue
+            binary = path.suffix.lower() in ['.exe', '.dll', '.lib', '.a'] or '.so' in path.name
+            if not binary:
+                with path.open('rb') as source:
+                    binary = source.read(4) == b'\x7fELF'
+            if binary:
+                print(f'SHA256 {file_digest(path)}  {path.relative_to(ROOT).as_posix()}', flush=True)
+
+
+def depfile_shell_witness():
+    """Exercise the upstream MSVC depfile awk expression through the chosen make/sh."""
+    scratch = ROOT/'target'
+    scratch.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='ffmpeg-shell-', dir=scratch) as temporary:
+        work = Path(temporary)
+        recipe = r"""all:
+	@printf '%s\n' 'Note: including file: C:\sdk\foo.h' | awk '/including/ { sub(/^.*file: */, ""); gsub(/\\/, "/"); print $$0 }'
+"""
+        (work/'Makefile').write_text(recipe)
+        command = [*tool_commands()['make'], '-f', 'Makefile']
+        if platform.system() == 'Windows':
+            command += ['SHELL=/usr/bin/sh']
+        result = subprocess.check_output(command, cwd=work, text=True).strip()
+        if result != 'C:/sdk/foo.h':
+            raise SystemExit(f'MSYS depfile escaping failed: {result!r}')
+    print('MSVC depfile make/sh/awk round trip passed', flush=True)
+
+
 def run(command, cwd, heavy=False):
+    if platform.system() == 'Windows' and command[0] == 'make':
+        command = [*tool_commands()['make'], 'SHELL=/usr/bin/sh', *command[1:]]
     if platform.system() != 'Windows':
         command = (['flock', '-o', '/tmp/kinewright-cargo-heavy.lock', 'nice', '-n', '10']
                    if heavy else ['nice', '-n', '10']) + command
@@ -91,14 +231,14 @@ def ensure_nasm():
     os.environ['PATH'] = str(executable.parent) + os.pathsep + os.environ['PATH']
 
 
-def build(profile):
+def build(profile, no_binary_cache=False):
     args = configure(profile)
-    key = hashlib.sha256((PROFILE['sha256'] + '\n' + '\n'.join(args)).encode()).hexdigest()
+    key, identity = fingerprint()
     prefix = ROOT / 'third_party' / {'libraries': 'ffmpeg', 'recorder': 'ffmpeg-recorder',
                                     'testgen': 'ffmpeg-testgen'}[profile]
     marker = prefix / '.build-key'
-    if marker.exists() and marker.read_text() == key:
-        print(f'{profile}: cached {key}', flush=True)
+    if not no_binary_cache and marker.exists() and marker.read_text() == key:
+        print(f'{profile}: local/cache reuse {key}', flush=True)
         return
     ensure_nasm()
     scratch = ROOT / 'target' / 'ffmpeg-build'
@@ -125,7 +265,7 @@ def build(profile):
         if platform.system() == 'Windows':
             # vcvars64 and static vcpkg libraries must be in the inherited environment.
             os.environ['PKG_CONFIG_PATH'] = str(ROOT / 'third_party/ffmpeg-deps/installed/x64-windows-static/lib/pkgconfig')
-            bash = os.environ.get('KINEWRIGHT_MSYS_BASH', r'C:\msys64\usr\bin\bash.exe')
+            bash = str(Path(os.environ.get('KINEWRIGHT_MSYS_ROOT', 'C:/msys64')) / 'usr/bin/bash.exe')
             run([bash, str(source_dir / 'configure'), *args], source_dir)
         else:
             run(['bash', str(source_dir / 'configure'), *args], source_dir)
@@ -141,6 +281,7 @@ def build(profile):
             for name in ['ffmpeg', 'ffprobe']:
                 suffix = '.exe' if platform.system() == 'Windows' else ''
                 (prefix / 'bin' / (name + suffix)).rename(prefix / 'bin' / (name + '-testgen' + suffix))
+        (prefix / 'fingerprint.json').write_text(json.dumps(identity, sort_keys=True, indent=2) + '\n')
         marker.write_text(key)
     print(f'{profile}: built {key}', flush=True)
 
@@ -149,8 +290,23 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--profile', choices=['libraries', 'recorder', 'testgen'], default='libraries')
     parser.add_argument('--print-key', action='store_true')
+    parser.add_argument('--no-binary-cache', action='store_true', help='Always compile verified source, ignoring the local marker')
+    parser.add_argument('--write-key', action='store_true', help='Write the shared fingerprint to GitHub env/output files')
+    parser.add_argument('--log-digests', action='store_true')
+    parser.add_argument('--check-msvc-shell', action='store_true')
     options = parser.parse_args()
-    if options.print_key:
-        print(hashlib.sha256((PROFILE['sha256'] + '\n' + '\n'.join(configure(options.profile))).encode()).hexdigest())
+    if options.log_digests:
+        log_digests()
+    elif options.check_msvc_shell:
+        depfile_shell_witness()
+    elif options.print_key or options.write_key:
+        key, identity = fingerprint()
+        print(key)
+        if options.write_key:
+            print(json.dumps(identity, sort_keys=True, indent=2))
+            for variable, name in [('GITHUB_ENV', 'FFMPEG_BUILD_KEY'), ('GITHUB_OUTPUT', 'key')]:
+                if output := os.environ.get(variable):
+                    with Path(output).open('a', encoding='utf-8') as stream:
+                        stream.write(f'{name}={key}\n')
     else:
-        build(options.profile)
+        build(options.profile, options.no_binary_cache)

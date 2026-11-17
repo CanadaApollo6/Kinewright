@@ -8,16 +8,24 @@ param(
     [string]$TargetDir,
     [string]$OutputDir,
     [string]$IsccPath,
-    [switch]$StageOnly
+    [switch]$StageOnly,
+    [switch]$NoBinaryCache
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-if ([string]::IsNullOrWhiteSpace($FfmpegDir)) {
-    $FfmpegDir = Join-Path $repoRoot 'third_party\ffmpeg'
+if (-not $NoBinaryCache) {
+    throw 'Packaging requires -NoBinaryCache: compile verified FFmpeg source, never CI binary-cache outputs.'
 }
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$ownedFfmpeg = Join-Path $repoRoot 'third_party\ffmpeg'
+if ($FfmpegDir -and -not [System.IO.Path]::GetFullPath($FfmpegDir).Equals($ownedFfmpeg, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Source-only packaging uses the owned verified FFmpeg install.'
+}
+# Mandatory source rebuild; cache marker/digest files cannot authorize a release.
+& (Join-Path $PSScriptRoot 'setup-ffmpeg.ps1') -NoBinaryCache -SkipBuildCachePrune
+$FfmpegDir = $env:FFMPEG_DIR
 if ([string]::IsNullOrWhiteSpace($TargetDir)) {
     $TargetDir = Join-Path $repoRoot 'target\release'
 }

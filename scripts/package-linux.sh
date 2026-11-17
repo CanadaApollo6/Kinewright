@@ -3,7 +3,7 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 --version <semver> [--ffmpeg-dir DIR] [--target-dir DIR] [--output-dir DIR] [--stage-only]" >&2
+    echo "Usage: $0 --version <semver> [--ffmpeg-dir DIR] [--target-dir DIR] [--output-dir DIR] [--stage-only] --no-binary-cache" >&2
     exit 2
 }
 
@@ -12,6 +12,7 @@ ffmpeg_dir="${FFMPEG_DIR:-}"
 target_dir=""
 output_dir=""
 stage_only=0
+no_binary_cache=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -31,6 +32,10 @@ while [[ $# -gt 0 ]]; do
             output_dir="${2:-}"
             shift 2
             ;;
+        --no-binary-cache)
+            no_binary_cache=1
+            shift
+            ;;
         --stage-only)
             stage_only=1
             shift
@@ -46,11 +51,20 @@ if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
     exit 1
 fi
 
+if [[ "$no_binary_cache" -ne 1 ]]; then
+    echo 'Packaging requires --no-binary-cache: compile verified FFmpeg source, never CI binary-cache outputs.' >&2
+    exit 1
+fi
+
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
-if [[ -z "$ffmpeg_dir" ]]; then
-    ffmpeg_dir="$repo_root/third_party/ffmpeg"
+if [[ -n "$ffmpeg_dir" && "$(realpath -m "$ffmpeg_dir")" != "$repo_root/third_party/ffmpeg" ]]; then
+    echo 'Source-only packaging uses the owned verified FFmpeg install.' >&2
+    exit 1
 fi
+# Mandatory source rebuild: a CI marker or cache digest is not release provenance.
+source "$script_dir/setup-ffmpeg.sh" --no-binary-cache
+ffmpeg_dir="$FFMPEG_DIR"
 if [[ -z "$target_dir" ]]; then
     target_dir="$repo_root/target/release"
 fi

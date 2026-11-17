@@ -21,7 +21,6 @@ pub(crate) static FORMATS: LazyLock<CString> = LazyLock::new(|| {
             .demuxers
             .iter()
             .map(|name| match name.as_str() {
-                "mpegps" => "mpeg",
                 "image_png_pipe" => "png_pipe",
                 "image_jpeg_pipe" => "jpeg_pipe",
                 "matroska" => "matroska,webm",
@@ -60,7 +59,7 @@ mod tests {
             ("libx265", "mov"),
             ("ffv1", "mkv"),
             ("mpeg4", "avi"),
-            ("mpeg2video", "mpg"),
+            ("mpeg2video", "mkv"),
             ("mjpeg", "mov"),
             ("png", "mov"),
             ("rawvideo", "nut"),
