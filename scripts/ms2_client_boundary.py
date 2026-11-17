@@ -51,7 +51,7 @@ def check(root):
                     specification = specification if isinstance(specification, dict) else {}
                     dependency_base = root
                 if specification.get("package", alias) == "zbus" and name != SUPERVISOR:
-                    errors.append(f"{path.relative_to(root)}: {name} declares direct zbus ({alias})")
+                    errors.append(f"{path.relative_to(root).as_posix()}: {name} declares direct zbus ({alias})")
                 # Cargo also makes in-workspace path dependencies implicit members.
                 if "path" in specification:
                     directory = (dependency_base / specification["path"]).resolve()
@@ -68,7 +68,7 @@ def check(root):
             for source in sorted(path.parent.rglob("*.rs")):
                 for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
                     if MANAGER in line:
-                        errors.append(f"{source.relative_to(root)}:{number}: app mentions {MANAGER}")
+                        errors.append(f"{source.relative_to(root).as_posix()}:{number}: app mentions {MANAGER}")
     with (root / "Cargo.lock").open("rb") as source:
         packages = tomllib.load(source)["package"]
     copies = [p["version"] for p in packages if p["name"] == "zbus"]

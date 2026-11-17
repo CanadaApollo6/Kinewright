@@ -76,7 +76,7 @@ bus = { package = "zbus", version = "=5.19.0" }
         (self.app.parent / "src/main.rs").write_text('// org.freedesktop.systemd1\nfn main() {}\n')
         result = self.run_gate()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("src/main.rs:1: app mentions", result.stderr)
+        self.assertIn("crates/kinewright-app/src/main.rs:1: app mentions", result.stderr)
 
     def test_two_zbus_versions_fail(self):
         lock = self.root / "Cargo.lock"
