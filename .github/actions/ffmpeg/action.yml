@@ -20,6 +20,33 @@ runs:
     - uses: actions/setup-python@v5
       with:
         python-version: '3.13'
+    - name: Read the pinned source digest
+      id: source
+      shell: bash
+      run: |
+        python - <<'PY'
+        import json, os
+        from pathlib import Path
+        profile = json.loads(Path('scripts/ffmpeg-profile.json').read_text())
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+            output.write('sha256=' + profile['sha256'] + '\n')
+        PY
+    - name: Restore source tarball for digest verification
+      id: source-cache
+      if: github.repository == 'CanadaApollo6/Kinewright' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      uses: actions/cache/restore@v4
+      with:
+        path: target/ffmpeg-source/${{ steps.source.outputs.sha256 }}/source.tar.xz
+        key: ffmpeg-source-${{ steps.source.outputs.sha256 }}
+    - name: Verify or fetch source before use
+      shell: bash
+      run: python scripts/build-ffmpeg.py --fetch-source
+    - name: Save verified source from repository pushes
+      if: inputs.producer == 'true' && github.event_name == 'push' && github.repository == 'CanadaApollo6/Kinewright' && steps.source-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: target/ffmpeg-source/${{ steps.source.outputs.sha256 }}/source.tar.xz
+        key: ffmpeg-source-${{ steps.source.outputs.sha256 }}
     - name: MSYS build tools
       id: msys
       if: runner.os == 'Windows'

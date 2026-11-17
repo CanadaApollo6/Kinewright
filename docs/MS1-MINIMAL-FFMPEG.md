@@ -10,10 +10,13 @@ The pin was checked against the detached signature using the
 [official release key](https://ffmpeg.org/download.html#release_8.0), fingerprint
 `FCF986EA15E6E293A5644F10B4322F04D67658D8`. It preserves our FFmpeg 8 ABI.
 
-`scripts/build-ffmpeg.py` downloads each source into a newly created empty
-`target/ffmpeg-build/<profile>-*` directory. It verifies SHA-256 before extracting
-or executing anything. It removes the source and intermediate build on success
-or failure. Only installed outputs remain. No system FFmpeg participates.
+`scripts/build-ffmpeg.py` downloads into new empty `target/ffmpeg-source/download-*`
+directories: three attempts, a 30 s socket timeout, and 2/4 s backoff. SHA-256 is
+checked before atomically caching `target/ffmpeg-source/<sha256>/source.tar.xz`.
+`actions/cache` uses `ffmpeg-source-<sha256>`; restores and build copies are rehashed.
+Extraction only follows verification in `target/ffmpeg-build/<profile>-*`; source
+and build trees are removed on success or failure. Verified tarballs and installs remain.
+Releases may reuse verified source, never binary caches. No system FFmpeg participates.
 
 ## Inventory and chosen profile
 
@@ -146,23 +149,21 @@ Run `scripts/prepare-ffmpeg-windows.ps1` once to build x264, x265, dav1d, zlib a
 libvpx, FreeType and HarfBuzz with the static MSVC vcpkg triplet. Its registry is pinned to
 `0df93a05b9de080129e653ec4776d7e14a1b2e4f`.
 `setup-ffmpeg.ps1` imports vcvars64, provisions pinned pkgconf/libclang helpers,
-then invokes the same Python source builder. Cached installations need neither
-vcpkg nor MSYS2 to run. FFmpeg DLLs and recorder have separate directories.
+then invokes the same builder. It moves upstream MSVC import `.lib` files from
+`bin` to `lib`; DLLs stay in `bin`. The recorder keeps a separate prefix.
 
-`ffmpeg.yml` builds Linux and MSVC profiles before dependent CI jobs. A single
-builder fingerprint keys both `actions/cache` and every local `.build-key`. It
-contains the source hash, all configure vectors, compiler/linker/assembler binary
-identities and full versions (including MSVC `/Bv`), dependency pkg-config
-versions/flags, build flags, host ABI, builder/profile/setup scripts and CI action.
-The producer exports exact Linux/Windows keys; consumers verify local markers
-against the same actual toolchain/dependency fingerprint. No fallback keys exist.
+`ffmpeg.yml` builds Linux and MSVC profiles before dependent CI jobs. One fingerprint
+keys the binary cache and local `.build-key`: source hash, configure vectors,
+compiler/linker/assembler binary identities and full versions (including MSVC `/Bv`),
+dependency pkg-config versions/flags, build flags, host ABI, builder/profile/setup
+scripts and CI action. Producers export exact Linux/Windows keys; consumers verify
+markers against that same toolchain/dependency fingerprint. No fallback keys exist.
 
 Binary cache writes require a successful canonical-repository **push**; PR jobs
 never write, and fork PRs/fork repositories never restore these caches. Each job
 logs SHA-256 for every installed native binary, including dependencies and tools.
-Digests record observed contents, not provenance. Accepted risk: cache writers can
-already push code to this single-owner repository; marker matching trusts them.
-Local marker reuse likewise trusts this desktop.
+Digests record contents, not provenance. Accepted risk: matching cache markers trust
+writers who can already push code to this single-owner repository. Local reuse trusts this desktop.
 
 Release jobs bypass binary-cache restore/save and invoke `--no-binary-cache`.
 Both packagers require this flag (`-NoBinaryCache` on Windows), force a fresh

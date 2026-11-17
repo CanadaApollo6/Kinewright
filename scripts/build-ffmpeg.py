@@ -2,6 +2,7 @@
 """Build the MS1 shared libraries, device-only recorder, or isolated test tools."""
 import argparse
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,8 @@ import shlex
 import subprocess
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -89,6 +92,40 @@ def canonical(value):
 def file_digest(path):
     with Path(path).open('rb') as source:
         return hashlib.file_digest(source, 'sha256').hexdigest()
+
+
+def verify_source(archive):
+    actual = file_digest(archive)
+    if actual != PROFILE['sha256']:
+        raise SystemExit(f'FFmpeg source checksum mismatch: {actual}')
+
+
+def verified_source():
+    scratch = ROOT / 'target/ffmpeg-source'
+    cache = scratch / PROFILE['sha256'] / 'source.tar.xz'
+    if cache.exists():
+        verify_source(cache)
+        return cache
+    scratch.mkdir(parents=True, exist_ok=True)
+    url = f'https://ffmpeg.org/releases/ffmpeg-{PROFILE["version"]}.tar.xz'
+    for attempt in range(1, 4):
+        # Each attempt starts empty; partial responses never enter the cache.
+        with tempfile.TemporaryDirectory(prefix='download-', dir=scratch) as temporary:
+            archive = Path(temporary) / 'source.tar.xz'
+            try:
+                with urllib.request.urlopen(url, timeout=30) as response, archive.open('wb') as output:
+                    shutil.copyfileobj(response, output)
+            except (OSError, urllib.error.URLError, http.client.HTTPException) as error:
+                if attempt == 3:
+                    raise
+                delay = 2 ** attempt
+                print(f'FFmpeg source attempt {attempt}/3 failed: {error}; retrying in {delay}s', flush=True)
+                time.sleep(delay)
+                continue
+            verify_source(archive)
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            archive.replace(cache)
+            return cache
 
 
 def tool_identity(command, version_arguments):
@@ -232,6 +269,14 @@ def ensure_nasm():
     os.environ['PATH'] = str(executable.parent) + os.pathsep + os.environ['PATH']
 
 
+def install_msvc_import_libraries(prefix):
+    # Upstream installs these beside the DLLs, but pkg-config and Cargo use lib/.
+    destination = prefix / 'lib'
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in ['avcodec', 'avformat', 'avutil', 'avfilter', 'swscale', 'swresample']:
+        (prefix / 'bin' / f'{name}.lib').replace(destination / f'{name}.lib')
+
+
 def build(profile, no_binary_cache=False):
     args = configure(profile)
     key, identity = fingerprint()
@@ -247,12 +292,8 @@ def build(profile, no_binary_cache=False):
     with tempfile.TemporaryDirectory(prefix=profile + '-', dir=scratch) as temporary:
         work = Path(temporary)
         archive = work / 'source.tar.xz'
-        url = f'https://ffmpeg.org/releases/ffmpeg-{PROFILE["version"]}.tar.xz'
-        urllib.request.urlretrieve(url, archive)
-        with archive.open('rb') as downloaded:
-            actual = hashlib.file_digest(downloaded, 'sha256').hexdigest()
-        if actual != PROFILE['sha256']:
-            raise SystemExit(f'FFmpeg source checksum mismatch: {actual}')
+        shutil.copyfile(verified_source(), archive)
+        verify_source(archive)
         # No source file is extracted or executed before verification.
         with tarfile.open(archive) as source:
             source.extractall(work, filter='data')
@@ -273,6 +314,8 @@ def build(profile, no_binary_cache=False):
         run(['make', '-j4', 'install' if profile == 'libraries' else 'install-progs'], source_dir, heavy=True)
         prefix.mkdir(parents=True, exist_ok=True)
         if platform.system() == 'Windows':
+            if profile == 'libraries':
+                install_msvc_import_libraries(prefix)
             for pc in prefix.glob('lib/pkgconfig/*.pc'):
                 pc.write_text(pc.read_text().replace(install_prefix, prefix.as_posix()))
         shutil.copyfile(source_dir / 'COPYING.GPLv3', prefix / 'LICENSE.txt')
@@ -295,8 +338,11 @@ if __name__ == '__main__':
     parser.add_argument('--write-key', action='store_true', help='Write the shared fingerprint to GitHub env/output files')
     parser.add_argument('--log-digests', action='store_true')
     parser.add_argument('--check-msvc-shell', action='store_true')
+    parser.add_argument('--fetch-source', action='store_true', help='Fetch or verify the pinned source cache without building')
     options = parser.parse_args()
-    if options.log_digests:
+    if options.fetch_source:
+        print(f'FFmpeg source verified {PROFILE["sha256"]}: {verified_source()}', flush=True)
+    elif options.log_digests:
         log_digests()
     elif options.check_msvc_shell:
         depfile_shell_witness()

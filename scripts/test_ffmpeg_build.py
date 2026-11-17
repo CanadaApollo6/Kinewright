@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Source admission must fail before extraction, configure, or install replacement."""
 import importlib.util
+import hashlib
+import io
 from pathlib import Path
+import tarfile
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -67,12 +71,10 @@ class SourceAdmission(unittest.TestCase):
             install.mkdir(parents=True)
             sentinel = install / 'keep'
             sentinel.write_bytes(b'previous verified install')
-            def download(_url, target):
-                Path(target).write_bytes(b'unverified input')
             with patch.object(builder, 'ROOT', root), \
                  patch.object(builder, 'ensure_nasm'), \
                  patch.object(builder, 'fingerprint', return_value=('test-key', {})), \
-                 patch.object(builder.urllib.request, 'urlretrieve', download), \
+                 patch.object(builder.urllib.request, 'urlopen', return_value=io.BytesIO(b'unverified input')), \
                  patch.object(builder, 'run') as run, \
                  patch.object(builder.tarfile, 'open') as extract:
                 with self.assertRaisesRegex(SystemExit, 'checksum mismatch'):
@@ -81,6 +83,29 @@ class SourceAdmission(unittest.TestCase):
                 extract.assert_not_called()
             self.assertEqual(sentinel.read_bytes(), b'previous verified install')
             self.assertEqual(list((root / 'target/ffmpeg-build').iterdir()), [])
+
+    def test_restored_bad_source_never_extracts_or_replaces_an_install(self):
+        with tempfile.TemporaryDirectory(dir=builder.ROOT/'target') as directory:
+            root = Path(directory)
+            install = root/'third_party/ffmpeg'
+            install.mkdir(parents=True)
+            sentinel = install/'keep'
+            sentinel.write_bytes(b'previous verified install')
+            cache = root/'target/ffmpeg-source'/builder.PROFILE['sha256']/'source.tar.xz'
+            cache.parent.mkdir(parents=True)
+            cache.write_bytes(b'unverified restored input')
+            with patch.object(builder, 'ROOT', root), \
+                 patch.object(builder, 'ensure_nasm'), \
+                 patch.object(builder, 'fingerprint', return_value=('test-key', {})), \
+                 patch.object(builder.urllib.request, 'urlopen') as download, \
+                 patch.object(builder, 'run') as run, \
+                 patch.object(builder.tarfile, 'open') as extract:
+                with self.assertRaisesRegex(SystemExit, 'checksum mismatch'):
+                    builder.build('libraries')
+                download.assert_not_called()
+                run.assert_not_called()
+                extract.assert_not_called()
+            self.assertEqual(sentinel.read_bytes(), b'previous verified install')
 
     def test_recorder_has_no_file_demuxers_or_test_generators(self):
         args = builder.configure('recorder')
@@ -98,7 +123,107 @@ class SourceAdmission(unittest.TestCase):
         self.assertIn('bmp', enabled.split('=', 1)[1].split(','))
 
 
+class SourceDownload(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(dir=builder.ROOT/'target')
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.payload = b'verified source fixture'
+        profile = dict(builder.PROFILE, sha256=hashlib.sha256(self.payload).hexdigest())
+        self.enterContext(patch.object(builder, 'ROOT', self.root))
+        self.enterContext(patch.object(builder, 'PROFILE', profile))
+
+    def test_timeouts_retry_three_attempts_then_reuse_the_verified_cache(self):
+        with patch.object(builder.urllib.request, 'urlopen', side_effect=[
+                builder.urllib.error.URLError(TimeoutError('connection timed out')),
+                TimeoutError('socket timed out'), io.BytesIO(self.payload)]) as download, \
+             patch.object(builder.time, 'sleep') as sleep:
+            archive = builder.verified_source()
+            self.assertEqual(archive.read_bytes(), self.payload)
+            self.assertEqual(archive.relative_to(self.root).as_posix(),
+                             f'target/ffmpeg-source/{builder.PROFILE["sha256"]}/source.tar.xz')
+            self.assertEqual(builder.verified_source(), archive)
+            archive.write_bytes(b'poisoned restored cache')
+            with self.assertRaisesRegex(SystemExit, 'checksum mismatch'):
+                builder.verified_source()
+        self.assertEqual(download.call_count, 3)
+        self.assertEqual([call.args for call in sleep.call_args_list], [(2,), (4,)])
+        for call in download.call_args_list:
+            self.assertEqual(call.args, ('https://ffmpeg.org/releases/ffmpeg-8.0.3.tar.xz',))
+            self.assertEqual(call.kwargs, {'timeout': 30})
+        self.assertEqual(list((self.root/'target/ffmpeg-source').iterdir()), [archive.parent])
+
+    def test_interrupted_download_is_discarded_before_retry(self):
+        class Interrupted(io.BytesIO):
+            def read(self, size=-1):
+                if self.tell():
+                    raise TimeoutError('interrupted body')
+                return super().read(size)
+        with patch.object(builder.urllib.request, 'urlopen', side_effect=[
+                Interrupted(b'partial response'), io.BytesIO(self.payload)]) as download, \
+             patch.object(builder.time, 'sleep') as sleep:
+            archive = builder.verified_source()
+        self.assertEqual(archive.read_bytes(), self.payload)
+        self.assertEqual(download.call_count, 2)
+        sleep.assert_called_once_with(2)
+        self.assertEqual(list((self.root/'target/ffmpeg-source').iterdir()), [archive.parent])
+
+    def test_retry_exhaustion_publishes_no_partial_cache(self):
+        with patch.object(builder.urllib.request, 'urlopen', side_effect=builder.urllib.error.URLError('timeout')) as download, \
+             patch.object(builder.time, 'sleep') as sleep:
+            with self.assertRaises(builder.urllib.error.URLError):
+                builder.verified_source()
+        self.assertEqual(download.call_count, 3)
+        self.assertEqual([call.args for call in sleep.call_args_list], [(2,), (4,)])
+        self.assertEqual(list((self.root/'target/ffmpeg-source').iterdir()), [])
+
+
 class BuildIdentity(unittest.TestCase):
+    def test_windows_shared_import_libraries_match_setup_and_survive_recorder_install(self):
+        with tempfile.TemporaryDirectory(dir=builder.ROOT/'target') as directory:
+            root = Path(directory)
+            archive = root/'source.tar.xz'
+            license_name = f'ffmpeg-{builder.PROFILE["version"]}/COPYING.GPLv3'
+            with tarfile.open(archive, 'w:xz') as source:
+                entry = tarfile.TarInfo(license_name)
+                entry.size = len(b'test license')
+                source.addfile(entry, io.BytesIO(b'test license'))
+            profile = dict(builder.PROFILE, sha256=builder.file_digest(archive))
+            runtime = root/'third_party/ffmpeg'
+            recorder = root/'third_party/ffmpeg-recorder'
+            names = ['avcodec', 'avformat', 'avutil', 'avfilter', 'swscale', 'swresample']
+            def install(command, _cwd, heavy=False):
+                if command[0] != 'make':
+                    return
+                self.assertTrue(heavy)
+                if command[-1] == 'install':
+                    (runtime/'bin').mkdir(parents=True)
+                    # FFmpeg's MSVC install rule puts import libraries in SHLIBDIR=bin.
+                    for name in names:
+                        (runtime/'bin'/f'{name}.lib').write_bytes(name.encode())
+                    (runtime/'bin/avcodec-62.dll').write_bytes(b'runtime DLL')
+                else:
+                    self.assertEqual(command[-1], 'install-progs')
+                    (recorder/'bin').mkdir(parents=True)
+                    (recorder/'bin/ffmpeg.exe').write_bytes(b'static recorder')
+            with patch.object(builder, 'ROOT', root), \
+                 patch.object(builder, 'PROFILE', profile), \
+                 patch.object(builder.platform, 'system', return_value='Windows'), \
+                 patch.dict(builder.os.environ), \
+                 patch.object(builder, 'ensure_nasm'), \
+                 patch.object(builder, 'fingerprint', return_value=('test-key', {})), \
+                 patch.object(builder, 'verified_source', return_value=archive), \
+                 patch.object(builder, 'run', side_effect=install):
+                builder.build('libraries')
+                builder.build('recorder')
+            for name in names:
+                self.assertTrue((runtime/'lib'/f'{name}.lib').is_file(), f'Required import library missing: {name}.lib')
+                self.assertEqual((runtime/'lib'/f'{name}.lib').read_bytes(), name.encode())
+                self.assertFalse((runtime/'bin'/f'{name}.lib').exists())
+            self.assertEqual((runtime/'bin/avcodec-62.dll').read_bytes(), b'runtime DLL')
+            self.assertEqual((recorder/'bin/ffmpeg.exe').read_bytes(), b'static recorder')
+            self.assertFalse((recorder/'lib').exists())
+
     def test_linker_query_nonce_is_not_part_of_the_tool_identity(self):
         from types import SimpleNamespace
         with patch.object(builder.shutil, 'which', return_value='/tool/gcc'), \
@@ -119,7 +244,7 @@ class BuildIdentity(unittest.TestCase):
             (prefix/'.build-key').write_text('shared-fingerprint')
             with patch.object(builder, 'ROOT', root), \
                  patch.object(builder, 'fingerprint', return_value=('shared-fingerprint', {})), \
-                 patch.object(builder.urllib.request, 'urlretrieve', side_effect=RuntimeError('fresh verified-source download')) as download:
+                 patch.object(builder.urllib.request, 'urlopen', side_effect=RuntimeError('fresh verified-source download')) as download:
                 builder.build('libraries')
                 download.assert_not_called()
                 with self.assertRaisesRegex(RuntimeError, 'fresh verified-source download'):
@@ -200,6 +325,24 @@ class BuildIdentity(unittest.TestCase):
         self.assertIn("inputs.no-binary-cache != 'true'", save)
         self.assertIn('ms1-${{ steps.fingerprint.outputs.key }}', save)
         self.assertNotIn('restore-keys', workflow)
+
+    def test_source_cache_uses_the_pin_and_verifies_restores_before_building(self):
+        workflow = (builder.ROOT/'.github/actions/ffmpeg/action.yml').read_text()
+        source = workflow[workflow.index('    - name: Read the pinned source digest'):workflow.index('    - name: MSYS build tools')]
+        self.assertIn("profile['sha256']", source)
+        code = source.split("python - <<'PY'\n", 1)[1].split('\n        PY', 1)[0]
+        with tempfile.TemporaryDirectory(dir=builder.ROOT/'target') as directory:
+            output = Path(directory)/'github-output'
+            with patch.dict(builder.os.environ, {'GITHUB_OUTPUT': str(output)}):
+                exec(compile(textwrap.dedent(code), '<source-cache-key>', 'exec'), {})
+            self.assertEqual(output.read_text(), f'sha256={builder.PROFILE["sha256"]}\n')
+        self.assertEqual(source.count('key: ffmpeg-source-${{ steps.source.outputs.sha256 }}'), 2)
+        self.assertEqual(source.count('path: target/ffmpeg-source/${{ steps.source.outputs.sha256 }}/source.tar.xz'), 2)
+        self.assertLess(source.index('actions/cache/restore@v4'), source.index('--fetch-source'))
+        self.assertLess(source.index('--fetch-source'), source.index('actions/cache/save@v4'))
+        save = source[source.index('    - name: Save verified source'):]
+        self.assertIn("github.event_name == 'push'", save)
+        self.assertNotIn('no-binary-cache', source)
 
 
 if __name__ == '__main__':
