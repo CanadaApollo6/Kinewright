@@ -24,10 +24,13 @@ on:
       - '.gitignore'
   workflow_dispatch:
 
+env:
+  KINEWRIGHT_CI_RUST: '1.99.1'
+
 jobs:
   pf1-wrapper:
     name: Linux PF1 wrapper witnesses
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       PYTHONDONTWRITEBYTECODE: '1'
@@ -58,7 +61,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable-x86_64-pc-windows-msvc
+          toolchain: ${{ env.KINEWRIGHT_CI_RUST }}
           components: rustfmt, clippy
 
       # Default key includes rustc (host/release/hash) and a hash of every
@@ -164,7 +167,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable-x86_64-pc-windows-msvc
+          toolchain: ${{ env.KINEWRIGHT_CI_RUST }}
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -189,7 +192,7 @@ jobs:
   linux:
     name: Linux workspace
     timeout-minutes: 60
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Check out repository
@@ -198,6 +201,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.KINEWRIGHT_CI_RUST }}
           components: rustfmt, clippy
 
       # Default key includes rustc (host/release/hash) and a hash of every
@@ -288,7 +292,7 @@ jobs:
 
   linux-slow:
     name: Linux slow tier
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     if: >-
       github.event_name == 'workflow_dispatch' ||
@@ -310,6 +314,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.KINEWRIGHT_CI_RUST }}
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
