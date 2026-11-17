@@ -2493,15 +2493,25 @@ fn cc7_export_and_verify(
     )
 }
 
+/// What one delivery-gate run found against the manifest, collected across
+/// every scenario so a single failure reports all of it.
+#[derive(Default)]
+struct Cc7ManifestFindings {
+    /// Terms this system has no manifest column for.
+    harvest: Vec<String>,
+    /// Declared values that differ from the measurement, one line each.
+    mismatches: Vec<String>,
+}
+
 /// §4(g)(1)'s three conditions, plus the probed tags and the sampling rule.
 ///
-/// `harvest` collects the measured terms this system has no manifest column
-/// for, so one run publishes the whole platform's column rather than one
-/// number at a time.
+/// `findings` collects every manifest comparison rather than stopping at the
+/// first, so one run publishes the whole platform's column (missing terms)
+/// and every value that differs, rather than one number at a time.
 fn assert_cc7_delivery_lane(
     measurement: &Cc7DeliveryMeasurement,
     output: &Path,
-    harvest: &mut Vec<String>,
+    findings: &mut Cc7ManifestFindings,
 ) -> Value {
     let verification = &measurement.verification;
     let comparison = &verification.comparison;
@@ -2625,7 +2635,7 @@ fn assert_cc7_delivery_lane(
             "measured",
             measured,
             &format!("budgets.delivery.{spec_id}.{depth_key}.{term}"),
-            harvest,
+            findings,
         );
     }
 
@@ -2660,7 +2670,7 @@ fn assert_cc7_delivery_lane(
 fn assert_cc7_every_scenario_verifies(depth: DeliveryEncodeDepth, fixture: &str) {
     let gpu = fallback_gpu();
     let mut lanes = Vec::new();
-    let mut harvest = Vec::new();
+    let mut findings = Cc7ManifestFindings::default();
     for scenario in CC7_SCENARIOS {
         let plan = cc7_canonical_plan(&gpu, scenario, "g");
         let expected_frames = cc7_expected_sample_frames(plan.document.duration.0);
@@ -2673,20 +2683,32 @@ fn assert_cc7_every_scenario_verifies(depth: DeliveryEncodeDepth, fixture: &str)
         lanes.push(assert_cc7_delivery_lane(
             &measurement,
             &output,
-            &mut harvest,
+            &mut findings,
         ));
         drop(directory);
     }
-    assert!(
-        harvest.is_empty(),
-        "`{}` has no measured column in `cc7_manifest.json` for these terms. Record them \
-         under the `\"{}\"` key of each row's `measured` object, measured on this system and \
-         optimized there — never by copying another system's number and never by widening a \
-         shared one:\n{}",
-        cc7_os(),
-        cc7_os(),
-        harvest.join("\n")
-    );
+    let mut report = Vec::new();
+    if !findings.mismatches.is_empty() {
+        report.push(format!(
+            "{} manifest value(s) differ from what {} measured; re-measure on this system \
+             rather than widening the value:\n{}",
+            findings.mismatches.len(),
+            cc7_os(),
+            findings.mismatches.join("\n")
+        ));
+    }
+    if !findings.harvest.is_empty() {
+        report.push(format!(
+            "`{}` has no measured column in `cc7_manifest.json` for these terms. Record them \
+             under the `\"{}\"` key of each row's `measured` object, measured on this system \
+             and optimized there — never by copying another system's number and never by \
+             widening a shared one:\n{}",
+            cc7_os(),
+            cc7_os(),
+            findings.harvest.join("\n")
+        ));
+    }
+    assert!(report.is_empty(), "{}", report.join("\n\n"));
     assert_eq!(lanes.len(), CC7_SCENARIOS.len());
     emit_cc7_evidence(
         fixture,
@@ -3165,29 +3187,30 @@ fn cc7_declared_i64(parent: &Value, key: &str) -> Option<i64> {
     }
 }
 
-/// Check one measured term against the manifest, **collecting** rather than
-/// panicking when the running system has no column yet.
+/// Check one measured term against the manifest exactly, **collecting**
+/// rather than panicking, both when the running system has no column yet and
+/// when its declared value differs.
 ///
 /// The delivery table is 5 terms x 6 scenarios per depth. Panicking on the
-/// first missing entry would surrender one number per CI run on a platform
-/// that has never been measured; collecting them lets one run publish the
-/// whole column, which is then pasted in and asserted from that point on.
+/// first missing or differing entry would surrender one number per CI run;
+/// collecting them lets one run report the whole column, which the caller
+/// fails on once, after every scenario has been measured.
 fn check_cc7_measurement(
     parent: &Value,
     key: &str,
     measured: i64,
     path: &str,
-    harvest: &mut Vec<String>,
+    findings: &mut Cc7ManifestFindings,
 ) {
     match cc7_declared_i64(parent, key) {
-        Some(declared) => assert_eq!(
-            declared,
-            measured,
-            "manifest {path}.{key} declares {declared} but {} measured {measured}; \
-             re-measure on this system rather than widening the value",
+        Some(declared) if declared == measured => {}
+        Some(declared) => findings.mismatches.push(format!(
+            "  {path}.{key} declares {declared} but {} measured {measured}",
             cc7_os()
-        ),
-        None => harvest.push(format!("  {path}.{key} = {measured}")),
+        )),
+        None => findings
+            .harvest
+            .push(format!("  {path}.{key} = {measured}")),
     }
 }
 
