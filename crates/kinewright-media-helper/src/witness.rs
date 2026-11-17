@@ -10,6 +10,7 @@ pub enum Witness {
     Decode,
     BeforeArm,
     BeforeShimArm,
+    RssBurst,
 }
 impl Witness {
     pub fn parse(stage: &str) -> io::Result<Self> {
@@ -18,6 +19,7 @@ impl Witness {
             "decode" => Ok(Self::Decode),
             "before-arm" => Ok(Self::BeforeArm),
             "before-shim-arm" => Ok(Self::BeforeShimArm),
+            "rss-burst" => Ok(Self::RssBurst),
             _ => Err(io::Error::other("unknown witness stage")),
         }
     }
@@ -48,7 +50,7 @@ impl Witness {
         }
     }
     pub fn decoder_checkpoint(self, response: &mut MediaFile, request: u32, generation: u64) {
-        if self == Self::Decode {
+        if matches!(self, Self::Decode | Self::RssBurst) {
             use kinewright_media_ipc::{
                 Color, Frame, Kind, Message, ProbeResult, Stream, StreamKind, write_frame,
             };
@@ -96,6 +98,11 @@ impl Witness {
             .is_err()
             {
                 kinewright_job_sys::media_boundary::exit_helper(125);
+            }
+            if self == Self::RssBurst {
+                let resident = vec![0xa5_u8; 384 * 1024 * 1024];
+                std::hint::black_box(&resident);
+                park();
             }
             park();
         }

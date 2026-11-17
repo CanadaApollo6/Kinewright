@@ -86,6 +86,8 @@ struct Status {
     incomplete_reply: AtomicBool,
     #[cfg(feature = "slow-tests")]
     contained: AtomicBool,
+    #[cfg(feature = "slow-tests")]
+    observed_rss: std::sync::atomic::AtomicU64,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Snapshot {
@@ -104,6 +106,7 @@ pub struct WitnessSnapshot {
     pub ready: bool,
     pub incomplete_reply: bool,
     pub contained: bool,
+    pub observed_rss: u64,
 }
 pub struct Runtime {
     sender: SyncSender<actor::Command>,
@@ -202,6 +205,7 @@ impl Runtime {
             ready: self.status.ready.load(Ordering::Acquire),
             incomplete_reply: self.status.incomplete_reply.load(Ordering::Acquire),
             contained: self.status.contained.load(Ordering::Acquire),
+            observed_rss: self.status.observed_rss.load(Ordering::Acquire),
         }
     }
     #[cfg(feature = "slow-tests")]

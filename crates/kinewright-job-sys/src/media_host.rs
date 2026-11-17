@@ -141,6 +141,18 @@ pub fn observe_boundary(
 }
 
 pub fn resident_bytes(process: &ProcessHandle) -> io::Result<u64> {
+    if exited(process)? {
+        return Ok(0);
+    }
+    let sample = live_resident_bytes(process);
+    // Exit can race the status read, which then omits VmRSS. An exited pidfd
+    // proves zero residency; other observation failures remain failures.
+    if exited(process)? {
+        return Ok(0);
+    }
+    sample
+}
+fn live_resident_bytes(process: &ProcessHandle) -> io::Result<u64> {
     if process.reaped()? {
         return Err(invalid("RSS identity disappeared"));
     }
@@ -325,4 +337,20 @@ pub fn spawn_helper(
         );
     }
     command.spawn()
+}
+
+/// Kernel maximum RSS of any waited-for child, in bytes (not a sum).
+pub fn children_peak_resident() -> io::Result<u64> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    // SAFETY: getrusage writes one complete rusage into valid writable storage;
+    // RUSAGE_CHILDREN selects only this caller's waited-for children.
+    if unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, usage.as_mut_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful getrusage initialized the entire output object.
+    let usage = unsafe { usage.assume_init() };
+    u64::try_from(usage.ru_maxrss)
+        .map_err(io::Error::other)?
+        .checked_mul(1024)
+        .ok_or_else(|| invalid("child peak RSS overflow"))
 }

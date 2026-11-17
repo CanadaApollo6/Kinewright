@@ -271,9 +271,12 @@ fn control(
     #[cfg(feature = "slow-tests")] witness: crate::witness::Witness,
 ) -> io::Result<Control> {
     #[cfg(feature = "slow-tests")]
-    if witness != crate::witness::Witness::Off {
-        // Only the distinct witness executable can choose a mode without the
-        // cooperative monitor. Production always starts the trusted watchdog.
+    if !matches!(
+        witness,
+        crate::witness::Witness::Off | crate::witness::Witness::RssBurst
+    ) {
+        // Only kill-chain barriers in the distinct witness executable omit
+        // the monitor. Production and RSS qualification keep the fixed watchdog.
         return Ok(Control {
             active: Arc::new(AtomicBool::new(false)),
             cancel: Arc::new(AtomicBool::new(false)),

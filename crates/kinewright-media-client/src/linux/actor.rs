@@ -33,6 +33,41 @@ struct Job {
     running: worker::Running,
     cause: Option<Failure>,
     kill_at: Option<Instant>,
+    payload: Option<kinewright_job_sys::ProcessHandle>,
+    next_rss: Instant,
+    memory_violation: bool,
+}
+impl Job {
+    fn resident_total(&mut self) -> std::io::Result<u64> {
+        let shim = media_host::resident_bytes(&self.running.pin)?;
+        if self.payload.is_none() {
+            let pid = self.running.shared.payload.load(Ordering::Acquire);
+            if pid != 0 {
+                match kinewright_job_sys::ProcessHandle::open(pid) {
+                    Ok(pin)
+                        if pin.start()
+                            == self.running.shared.payload_start.load(Ordering::Acquire) =>
+                    {
+                        self.payload = Some(pin);
+                    }
+                    // A different/missing identity means that old payload has
+                    // already gone. Never sample or signal its replacement.
+                    Ok(_) => {}
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::NotFound
+                            || error.raw_os_error()
+                                == Some(rustix::io::Errno::SRCH.raw_os_error()) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        let payload = self
+            .payload
+            .as_ref()
+            .map_or(Ok(0), media_host::resident_bytes)?;
+        shim.checked_add(payload)
+            .ok_or_else(|| std::io::Error::other("helper RSS sum overflow"))
+    }
 }
 struct AbortOnExit;
 impl Drop for AbortOnExit {
@@ -46,6 +81,7 @@ pub(super) fn run(config: Config, receiver: Receiver<Command>, status: Arc<Statu
     let mut actor = Actor::new(config, receiver, status);
     loop {
         actor.supervisor_health();
+        actor.poll_resources(Instant::now());
         actor.settle(Instant::now());
         actor.restart();
         actor.admit();
@@ -108,6 +144,34 @@ impl Actor {
             }
         }
     }
+    fn poll_resources(&mut self, now: Instant) {
+        for job in &mut self.active {
+            if !job.pending.degraded
+                || job.cause.is_some()
+                || job.running.thread.is_finished()
+                || now < job.next_rss
+            {
+                continue;
+            }
+            job.next_rss = now + TICK;
+            if let Ok(total) = job.resident_total() {
+                #[cfg(feature = "slow-tests")]
+                self.status.observed_rss.fetch_max(total, Ordering::AcqRel);
+                if total > self.config.limits.private_memory {
+                    job.memory_violation = true;
+                    job.cause = Some(Failure::Sandbox(Error::ResourceLimit));
+                    eprintln!(
+                        "MS2_RSS_LIMIT observed={total} admitted={}",
+                        self.config.limits.private_memory
+                    );
+                    let _ = job.running.pin.kill();
+                }
+            } else {
+                job.cause = Some(Failure::Sandbox(Error::SandboxUnavailable));
+                let _ = job.running.pin.kill();
+            }
+        }
+    }
     fn settle(&mut self, now: Instant) {
         for index in (0..self.active.len()).rev() {
             let job = &mut self.active[index];
@@ -133,6 +197,9 @@ impl Actor {
                 let uncaused = job.cause.is_none();
                 let done = job.running.thread.join();
                 let mut request = job.pending;
+                if job.memory_violation {
+                    self.circuit.quarantine(request.request.source.identity());
+                }
                 let mut result = match done {
                     Ok(done) if job.cause.is_none() && done.fallback && !request.degraded => {
                         request.degraded = true;
@@ -248,6 +315,12 @@ impl Actor {
                 Mode::Scope
             };
             self.status.degraded.store(item.degraded, Ordering::Release);
+            if item.degraded {
+                eprintln!(
+                    "MS2_RESOURCE_MODE degraded rss_poll_ms=100 admitted={} address_space={}",
+                    self.config.limits.private_memory, self.config.limits.address_space
+                );
+            }
             let launch = worker::Launch {
                 helper: &self.config.helper,
                 limits: self.config.limits,
@@ -264,6 +337,9 @@ impl Actor {
                     running,
                     cause: None,
                     kill_at: None,
+                    payload: None,
+                    next_rss: now,
+                    memory_violation: false,
                 }),
                 Err(_) => {
                     let _ = item
@@ -460,6 +536,15 @@ impl Circuit {
         self.tokens -= 1.0;
         self.launches.push_back(now);
         true
+    }
+    fn quarantine(&mut self, identity: [u8; 32]) {
+        if let Some(entry) = self
+            .history
+            .iter_mut()
+            .find(|entry| entry.identity == identity)
+        {
+            entry.quarantine = true;
+        }
     }
     fn failed(&mut self, identity: [u8; 32], error: Error, now: Instant) -> bool {
         let Some(entry) = self

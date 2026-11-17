@@ -291,11 +291,14 @@ impl Lease {
         protocol.shared.payload.store(pid, Ordering::Release);
         protocol.send(Message::EnterBoundary {})?;
         let boundary = protocol.receive()?;
-        if boundary.request != 1
-            || boundary.generation != generation
-            || !matches!(boundary.message, Message::Boundary { .. })
-        {
+        if boundary.request != 1 || boundary.generation != generation {
             return Err(bad());
+        }
+        let Message::Boundary { landlock } = boundary.message else {
+            return Err(bad());
+        };
+        if !landlock {
+            eprintln!("MS2_LANDLOCK_UNAVAILABLE namespace_seccomp_required=true");
         }
         let observation = media_host::observe_boundary(&self.pin, &payload, source)
             .map_err(|_| Failure::Sandbox(Error::SandboxUnavailable))?;
