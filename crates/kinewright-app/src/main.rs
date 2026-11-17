@@ -46,5 +46,12 @@ mod transport;
 mod visual_cache;
 
 fn main() -> eframe::Result {
+    // MS2: the confined probe helper and scope supervisor ship beside this
+    // executable. Without them, media admission fails as unavailable.
+    if let Err(error) =
+        kinewright_project::media_sandbox::configure_media_sandbox_beside_executable()
+    {
+        eprintln!("media sandbox unavailable: {error}");
+    }
     app::run()
 }

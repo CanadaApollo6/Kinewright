@@ -429,6 +429,41 @@ impl CertifiedSource {
         self.0.identity
     }
 
+    /// The pinned read-only descriptor, for a confined helper only (MS2). The
+    /// host never parses through it; the helper reads by position, so this
+    /// descriptor's offset is unchanged.
+    #[must_use]
+    pub fn sandbox_descriptor(&self) -> &File {
+        &self.0.file
+    }
+
+    /// The narrowed `(video, audio)` interpretation, if any.
+    #[must_use]
+    pub fn selected_streams(&self) -> Option<(Option<usize>, Option<usize>)> {
+        self.1.map(|selection| (selection.video, selection.audio))
+    }
+
+    /// The host's byte-identity state for a confined read (MS2): a source a
+    /// cursor already found damaged stays quarantined, and a descriptor whose
+    /// length moved is damaged. The helper attests to nothing about its reads.
+    pub fn check_quarantine(&self) -> Result<(), OwnedIoError> {
+        let mut failure = self
+            .0
+            .failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(error) = &*failure {
+            return Err(error.clone());
+        }
+        let length = self.0.file.metadata().map_err(unavailable)?.len();
+        if length != self.0.identity.source_length {
+            let error = OwnedIoError::Damaged("descriptor length changed".into());
+            *failure = Some(error.clone());
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// First-plane bytes in decoded frames accepted across this source's decoders.
     /// Zero means no decoded output was accepted, including through nested inputs.
     #[cfg(any(test, feature = "test-util"))]

@@ -224,6 +224,31 @@ fn confined_video_probe_decodes_a_first_frame_and_closes() {
     assert_eq!(result.resolution, Some([64, 32]));
     assert_eq!(result.duration_frames, 30);
 }
+/// `FFmpeg`'s `max_pixels` check counts the decoder's padded allocation, so
+/// SD (720 wide, off the stride alignment), tiny pictures and MPEG-4 Part 2
+/// (16-pixel edges) need the reserved envelope, not the declared picture.
+#[test]
+fn confined_video_probe_admits_padded_decoder_allocations() {
+    for (size, codec, name, expected) in [
+        ("720x480", "libx264", "sd.mkv", [720, 480]),
+        ("32x24", "libx264", "tiny.mkv", [32, 24]),
+        ("64x64", "mpeg4", "part2.avi", [64, 64]),
+    ] {
+        let directory = Directory::new();
+        let source = directory.0.join(name);
+        let result = Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i"])
+            .arg(format!("color=c=red:size={size}:rate=24"))
+            .args(["-t", "0.5", "-c:v", codec, "-pix_fmt", "yuv420p"])
+            .arg(&source)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+        let result = run(&directory, &source).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        assert_eq!(result.resolution, Some(expected), "{name}");
+    }
+}
 #[test]
 fn confined_still_probe_inspects_and_closes() {
     for extension in ["png", "jpg"] {

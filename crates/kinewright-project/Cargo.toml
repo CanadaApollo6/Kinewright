@@ -31,6 +31,9 @@ libc.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix.workspace = true
+# MS2: admission probes run in the confined helper (no FFmpeg in these crates).
+kinewright-media-client = { path = "../kinewright-media-client" }
+kinewright-media-ipc = { path = "../kinewright-media-ipc" }
 
 # Already in Cargo.lock; safe access to volume serial + file index on stable Rust.
 [target.'cfg(windows)'.dependencies]

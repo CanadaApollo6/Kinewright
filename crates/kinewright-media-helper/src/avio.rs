@@ -93,7 +93,7 @@ impl Input {
             for (option, stream) in options.iter_mut().zip(self.format.streams()) {
                 let bound = allocation(&stream.parameters(), budget, Metadata::Initial)?;
                 ffi::av_dict_set(option, c"threads".as_ptr(), c"1".as_ptr(), 0);
-                ffi::av_dict_set_int(option, c"max_pixels".as_ptr(), bound.pixels, 0);
+                ffi::av_dict_set_int(option, c"max_pixels".as_ptr(), bound.native_pixels, 0);
                 ffi::av_dict_set_int(option, c"max_samples".as_ptr(), 65_536, 0);
             }
             let result =
@@ -127,7 +127,7 @@ impl Input {
         });
         // SAFETY: context owns a live AVCodecContext; these limits precede decoder open.
         unsafe {
-            (*context.as_mut_ptr()).max_pixels = bound.pixels;
+            (*context.as_mut_ptr()).max_pixels = bound.native_pixels;
             (*context.as_mut_ptr()).max_samples = 65_536;
         }
         Ok(context)
@@ -174,7 +174,14 @@ enum Metadata {
 }
 
 struct Bound {
+    /// The declared picture, checked against each decoded frame.
     pixels: i64,
+    /// `FFmpeg`'s `max_pixels`: the reserved picture envelope. Decoders check
+    /// it against their padded allocation, not the declared picture: the
+    /// stride-aligned width (`STRIDE_ALIGN`, up to 64), and for MPEG-4 Part 2
+    /// and H.263 a 16-pixel edge on every side. The hard budget already
+    /// reserves this envelope per frame, so it admits no extra memory.
+    native_pixels: i64,
     references: u64,
 }
 #[allow(clippy::too_many_lines, reason = "audited codec allocation table")]
@@ -197,6 +204,7 @@ fn allocation(
         }
         return Ok(Bound {
             pixels: 0,
+            native_pixels: 0,
             references: 0,
         });
     }
@@ -272,7 +280,8 @@ fn allocation(
         ffi::AVCodecID::AV_CODEC_ID_AV1 | ffi::AVCodecID::AV_CODEC_ID_VP9 => 8,
         _ => 1,
     };
-    let frame = (u64::try_from(p.width)
+    // The reserved picture envelope: 128-aligned with 256 padding per axis.
+    let envelope = (u64::try_from(p.width)
         .map_err(|_| Error::UnsupportedMedia)?
         .div_ceil(128)
         * 128
@@ -281,8 +290,8 @@ fn allocation(
             .map_err(|_| Error::UnsupportedMedia)?
             .div_ceil(128)
             * 128
-            + 256)
-        * bytes_per_pixel;
+            + 256);
+    let frame = envelope * bytes_per_pixel;
     // One decoder thread, no scaler, one accepted frame plus native scratch.
     if frame
         .checked_mul(dpb + 3)
@@ -292,6 +301,7 @@ fn allocation(
     }
     Ok(Bound {
         pixels,
+        native_pixels: i64::try_from(envelope).map_err(|_| Error::UnsupportedMedia)?,
         references: dpb,
     })
 }

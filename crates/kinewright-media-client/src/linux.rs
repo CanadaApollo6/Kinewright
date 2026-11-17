@@ -14,11 +14,16 @@ use std::{
 };
 
 mod actor;
+mod admission;
 mod controller;
 mod worker;
 
 pub const ACTIVE_PROBES: usize = 2;
+/// Queue bound (ruling 35): 32 requests behind two slots. Each launch ends
+/// within its 5 s deadline, 250 ms grace and 2 s native cleanup, so a full
+/// queue reaches a slot within 16 × 7.25 s = 116 s; `QUEUE_WAIT` covers that.
 pub const PENDING_PROBES: usize = 32;
+pub const QUEUE_WAIT: Duration = Duration::from_secs(120);
 const INITIAL_DEADLINE: Duration = Duration::from_secs(5);
 const CANCEL_GRACE: Duration = Duration::from_millis(250);
 const TICK: Duration = Duration::from_millis(100);
@@ -95,16 +100,39 @@ pub struct Request {
     pub cancel: Arc<AtomicBool>,
     pub explicit_retry: bool,
 }
+/// Typed, retryable admission refusals. None of them launched a helper.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Busy {
+    /// More than `PENDING_PROBES` requests are waiting.
+    QueueFull,
+    /// The request waited `QUEUE_WAIT` without reaching a slot.
+    QueueWait,
+    /// Repeated unhealthy launches paused admission; the first request after
+    /// `retry_after` resumes it.
+    Paused { retry_after: Duration },
+}
 #[derive(Debug)]
 pub enum Failure {
     Sandbox(MediaSandboxError),
     Authority(MediaError),
+    Busy(Busy),
 }
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Sandbox(error) => write!(f, "media sandbox: {error:?}"),
             Self::Authority(error) => error.fmt(f),
+            Self::Busy(Busy::QueueFull) => {
+                f.write_str("media admission queue is full; try again shortly")
+            }
+            Self::Busy(Busy::QueueWait) => {
+                f.write_str("media admission waited too long for a free helper; try again shortly")
+            }
+            Self::Busy(Busy::Paused { retry_after }) => write!(
+                f,
+                "media admission paused after repeated helper failures; try again in {} s",
+                retry_after.as_secs().max(1)
+            ),
         }
     }
 }
@@ -192,7 +220,7 @@ impl Runtime {
         loop {
             let count = self.status.pending.load(Ordering::Acquire);
             if count >= PENDING_PROBES {
-                return Err(Failure::Sandbox(MediaSandboxError::ResourceLimit));
+                return Err(Failure::Busy(Busy::QueueFull));
             }
             if self
                 .status
@@ -209,15 +237,11 @@ impl Runtime {
         };
         if self
             .sender
-            .try_send(actor::Command::Probe(
-                request,
-                reply,
-                Instant::now() + INITIAL_DEADLINE,
-            ))
+            .try_send(actor::Command::Probe(request, reply, Instant::now()))
             .is_err()
         {
             self.status.pending.fetch_sub(1, Ordering::AcqRel);
-            return Err(Failure::Sandbox(MediaSandboxError::ResourceLimit));
+            return Err(Failure::Busy(Busy::QueueFull));
         }
         unwind.armed = true;
         let result = receiver
@@ -225,13 +249,6 @@ impl Runtime {
             .unwrap_or(Err(Failure::Sandbox(MediaSandboxError::Crashed)));
         unwind.armed = false;
         result
-    }
-    pub fn resume(&self) -> Result<(), MediaSandboxError> {
-        let (reply, receiver) = mpsc::sync_channel(1);
-        self.sender
-            .try_send(actor::Command::Resume(reply))
-            .map_err(|_| MediaSandboxError::ResourceLimit)?;
-        receiver.recv().unwrap_or(Err(MediaSandboxError::Crashed))
     }
     /// Close admission and wait for all native cleanup, keeping the spawner
     /// thread itself alive until process exit.
@@ -345,10 +362,7 @@ mod tests {
             drop(receiver);
             assert_eq!(batch_len, PENDING_PROBES);
             assert_eq!(reserved, PENDING_PROBES);
-            assert!(matches!(
-                outcome,
-                Ok(Err(Failure::Sandbox(MediaSandboxError::ResourceLimit)))
-            ));
+            assert!(matches!(outcome, Ok(Err(Failure::Busy(Busy::QueueFull)))));
         });
     }
 }

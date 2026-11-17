@@ -690,11 +690,19 @@ not count as hang quarantine. Repeated no-progress failures with independently
 established hang evidence require explicit Retry, preserving the slow-decode
 distinction. No automatic retry for malformed output or sandbox failure. Explicit
 retries have a one-second cooldown and at most three launches per minute.
-The global launch circuit breaker counts successful, failed, probe, decode, and
-explicit-retry launches across all sources: at most two/s, burst four, and 20
-per rolling minute. On exhaustion, pause admission as `ResourceLimit`, report
-the cooldown, and require explicit resume after 60 s; no endlessly draining
-launch queue for projects containing hundreds of hostile sources.
+The global launch circuit breaker (ruling 35) spends a token only on an
+unhealthy launch outcome across all sources: crash, OOM, protocol violation,
+`TimedOut`, sandbox failure, malformed output, or a typed malformed-input
+refusal. Healthy results, cancellation and authority loss spend nothing. The
+rates are at most two/s, burst four, and 20 per rolling minute. On exhaustion,
+admission pauses: the queue is cleared and every queued request is refused with
+the 60 s cooldown, and so is every new request during it. The first request
+after the cooldown resumes admission; there is no timer drain and no resume
+control. The queue is bounded (32 requests; over the bound a typed retryable
+`QueueFull`), and a queued request waits at most 120 s (`QueueWait`). Its
+deadline starts at launch, never at enqueue. Refusal text says what happened and
+when to try again. A project of hundreds of hostile sources therefore pauses
+after a handful of failures, never drains endlessly.
 The app's supervision thread retains the reservation until the process is
 reaped and native membership is empty. Cleanup failure retains ownership and
 blocks replacement.

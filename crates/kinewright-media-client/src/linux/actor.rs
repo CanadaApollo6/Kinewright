@@ -1,35 +1,32 @@
 //! Sole process spawner and admission owner. No media parsing or scope RPC here.
 use super::{
-    ACTIVE_PROBES, CANCEL_GRACE, Config, Failure, Outcome, PENDING_PROBES, Request, Status, TICK,
-    controller::Controller, worker,
+    ACTIVE_PROBES, CANCEL_GRACE, Config, Failure, Outcome, Request, Status, TICK,
+    admission::{Health, Pending, Queue},
+    controller::Controller,
+    worker,
 };
 use kinewright_job_sys::{media_boundary::Mode, media_host};
 use kinewright_media_ipc::MediaSandboxError as Error;
 use std::{
-    collections::VecDeque,
     sync::{
         Arc,
         atomic::Ordering,
         mpsc::{Receiver, SyncSender},
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 pub(super) enum Command {
+    /// The instant is when the caller enqueued, never a decode deadline.
     Probe(Request, SyncSender<Outcome>, Instant),
-    Resume(SyncSender<Result<(), Error>>),
     Close(SyncSender<Result<(), Error>>),
     #[cfg(feature = "slow-tests")]
     Panic,
 }
-struct Pending {
-    request: Request,
-    reply: SyncSender<Outcome>,
-    deadline: Instant,
-    degraded: bool,
-}
 struct Job {
     pending: Pending,
+    /// Starts at launch: queue wait never spends another source's decode time.
+    deadline: Instant,
     running: worker::Running,
     cause: Option<Failure>,
     kill_at: Option<Instant>,
@@ -100,9 +97,7 @@ struct Actor {
     supervisor_generation: u64,
     controller: Option<Controller>,
     active: Vec<Job>,
-    pending: VecDeque<Pending>,
-    continued: VecDeque<Pending>,
-    circuit: Circuit,
+    queue: Queue,
     closed: bool,
     close_reply: Option<SyncSender<Result<(), Error>>>,
 }
@@ -126,9 +121,7 @@ impl Actor {
             supervisor_generation: 1,
             controller,
             active: Vec::with_capacity(ACTIVE_PROBES),
-            pending: VecDeque::with_capacity(PENDING_PROBES),
-            continued: VecDeque::with_capacity(ACTIVE_PROBES),
-            circuit: Circuit::new(Instant::now()),
+            queue: Queue::new(Instant::now()),
             closed: false,
             close_reply: None,
         }
@@ -183,7 +176,7 @@ impl Actor {
                     job.cause = Some(Failure::Sandbox(Error::Cancelled));
                     job.kill_at = Some(now + CANCEL_GRACE);
                     job.running.shared.cancel.store(true, Ordering::Release);
-                } else if now >= job.pending.deadline {
+                } else if now >= job.deadline {
                     job.cause = Some(Failure::Sandbox(Error::TimedOut));
                     job.kill_at = Some(now + CANCEL_GRACE);
                     job.running.shared.cancel.store(true, Ordering::Release);
@@ -197,13 +190,14 @@ impl Actor {
                 let uncaused = job.cause.is_none();
                 let done = job.running.thread.join();
                 let mut request = job.pending;
+                let identity = request.request.source.identity();
                 if job.memory_violation {
-                    self.circuit.quarantine(request.request.source.identity());
+                    self.queue.circuit.quarantine(identity, now);
                 }
                 let mut result = match done {
                     Ok(done) if job.cause.is_none() && done.fallback && !request.degraded => {
                         request.degraded = true;
-                        self.continued.push_back(request);
+                        self.queue.continue_with(request, &self.status, now);
                         continue;
                     }
                     Ok(done) => job.cause.map_or(done.result, Err),
@@ -215,15 +209,16 @@ impl Actor {
                 if let Err(error) = request.request.source.check() {
                     result = Err(Failure::Authority(error));
                 }
-                if let Err(Failure::Sandbox(error)) = &result {
-                    let identity = request.request.source.identity();
-                    if uncaused
-                        && self.circuit.failed(identity, *error, now)
-                        && now < request.deadline
-                    {
-                        self.continued.push_back(request);
-                        continue;
-                    }
+                let recorded = self
+                    .queue
+                    .circuit
+                    .record(identity, Health::of(&result), now);
+                if recorded.paused {
+                    self.queue.clear_for_pause(&self.status, now);
+                }
+                if uncaused && recorded.retry && !recorded.paused {
+                    self.queue.continue_with(request, &self.status, now);
+                    continue;
                 }
                 let _ = request.reply.send(result);
             }
@@ -234,7 +229,7 @@ impl Actor {
         // cleanup. An absent manager still has a live lifecycle supervisor.
         if self.controller.is_none()
             && self.active.is_empty()
-            && (!self.pending.is_empty() || !self.continued.is_empty())
+            && !self.queue.is_empty()
             && self.available
             && !self.closed
             && let Some(next) = self.supervisor_generation.checked_add(1)
@@ -243,43 +238,25 @@ impl Actor {
             self.controller = Controller::start(&self.config.supervisor, next).ok();
         }
     }
-    fn next_pending(&mut self) -> Option<(Pending, bool)> {
-        // One source identity has only one active cursor, even when
-        // multiple clips or callers request it concurrently.
-        let eligible = |item: &Pending| {
-            self.active
-                .iter()
-                .all(|job| job.pending.request.source.identity() != item.request.source.identity())
-        };
-        self.continued
-            .iter()
-            .position(&eligible)
-            .and_then(|index| self.continued.remove(index))
-            .map(|item| (item, false))
-            .or_else(|| {
-                self.pending
-                    .iter()
-                    .position(eligible)
-                    .and_then(|index| self.pending.remove(index))
-                    .map(|item| (item, true))
-            })
-    }
     fn admit(&mut self) {
+        self.queue.expire(&self.status, Instant::now());
         while self.active.len() < ACTIVE_PROBES {
             // A supervisor restart may have consumed its bounded handshake time.
             let now = Instant::now();
-            let next = self.next_pending();
-            let Some((mut item, fresh)) = next else {
+            // One source identity has only one active cursor, even when
+            // multiple clips or callers request it concurrently.
+            let active = &self.active;
+            let Some(mut item) = self.queue.next(
+                |identity| {
+                    active
+                        .iter()
+                        .any(|job| job.pending.request.source.identity() == *identity)
+                },
+                &self.status,
+            ) else {
                 break;
             };
-            if fresh {
-                self.status.pending.fetch_sub(1, Ordering::AcqRel);
-            }
-            let refuse = if self.closed {
-                Some(Failure::Sandbox(Error::Cancelled))
-            } else if now >= item.deadline {
-                Some(Failure::Sandbox(Error::TimedOut))
-            } else if item.request.cancel.load(Ordering::Acquire) {
+            let refuse = if self.closed || item.request.cancel.load(Ordering::Acquire) {
                 Some(Failure::Sandbox(Error::Cancelled))
             } else {
                 item.request.source.check().err().map(Failure::Authority)
@@ -294,7 +271,7 @@ impl Actor {
                     .send(Err(Failure::Sandbox(Error::SandboxUnavailable)));
                 continue;
             };
-            if !self.circuit.admit(
+            if !self.queue.circuit.permits(
                 item.request.source.identity(),
                 item.request.explicit_retry,
                 now,
@@ -335,8 +312,9 @@ impl Actor {
                 #[cfg(feature = "slow-tests")]
                 observer: self.config.observer.as_ref().map(Arc::clone),
             };
-            match worker::start(launch) {
-                Ok(running) => self.active.push(Job {
+            if let Ok(running) = worker::start(launch) {
+                self.active.push(Job {
+                    deadline: item.decode_deadline(now),
                     pending: item,
                     running,
                     cause: None,
@@ -344,12 +322,19 @@ impl Actor {
                     payload: None,
                     next_rss: now,
                     memory_violation: false,
-                }),
-                Err(_) => {
-                    let _ = item
-                        .reply
-                        .send(Err(Failure::Sandbox(Error::SandboxUnavailable)));
+                });
+            } else {
+                let failure = Failure::Sandbox(Error::SandboxUnavailable);
+                let identity = item.request.source.identity();
+                if self
+                    .queue
+                    .circuit
+                    .record(identity, Health::Unhealthy(Error::SandboxUnavailable), now)
+                    .paused
+                {
+                    self.queue.clear_for_pause(&self.status, now);
                 }
+                let _ = item.reply.send(Err(failure));
             }
         }
     }
@@ -385,17 +370,14 @@ impl Actor {
                 Ordering::Release,
             );
         }
-        self.status
-            .active
-            .store(self.active.len() + self.continued.len(), Ordering::Release);
+        self.status.active.store(
+            self.active.len() + self.queue.continued.len(),
+            Ordering::Release,
+        );
         self.status
             .paused
-            .store(self.circuit.paused.is_some(), Ordering::Release);
-        if self.closed
-            && self.active.is_empty()
-            && self.pending.is_empty()
-            && self.continued.is_empty()
-        {
+            .store(self.queue.circuit.paused(), Ordering::Release);
+        if self.closed && self.active.is_empty() && self.queue.is_empty() {
             if let Some(value) = self.controller.take() {
                 value.shutdown();
             }
@@ -408,21 +390,22 @@ impl Actor {
         match self.receiver.recv_timeout(TICK) {
             #[cfg(feature = "slow-tests")]
             Ok(Command::Panic) => panic!("injected media spawner exit"),
-            Ok(Command::Probe(request, reply, deadline)) => {
-                if self.pending.len() >= PENDING_PROBES || self.closed {
+            Ok(Command::Probe(request, reply, queued)) => {
+                if self.closed {
                     self.status.pending.fetch_sub(1, Ordering::AcqRel);
-                    let _ = reply.send(Err(Failure::Sandbox(Error::ResourceLimit)));
+                    let _ = reply.send(Err(Failure::Sandbox(Error::Cancelled)));
                 } else {
-                    self.pending.push_back(Pending {
-                        request,
-                        reply,
-                        deadline,
-                        degraded: false,
-                    });
+                    self.queue.offer(
+                        Pending {
+                            request,
+                            reply,
+                            queued,
+                            degraded: false,
+                        },
+                        &self.status,
+                        Instant::now(),
+                    );
                 }
-            }
-            Ok(Command::Resume(reply)) => {
-                let _ = reply.send(self.circuit.resume(Instant::now()));
             }
             Ok(Command::Close(reply)) => {
                 if self.close_reply.is_some() {
@@ -431,6 +414,7 @@ impl Actor {
                 }
                 self.closed = true;
                 self.close_reply = Some(reply);
+                self.queue.close(&self.status);
                 for job in &mut self.active {
                     job.cause.get_or_insert(Failure::Sandbox(Error::Cancelled));
                     let _ = job.running.pin.kill();
@@ -450,204 +434,5 @@ impl Actor {
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
-    }
-}
-
-struct History {
-    identity: [u8; 32],
-    crashes: u8,
-    quarantine: bool,
-    automatic: Option<Instant>,
-    retry: VecDeque<Instant>,
-    seen: Instant,
-}
-struct Circuit {
-    launches: VecDeque<Instant>,
-    history: Vec<History>,
-    tokens: f64,
-    refill: Instant,
-    paused: Option<Instant>,
-}
-impl Circuit {
-    fn new(now: Instant) -> Self {
-        Self {
-            launches: VecDeque::with_capacity(20),
-            history: Vec::with_capacity(256),
-            tokens: 4.0,
-            refill: now,
-            paused: None,
-        }
-    }
-    fn admit(&mut self, identity: [u8; 32], explicit: bool, now: Instant) -> bool {
-        if self.paused.is_some() {
-            return false;
-        }
-        self.launches
-            .retain(|stamp| now.saturating_duration_since(*stamp) < Duration::from_secs(60));
-        self.tokens =
-            (self.tokens + now.saturating_duration_since(self.refill).as_secs_f64() * 2.0).min(4.0);
-        self.refill = now;
-        if self.launches.len() >= 20 || self.tokens < 1.0 {
-            self.paused = Some(now);
-            return false;
-        }
-        self.history.retain(|entry| {
-            entry.crashes != 0
-                || entry.quarantine
-                || now.saturating_duration_since(entry.seen) < Duration::from_secs(300)
-        });
-        let position = self
-            .history
-            .iter()
-            .position(|entry| entry.identity == identity);
-        let index = match position {
-            Some(index) => index,
-            None if self.history.len() < 256 => {
-                self.history.push(History {
-                    identity,
-                    crashes: 0,
-                    quarantine: false,
-                    automatic: None,
-                    retry: VecDeque::with_capacity(3),
-                    seen: now,
-                });
-                self.history.len() - 1
-            }
-            None => {
-                self.paused = Some(now);
-                return false;
-            }
-        };
-        let entry = &mut self.history[index];
-        if explicit {
-            entry
-                .retry
-                .retain(|stamp| now.saturating_duration_since(*stamp) < Duration::from_secs(60));
-            if entry.retry.len() >= 3
-                || entry.retry.back().is_some_and(|stamp| {
-                    now.saturating_duration_since(*stamp) < Duration::from_secs(1)
-                })
-            {
-                return false;
-            }
-            entry.retry.push_back(now);
-            entry.quarantine = false;
-            entry.crashes = 0;
-        } else if entry.quarantine {
-            return false;
-        }
-        entry.seen = now;
-        self.tokens -= 1.0;
-        self.launches.push_back(now);
-        true
-    }
-    fn quarantine(&mut self, identity: [u8; 32]) {
-        if let Some(entry) = self
-            .history
-            .iter_mut()
-            .find(|entry| entry.identity == identity)
-        {
-            entry.quarantine = true;
-        }
-    }
-    fn failed(&mut self, identity: [u8; 32], error: Error, now: Instant) -> bool {
-        let Some(entry) = self
-            .history
-            .iter_mut()
-            .find(|entry| entry.identity == identity)
-        else {
-            return false;
-        };
-        match error {
-            Error::ProtocolViolation => entry.quarantine = true,
-            Error::Crashed => {
-                entry.crashes = entry.crashes.saturating_add(1);
-                if entry.crashes >= 2 {
-                    entry.quarantine = true;
-                } else if entry.automatic.is_none_or(|stamp| {
-                    now.saturating_duration_since(stamp) >= Duration::from_secs(300)
-                }) {
-                    entry.automatic = Some(now);
-                    return true;
-                }
-            }
-            _ => {}
-        }
-        false
-    }
-    fn resume(&mut self, now: Instant) -> Result<(), Error> {
-        if self.paused.is_none() {
-            return Ok(());
-        }
-        if self
-            .paused
-            .is_some_and(|stamp| now.saturating_duration_since(stamp) < Duration::from_secs(60))
-        {
-            return Err(Error::ResourceLimit);
-        }
-        self.paused = None;
-        self.tokens = 4.0;
-        self.refill = now;
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn exhausted_burst_stays_paused_until_explicit_cooldown_resume() {
-        let now = Instant::now();
-        let mut circuit = Circuit::new(now);
-        for n in 0..4 {
-            assert!(circuit.admit([n; 32], false, now));
-        }
-        assert!(!circuit.admit([9; 32], false, now));
-        assert!(!circuit.admit([10; 32], false, now + Duration::from_secs(61)));
-        assert_eq!(
-            circuit.resume(now + Duration::from_secs(59)),
-            Err(Error::ResourceLimit)
-        );
-        circuit.resume(now + Duration::from_secs(60)).unwrap();
-        assert!(circuit.admit([11; 32], false, now + Duration::from_secs(60)));
-    }
-    #[test]
-    fn resume_without_a_pause_does_not_refill_launch_tokens() {
-        let now = Instant::now();
-        let mut circuit = Circuit::new(now);
-        for n in 0..4 {
-            assert!(circuit.admit([n; 32], false, now));
-        }
-        circuit.resume(now).unwrap();
-        assert!(!circuit.admit([9; 32], false, now));
-    }
-    #[test]
-    fn twenty_launches_across_sources_exhaust_the_rolling_minute() {
-        let now = Instant::now();
-        let mut circuit = Circuit::new(now);
-        for n in 0..20 {
-            assert!(circuit.admit([n; 32], false, now + Duration::from_secs(u64::from(n) * 2)));
-        }
-        assert!(!circuit.admit([30; 32], false, now + Duration::from_secs(40)));
-    }
-    #[test]
-    fn crash_and_protocol_quarantine_require_explicit_retry() {
-        let now = Instant::now();
-        let mut circuit = Circuit::new(now);
-        let source = [1; 32];
-        assert!(circuit.admit(source, false, now));
-        assert!(circuit.failed(source, Error::Crashed, now));
-        assert!(circuit.admit(source, false, now + Duration::from_secs(1)));
-        assert!(!circuit.failed(source, Error::Crashed, now + Duration::from_secs(1)));
-        assert!(!circuit.admit(source, false, now + Duration::from_secs(2)));
-        assert!(circuit.admit(source, true, now + Duration::from_secs(2)));
-        assert!(!circuit.failed(
-            source,
-            Error::ProtocolViolation,
-            now + Duration::from_secs(2)
-        ));
-        assert!(!circuit.admit(source, false, now + Duration::from_secs(3)));
-        assert!(circuit.admit(source, true, now + Duration::from_secs(3)));
-        assert!(!circuit.admit(source, true, now + Duration::from_millis(3500)));
     }
 }

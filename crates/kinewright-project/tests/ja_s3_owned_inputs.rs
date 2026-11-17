@@ -125,6 +125,7 @@ fn s3_owned_import_refuses_dynamic_mpegps_before_probe() {
     use kinewright_core::{Core, Document};
     use kinewright_media::{owned_io::observe_stream_info_probes, test_support::run_ffmpeg};
     use kinewright_project::bundle::{BundleError, BundleWriteAdmission};
+    use kinewright_project::media_sandbox::observe_confined_probes;
     let temp = temp("c0-mpegps-import-refusal");
     let wav = temp.path("control.wav");
     run_ffmpeg(
@@ -163,17 +164,30 @@ fn s3_owned_import_refuses_dynamic_mpegps_before_probe() {
     let mut edit =
         Ja1EditingSession::activate(&root, BundleWriteAdmission::new_document(), &core, None)
             .unwrap();
-    let (control, probes) = observe_stream_info_probes(|| edit.import_owned_media(&wav));
+    let ((control, confined), probes) =
+        observe_stream_info_probes(|| observe_confined_probes(|| edit.import_owned_media(&wav)));
     control.expect("supported production WAV import control");
-    assert!(probes > 0, "observer sees the successful production probe");
+    assert!(confined > 0, "observer sees the successful confined probe");
+    assert_eq!(
+        probes, 0,
+        "MS2: production admission never probes in the host"
+    );
     let history = core.export_history().unwrap();
     let inputs = edit.current_inputs_ref().clone();
     let root_bytes = std::fs::read(&root).unwrap();
-    let (result, probes) = observe_stream_info_probes(|| edit.import_owned_media(&mpeg));
-    assert_eq!(probes, 0, "C0_PRODUCTION_INCOMPLETE_PROBE_NOT_ENTERED");
+    let ((result, confined), probes) =
+        observe_stream_info_probes(|| observe_confined_probes(|| edit.import_owned_media(&mpeg)));
+    // MS2: the dynamic-table guard runs inside the confined helper
+    // (`kinewright-media-helper/src/avio.rs`), which refuses before its
+    // stream-info probe; the host never parses the bytes.
+    assert_eq!(
+        (probes, confined),
+        (0, 1),
+        "C0_PRODUCTION_INCOMPLETE_PROBE_NOT_ENTERED"
+    );
     assert!(
         matches!(result, Err(BundleError::Corrupt(ref reason))
-            if reason == "certified decoder: incomplete or dynamic stream table unsupported"),
+            if reason == "media sandbox: UnsupportedMedia"),
         "C0_PRODUCTION_MPEGPS_GUARD_REFUSAL: {result:?}",
     );
     assert_eq!(

@@ -19,6 +19,7 @@ pub use history_save::{AttemptBinding, ProjectAttachment};
 #[cfg(feature = "test-util")]
 pub mod c0_fixtures;
 mod certified_resources;
+pub mod media_sandbox;
 pub mod owned_inputs;
 mod owned_media;
 mod read_only_inputs;

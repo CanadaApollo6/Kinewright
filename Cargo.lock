@@ -2468,6 +2468,8 @@ dependencies = [
  "kinewright-core",
  "kinewright-hash",
  "kinewright-media",
+ "kinewright-media-client",
+ "kinewright-media-ipc",
  "libc",
  "rustix 1.1.4",
  "serde",
