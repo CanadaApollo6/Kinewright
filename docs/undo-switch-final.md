@@ -104,6 +104,13 @@ cannot release it. A working-copy lease is creation-sized. Do not reintroduce
 a full preview snapshot per message. Identity hashing is a Save/install/cold
 boundary cost, not warm-edit work.
 
+**Task edit durability.** An MCP reply that acknowledges a non-destructive task
+edit does not make that edit durable. The edit becomes durable at the next task
+checkpoint publication: preparation, finish, freeze, merge or attempt
+retirement. This is unchanged from `2a914931`. If the host stops between the
+reply and that publication, the acknowledged edit is lost. Ticket **HX-T1**
+below owns the change.
+
 The mutation checkpoints qualify **29 retargeted C6**, five additional C4 and
 seven distinct C2 edits with runtime red/restored-green controls. The other
 84 retained C6 anchors were checked for unique applicability, not rerun as a
@@ -156,3 +163,7 @@ to 2,000 accepted transitions or 2,000 Do/Undo cycles. It is deferred, not fixed
 or claimed fast enough for that projected workload. Creation-sized capture
 leases and leases that grow with actual use remain the previously recorded
 follow-ups; admission accounting stays **312 + 400 + 144 + 168 = 1,024 MiB**.
+
+Local ticket **HX-T1: publish task checkpoint before the MCP reply.** Publish
+the task's checkpoint before the MCP reply acknowledges a non-destructive task
+edit, so that an acknowledged edit survives a host stop.
