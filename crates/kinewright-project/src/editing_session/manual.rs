@@ -977,7 +977,7 @@ mod c0_fix1_tests {
             .issue_manual_lease("g".repeat(64), "t".repeat(64))
             .unwrap();
         let authority = writer.manual_authority(lease.clone()).unwrap();
-        let (gui, permit) = replica(&temp, &writer, lease);
+        let (gui, permit) = replica(&temp, &writer, lease.clone());
         for command in [
             Command::DoBatchCoalesced {
                 operations: vec![Operation::SetTrackSyncLock {
@@ -1003,7 +1003,12 @@ mod c0_fix1_tests {
         let mut receipts = Vec::new();
         for message in &pending {
             let (receipt, report) = writer.commit_manual_history(&authority, message).unwrap();
-            assert!(report.is_some(), "ACK_FOLLOWS_DURABLE_ROOT_PUBLICATION");
+            let report = report.expect("ACK_FOLLOWS_DURABLE_ROOT_PUBLICATION");
+            assert_eq!(
+                kinewright_media::sha256_bytes(&std::fs::read(&report.path).unwrap()),
+                report.root_sha256,
+                "ACK_FOLLOWS_DURABLE_ROOT_PUBLICATION"
+            );
             let position = writer.core().change_id().unwrap();
             let (repeated, duplicate) = writer.commit_manual_history(&authority, message).unwrap();
             assert_eq!(repeated, receipt, "RETRY_RETURNS_THE_ORIGINAL_RECEIPT");
@@ -1026,19 +1031,42 @@ mod c0_fix1_tests {
         drop(authority);
         drop(writer);
         let mut reopened = Ja1EditingSession::open(&path, &pool).unwrap();
+        let retry_authority = reopened.manual_authority(lease).unwrap();
         for (message, receipt) in pending.iter().zip(&receipts) {
             assert_eq!(
                 reopened.manual_receipt(message).unwrap().as_ref(),
                 Some(receipt),
                 "RESTART_RECOGNISES_EVERY_ORIGINAL_RECEIPT"
             );
+            let before = reopened.core().change_id().unwrap();
+            let (retried, report) = reopened
+                .commit_manual_history(&retry_authority, message)
+                .unwrap();
+            assert_eq!(&retried, receipt, "RESTART_RETURNS_ORIGINAL_RECEIPT");
+            assert!(report.is_none(), "RESTART_RETRY_PUBLISHES_NOTHING");
+            assert_eq!(
+                reopened.core().change_id().unwrap(),
+                before,
+                "RESTART_RECEIPT_RETRY_NEVER_REAPPLIES_COMMAND"
+            );
         }
+        drop(retry_authority);
         assert_eq!(
             reopened.core().snapshot_identity().unwrap(),
             identity,
             "WHAT_WAS_ACKNOWLEDGED_REOPENS_IDENTICALLY"
         );
-        reopened.rotate_manual_epoch(identity).unwrap();
+        let installation = reopened.rotate_manual_epoch(identity);
+        assert!(
+            installation.is_ok(),
+            "INSTALL_RETIRES_PREVIOUS_EPOCH_CHAIN: {:?}",
+            installation.as_ref().err()
+        );
+        installation.unwrap();
+        assert!(
+            reopened.manual_checkpoint().unwrap().1.stream.is_none(),
+            "INSTALL_RETIRES_PREVIOUS_EPOCH_CHAIN"
+        );
         let after = reopened.core().snapshot_identity().unwrap();
         assert_ne!(after, identity, "RECOVERY_INSTALL_STARTS_A_NEW_EPOCH");
         let saved_position = reopened.core().change_id().unwrap().position;

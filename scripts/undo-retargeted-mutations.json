@@ -4761,6 +4761,145 @@
           "diagnostic": null
         }
       ]
+    },
+    "switch": {
+      "original_count": 7,
+      "original_names_sha256": "fd8a8551285d0d29a7594b7f3678fd61be7a63d5693547bfb0f71d16a53883da",
+      "cases": [
+        {
+          "name": "ack-before-root",
+          "status": "retargeted",
+          "edits": [
+            {
+              "file": "crates/kinewright-project/src/bundle_commit.rs",
+              "old": "        let report = Self::publish_update(\n            bundle,\n            shadow,",
+              "new": "        if message.sequence == 1 { return Ok((receipt, None)); }\n        let report = Self::publish_update(\n            bundle,\n            shadow,"
+            }
+          ],
+          "witness": "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+          "package": "kinewright-project",
+          "target": "--lib",
+          "environment": {},
+          "child_app": false,
+          "include_ignored": false,
+          "diagnostic": "ACK_FOLLOWS_DURABLE_ROOT_PUBLICATION",
+          "reason": "H2b deliberate wrong change; original bytes restored after each execution."
+        },
+        {
+          "name": "restart-reapplies-receipt",
+          "status": "retargeted",
+          "edits": [
+            {
+              "file": "crates/kinewright-project/src/editing_session/manual.rs",
+              "old": "        if let Some(receipt) = self.manual_receipt(accepted)? {\n            let core = self.core.clone();",
+              "new": "        if let Some(receipt) = self.manual_receipt(accepted)? {\n            if lease.owner_epoch != self.active_bundle()?.store.owner_epoch() {\n                let cut = self.attachment.freeze().map_err(crate::bundle::operation_error)?;\n                let update = self.attachment.prepare(&cut, message.action.clone(),\n                    crate::operation_actor::CommandContext {\n                        creation: crate::operation_history::CreationOrigin {\n                            branch: self.core.creation_branch().map_err(crate::bundle::operation_error)?,\n                            batch: crate::bundle_records::BatchId::fresh()?,\n                        }, inputs: vec![], approval: None, transition: None,\n                    }).map_err(crate::bundle::operation_error)?;\n                let identity = update.identity().map_err(crate::bundle::operation_error)?;\n                let after = self.attachment.commit_prepared(&cut, update, identity)\n                    .map_err(crate::bundle::operation_error)?;\n                self.attachment.resume(&after).map_err(crate::bundle::operation_error)?;\n                eprintln!(\"MUTATION_REAPPLIED_COMMITTED_RESTART_MESSAGE\");\n            }\n            let core = self.core.clone();"
+            }
+          ],
+          "witness": "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+          "package": "kinewright-project",
+          "target": "--lib",
+          "environment": {},
+          "child_app": false,
+          "include_ignored": false,
+          "diagnostic": "RESTART_RECEIPT_RETRY_NEVER_REAPPLIES_COMMAND",
+          "reason": "H2b deliberate wrong change; original bytes restored after each execution."
+        },
+        {
+          "name": "install-keeps-chain",
+          "status": "retargeted",
+          "edits": [
+            {
+              "file": "crates/kinewright-project/src/editing_session/manual.rs",
+              "old": "                &checkpoint.branch_id,\n                None,\n                false,\n                Some(install),",
+              "new": "                &checkpoint.branch_id,\n                checkpoint.stream.clone(),\n                false,\n                Some(install),"
+            }
+          ],
+          "witness": "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+          "package": "kinewright-project",
+          "target": "--lib",
+          "environment": {},
+          "child_app": false,
+          "include_ignored": false,
+          "diagnostic": "INSTALL_RETIRES_PREVIOUS_EPOCH_CHAIN",
+          "reason": "H2b deliberate wrong change; original bytes restored after each execution."
+        },
+        {
+          "name": "shadow-skips-fold",
+          "status": "retargeted",
+          "edits": [
+            {
+              "file": "crates/kinewright-project/src/operation_history/preview.rs",
+              "old": "        self.preview_sized(self.reservation.sizing(), self.core.bounds())",
+              "new": "        let mut bounds = self.core.bounds();\n        bounds.step_cap = bounds.step_cap.saturating_add(1);\n        self.preview_sized(self.reservation.sizing(), bounds)"
+            }
+          ],
+          "witness": "operation_actor::tests::prepared_shadow_follows_gui_folds_at_each_command_boundary",
+          "package": "kinewright-project",
+          "target": "--lib",
+          "environment": {},
+          "child_app": false,
+          "include_ignored": false,
+          "diagnostic": "SHADOW_REPLAYS_GUI_FOLD_AT_THE_SAME_COMMAND_BOUNDARY",
+          "reason": "H2b deliberate wrong change; original bytes restored after each execution."
+        },
+        {
+          "name": "collect-reachable-redo",
+          "status": "retargeted",
+          "edits": [
+            {
+              "file": "crates/kinewright-project/src/store.rs",
+              "old": "            .filter(|(h, _)| {\n                ledger.pins.get(*h).copied().unwrap_or(0) == 0\n                    && !durable.contains_key(*h)",
+              "new": "            .filter(|(h, (reference, _))| {\n                ledger.pins.get(*h).copied().unwrap_or(0) == 0\n                    && (!durable.contains_key(*h) || reference.record_kind == RecordKind::OwnedLut)"
+            }
+          ],
+          "witness": "compact_history_redo_keeps_owned_lut_after_collection_reopen_and_save_as",
+          "package": "kinewright-project",
+          "target": "ja_s3_owned_inputs",
+          "environment": {},
+          "child_app": false,
+          "include_ignored": false,
+          "diagnostic": "REACHABLE_REDO_LUT_BYTES_SURVIVE_COLLECTION",
+          "reason": "H2b deliberate wrong change; original bytes restored after each execution."
+        },
+        {
+          "name": "uncertain-counted-as-removed",
+          "status": "retargeted",
+          "edits": [
+            {
+              "file": "crates/kinewright-app/src/studio_run_view.rs",
+              "old": ".filter(|r| r.applied && r.issue.is_none() && !is_missing(r) && !is_uncertain(r))",
+              "new": ".filter(|r| r.applied && r.issue.is_none() && !is_missing(r) && { let _ = &is_uncertain; true })"
+            }
+          ],
+          "witness": "studio_run_view::tests::uncertain_approvals_are_never_in_individual_or_aggregate_removal_claims",
+          "package": "kinewright-app",
+          "target": "--bin",
+          "environment": {},
+          "child_app": false,
+          "include_ignored": false,
+          "diagnostic": "UNCERTAIN_APPROVAL_NEVER_COUNTS_AS_REMOVAL",
+          "reason": "H2b deliberate wrong change; original bytes restored after each execution."
+        },
+        {
+          "name": "core-only-snapshot-comparison",
+          "status": "retargeted",
+          "edits": [
+            {
+              "file": "crates/kinewright-project/src/operation_protocol.rs",
+              "old": "if self.seed.installed != identity {",
+              "new": "if self.seed.installed.core != identity.core {"
+            }
+          ],
+          "witness": "operation_protocol::tests::install_seeds_a_new_chain_from_the_combined_snapshot_identity",
+          "package": "kinewright-project",
+          "target": "--lib",
+          "environment": {},
+          "child_app": false,
+          "include_ignored": false,
+          "diagnostic": "INSTALL_EQUALITY_USES_COMBINED_SNAPSHOT_IDENTITY",
+          "reason": "H2b deliberate wrong change; original bytes restored after each execution."
+        }
+      ]
     }
   }
 }

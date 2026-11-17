@@ -1280,23 +1280,77 @@ fn compact_history_redo_keeps_owned_lut_after_collection_reopen_and_save_as() {
     assert_eq!(undone.history().redo.len(), 2);
     let undone_identity = undone.identity().unwrap();
     drop(undone);
+    let redo_manifest = inputs.reference.clone();
     drop(blob);
     drop(inputs);
     for _ in 0..4 {
-        owner.save(&core, &empty.reference).unwrap();
-        owner.collect_after_ack().unwrap();
+        let saved = owner.save(&core, &empty.reference);
+        assert!(
+            saved.is_ok(),
+            "REACHABLE_REDO_LUT_BYTES_SURVIVE_COLLECTION: {:?}",
+            saved.as_ref().err()
+        );
+        let collected = owner.collect_after_ack();
+        assert!(
+            collected.is_ok(),
+            "REACHABLE_REDO_LUT_BYTES_SURVIVE_COLLECTION: {:?}",
+            collected.as_ref().err()
+        );
+        // Retain only identities across collections. Each proof is a fresh
+        // certified read whose pin is dropped before the next collection.
+        let reachable = owner.store().certify_resource_input(&OwnedInputRef {
+            manifest_ref: redo_manifest.clone(),
+            entry: entry.clone(),
+        });
+        assert!(
+            reachable.is_ok(),
+            "REACHABLE_REDO_LUT_BYTES_SURVIVE_COLLECTION: {:?}",
+            reachable.as_ref().err()
+        );
+        let reachable = reachable.unwrap();
+        assert_eq!(
+            reachable.bytes().unwrap(),
+            cube,
+            "REACHABLE_REDO_LUT_BYTES_SURVIVE_COLLECTION"
+        );
     }
     drop(empty);
-    owner.collect_after_ack().unwrap();
+    let collected = owner.collect_after_ack();
+    assert!(
+        collected.is_ok(),
+        "REACHABLE_REDO_LUT_BYTES_SURVIVE_COLLECTION: {:?}",
+        collected.as_ref().err()
+    );
+    let reachable = owner.store().certify_resource_input(&OwnedInputRef {
+        manifest_ref: redo_manifest,
+        entry: entry.clone(),
+    });
+    assert!(
+        reachable.is_ok(),
+        "REACHABLE_REDO_LUT_BYTES_SURVIVE_COLLECTION: {:?}",
+        reachable.as_ref().err()
+    );
+    let reachable = reachable.unwrap();
+    assert_eq!(
+        reachable.bytes().unwrap(),
+        cube,
+        "REACHABLE_REDO_LUT_BYTES_SURVIVE_COLLECTION"
+    );
+    drop(reachable);
     std::fs::remove_file(external).unwrap();
     drop(owner);
-    let mut loaded = LoadedBundle::read(
+    let loaded = LoadedBundle::read(
         &project,
         &kinewright_project::operation_history::HistoryPool::new(
             kinewright_project::operation_history::PoolLimits::default(),
         ),
-    )
-    .unwrap();
+    );
+    assert!(
+        loaded.is_ok(),
+        "REACHABLE_REDO_LUT_BYTES_SURVIVE_COLLECTION: {:?}",
+        loaded.as_ref().err()
+    );
+    let mut loaded = loaded.unwrap();
     let original = loaded.open_manual().unwrap();
     assert_eq!(original.snapshot_identity().unwrap(), undone_identity);
     let mut owner = loaded.into_writer().unwrap();

@@ -155,3 +155,14 @@ Its final gates pass 5,463 fast, 5,587 Linux slow and 54 unpaid TE1 tests, all
 64 session seeds, workspace and feature clippy, fmt, workspace and three separate
 shipping builds, and lint/self-tests. The seven switch mutations and exact
 256-cycle maximal qualification remain; no new timing result is claimed here.
+
+## Seven switch mutations
+
+The [switch mutation report](undo-switch-mutations.md) records all seven named
+runtime failures and their sealed original passes. The resource test now checks
+fresh bytes before teardown and names the cold-open reachability assertion;
+two earlier unnamed refusals remain explicitly unqualified evidence. No fixture,
+collection count, role limit or deadline changed. The final gates pass 5,464
+workspace fast tests, 697 Project slow tests plus the explicit 20,000-clip case,
+54 unpaid TE1 tests, all 64 session seeds, clippy/fmt, workspace and three separate
+shipping builds, and lint/self-tests. The maximal qualification remains pending.

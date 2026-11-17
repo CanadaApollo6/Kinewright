@@ -1811,3 +1811,82 @@ fn attachment_fences_every_mutator_when_frozen_or_sealed() {
         before
     );
 }
+
+#[test]
+fn prepared_shadow_follows_gui_folds_at_each_command_boundary() {
+    // These are independent process participants with the same semantic origin.
+    let gui_pool = HistoryPool::new(PoolLimits::default());
+    let writer_pool = HistoryPool::new(PoolLimits::default());
+    let source = origin();
+    let make = |pool: &HistoryPool| {
+        let owner = OwnerHistory::measured(
+            pool,
+            Role::Ordinary,
+            Role::Ordinary.policy(),
+            &source,
+            RoleBounds {
+                step_cap: 1,
+                ..Role::Ordinary.bounds()
+            },
+            || Ok(document()),
+        )
+        .unwrap();
+        Core::spawn_owner(owner, source.branch.clone(), TimelineRevision::default()).unwrap()
+    };
+    let gui = make(&gui_pool);
+    let writer = make(&writer_pool);
+    let gui_owner = gui.attach(&Proof).unwrap();
+    let writer_owner = writer.attach(&Proof).unwrap();
+    let permit = gui_owner
+        .manual_permit(
+            &Proof,
+            None,
+            producer_lease(&gui, source.branch.clone(), 1),
+            crate::operation_inputs::ManualInputs::fixture(),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap();
+    for (index, command) in [
+        Command::Do(lock(true)),
+        Command::Do(lock(false)),
+        Command::Undo,
+        Command::Redo,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        permit.request(command).unwrap();
+        let message = permit.pending().unwrap().last().unwrap().decode().unwrap();
+        let cut = writer_owner.freeze(&Proof).unwrap();
+        let update = writer_owner.prepare(&Proof, cut, message.action, message.context);
+        assert!(
+            update.is_ok(),
+            "SHADOW_REPLAYS_GUI_FOLD_AT_THE_SAME_COMMAND_BOUNDARY: {:?}",
+            update.as_ref().err()
+        );
+        writer_owner
+            .commit_prepared(&Proof, cut, update.unwrap())
+            .unwrap();
+        let installed = writer_owner.freeze(&Proof).unwrap();
+        writer_owner.resume(&Proof, installed).unwrap();
+        let left = gui.export_history().unwrap();
+        let right = writer.export_history().unwrap();
+        assert_eq!(
+            left.identity().unwrap(),
+            right.identity().unwrap(),
+            "GUI_AND_SHADOW_FOLD_IDENTITIES_AGREE"
+        );
+        assert_eq!(
+            serde_json::to_value(&left).unwrap(),
+            serde_json::to_value(&right).unwrap(),
+            "GUI_AND_SHADOW_COMPLETE_OWNER_STATES_AGREE"
+        );
+        if index == 1 {
+            assert_eq!(left.history().undo.len(), 1);
+            assert!(
+                left.fold_frontier().is_some(),
+                "THE_TEST_ACTUALLY_FOLDED_A_STEP"
+            );
+        }
+    }
+}
