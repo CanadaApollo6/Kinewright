@@ -7,7 +7,7 @@ exact. Both arms import these identical bytes.
 Generated with the provisioned FFmpeg:
 
 ```sh
-ffmpeg -v error -loop 1 -framerate 25 -i ../te1/talking-head.ppm \
+ffmpeg -v error -loop 1 -framerate 25 -i ../te1/talking-head.png \
   -frames:v 100 -an -c:v ffv1 -level 3 -pix_fmt bgra -map_metadata -1 \
   -fflags +bitexact -flags:v +bitexact talking-head-owned.mkv
 ```

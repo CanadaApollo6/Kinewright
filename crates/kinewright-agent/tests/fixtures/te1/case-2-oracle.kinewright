@@ -140,7 +140,7 @@
   "media_pool": [
     {
       "id": 1,
-      "path": "talking-head.ppm",
+      "path": "talking-head.png",
       "name": "Authored synthetic talking head",
       "duration": 100,
       "fps": {

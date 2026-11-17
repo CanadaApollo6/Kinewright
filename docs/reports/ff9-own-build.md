@@ -1,9 +1,8 @@
 # FF9: the project's own FFmpeg build at 9.0.2, joined with dq-native
 
 Branch `ff9`, from `origin/dq-native` (`5138cd5f`) with `origin/ms1` (`66a66cd1`) merged.
-Status: **partial**. The merge and the pin are committed and build on Linux. One
-merge conflict needs a decision (TE1 still image, below) before the fast tier is
-green; the Windows questions wait on the first CI push.
+Status: **partial**. Linux gates are green, including the TE1 still image converted to
+PNG under the lead's ruling (§7). The Windows questions (§4) wait on CI.
 
 ## 1. Merge resolutions
 
@@ -49,6 +48,17 @@ Not conflicted, but changed to join the two:
   signing key <ffmpeg-devel@ffmpeg.org>". This is the fingerprint MS1 recorded for
   8.0.3. Trust in the key comes from that match and from the key being served
   by ffmpeg.org. It is not certified by any key in a personal web of trust.
+- Verification inputs, deleted after this record: `ffmpeg-9.0.2.tar.xz.asc` SHA-256
+  `d617fd94ea354dadd2a8bb16243d37c44e1e9729b06b6ad58fe30bfb0fa943f2` (520 bytes);
+  `ffmpeg-devel.asc` SHA-256
+  `397b3becedcd5a98769967ff1ff8501ddc89f8368b8f766e4701377d7dbaabe5` (1,709 bytes; primary
+  key `FCF986EA…58D8`, plus subkey `5F2EDE9A44501BB559871F8650EE8DF19C3345A2`). The
+  verified tarball stays in the builder's cache, `target/ffmpeg-source/8c38…002e/`,
+  byte-identical to the download.
+- Stale downloads deleted from `third_party/ffmpeg-archives/`: the old setup's
+  `3ffc4daf…b5ac.tar.xz` (mifi linux64 gpl-shared 9.0, 69,756,360 bytes) and
+  `ce3a3a05…00e5.zip` (System233 9.0.2 MSVC, 44,687,068 bytes). Their URLs and checksums
+  are in `origin/dq-native:scripts/setup-ffmpeg.{sh,ps1}`.
 - `scripts/ffmpeg-profile.json` holds the version and checksum; `build-ffmpeg.py`
   derives the URL and unpacked directory from it.
 - ABI: libavcodec 63.1.102 (`setup-ffmpeg.sh` prints it). Windows DLLs:
@@ -160,6 +170,11 @@ decision in §6.
   unchanged Linux column.
 - Slow tier (`slow_tests.py slow`, media + agent + app features) at `4b850ecd`:
   "slow tier accounted for exactly the 139 manifest tests: 139 passed".
+- At the TE1 PNG commit (same tree apart from this report text): `slow_tests.py fast` passes. That is 92 binaries, 5,616
+  passed, 0 failed, 277 ignored, and it reports "fast tier on linux skipped exactly
+  the 105 manifest tests and 172 allowlisted ignores … 34 other-OS manifest tests ran
+  and passed". `cargo test -p kinewright-agent --features te1-eval,slow-tests`:
+  1,899 passed, 0 failed. Clippy, fmt and the slow-test lint are clean.
 - Not run: the Windows cross-clippy (`c5-windows-clippy.sh`). Its header-archive
   cache was empty here, and filling it would mean a second download.
 
@@ -173,15 +188,99 @@ decision in §6.
   stills (`media_bin.rs:31`, `media_workflow.rs:967`). MS1's profile decodes none of
   them. This predates the merge (it came in through MS1 and main).
 
-## 7. Open
+## 7. TE1 still image: PPM to PNG (lead's decision)
 
-- **TE1 still image (blocks the fast tier).**
-  `kinewright-agent --test te1_corpus te1_six_case_rendered_evidence_uses_production_preview`
-  fails with `certified decoder: incomplete or dynamic stream table unsupported`.
-  dq-native's frozen TE1 corpus uses `tests/fixtures/te1/talking-head.ppm`. The MS1
-  profile has no PPM decoder, and its pre-probe guard refuses image2's NOHEADER table
-  outside the validated PNG/JPEG exception. Keeping the fixture means adding
-  components (a PPM decoder and pipe demuxer), which the brief forbids. Converting
-  it to PNG changes a frozen corpus: its `hashes.json`, seven `.kinewright` oracles
-  that name the path, and `te15-measurement-pin.json`. That needs the lead's decision.
-- Windows CI answers for §4.
+dq-native's frozen TE1 corpus used `tests/fixtures/te1/talking-head.ppm`. The MS1
+profile has no PPM decoder, and its pre-probe guard refuses image2's NOHEADER table
+outside the validated PNG/JPEG exception, so
+`te1_corpus::te1_six_case_rendered_evidence_uses_production_preview` failed with
+`certified decoder: incomplete or dynamic stream table unsupported`. Lead's ruling:
+convert the still to PNG and add no PPM decoder. No paid run has used the corpus.
+
+**Conversion.** Run as `nice -n 19 python3 -I ppm_to_png.py talking-head.ppm
+talking-head.png`, standard library only. The script was not committed:
+
+```python
+"""Write an 8-bit RGB PNG with no ancillary chunks from a binary P6 PPM (maxval 255)."""
+import struct
+import sys
+import zlib
+
+source, target = sys.argv[1], sys.argv[2]
+data = open(source, 'rb').read()
+fields, offset = [], 0
+while len(fields) < 4:
+    while data[offset:offset + 1].isspace():
+        offset += 1
+    if data[offset:offset + 1] == b'#':
+        offset = data.index(b'\n', offset) + 1
+        continue
+    end = offset
+    while not data[end:end + 1].isspace():
+        end += 1
+    fields.append(data[offset:end])
+    offset = end
+offset += 1  # exactly one whitespace byte separates the header from the raster
+magic, width, height, maxval = fields[0], int(fields[1]), int(fields[2]), int(fields[3])
+assert magic == b'P6' and maxval == 255, (magic, maxval)
+payload = data[offset:]
+assert len(payload) == width * height * 3, (len(payload), width, height)
+rows = b''.join(b'\x00' + payload[y * width * 3:(y + 1) * width * 3] for y in range(height))
+
+
+def chunk(kind, body):
+    return struct.pack('>I', len(body)) + kind + body + struct.pack('>I', zlib.crc32(kind + body))
+
+
+png = (b'\x89PNG\r\n\x1a\n'
+       + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0))
+       + chunk(b'IDAT', zlib.compress(rows, 9))
+       + chunk(b'IEND', b''))
+open(target, 'wb').write(png)
+print(width, height, len(payload), len(png))
+```
+
+Output: 160x90 8-bit RGB, colour type 2, no interlace. Chunks are IHDR, IDAT and
+IEND only, with no ancillary chunks. 390 bytes, SHA-256
+`138ce16a12d259cea1baa337f963f7427c00fb2096b0387c003dd0657a698b69`. Two runs
+produced identical bytes.
+
+**Lossless proof.** A temporary, uncommitted kinewright-media unit test opened the PNG
+through the production `media_input` (MS1's guard and allowlist) and decoded it with
+our 9.0.2 PNG decoder. It reported `RGB24 160x90 range=JPEG space=RGB
+primaries=Unspecified trc=Unspecified`. The 43,200 decoded RGB bytes equal the PPM's
+raster byte for byte (both SHA-256 `0c595d55f2f0d602f896570960dbe98bbc4428f87eadca631e7c4908770d7c0b`).
+The asset's colour is a `user_override` sRGB/full declaration in the documents, so
+the file's untagged primaries do not drive interpretation. The PPM carried no tags either.
+
+**Rendered evidence.** The corpus stores no rendered-frame hash. Its rendered-evidence
+test asserts a 160x90 frame and the forehead's R > G > B, R > 80 ordering; those
+assertions are unchanged, and the test passes with the PNG. As a further check,
+`te15/README.md`'s generation command, run on the PNG with our testgen, reproduces the
+committed `te15/talking-head-owned.mkv` byte for byte
+(`11e0042a41a82bd48d063e67ddfa6a731de28c201cbdd1d69feef849286da970`). The candidate
+arm's picture source is therefore unchanged.
+
+**Re-pinned (path string and derived hashes only).** Each of
+`talking-head.kinewright`, `case-{1..6}-oracle.kinewright` and
+`case-5-child.kinewright` changes one line: `"path": "talking-head.ppm"` becomes
+`"talking-head.png"`. `hashes.json` renames the key and updates nine values;
+`te15-measurement-pin.json` changes the same nine entries under
+`fixture_and_oracle_sha256`. No other pin field changed, and none needed a live or
+paid run. `pin::verify` (`te15_b2a_measurement_pin_matches_every_observed_field`)
+passes. `te15/README.md` names the PNG. `docs/reports/te1-1.md` is historical and left alone.
+
+| File | Before | After |
+| --- | --- | --- |
+| talking-head.ppm / .png | `0fa72465…d5e1` | `138ce16a…8b69` |
+| talking-head.kinewright | `e5c2ec04…8d08` | `e5981e61…cec6` |
+| case-1-oracle, case-5-child | `581acae7…43b3` | `fdf26341…17da` |
+| case-2-oracle | `ccfd5140…d34e` | `675fc69d…884b` |
+| case-3-oracle | `b7f4b595…c6c0` | `b4619c15…4e63` |
+| case-4-oracle | `bcce9fcf…eb14` | `3772f41e…635c` |
+| case-5-oracle | `72cefac3…3d65` | `eb659ad0…f9aa` |
+| case-6-oracle | `afb4bc65…9580` | `6deb7d9b…daf2` |
+
+## 8. Open
+
+- Windows CI answers for §4, and the Windows luma entry is re-measured from it.
