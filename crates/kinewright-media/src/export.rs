@@ -2948,15 +2948,7 @@ mod tests {
                     "neutral input must stay neutral in {plane}, was {codes:?}"
                 );
             }
-            let Some((neutral_blue, neutral_red)) = NEUTRAL_CHROMA_CODES else {
-                panic!(
-                    "`{}` has no measured neutral-chroma codes for the 8-bit lane. This system \
-                     measured Cb {observed_blue:?} and Cr {observed_red:?}; record those in \
-                     `NEUTRAL_CHROMA_CODES` for it, measured here rather than copied from \
-                     another system.",
-                    std::env::consts::OS
-                );
-            };
+            let (neutral_blue, neutral_red) = NEUTRAL_CHROMA_CODES;
             let system = std::env::consts::OS;
             assert_eq!(
                 observed_blue,
@@ -2971,27 +2963,19 @@ mod tests {
         }
     }
 
-    /// The neutral Cb and Cr codes of the 8-bit delivery lane, per operating
-    /// system, as `(Cb, Cr)`.
+    /// The neutral Cb and Cr codes of the 8-bit delivery lane, as `(Cb, Cr)`,
+    /// on every system.
     ///
-    /// A dither pattern is a property of the scaler that produced it. Linux's
-    /// `mifi/ffmpeg-builds` splits a flat neutral plane across the two codes
-    /// straddling the exact value — Cb up, Cr down — and Windows'
-    /// `System233/ffmpeg-msvc-prebuilt` returns the exact code. Both are
-    /// correct for their build and a single expectation covering both would
-    /// assert nothing, so each system declares what it measures. `None` means
-    /// this system has not been measured yet, and the fixture says so loudly
-    /// instead of passing.
-    #[cfg(not(target_os = "windows"))]
-    const NEUTRAL_CHROMA_CODES: Option<(&[u8], &[u8])> = Some((&[128, 129], &[127, 128]));
-    /// See [`NEUTRAL_CHROMA_CODES`]. Measured on `windows-latest` in CI run
-    /// 34693346093 against the `System233/ffmpeg-msvc-prebuilt
-    /// ffmpeg-8.0.1-r3` package: **Cb is the exact code alone** where Linux's
-    /// build splits it up, and **Cr is the same pair** on both. Nothing here
-    /// is copied from Linux — the Cr entry agrees because it was measured to
-    /// agree, and the Cb entry is the one that actually differs.
-    #[cfg(target_os = "windows")]
-    const NEUTRAL_CHROMA_CODES: Option<(&[u8], &[u8])> = Some((&[128], &[127, 128]));
+    /// The split is libswscale's ordered dither in the `yuv2yuvX` vertical
+    /// scaler, which x86 selects for 8-bit output (`use_mmx_vfilter`) unless
+    /// `accurate_rnd` or `bitexact` is set. Up to `FFmpeg` 8.x that selection
+    /// sat behind GCC inline asm (`HAVE_MMXEXT_INLINE`), so `MSVC` builds used
+    /// `ff_yuv2planeX_8_*` and returned Cb 128 alone, where GCC builds split
+    /// Cb up to 129. `FFmpeg` 9 makes the choice from external (nasm) SIMD, and
+    /// both systems build the same pinned 9.0.2 source with nasm, so one
+    /// expectation holds on both. `docs/reports/ff9-own-build.md` §4 records
+    /// the source analysis and the forced-selection reproduction.
+    const NEUTRAL_CHROMA_CODES: (&[u8], &[u8]) = (&[128, 129], &[127, 128]);
 
     /// The same conversion on the 10-bit lane (CC6 4.3/5.4).
     ///
