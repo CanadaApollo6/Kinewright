@@ -5,6 +5,9 @@ use kinewright_core::{Command, Operation, Track, TrackId, TrackKind};
 use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
 
 fn fixture() -> (TempDirectory, Core, ProjectBundle) {
+    fixture_with(1)
+}
+fn fixture_with(toggles: usize) -> (TempDirectory, Core, ProjectBundle) {
     let temp = TempDirectory::new_in(&workspace_target_dir(), "checkpoint-undo-recovery");
     let mut document = Document::default();
     document.tracks.push(Track {
@@ -22,11 +25,13 @@ fn fixture() -> (TempDirectory, Core, ProjectBundle) {
     });
     document.duration = kinewright_core::TimeCode(90);
     let core = Core::for_test(document).unwrap();
-    core.request(Command::Do(Operation::SetTrackSyncLock {
-        track: TrackId(1),
-        locked: false,
-    }))
-    .unwrap();
+    for toggle in 0..toggles {
+        core.request(Command::Do(Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: toggle % 2 == 1,
+        }))
+        .unwrap();
+    }
     let mut bundle = ProjectBundle::activate(
         &temp.path("source.kinewright"),
         BundleWriteAdmission::new_document(),
@@ -427,4 +432,125 @@ fn history_admission_reopen_capacity_never_authorizes_empty_undo_recovery() {
         "CAPACITY_GRANTS_NO_RESCUE"
     );
     assert_eq!(std::fs::read(path).unwrap(), original);
+}
+fn owner_object(temp: &TempDirectory, bundle: &ProjectBundle) -> (std::path::PathBuf, ObjectRef) {
+    let owner = bundle.branches[&bundle.manual_branch_id].owner_ref.clone();
+    (
+        temp.path(&format!(
+            "source.kinewright-assets/studio/objects/{}",
+            owner.sha256
+        )),
+        owner,
+    )
+}
+/// A history read that fails for a reason other than its stored bytes is a
+/// refusal: no rescue capability, nothing written, and the same project opens
+/// once the cause is gone.
+fn assert_retryable_refusal(
+    refused: Result<Option<VerifiedCheckpointRecovery>, BundleError>,
+    expected: impl FnOnce(&BundleError) -> bool,
+    path: &Path,
+    original: &[u8],
+    context: &str,
+) {
+    match refused {
+        Err(error) => assert!(expected(&error), "{context}: unexpected refusal {error:?}"),
+        Ok(Some(recovery)) => panic!(
+            "{context}: STORE_ERROR_GRANTS_NO_EMPTY_HISTORY_RESCUE ({})",
+            recovery.disclosure().reason
+        ),
+        Ok(None) => panic!("{context}: the failing read was not reached"),
+    }
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        original,
+        "{context}: ROOT_UNTOUCHED"
+    );
+}
+#[test]
+fn unreadable_history_refuses_rescue_and_stays_recoverable() {
+    use std::os::unix::fs::PermissionsExt;
+    let (temp, core, bundle) = fixture();
+    let pool = core.history_pool().clone();
+    let path = temp.path("source.kinewright");
+    let (object, _) = owner_object(&temp, &bundle);
+    drop(bundle);
+    drop(core);
+    let original = std::fs::read(&path).unwrap();
+    let history = std::fs::read(&object).unwrap();
+    let mode = std::fs::metadata(&object).unwrap().permissions();
+    std::fs::set_permissions(&object, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(
+        std::fs::File::open(&object).is_err(),
+        "EACCES_FIXTURE_NEEDS_A_NON_ROOT_RUNNER"
+    );
+    let refused = VerifiedCheckpointRecovery::open(&path, &pool);
+    std::fs::set_permissions(&object, mode).unwrap();
+    assert_retryable_refusal(
+        refused,
+        |error| {
+            matches!(
+                error,
+                BundleError::Operation(crate::operation_actor::Error::History(
+                    crate::operation_history::Error::Store(reason)
+                )) if reason.contains("Permission denied")
+            )
+        },
+        &path,
+        &original,
+        "EACCES",
+    );
+    assert_eq!(
+        std::fs::read(&object).unwrap(),
+        history,
+        "HISTORY_UNTOUCHED"
+    );
+    let restored = reopen(&path, &pool);
+    assert!(
+        !restored.export_history().unwrap().history().undo.is_empty(),
+        "EACCES_RETRY_KEEPS_UNDO"
+    );
+}
+#[test]
+fn history_store_capacity_refuses_rescue_and_stays_recoverable() {
+    // A long Undo over a tiny document: the owner record is the only object
+    // whose encoded or decoded size reaches the cap below.
+    let (temp, core, bundle) = fixture_with(8000);
+    let pool = core.history_pool().clone();
+    let path = temp.path("source.kinewright");
+    let (_, owner) = owner_object(&temp, &bundle);
+    let largest_other = bundle
+        .store
+        .manifest()
+        .unwrap()
+        .objects
+        .iter()
+        .filter(|reference| reference.sha256 != owner.sha256)
+        .map(|reference| reference.byte_length)
+        .max()
+        .unwrap();
+    drop(bundle);
+    drop(core);
+    let original = std::fs::read(&path).unwrap();
+    // Every other record still fits; only the owner record is over the cap.
+    let limits = StorageLimits {
+        decoded_record_bytes: owner.byte_length - 1,
+        ..StorageLimits::default()
+    };
+    assert!(
+        largest_other < limits.decoded_record_bytes,
+        "STORE_CAPACITY_FIXTURE_TARGETS_ONLY_THE_OWNER_RECORD"
+    );
+    assert_retryable_refusal(
+        VerifiedCheckpointRecovery::open_with_limits(&path, &limits, &pool),
+        |error| matches!(error, BundleError::Capacity("encoded metadata record")),
+        &path,
+        &original,
+        "STORE_CAPACITY",
+    );
+    let restored = reopen(&path, &pool);
+    assert!(
+        !restored.export_history().unwrap().history().undo.is_empty(),
+        "STORE_CAPACITY_RETRY_KEEPS_UNDO"
+    );
 }

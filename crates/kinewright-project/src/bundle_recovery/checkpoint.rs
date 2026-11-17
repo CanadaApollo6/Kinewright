@@ -50,6 +50,61 @@ fn load<T: BundleRecord>(
     )
 }
 
+/// Whether a failed owner read proves the stored history unusable: a decode or
+/// identity failure of the bytes the store holds under that reference. Only
+/// that authorizes a rescue with empty history; every other failure is a
+/// refusal that leaves the record untouched and retryable. Exhaustive, so a
+/// new error variant does not compile until it is classified here.
+fn history_bytes_unusable(error: &crate::operation_history::Error) -> bool {
+    use crate::operation_history::Error as H;
+    use kinewright_core::undo::Error as C;
+    match error {
+        H::History(
+            C::Batch(_)
+            | C::InvalidDepth
+            | C::InvalidRecord
+            | C::InvalidMetadata
+            | C::InvalidDocument(_)
+            | C::DocumentMismatch
+            | C::InvalidUndo(_)
+            | C::InvalidRedo(_)
+            | C::UnsupportedCommand,
+        )
+        | H::InvalidLedger
+        | H::InvalidFrontier
+        | H::InvalidPolicy
+        | H::InvalidOrigin
+        | H::InvalidSeeds
+        | H::MissingResource
+        | H::InvalidResource
+        | H::InvalidRecord
+        | H::IdentityMismatch
+        // Decode errors, digest or length mismatches, and a content address
+        // the store does not hold.
+        | H::StoreCorrupt(_) => true,
+        H::History(
+            C::StepTooLarge
+            | C::HistoryFull
+            | C::Capacity
+            | C::DocumentCapacity
+            | C::CounterExhausted
+            | C::Encoding,
+        )
+        | H::Capacity(_)
+        | H::PoolFull(_)
+        | H::Reservation
+        | H::StoreCapacity(_)
+        | H::StoreUnsettled
+        | H::StoreRunLimit
+        // I/O (EACCES and the like), identity of the session, contention.
+        | H::Store(_)
+        | H::CommandConflict
+        | H::NoTargetStep
+        | H::StaleTransition
+        | H::InputRequired => false,
+    }
+}
+
 impl VerifiedCheckpointRecovery {
     #[must_use]
     pub fn document(&self) -> &Document {
@@ -115,7 +170,8 @@ impl VerifiedCheckpointRecovery {
         {
             return Err(BundleError::Corrupt("recovery checkpoint identity".into()));
         }
-        // Capacity and authority failures do not authorize discarding Undo.
+        // Only unusable stored bytes authorize discarding Undo. Capacity,
+        // permission and other store failures leave the record retryable.
         let reason = match crate::operation_history::StoredOwnerRecord::read_namespace(
             &namespace,
             &checkpoint,
@@ -123,13 +179,14 @@ impl VerifiedCheckpointRecovery {
             &admission.data.usage,
             limits,
         ) {
+            Err(error) if history_bytes_unusable(&error) => error.to_string(),
             Err(
                 crate::operation_history::Error::Capacity(_)
                 | crate::operation_history::Error::PoolFull(_),
             ) => {
                 return Err(BundleError::Capacity("checkpoint recovery admission"));
             }
-            Err(error) => error.to_string(),
+            Err(error) => return Err(error.into()),
             Ok(_) => return Err(BundleError::HistoryChanged),
         };
         let document = load::<Document>(&namespace, &checkpoint.document_ref, &admission)?;

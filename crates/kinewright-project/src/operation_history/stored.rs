@@ -570,7 +570,7 @@ impl StoredOwnerRecord {
         };
         let record: Self = source.read(&checkpoint.owner_ref)?;
         if record.role != checkpoint.role || record.sizing.kind.role() != checkpoint.role {
-            return Err(Error::Reservation);
+            return Err(Error::IdentityMismatch);
         }
         if record.document != checkpoint.document_ref
             || record.identity != digest_text(&checkpoint.identity.digest())
@@ -631,7 +631,7 @@ impl StoredOwnerRecord {
             .map_err(store_error)?
             .take();
         if record.role != expected_role || record.sizing.kind.role() != expected_role {
-            return Err(Error::Reservation);
+            return Err(Error::IdentityMismatch);
         }
         if expected.is_some_and(|(document, identity)| {
             record.document != *document || record.identity != digest_text(&identity.digest())
@@ -671,7 +671,7 @@ impl StoredOwnerRecord {
         expected_role: Role,
     ) -> Result<ValidatedOwnerSnapshot, Error> {
         if self.role != expected_role {
-            return Err(Error::Reservation);
+            return Err(Error::IdentityMismatch);
         }
         let reservation = pool.admit_sized(self.sizing)?;
         let bounds = reservation.limits().bounds;
@@ -691,7 +691,7 @@ impl StoredOwnerRecord {
         bounds: kinewright_core::undo::RoleBounds,
     ) -> Result<ValidatedOwnerSnapshot, Error> {
         if self.role != expected_role {
-            return Err(Error::Reservation);
+            return Err(Error::IdentityMismatch);
         }
         if reservation.sizing() != self.sizing {
             return Err(Error::InvalidRecord);
