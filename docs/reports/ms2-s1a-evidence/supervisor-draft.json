@@ -1,0 +1,52 @@
+{
+  "check": {
+    "sha256": "7fc4895f61bf5603e0cda549fcb9ee3d08a7a75e065474238a1af5c4298effb4",
+    "tail": [
+      "   Compiling zvariant_derive v5.15.1",
+      "    Checking kinewright-job-sys v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/crates/kinewright-job-sys)",
+      "    Checking kinewright-media-ipc v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/crates/kinewright-media-ipc)",
+      "   Compiling zvariant v5.15.1",
+      "    Checking zbus_names v4.3.5",
+      "   Compiling zbus_macros v5.19.0",
+      "    Checking zbus v5.19.0",
+      "    Checking kinewright-media-supervisor v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/crates/kinewright-media-supervisor)",
+      "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.29s"
+    ]
+  },
+  "native_tests": {
+    "sha256": "cdfa3f45ed03fe632c8dd38de5d694aa7b7f184cd64597e45050d07e7ce62a5e",
+    "tail": [
+      "   Compiling polling v3.11.0",
+      "   Compiling async-io v2.6.0",
+      "   Compiling zbus_names v4.3.5",
+      "   Compiling async-signal v0.2.14",
+      "   Compiling async-process v2.5.0",
+      "   Compiling kinewright-job-sys v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/crates/kinewright-job-sys)",
+      "   Compiling zbus v5.19.0",
+      "   Compiling kinewright-media-ipc v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/crates/kinewright-media-ipc)",
+      "   Compiling kinewright-media-supervisor v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/crates/kinewright-media-supervisor)",
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.74s",
+      "     Running tests/scope_native.rs (target/debug/deps/scope_native-7942826db24ce4ca)",
+      "",
+      "running 4 tests",
+      "test blocked_child_fixture ... ok",
+      "test missing_user_manager_is_typed_and_creates_no_scope ... ok",
+      "test native_scope_limits_join_before_release_and_supervisor_stays_outside ... ok",
+      "test native_scope_records_are_bounded_and_self_or_stale_requests_are_refused ... ok",
+      "",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s",
+      ""
+    ]
+  },
+  "binary_sha256": "c52837a66801d86b24f993663a68f625b07ec0f5790f088d0e94399b5debfdc5",
+  "source": "parked draft, not a qualified implementation commit",
+  "patch_sha256": "5fefd815a4cfbe65e68f1d6898472a7be3310e94348e1ee92853d12fe6208b4f",
+  "systemd_user_unit_inventory": "  UNIT LOAD ACTIVE SUB DESCRIPTION\n\n0 loaded units listed.\nTo show all installed unit files use 'systemctl list-unit-files'.\n",
+  "not_run": [
+    "full touched-crate slow tests",
+    "all-target clippy -D warnings",
+    "Windows supervisor stub check",
+    "complete locked normal/build dependency graph and licenses",
+    "final app build"
+  ]
+}
