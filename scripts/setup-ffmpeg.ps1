@@ -10,8 +10,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $originalPath = $env:Path
 
-$FfmpegUrl = 'https://github.com/System233/ffmpeg-msvc-prebuilt/releases/download/ffmpeg-8.0.1-r3/ffmpeg-8.0.1-r3_x64-windows-shared-gpl.zip'
-$FfmpegSha256 = '3399afab045f6bc64301001d4f5ca1aba3d6df96948cc1799028cf2f24ede433'
+$FfmpegUrl = 'https://github.com/System233/ffmpeg-msvc-prebuilt/releases/download/ffmpeg-9.0.2/ffmpeg-9.0.2_x64-windows-shared-gpl.zip'
+$FfmpegSha256 = 'ce3a3a052c9dfe5f941789e88dba0d14d10fbf9be6236cb0c4b71a2dfc0a00e5'
 $PkgconfVersion = '3.0.1.post0'
 $LibclangVersion = '18.1.1'
 
@@ -153,7 +153,7 @@ $ffmpegBin = Join-Path $ffmpegRoot 'bin'
 foreach ($required in @(
     (Join-Path $ffmpegRoot 'include\libavcodec\avcodec.h'),
     (Join-Path $ffmpegRoot 'lib\avcodec.lib'),
-    (Join-Path $ffmpegBin 'avcodec-62.dll'),
+    (Join-Path $ffmpegBin 'avcodec-63.dll'),
     $pkgConfig
 )) {
     if (-not (Test-Path -LiteralPath $required)) {

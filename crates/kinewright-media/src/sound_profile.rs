@@ -347,8 +347,10 @@ impl Measurement {
 pub(crate) fn measure_file(
     path: &Path,
     cancel: &ExportCancellation,
+    source: Option<&crate::owned_io::CertifiedSource>,
 ) -> Result<SoundMeasurement, MediaError> {
-    let mut decoder = crate::audio::AudioDecoder::open(path, DETECTOR_RATE, 1, 0, u64::MAX)?;
+    let mut decoder =
+        crate::audio::AudioDecoder::open_with_source(path, DETECTOR_RATE, 1, 0, u64::MAX, source)?;
     let mut measurement = Measurement::new();
     loop {
         check_cancel(cancel)?;
@@ -384,7 +386,7 @@ mod tests {
             &wav_f32(&samples, 44_100, 2),
         );
         let measured =
-            profile(measure_file(source.path(), &ExportCancellation::default()).unwrap());
+            profile(measure_file(source.path(), &ExportCancellation::default(), None).unwrap());
         assert_eq!(measured.duration_micros(), 20_000);
         assert_eq!(measured.len(), 2);
         for hop in measured.hops() {
@@ -435,7 +437,7 @@ mod tests {
         crate::initialize_ffmpeg().unwrap();
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ami-es2002a-90-102.wav");
-        let measured = profile(measure_file(&path, &ExportCancellation::default()).unwrap());
+        let measured = profile(measure_file(&path, &ExportCancellation::default(), None).unwrap());
         assert_eq!(measured.duration_micros(), 12_000_000);
         assert!(
             measured.hops().any(|hop| hop.voice),
@@ -466,7 +468,8 @@ mod tests {
             "wav",
             &wav_f32(&vec![0.0; 481], 16_000, 1),
         );
-        let silence = profile(measure_file(source.path(), &ExportCancellation::default()).unwrap());
+        let silence =
+            profile(measure_file(source.path(), &ExportCancellation::default(), None).unwrap());
         assert!(silence.hops().all(|hop| !hop.voice));
         assert_eq!(silence.duration_micros(), 30_063);
     }
@@ -573,7 +576,8 @@ mod tests {
         let input = std::env::var_os("KINEWRIGHT_MEASUREMENT_AUDIO").expect("explicit input");
         let output = std::env::var_os("KINEWRIGHT_MEASUREMENT_OUTPUT").expect("explicit output");
         let start = std::time::Instant::now();
-        let measurement = measure_file(Path::new(&input), &ExportCancellation::default()).unwrap();
+        let measurement =
+            measure_file(Path::new(&input), &ExportCancellation::default(), None).unwrap();
         let elapsed = start.elapsed();
         let bytes = serde_json::to_vec(&measurement).unwrap();
         std::fs::write(output, &bytes).unwrap();
@@ -599,7 +603,7 @@ mod pass_comparison {
             for passes in 1..=2 {
                 let start = std::time::Instant::now();
                 let measurement = if passes == 1 {
-                    measure_file(Path::new(&input), &ExportCancellation::default()).unwrap()
+                    measure_file(Path::new(&input), &ExportCancellation::default(), None).unwrap()
                 } else {
                     let mut measurement = Measurement::new();
                     let mut levels =

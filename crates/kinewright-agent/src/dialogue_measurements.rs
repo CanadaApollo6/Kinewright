@@ -21,11 +21,21 @@ pub enum MeasurementStatus {
     Running { progress_percent: Option<u8> },
     Failed { reason: String },
 }
-fn failed(reason: impl AsRef<str>) -> Refusal {
+pub(crate) fn failed(reason: impl AsRef<str>) -> Refusal {
     Refusal::MeasurementPending {
         status: MeasurementStatus::Failed {
             reason: reason.as_ref().chars().take(128).collect(),
         },
+    }
+}
+
+pub(crate) struct UnmeasuredDialogue;
+impl DialogueMeasurements for UnmeasuredDialogue {
+    fn audio_stream(&self, _: &MediaIdentity) -> Result<u32, Refusal> {
+        Err(Refusal::NotMeasured)
+    }
+    fn get(&self, _: &MediaIdentity, _: u32) -> Result<Arc<BoundDialogue>, Refusal> {
+        Err(Refusal::NotMeasured)
     }
 }
 fn pending(status: TranscriptStatus) -> Refusal {

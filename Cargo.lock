@@ -555,20 +555,19 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "bindgen"
-version = "0.72.1"
+version = "0.73.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+checksum = "787ef8ef523575546b106a58213d6e6b06198a05c2f757258c68a74273670cfa"
 dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "regex",
  "rustc-hash 2.1.3",
- "shlex 1.3.0",
- "syn 2.0.119",
+ "shlex",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -735,14 +734,14 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.4.1"
+version = "1.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9066c49992464636f92905fa096ec58baaa4d57ec19a5c096c68d3e25ef3d136"
+checksum = "33ef9e3e8154a45c7a95cff4c1299702106ad94062d7bb85fdc5d3a5afd91d45"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
  "libc",
- "shlex 2.0.1",
+ "shlex",
 ]
 
 [[package]]
@@ -1167,7 +1166,7 @@ dependencies = [
  "bitflags 2.13.1",
  "emath",
  "epaint",
- "itertools 0.14.0",
+ "itertools",
  "log",
  "nohash-hasher",
  "profiling",
@@ -1226,7 +1225,7 @@ dependencies = [
  "ahash",
  "egui",
  "enum-map",
- "itertools 0.14.0",
+ "itertools",
  "log",
  "profiling",
  "resvg",
@@ -1420,9 +1419,9 @@ checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 
 [[package]]
 name = "ffmpeg-next"
-version = "8.0.0"
+version = "9.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d658424d233cbd993a972dd73a66ca733acd12a494c68995c9ac32ae1fe65b40"
+checksum = "041fc1d1e9e6f62e03f52d8a2b1cc138d799defbaf7a9d69ddde78c97fb06e97"
 dependencies = [
  "bitflags 2.13.1",
  "ffmpeg-sys-next",
@@ -1431,9 +1430,9 @@ dependencies = [
 
 [[package]]
 name = "ffmpeg-sys-next"
-version = "8.1.0"
+version = "9.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a314bc0e022a33a99567ed4bd2576bd58ffd8fcff7891c29194cfecc26a62547"
+checksum = "226c264da7fce6bd034bfc0b20f87ce4ecc97b3294c407503557910c05e43588"
 dependencies = [
  "bindgen",
  "cc",
@@ -1445,9 +1444,9 @@ dependencies = [
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.10"
+version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26b73573e6edcd2af0cdf47bd6cb58f0b3839491263c314eaad1ccf24430e1de"
+checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
 
 [[package]]
 name = "flate2"
@@ -2191,15 +2190,6 @@ name = "ipnet"
 version = "2.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
-
-[[package]]
-name = "itertools"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
-dependencies = [
- "either",
-]
 
 [[package]]
 name = "itertools"
@@ -4230,12 +4220,6 @@ dependencies = [
  "quote",
  "syn 3.0.3",
 ]
-
-[[package]]
-name = "shlex"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "shlex"

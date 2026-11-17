@@ -576,6 +576,18 @@ impl SessionMedia {
         asset: &MediaAsset,
         transcript: AssetTranscript,
     ) -> Result<(), MediaError> {
+        if matches!(self.authority, MediaAuthority::Certified(_)) {
+            let source = self.dialogue_source(asset)?;
+            let asset = crate::transcript::owned_dialogue_asset(asset, source.audio_stream()?)?;
+            let content = asset
+                .source_fingerprint
+                .content_sha256
+                .as_deref()
+                .ok_or(MediaError::MediaAdmissionRequired)?;
+            return self
+                .engine
+                .register_bound_transcript(&asset, transcript, content);
+        }
         let _access = self.locator_access()?;
         self.engine.register_transcript(asset, transcript)
     }
@@ -584,6 +596,9 @@ impl SessionMedia {
     /// # Errors
     /// Refuses unadmitted media or a source without audio.
     pub fn dialogue_audio_stream(&self, asset: &MediaAsset) -> Result<u32, MediaError> {
+        if matches!(self.authority, MediaAuthority::Certified(_)) {
+            return self.dialogue_source(asset)?.audio_stream();
+        }
         let _access = self.locator_access()?;
         crate::sound_profile::audio_stream(&asset.path)
     }
@@ -601,6 +616,14 @@ impl SessionMedia {
             dialogue_cache::DialogueCacheRead,
             sound_profile::{ProfileIdentity, SoundMeasurement, SoundProfileCache},
         };
+        if matches!(self.authority, MediaAuthority::Certified(_)) {
+            return self.transcripts.owned_dialogue_cache(
+                asset,
+                stream,
+                self.dialogue_source(asset)?,
+                self.engine.data_dir(),
+            );
+        }
         let _access = self.locator_access()?;
         let key = ProfileIdentity::new(&asset.source_fingerprint, stream)
             .ok_or_else(|| MediaError::Backend("source content identity is missing".into()))?;
@@ -655,6 +678,19 @@ impl SessionMedia {
                 Err(MediaError::MediaAdmissionRequired)
             }
         }
+    }
+
+    fn dialogue_source(
+        &self,
+        asset: &MediaAsset,
+    ) -> Result<crate::owned_io::CertifiedSource, MediaError> {
+        let MediaAuthority::Certified(inputs) = &self.authority else {
+            return Err(MediaError::MediaAdmissionRequired);
+        };
+        if inputs.document().asset(asset.id) != Some(asset) {
+            return Err(MediaError::MediaAdmissionRequired);
+        }
+        inputs.source(asset.id)
     }
 
     fn locator_access(&self) -> Result<crate::locator::LocatorAccess, MediaError> {
@@ -1193,6 +1229,15 @@ impl FfmpegMediaEngine {
         asset: &MediaAsset,
         transcript: AssetTranscript,
     ) -> Result<(), MediaError> {
+        let content = crate::sha256_file(&asset.path)?;
+        self.register_bound_transcript(asset, transcript, &content)
+    }
+    fn register_bound_transcript(
+        &self,
+        asset: &MediaAsset,
+        transcript: AssetTranscript,
+        content_sha256: &str,
+    ) -> Result<(), MediaError> {
         if transcript.asset != asset.id {
             return Err(MediaError::Backend(format!(
                 "transcript asset {} does not match media asset {}",
@@ -1208,7 +1253,6 @@ impl FfmpegMediaEngine {
                 asset.fps.denominator()
             )));
         }
-        let content_sha256 = crate::sha256_file(&asset.path)?;
         if transcript.content_sha256 != content_sha256 {
             return Err(MediaError::Backend(format!(
                 "transcript content hash {} does not match media hash {content_sha256}",

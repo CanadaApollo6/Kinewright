@@ -2,7 +2,7 @@
 
 Kinewright is a native desktop app for **64-bit Windows** (MSVC) and **64-bit Linux**
 (glibc). The media crate links FFmpeg at build time and loads its shared
-libraries at test and run time. Each platform provisions a pinned GPL FFmpeg 8
+libraries at test and run time. Each platform provisions a pinned GPL FFmpeg 9
 build into `third_party/ffmpeg` — no system FFmpeg install is required.
 
 ## Linux (x86_64)
@@ -41,7 +41,7 @@ Programme documents whose exit gate says `cargo test --workspace` mean the fast
 tier unless they say otherwise; CI runs the slow tier on every push to `main`.
 
 `source` the setup script in the same shell as Cargo. It downloads the pinned
-FFmpeg 8.0 x86_64 shared GPL build (the same 8.0 ABI Windows links), verifies
+FFmpeg 9.0 x86_64 shared GPL build (the same 8.0 ABI Windows links), verifies
 its SHA-256, extracts it to `third_party/ffmpeg`, and exports `FFMPEG_DIR`,
 `PKG_CONFIG_PATH`, `PATH`, `RUSTFLAGS`, and `LD_LIBRARY_PATH` for
 `ffmpeg-sys-next` and the FFmpeg CLI. The native linker flag keeps a newer
@@ -50,23 +50,23 @@ crate publishes `/usr/lib` as a global Cargo search path.
 
 The script downloads this exact shared GPL build:
 
-- Provider: mifi FFmpeg-Builds (BtbN linux64 gpl-shared 8.0)
-- FFmpeg: `n8.0-latest`, linux64, shared, GPL
-- Archive: `ffmpeg-n8.0-latest-linux64-gpl-shared-8.0.tar.xz`
-- SHA-256: `c201d31f5c8a3b169345101c63ca70f71442848a271bec4a16ca29a1876e5cb1`
+- Provider: mifi FFmpeg-Builds (BtbN linux64 gpl-shared 9.0)
+- FFmpeg: `n9.0.2-37-gae19868753-20261028` (9.0-2 mirror), linux64, shared, GPL
+- Archive: `ffmpeg-n9.0-latest-linux64-gpl-shared-9.0.tar.xz`
+- SHA-256: `3ffc4dafa2309adb18f5f598f5e23e84f3d400c1444f2538dcbcfb0d5c60b5ac`
 
-#### Why FFmpeg 8 is pinned
+#### Why FFmpeg 9 is pinned
 
 `ffmpeg-next` tracks FFmpeg's major/minor release line, and this workspace pins
-`ffmpeg-next = 8.0.0`. Windows and Linux therefore provision the same FFmpeg 8
+`ffmpeg-next = 9.1.0`. Windows and Linux therefore provision the same FFmpeg 9
 ABI instead of compiling against whichever incompatible version a host happens
 to ship. This keeps media behavior and release bundles reproducible and avoids
-mixing generated FFmpeg 8 bindings with a newer shared library.
+mixing generated FFmpeg 9 bindings with a newer shared library.
 
 The host may still install and use another FFmpeg version. In particular,
 rolling Arch-family distributions such as CachyOS can move to a newer ABI
 without affecting Kinewright: the setup script prepends the bundled headers,
-libraries, and CLI, then verifies that `libavcodec` ABI 62 was selected.
+libraries, and CLI, then verifies that `libavcodec` ABI 63 was selected.
 
 ### Environment variables
 
@@ -168,9 +168,9 @@ The standalone cleaner supports the same size gate:
 The script downloads this exact shared GPL build:
 
 - Provider: System233 FFmpeg MSVC Prebuilt
-- FFmpeg: `8.0.1-r3`, x64, shared, GPL
-- Archive: `ffmpeg-8.0.1-r3_x64-windows-shared-gpl.zip`
-- SHA-256: `3399afab045f6bc64301001d4f5ca1aba3d6df96948cc1799028cf2f24ede433`
+- FFmpeg: `9.0.2`, x64, shared, GPL
+- Archive: `ffmpeg-9.0.2_x64-windows-shared-gpl.zip`
+- SHA-256: `ce3a3a052c9dfe5f941789e88dba0d14d10fbf9be6236cb0c4b71a2dfc0a00e5`
 
 It extracts the archive to `third_party/ffmpeg`, then installs these pinned
 build helpers locally:

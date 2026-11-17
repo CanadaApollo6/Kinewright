@@ -81,8 +81,8 @@ def build(tier, count):
         st.verify_exact_rows(docs, st.parse((directory / "docs.log").read_text(encoding="utf-8")))
         if st.host_os() == "linux":
             dynamic = subprocess.check_output(["readelf", "-d", "target/debug/kinewright-eval"], text=True)
-            if "[libavcodec.so.62]" not in dynamic:
-                raise ValueError("kinewright-eval does not link pinned libavcodec.so.62")
+            if "[libavcodec.so.63]" not in dynamic:
+                raise ValueError("kinewright-eval does not link pinned libavcodec.so.63")
             print(dynamic)
 
 

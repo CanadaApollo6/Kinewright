@@ -11,6 +11,9 @@ dist/
 # verify the exact archive.
 third_party/ffmpeg/
 third_party/ffmpeg.zip
+third_party/ffmpeg-archives/
+third_party/nemo-speech/
+third_party/tools/
 third_party/pkgconf/
 third_party/libclang/
 

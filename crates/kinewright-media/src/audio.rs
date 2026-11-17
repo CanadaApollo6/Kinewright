@@ -4834,7 +4834,11 @@ impl AudioDecoder {
         } else {
             crate::owned_io::DecodeInput::Legacy(media_input(path)?)
         };
-        let stream_index = selected_audio_stream(&input, path)?;
+        let stream_index = if let Some(source) = source {
+            source.audio_stream_index(&input)?
+        } else {
+            selected_audio_stream(&input, path)?
+        };
         let stream = input
             .stream(stream_index)
             .expect("selected audio stream exists");

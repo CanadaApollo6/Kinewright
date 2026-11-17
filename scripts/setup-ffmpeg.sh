@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Provision the pinned Linux FFmpeg 8.x shared GPL build into third_party/ffmpeg
+# Provision the pinned Linux FFmpeg 9.x shared GPL build into third_party/ffmpeg
 # and export the environment ffmpeg-sys-next, tests, and the app need.
 #
 # Usage (same shell as cargo):
@@ -34,8 +34,8 @@ if [[ "$sourced" -eq 1 ]]; then
 fi
 set -euo pipefail
 
-FFMPEG_URL='https://github.com/mifi/ffmpeg-builds/releases/download/8.0-1/ffmpeg-n8.0-latest-linux64-gpl-shared-8.0.tar.xz'
-FFMPEG_SHA256='c201d31f5c8a3b169345101c63ca70f71442848a271bec4a16ca29a1876e5cb1'
+FFMPEG_URL='https://github.com/mifi/ffmpeg-builds/releases/download/9.0-2/ffmpeg-n9.0-latest-linux64-gpl-shared-9.0.tar.xz'
+FFMPEG_SHA256='3ffc4dafa2309adb18f5f598f5e23e84f3d400c1444f2538dcbcfb0d5c60b5ac'
 archive="${KINEWRIGHT_FFMPEG_ARCHIVE_CACHE:-$third_party/ffmpeg-archives}/$FFMPEG_SHA256.tar.xz"
 
 fail() {
@@ -128,9 +128,9 @@ fi
 
 codec_version="$(pkg-config --modversion libavcodec)"
 case "$codec_version" in
-    62.*) ;;
+    63.*) ;;
     *)
-        fail "Expected the pinned FFmpeg 8 libavcodec ABI 62, but pkg-config resolved $codec_version."
+        fail "Expected the pinned FFmpeg 9 libavcodec ABI 63, but pkg-config resolved $codec_version."
         return 1 2>/dev/null || exit 1
         ;;
 esac

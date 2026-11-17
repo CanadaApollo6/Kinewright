@@ -236,6 +236,7 @@ pub(crate) fn file(
     cancel: ExportCancellation,
     identity: Identity,
     profile: Option<crate::sound_profile::ProfileTarget>,
+    source: Option<crate::owned_io::CertifiedSource>,
     progress: impl FnMut(u64) + Send + 'static,
 ) -> Result<Recognized, Error> {
     let request_cancel = cancel.clone();
@@ -247,7 +248,15 @@ pub(crate) fn file(
         identity,
         move |recognizer| {
             let end = crate::clock::frame_to_samples(frames, SAMPLE_RATE, fps);
-            drive_file(recognizer, &path, end, &request_cancel, profile, progress)
+            drive_file(
+                recognizer,
+                &path,
+                end,
+                &request_cancel,
+                profile,
+                source.as_ref(),
+                progress,
+            )
         },
     )
 }
@@ -258,14 +267,16 @@ fn drive_file(
     end: u64,
     cancel: &ExportCancellation,
     profile: Option<crate::sound_profile::ProfileTarget>,
+    source: Option<&crate::owned_io::CertifiedSource>,
     progress: impl FnMut(u64),
 ) -> Result<Recognition, Error> {
-    let mut decoder = crate::audio::AudioDecoder::open(
+    let mut decoder = crate::audio::AudioDecoder::open_with_source(
         path,
         SAMPLE_RATE,
         1,
         0,
         if profile.is_some() { u64::MAX } else { end },
+        source,
     )?;
     let mut measurement = profile
         .as_ref()
@@ -719,6 +730,7 @@ mod measurement_tests {
             1600,
             &ExportCancellation::default(),
             Some(target),
+            None,
             |_| {},
         )
         .unwrap();

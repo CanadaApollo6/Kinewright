@@ -136,6 +136,9 @@ pub(crate) fn product_tool_name(name: &str, capability: Option<&str>) -> &'stati
         "read_task_evidence" => return "read_task_evidence",
         "read_task_result" => return "read_task_result",
         "read_child_result" => return "read_child_result",
+        "get_timeline_transcript" => return "get_timeline_transcript",
+        "cut_dialogue" => return "cut_dialogue",
+        "check_dialogue_cut" => return "check_dialogue_cut",
         _ => {}
     }
     crate::runtime::COMPACT_TOOL_NAMES

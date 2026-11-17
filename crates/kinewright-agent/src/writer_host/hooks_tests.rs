@@ -17,6 +17,7 @@ mod tests {
     use std::{collections::BTreeSet, sync::atomic::AtomicUsize, time::Instant};
 
     include!("hooks_attention_tests.rs");
+    include!("dialogue_measurement_tests.rs");
     include!("hooks_store_tests.rs");
     include!("hooks_grant_tests.rs");
     include!("revise_tests.rs");

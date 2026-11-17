@@ -49,20 +49,59 @@ impl TranscriptInferenceHold {
 mod requests;
 use requests::{Recipe, Requests};
 
+// A status key, never a locator. Owned jobs always carry their certified descriptor.
+pub(crate) fn owned_dialogue_asset(
+    asset: &MediaAsset,
+    stream: u32,
+) -> Result<MediaAsset, MediaError> {
+    let sha256 = asset
+        .source_fingerprint
+        .content_sha256
+        .as_deref()
+        .ok_or(MediaError::MediaAdmissionRequired)?;
+    let bytes = asset
+        .source_fingerprint
+        .byte_len
+        .ok_or(MediaError::MediaAdmissionRequired)?;
+    let mut bound = asset.clone();
+    bound.path = PathBuf::from(format!("owned-dialogue/{sha256}/{bytes}/{stream}"));
+    Ok(bound)
+}
+
 pub(crate) struct TranscriptService {
-    jobs: crate::worker::OwnedWorker<crate::locator::LocatorJob<TranscriptJob>>,
+    jobs: crate::worker::OwnedWorker<TranscriptWork>,
     requests: Requests,
     profiles: Requests,
     root: CacheDirectory,
     #[cfg(any(test, feature = "test-util"))]
     inference_gate: InferenceGate,
 }
+enum TranscriptWork {
+    Locator(crate::locator::LocatorJob<TranscriptJob>),
+    Owned(TranscriptJob),
+}
 struct TranscriptJob {
+    source: Option<crate::owned_io::CertifiedSource>,
     profile_only: bool,
     asset: MediaAsset,
     model: &'static recognizer::ModelSpec,
     recipe: Recipe,
     cancellation: ExportCancellation,
+}
+impl TranscriptJob {
+    fn content_sha256(&self) -> Result<String, MediaError> {
+        if let Some(source) = &self.source {
+            source.check_read_authority()?;
+            self.asset
+                .source_fingerprint
+                .content_sha256
+                .as_ref()
+                .ok_or(MediaError::MediaAdmissionRequired)
+                .map(ToOwned::to_owned)
+        } else {
+            sha256_file(&self.asset.path)
+        }
+    }
 }
 impl Drop for TranscriptService {
     fn drop(&mut self) {
@@ -71,6 +110,91 @@ impl Drop for TranscriptService {
     }
 }
 impl TranscriptService {
+    pub(crate) fn owned_dialogue_cache(
+        &self,
+        asset: &MediaAsset,
+        stream: u32,
+        source: crate::owned_io::CertifiedSource,
+        data_dir: &Path,
+    ) -> Result<crate::dialogue_cache::DialogueCacheRead, MediaError> {
+        use crate::{
+            dialogue_cache::DialogueCacheRead,
+            sound_profile::{ProfileIdentity, SoundMeasurement, SoundProfileCache},
+        };
+        if source.audio_stream()? != stream {
+            return Err(MediaError::OwnedMediaOperationUnavailable);
+        }
+        let key = ProfileIdentity::new(&asset.source_fingerprint, stream)
+            .ok_or(MediaError::MediaAdmissionRequired)?;
+        let asset = owned_dialogue_asset(asset, stream)?;
+        let words = self.dialogue_words(&asset)?;
+        let profile = SoundProfileCache::new(data_dir)?.load(&key)?;
+        match (words, profile) {
+            (Some(words), Some(SoundMeasurement::Measured { profile })) => {
+                Ok(DialogueCacheRead::Ready {
+                    recogniser_key: words.recogniser_key,
+                    words: words.words,
+                    profile,
+                })
+            }
+            (_, Some(SoundMeasurement::NoVoiceInformation { reason })) => {
+                Ok(DialogueCacheRead::Pending(TranscriptStatus::Failed(
+                    format!("no voice information: {reason}"),
+                )))
+            }
+            (words, _) => Ok(DialogueCacheRead::Pending(self.request_owned_dialogue(
+                asset,
+                source,
+                words.is_some(),
+            ))),
+        }
+    }
+    fn request_owned_dialogue(
+        &self,
+        asset: MediaAsset,
+        source: crate::owned_io::CertifiedSource,
+        profile_only: bool,
+    ) -> TranscriptStatus {
+        let requests = if profile_only {
+            &self.profiles
+        } else {
+            &self.requests
+        };
+        let recipe = Recipe {
+            identity: Identity::english(),
+            language: None,
+        };
+        let admitted = if profile_only {
+            requests.invalidate_finished(&asset.path);
+            requests
+                .admit(&asset.path, &recipe)
+                .map(|cancel| (recipe, cancel))
+        } else {
+            requests.admit_cached_miss(&asset.path)
+        };
+        let path = asset.path.clone();
+        if let Some((recipe, cancellation)) = admitted {
+            self.enqueue(
+                TranscriptJob {
+                    source: Some(source),
+                    profile_only,
+                    asset,
+                    model: &ENGLISH_MODEL,
+                    recipe,
+                    cancellation,
+                },
+                None,
+            );
+        }
+        match requests.status(&path) {
+            TranscriptStatus::Ready(_) | TranscriptStatus::NoSpeech => {
+                TranscriptStatus::Transcribing {
+                    progress_percent: 100,
+                }
+            }
+            status => status,
+        }
+    }
     pub(crate) fn new(data_dir: PathBuf) -> Result<Self, MediaError> {
         let data_dir = crate::data_dir::ensure_root(data_dir)?;
         let (jobs, jobs_rx) = unbounded();
@@ -84,8 +208,17 @@ impl TranscriptService {
             "kinewright-transcript",
             "transcript",
             (jobs, jobs_rx),
-            move |job: crate::locator::LocatorJob<TranscriptJob>| {
-                worker.dispatch(job, TranscriptWorker::transcribe_asset)
+            move |job| match job {
+                TranscriptWork::Locator(job) => {
+                    worker.dispatch(job, TranscriptWorker::transcribe_asset)
+                }
+                TranscriptWork::Owned(job) => worker.handle(&job, |worker, job| {
+                    job.source
+                        .as_ref()
+                        .ok_or(MediaError::MediaAdmissionRequired)?
+                        .check_read_authority()?;
+                    worker.transcribe_asset(job)
+                }),
             },
         )?;
         Ok(Self {
@@ -134,16 +267,17 @@ impl TranscriptService {
         };
         self.enqueue(
             TranscriptJob {
+                source: None,
                 profile_only: false,
                 asset,
                 model,
                 recipe,
                 cancellation,
             },
-            grant,
+            Some(grant),
         );
     }
-    fn enqueue(&self, job: TranscriptJob, grant: kinewright_core::LegacyMediaGrant) {
+    fn enqueue(&self, job: TranscriptJob, grant: Option<kinewright_core::LegacyMediaGrant>) {
         let requests = if job.profile_only {
             &self.profiles
         } else {
@@ -153,7 +287,10 @@ impl TranscriptService {
         let cancellation = job.cancellation.clone();
         if self
             .jobs
-            .send(crate::locator::LocatorJob::new(grant, job))
+            .send(match grant {
+                Some(grant) => TranscriptWork::Locator(crate::locator::LocatorJob::new(grant, job)),
+                None => TranscriptWork::Owned(job),
+            })
             .is_err()
         {
             requests.update(
@@ -175,13 +312,14 @@ impl TranscriptService {
             match recognizer::model_for_language(recipe.language.as_deref()) {
                 Ok(model) => self.enqueue(
                     TranscriptJob {
+                        source: None,
                         profile_only: false,
                         asset,
                         model,
                         recipe,
                         cancellation,
                     },
-                    grant,
+                    Some(grant),
                 ),
                 Err(error) => {
                     self.requests.update(
@@ -316,13 +454,14 @@ impl TranscriptService {
                 let path = asset.path.clone();
                 self.enqueue(
                     TranscriptJob {
+                        source: None,
                         profile_only: true,
                         asset,
                         model: &ENGLISH_MODEL,
                         recipe,
                         cancellation,
                     },
-                    grant,
+                    Some(grant),
                 );
                 return match self.profiles.status(&path) {
                     TranscriptStatus::NoSpeech => TranscriptStatus::Transcribing {
@@ -419,9 +558,9 @@ impl TranscriptWorker {
         let identity = &job.recipe.identity;
         cancelled(cancellation)?;
         self.update(job, TranscriptStatus::Hashing);
-        let content_sha256 = sha256_file(&asset.path)?;
+        let content_sha256 = job.content_sha256()?;
         cancelled(cancellation)?;
-        let profile_target = self.profile_target(asset, &content_sha256)?;
+        let profile_target = self.profile_target(asset, &content_sha256, job.source.as_ref())?;
         if job.profile_only {
             self.fill_profile(job, profile_target)?;
             self.update(job, TranscriptStatus::NoSpeech);
@@ -440,7 +579,7 @@ impl TranscriptWorker {
             return Ok(());
         }
         #[cfg(any(test, feature = "test-util"))]
-        self.hold_before_inference(asset, cancellation)?;
+        self.hold_before_inference(asset, cancellation, job.source.as_ref())?;
         let model = job.model;
         let model_root = recognizer::provision(
             model,
@@ -480,6 +619,8 @@ impl TranscriptWorker {
             cancellation.clone(),
             identity.clone(),
             profile_target,
+            // Model work retains the certified descriptor until decoding finishes.
+            job.source.clone(),
             move |processed| {
                 let progress_percent =
                     u8::try_from(processed.saturating_mul(100) / source_us.max(1))
@@ -518,7 +659,11 @@ impl TranscriptWorker {
                     progress_percent: 0,
                 },
             );
-            let measured = crate::sound_profile::measure_file(&job.asset.path, &job.cancellation)?;
+            let measured = crate::sound_profile::measure_file(
+                &job.asset.path,
+                &job.cancellation,
+                job.source.as_ref(),
+            )?;
             target.save(measured, &job.cancellation)?;
         }
         Ok(())
@@ -527,6 +672,7 @@ impl TranscriptWorker {
         &self,
         asset: &MediaAsset,
         content: &str,
+        source: Option<&crate::owned_io::CertifiedSource>,
     ) -> Result<Option<crate::sound_profile::ProfileTarget>, MediaError> {
         use crate::sound_profile::{ProfileIdentity, ProfileTarget, SoundProfileCache};
         if !asset.source_fingerprint.is_verified() {
@@ -534,18 +680,24 @@ impl TranscriptWorker {
         }
         if asset.source_fingerprint.content_sha256.as_deref() != Some(content)
             || asset.source_fingerprint.byte_len
-                != Some(
+                != Some(if let Some(source) = source {
+                    source.identity().source_length
+                } else {
                     std::fs::metadata(&asset.path)
                         .map_err(|e| MediaError::Backend(e.to_string()))?
-                        .len(),
-                )
+                        .len()
+                })
         {
             return Err(MediaError::Backend(
                 "source content no longer matches its identity; re-import it before measurement"
                     .into(),
             ));
         }
-        let stream = crate::sound_profile::audio_stream(&asset.path)?;
+        let stream = if let Some(source) = source {
+            source.audio_stream()?
+        } else {
+            crate::sound_profile::audio_stream(&asset.path)?
+        };
         let Some(identity) = ProfileIdentity::new(&asset.source_fingerprint, stream) else {
             return Ok(None);
         };
@@ -561,13 +713,20 @@ impl TranscriptWorker {
         &self,
         asset: &MediaAsset,
         cancellation: &ExportCancellation,
+        source: Option<&crate::owned_io::CertifiedSource>,
     ) -> Result<(), MediaError> {
         let gate = self.inference_gate.lock().expect("inference gate").take();
         if let Some((arrived, released)) = gate {
             let end =
                 crate::clock::frame_to_samples(asset.duration, recognizer::SAMPLE_RATE, asset.fps);
-            let mut decoder =
-                crate::audio::AudioDecoder::open(&asset.path, recognizer::SAMPLE_RATE, 1, 0, end)?;
+            let mut decoder = crate::audio::AudioDecoder::open_with_source(
+                &asset.path,
+                recognizer::SAMPLE_RATE,
+                1,
+                0,
+                end,
+                source,
+            )?;
             assert!(
                 decoder.next_chunk()?.is_some(),
                 "held transcript decoded real audio"
@@ -1032,6 +1191,7 @@ mod tests {
             language: None,
         };
         TranscriptJob {
+            source: None,
             profile_only: false,
             asset: MediaAsset {
                 id: AssetId(id),
@@ -1622,6 +1782,7 @@ mod measurement_tests {
         };
         let cancellation = requests.admit(&asset.path, &recipe).unwrap();
         let job = TranscriptJob {
+            source: None,
             profile_only: false,
             asset,
             model: &ENGLISH_MODEL,
@@ -1675,7 +1836,7 @@ mod measurement_tests {
         );
         assert!(
             worker
-                .profile_target(&job.asset, &sha256_file(audio.path()).unwrap())
+                .profile_target(&job.asset, &sha256_file(audio.path()).unwrap(), None)
                 .unwrap()
                 .is_none(),
             "a model change cannot request level remeasurement"

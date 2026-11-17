@@ -69,6 +69,119 @@ fn thumbnail_engine(root: &TempDirectory) -> ThumbnailEngine {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep descriptor ownership, held inference, and the cache witness in one regression"
+)]
+fn dq_native_owned_dialogue_measures_without_a_locator_and_reuses_the_profile() {
+    use crate::{
+        dialogue_cache::DialogueCacheRead,
+        sound_profile::{ProfileIdentity, SoundMeasurement, SoundProfileCache},
+    };
+    use kinewright_core::{AssetTranscript, TranscriptWord};
+    let root = TempDirectory::new("dq-native-owned-dialogue");
+    let path = root.path("recording.wav");
+    let pcm = [vec![0.0; 16_000], vec![0.25; 16_000], vec![0.0; 16_000]].concat();
+    fs::write(&path, crate::test_support::wav_f32(&pcm, 16_000, 1)).unwrap();
+    let source = source(&path).with_selected_streams(None, Some(0)).unwrap();
+    let asset = source
+        .probe_asset(
+            kinewright_core::AssetId(1),
+            &root.path("missing.wav"),
+            running(),
+        )
+        .unwrap();
+    let document = Arc::new(crate::test_support::single_clip_document(asset));
+    let asset = &document.media_pool[0];
+    let inputs = Arc::new(
+        PlaybackInputs::admit(
+            Arc::clone(&document),
+            [(asset.id, source)].into(),
+            Arc::new(crate::LutLibrary::default()),
+            Arc::new(()),
+        )
+        .unwrap(),
+    );
+    let engine = thumbnail_engine(&root);
+    let media = engine.certified_media(inputs);
+    fs::remove_file(&path).unwrap();
+    assert_eq!(
+        media.dialogue_audio_stream(asset).unwrap(),
+        0,
+        "DQ_NATIVE_DESCRIPTOR_STREAM"
+    );
+    assert!(matches!(
+        media.dialogue_cache(asset, 7),
+        Err(kinewright_core::MediaError::OwnedMediaOperationUnavailable)
+    ));
+    let hold = engine.test_hold_transcript_inference();
+    assert!(matches!(
+        media.dialogue_cache(asset, 0).unwrap(),
+        DialogueCacheRead::Pending(
+            kinewright_core::TranscriptStatus::Queued | kinewright_core::TranscriptStatus::Hashing
+        )
+    ));
+    hold.wait();
+    media
+        .register_transcript(
+            asset,
+            AssetTranscript {
+                asset: asset.id,
+                content_sha256: asset
+                    .source_fingerprint
+                    .content_sha256
+                    .as_ref()
+                    .unwrap()
+                    .into(),
+                source_fps: asset.fps,
+                words: vec![TranscriptWord {
+                    text: "owned".into(),
+                    source_start: kinewright_core::TimeCode(0),
+                    source_end: kinewright_core::TimeCode(1),
+                    speaker: None,
+                }],
+            },
+        )
+        .unwrap();
+    drop(hold);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let measured = loop {
+        match media.dialogue_cache(asset, 0).unwrap() {
+            DialogueCacheRead::Ready { profile, words, .. } => {
+                assert_eq!(words[0].text, "owned");
+                break profile;
+            }
+            DialogueCacheRead::Pending(status) => assert!(
+                matches!(
+                    status,
+                    kinewright_core::TranscriptStatus::Queued
+                        | kinewright_core::TranscriptStatus::Hashing
+                        | kinewright_core::TranscriptStatus::Transcribing { .. }
+                ),
+                "unexpected refusal: {status:?}"
+            ),
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "owned measurement deadline"
+        );
+        thread::yield_now();
+    };
+    assert_eq!(measured.hop(150).unwrap().rms_dbfs_hundredths, -1204);
+    assert!(measured.hop(50).unwrap().rms_dbfs_hundredths < -8000);
+    let cache = SoundProfileCache::new(engine.data_dir()).unwrap();
+    let key = ProfileIdentity::new(&asset.source_fingerprint, 0).unwrap();
+    assert_eq!(
+        cache.load(&key).unwrap(),
+        Some(SoundMeasurement::Measured { profile: measured })
+    );
+    assert!(
+        !engine.data_dir().join("models").exists(),
+        "DQ_NATIVE_NO_MODEL_DOWNLOAD"
+    );
+}
+
+#[test]
 fn s3_certified_live_audio_retains_the_program_namespace_without_recue() {
     use kinewright_core::{LiveAudioChange, Playback};
     let (root, path, source) = media_fixture("red");

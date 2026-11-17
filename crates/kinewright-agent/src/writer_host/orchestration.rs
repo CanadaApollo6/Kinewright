@@ -1944,7 +1944,24 @@ impl HostCommandOwner {
                 .clone()
         };
         let media = std::sync::Arc::new(super::LazyHostMedia::new(self.config.data_dir.clone()));
-        crate::McpServer::start_task_isolated(
+        let state = self
+            .owner()?
+            .orchestration_projection(run)?
+            .ok_or_else(|| refused("run missing"))?;
+        let brief = &state
+            .tasks
+            .iter()
+            .find(|record| record.id == endpoint.authority().task)
+            .ok_or_else(|| refused("task missing"))?
+            .brief;
+        let manifest = self.owner()?.store()?.read_input_manifest(&brief.inputs)?;
+        let dialogue = super::dialogue_measurements::TaskDialogueMeasurements::new(
+            core.clone(),
+            Arc::clone(&media),
+            Arc::clone(&self.hooks.runs[run].inputs.inputs),
+            &manifest,
+        )?;
+        let server = crate::McpServer::start_task_isolated(
             core,
             media.clone(),
             media,
@@ -1971,7 +1988,11 @@ impl HostCommandOwner {
                 #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
                 self.qualification_stop.clone(),
             )),
-        )
+        )?;
+        server
+            .install_dialogue_measurements(Arc::new(dialogue))
+            .map_err(HostError::Protocol)?;
+        Ok(server)
     }
 }
 

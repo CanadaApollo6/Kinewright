@@ -42,6 +42,13 @@ pub(super) fn tools() -> Vec<Tool> {
     Tool::new("check_dialogue_cut","Read the current unit-speed dialogue track. Independent flags: edge in sound, short air, room-tone jump, dip intrusion; repeats, long pauses and sounding holes are warnings. Holes are measured voice without a word start in the preceding second; sounding holes exceed the recording-relative RMS threshold for at least 100 ms. Word ends do not decide either count. Default flags only; detail all includes information. Not-checked clips are explicit. Other audible clips are counted, never mixed or judged. Hole level is [RMS,peak] centidB over its source location; group indexes hole_groups. Playback range narrows evidence without creating clip edges. No score match counts are presented without their error quantiles.",schema_object::<CheckArgs>()).with_annotations(read_only_annotations()),
 ]
 }
+pub(super) fn transcript_tool() -> Tool {
+    Tool::new(
+        "get_timeline_transcript",
+        "Read addressed words from the bound measurement on audible source time. Optional word_range {clip,first,end} uses half-open recording indices; range {start,end} uses project frames. Choose one, or omit both for the full transcript. Times are recogniser estimates; acoustic cut checks use measured sound.",
+        schema_object::<TranscriptArgs>(),
+    ).with_annotations(read_only_annotations())
+}
 fn reply(value: serde_json::Value, failed: bool) -> CallToolResult {
     let mut result = success_structured(
         if failed {

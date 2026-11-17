@@ -280,6 +280,35 @@ struct SelectedStreams {
 }
 
 impl CertifiedSource {
+    pub(crate) fn audio_stream(&self) -> Result<u32, kinewright_core::MediaError> {
+        let input = DecodeInput::open(self, Arc::new(AtomicBool::new(false)))?;
+        u32::try_from(self.audio_stream_index(&input)?)
+            .map_err(|e| kinewright_core::MediaError::Backend(e.to_string()))
+    }
+    pub(crate) fn audio_stream_index(
+        &self,
+        input: &DecodeInput,
+    ) -> Result<usize, kinewright_core::MediaError> {
+        let index = match self.1 {
+            Some(SelectedStreams {
+                audio: Some(index), ..
+            }) => index,
+            Some(SelectedStreams { audio: None, .. }) => {
+                return Err(kinewright_core::MediaError::OwnedMediaOperationUnavailable);
+            }
+            None => {
+                crate::audio::selected_audio_stream(input, std::path::Path::new("owned audio"))?
+            }
+        };
+        self.check_selected(index, false).map_err(media_io_error)?;
+        if input
+            .stream(index)
+            .is_none_or(|stream| stream.parameters().medium() != ffmpeg::media::Type::Audio)
+        {
+            return Err(kinewright_core::MediaError::OwnedMediaOperationUnavailable);
+        }
+        Ok(index)
+    }
     pub fn with_read_authority(mut self, authority: ReadAuthority) -> Result<Self, OwnedIoError> {
         authority.check().map_err(authority_error)?;
         Arc::get_mut(&mut self.0)

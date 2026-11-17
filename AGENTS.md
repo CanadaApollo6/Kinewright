@@ -10,7 +10,7 @@ buildable here after provisioning FFmpeg and the native desktop libraries:
 
 - `kinewright-core` — pure logic (document model, `Operation` set, the `Core` actor,
   undo/redo, `.kinewright` JSON serde). No extra system deps.
-- `kinewright-media`, `kinewright-agent`, `kinewright-app` — FFmpeg 8.x shared libs
+- `kinewright-media`, `kinewright-agent`, `kinewright-app` — FFmpeg 9.x shared libs
   (not Ubuntu's FFmpeg 6.1), Vulkan (`wgpu`, including Mesa lavapipe), ALSA
   (`cpal`), NeMo-Speech.cpp (separately provisioned shared CPU libraries), GTK 3 (`rfd`), and X11/Wayland
   (`eframe`/`winit`). `scripts/install-linux-deps.sh` plus

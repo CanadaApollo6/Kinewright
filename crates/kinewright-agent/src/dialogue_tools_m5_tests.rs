@@ -126,7 +126,7 @@ fn dq_m5_catalog_and_dispatch_expose_measurements_without_pacing() {
 }
 
 #[test]
-fn dq_m5_native_manifests_omit_unwired_dialogue_while_app_catalog_serves_it() {
+fn dq_m5_native_manifests_expose_scoped_dialogue_while_app_catalog_serves_it() {
     use crate::orchestration::orchestration_records::Role;
     let dialogue = [
         "get_timeline_transcript",
@@ -143,15 +143,20 @@ fn dq_m5_native_manifests_omit_unwired_dialogue_while_app_catalog_serves_it() {
     ] {
         let tools = task_role_tools(role).unwrap();
         for name in dialogue {
-            assert!(
-                !crate::writer_host::task_mcp::manifest::names(role).contains(&name),
+            let expected = name != "cut_dialogue" || !matches!(role, Role::Director | Role::Reviewer);
+            assert_eq!(
+                crate::writer_host::task_mcp::manifest::names(role).contains(&name), expected,
                 "M5_NATIVE_MANIFEST {role:?} {name}"
             );
-            assert!(
-                !tools.iter().any(|tool| tool.name == name),
+            assert_eq!(
+                tools.iter().any(|tool| tool.name == name), expected,
                 "M5_NATIVE_SCHEMA {role:?} {name}"
             );
         }
+    }
+    for name in dialogue {
+        assert!(crate::orchestration::task_tool_names::TASK_TOOL_NAMES.contains(&name), "NATIVE_PROVIDER_ALLOWLIST {name}");
+        assert_eq!(crate::writer_host::task_mcp::product_tool_name(name, None), name, "NATIVE_DIALOGUE_ACCOUNTING {name}");
     }
     let (mut app, _) = fixture();
     *app.dialogue_measurements.write().unwrap() = None;

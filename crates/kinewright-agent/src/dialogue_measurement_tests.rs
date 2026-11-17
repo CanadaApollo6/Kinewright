@@ -18,6 +18,20 @@ mod dialogue_measurement_tests {
         assets: Vec<MediaAsset>,
         root: TempDirectory,
     }
+    #[test]
+    fn dq_native_host_without_admitted_audio_returns_not_measured() {
+        let (core, playback, analysis) = super::fixture();
+        let server = McpServer::start_host_isolated(
+            core, playback, analysis, "no admitted audio",
+            crate::writer_host::SessionRoots { read: vec![], write: vec![] },
+            kinewright_project::manual_history::OrdinaryHistoryLimits::default(),
+        ).unwrap();
+        let slot = server.dialogue_measurements.read().unwrap();
+        let provider = slot.as_ref().expect("native host installs measurements");
+        let identity = MediaIdentity { sha256: "a".repeat(64), byte_length: 1 };
+        assert_eq!(provider.audio_stream(&identity), Err(Refusal::NotMeasured));
+        assert!(matches!(provider.get(&identity, 0), Err(Refusal::NotMeasured)));
+    }
     #[allow(
         clippy::cast_precision_loss,
         reason = "fixture sample indices are below 2^24"

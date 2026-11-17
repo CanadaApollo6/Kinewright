@@ -565,6 +565,16 @@ enum HostHistoryPolicy {
     ),
 }
 impl McpServer {
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn test_dialogue_measurements(
+        &self,
+    ) -> Option<Arc<dyn crate::dialogue_tools::DialogueMeasurements>> {
+        self.dialogue_measurements
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(Arc::clone)
+    }
     /// Authenticated isolated endpoint for one host-owned session. File/media operations
     /// without pinned capabilities are refused before dispatch, including asset dependencies.
     pub(crate) fn start_host_isolated(
@@ -638,6 +648,9 @@ impl McpServer {
             Arc::clone(&incidents),
         );
         handler.host_scoped = true;
+        *handler.dialogue_measurements.write().map_err(|_| {
+            crate::writer_host::HostError::Protocol("dialogue measurements unavailable".into())
+        })? = Some(Arc::new(crate::dialogue_measurements::UnmeasuredDialogue));
         match history_policy {
             HostHistoryPolicy::Ordinary(limits) => {
                 handler.ordinary_history_limits = Arc::new(
@@ -14833,12 +14846,7 @@ fn inspector_tools() -> Vec<Tool> {
             schema_object::<TranscriptsArgs>(),
         )
         .with_annotations(read_only()),
-        Tool::new(
-            "get_timeline_transcript",
-            "Read addressed words from the bound measurement on audible source time. Optional word_range {clip,first,end} uses half-open recording indices; range {start,end} uses project frames. Choose one, or omit both for the full transcript. Times are recogniser estimates; acoustic cut checks use measured sound.",
-            schema_object::<dialogue_dispatch::TranscriptArgs>(),
-        )
-        .with_annotations(read_only()),
+        dialogue_dispatch::transcript_tool(),
         Tool::new(
             "import_media",
             "Probe a media path, then add the resulting asset metadata through Operation::AddAsset when expected_revision still matches.",
@@ -36747,12 +36755,14 @@ pub(crate) fn task_role_tools(
 }
 
 fn task_role_tools_uncached(names: &[&'static str]) -> Result<Vec<Tool>, String> {
-    let controls = task_control_tools();
+    let mut controls = task_control_tools();
+    controls.extend(dialogue_dispatch::tools());
     names
         .iter()
         .map(|name| {
             match *name {
                 "get_timeline_state" => Some(compact_get_timeline_state_tool()),
+                "get_timeline_transcript" => Some(dialogue_dispatch::transcript_tool()),
                 "prepare_edit_plan" => Some(task_prepare_edit_plan_tool()),
                 "commit_edit_plan" => Some(compact_commit_edit_plan_tool()),
                 "discard_edit_plan" => Some(compact_discard_edit_plan_tool()),

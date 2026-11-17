@@ -5,6 +5,7 @@ const HOST_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 #[cfg(target_os = "linux")]
 const HOST_STARTUP_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(55);
 mod attention;
+mod dialogue_measurements;
 #[cfg(test)]
 mod hooks_tests;
 mod issuer;
