@@ -80,9 +80,24 @@ pub struct ProbeResult {
     pub color: Color,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum ScopeUnavailableReason {
+    NoUserManager,
+    ControllersUnavailable,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum Message {
+    ScopeCreateFailed {
+        scope: u32,
+        error: MediaSandboxError,
+    },
+    ScopeUnavailable {
+        scope: Option<u32>,
+        reason: ScopeUnavailableReason,
+    },
     Forked {
         pid: u32,
     },
@@ -129,6 +144,8 @@ pub enum Message {
 impl Message {
     fn tag(&self) -> u32 {
         match self {
+            Self::ScopeCreateFailed { .. } => 18,
+            Self::ScopeUnavailable { .. } => 19,
             Self::Forked { .. } => 14,
             Self::EnterBoundary {} => 15,
             Self::Boundary { .. } => 16,
@@ -176,7 +193,7 @@ pub(crate) fn read_charged(
     }
     let tag = u32::from_le_bytes(header[20..24].try_into().map_err(|_| invalid())?);
     let length = u32::from_le_bytes(header[24..28].try_into().map_err(|_| invalid())?) as usize;
-    if length > MAX_FRAME - HEADER_BYTES || !(1..=17).contains(&tag) {
+    if length > MAX_FRAME - HEADER_BYTES || !(1..=19).contains(&tag) {
         charge(HEADER_BYTES)?;
         return Err(invalid());
     }

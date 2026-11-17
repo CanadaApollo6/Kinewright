@@ -1,5 +1,10 @@
 # Slice 1a app dependency conflict
 
+Resolved by lead ruling 34. Preserve app accessibility; restrict MS2's systemd
+client to the supervisor and enforce the direct-dependency/source gate in CI.
+The following records the original stop. The parked patch has been reapplied;
+commit `ac1c60ce` retains that historical draft. Live supervisor code supersedes it.
+
 Stopped after helper commit `2d926a59`, while qualifying the supervisor.
 The helper patch is committed with rulings 32 and 33. Linux admission is still
 in process; slice 1a is incomplete.

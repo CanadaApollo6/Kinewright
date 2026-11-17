@@ -25,6 +25,7 @@ impl Directory {
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
+        fs::create_dir_all(root.parent().unwrap()).unwrap();
         fs::create_dir(&root).unwrap();
         Self(root)
     }

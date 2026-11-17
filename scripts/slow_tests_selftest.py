@@ -607,6 +607,19 @@ class RunCargoTests(unittest.TestCase):
 
 
 class NativeGuardianAccounting(unittest.TestCase):
+    def test_ms2_availability_is_counted_and_malformed_or_unknown_markers_fail(self):
+        with mock.patch.object(st.sys, "platform", "linux"):
+            log = build_log(slow_rows())
+            names = [p for b, p, _, scope in st.read_manifest() if b == "scope_native" and scope == "linux-only"]
+            self.assertEqual(len(names), 3)
+            marker = f"\nMS2_NATIVE_NOT_RUN binary=scope_native test={names[0]} reason=no_user_manager\n"
+            code, out = check(st.verify_slow, log + marker)
+            self.assertEqual(code, 0, out)
+            self.assertIn("1 equipped-session NOT RUN", out)
+            for bad in [marker * 2, marker.replace("reason=", "invalid="), marker.replace(names[0], "unknown")]:
+                code, out = check(st.verify_slow, log + bad)
+                self.assertEqual(code, 1, out)
+
     def test_platform_only_fixtures_match_compiled_fast_skips(self):
         windows_test = "s4_c2_windows_claim_ignores_localappdata"
         linux_test = "s4_c2_blocked_guardian_exits_and_manager_kills"

@@ -1,6 +1,6 @@
 # MS2 slice 1a
-Status: STOPPED for the app/zbus design conflict; Linux IX admission remains in process.
-Commits: `4a55b8d4` plan; `79d93705` bounded IPC; `90741cf4` prior blocker; `2d926a59` qualified helper.
+Status: IN PROGRESS; ruling 34 applied, supervisor qualified; Linux IX admission remains in process until rewiring.
+Commits: `4a55b8d4` plan; `79d93705` IPC; `90741cf4`/`ac1c60ce` historical stops; `2d926a59` helper; supervisor in this commit.
 FFmpeg: base setup unchanged; libavcodec 62.11.100 SHA256 `daf171e4d0648d5483f94a0d1fb97fd42c1b99c5f8ce990865235f6e0b8831fa`; MS1 is independent and untouched.
 App/helper share the extracted owned_io opener, so later MS1 policy reaches both there.
 Ruling 32: exact madvise 0/4/8/102/103; native guard install/remove succeeds; other advice/high-bit aliases die with SIGSYS and controls survive.
@@ -11,14 +11,14 @@ Audited direct-close ownership preserves fcntl denial; the watchdog initializes 
 IPC strict framing, typed bootstrap/state, pre-allocation charging and decoded-text limits pass, 7 tests; libFuzzer NOT RUN.
 Landlock denies canary reads with EACCES, control reads succeed and the canary is unchanged; x32/foreign-arch/degraded pthread attempts die with SIGSYS.
 Helper gates: 1,289 tests pass, 32 existing opt-ins ignored; touched all-target clippy -D warnings, fmt, slow lint and 44 lint self-tests pass; details in `ms2-s1a-evidence/helper-gates.json`.
-Supervisor draft: all-target check and 4 tests pass, covering missing manager, verified limits/join/separation, bounded records and self/stale requests; full commit gates pending.
+Supervisor: 29 touched-crate slow-feature tests and all-target clippy pass; scope join/limits/separation, bounded records, socket-EOF cleanup, stale/non-lifecycle refusal and no-manager/private-bus cases pass.
 Every test scope was stopped; `systemctl --user list-units 'kinewright-*' --all --no-pager` reports zero units.
-Blocker: base eframe defaults already link zbus through AccessKit; ruling 28/design require no app zbus. Removing accessibility needs a lead decision.
-Evidence: `.review/arch/ms2-s1a-app-zbus-blocker.md` and `ms2-s1a-evidence/app-zbus-base.json`; no Cargo graph-build gate claimed.
-Supervisor patch parked and reapplication checked: `.review/arch/ms2-s1a-supervisor-wip.patch`; its pinned zbus also updates the app's existing transitive version.
+Ruling 34 CI gate: 7 self-tests plus a real-app direct-zbus mutation fail/restore/pass; no app feature edits; one locked zbus 5.19.0, accessibility only in the app.
+Evidence: `ms2-s1a-evidence/supervisor-gates.json`, full normal/build trees and the 99-package license/checksum catalog; helper has no zbus, supervisor has no FFmpeg.
+Slow manifest/lint agrees on 123 tests; all 45 lint self-tests pass; unavailable primary user-manager witnesses are counted NOT RUN, never qualified silently.
 Probe PSS/private/shared RSS/VmPeak/cgroup measurements: NOT RUN; probe MemoryMax/RLIMIT_AS remain unfrozen.
-Deviations awaiting lead: existing app accessibility zbus exemption; no app feature change made. Supervisor draft uses systemd PIDFDs to prevent delayed PID reuse.
-Remaining: supervisor gates, spawner/kill chain, complete degraded supervision, measurements, admission rewiring, full-stack escape/kill witnesses, fuzz and Ubuntu packaging/CI.
-Windows helper/IPC/job-sys cross-check passed; shared FFmpeg/media Windows check, final app build and native Ubuntu qualification: NOT RUN.
+Accepted deviations: systemd PIDFDs prevent delayed PID reuse; ruling 34 preserves existing app accessibility. No new helper syscall allowance in this step.
+Remaining: spawner/kill chain, complete degraded supervision, measurements, admission rewiring, full-stack escape/kill witnesses, fuzz and Ubuntu packaging/CI.
+Windows supervisor/helper/IPC/job-sys MSVC cross-check passed; shared FFmpeg/media Windows check, final app build and native Ubuntu qualification: NOT RUN.
 Target remains below 40 GB. No desktop policy changes, hardware GPU use or push.
 1b: LPAC spike, SID/install ACLs, storage denial/quota, Job/CPU/mitigation and handle/IPC canaries, then Windows probe/admission integration; Windows stays in process.

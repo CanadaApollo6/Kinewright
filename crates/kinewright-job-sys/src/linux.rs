@@ -60,6 +60,12 @@ pub struct ProcessHandle {
     start: u64,
 }
 
+impl std::os::fd::AsFd for ProcessHandle {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+
 impl ProcessHandle {
     /// # Errors
     /// Refuses a missing/replaced process or unavailable pidfd support.

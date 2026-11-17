@@ -77,6 +77,12 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
+      - name: Check the MS2 client boundary and red witnesses
+        shell: bash
+        run: |
+          python scripts/ms2_client_boundary.py
+          python scripts/ms2_client_boundary_selftest.py
+
       - name: Prepare sealed JA S1 predecessor controls
         shell: bash
         run: bash scripts/ja-s1-predecessor-controls.sh
@@ -262,6 +268,11 @@ jobs:
         run: |
           python3 scripts/slow_tests.py lint
           python3 scripts/slow_tests_selftest.py
+
+      - name: Check the MS2 client boundary and red witnesses
+        run: |
+          python3 scripts/ms2_client_boundary.py
+          python3 scripts/ms2_client_boundary_selftest.py
 
       - name: Prepare sealed JA S1 predecessor controls
         shell: bash

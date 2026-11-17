@@ -368,7 +368,12 @@ above for typed lifecycle commands `CreateScope`, `VerifyScope`, and `StopScope`
 and their typed results, with at most two live scope records and two outstanding
 replies. A create request names only a PID the app spawned.
 The supervisor independently resolves PID plus starttime, checks the app's child
-relationship, and retains that identity. It generates the unit name itself;
+relationship, and retains that identity. It passes its locally pinned pidfd to
+systemd's `PIDFDs` property, rather than sending a numeric PID that could be
+reused while the bus request is delayed. This does not add fd passing to the
+app/supervisor contract. There is no numeric-PID fallback.
+[systemd v255 scope PIDFDs implementation](https://github.com/systemd/systemd/blob/v255/src/core/dbus-scope.c#L145).
+ It generates the unit name itself;
 later commands use its bounded scope ID, never helper-supplied PIDs or unit
 names. No generic D-Bus forwarding exists. Its curated exec environment contains
 only `DBUS_SESSION_BUS_ADDRESS`, with no loader variables or FFmpeg settings.
@@ -721,7 +726,8 @@ Keep narrow OS operations in job-sys. No Python/Node runtime ships with MS2.
 | --- | --- |
 | [`landlock`](https://docs.rs/landlock/latest/landlock/) | Add a pinned direct Linux dependency. Require enforcement of selected known rights when available; log absent ABI/policy as defence in depth unavailable. Namespace/seccomp remain load-bearing. |
 | [`seccompiler`](https://docs.rs/seccompiler/latest/seccompiler/) | Add a pinned Linux dependency, with JSON policy loading disabled. Typed argument rules compile the reviewed policy to BPF; the policy remains our responsibility. |
-| [`zbus` 5.19.0](https://docs.rs/zbus/5.19.0/zbus/blocking/) | Use the blocking API in the separate Linux supervisor binary only, with `default-features = false` and `async-io`, `blocking-api` enabled. It supplies D-Bus authentication, framing, signatures, and typed systemd calls. Its async runtime dependencies remain in that binary. A hand-rolled D-Bus client adds protocol/security risk without a confinement benefit and is rejected. |
+| [`zbus` 5.19.0](https://docs.rs/zbus/5.19.0/zbus/blocking/) | Use the blocking API for MS2 only in the separate Linux supervisor binary, with `default-features = false` and `async-io`, `blocking-api` enabled. It supplies D-Bus authentication, framing, signatures, and typed systemd calls. Keep MS2's lifecycle code and runtime use in that binary. A hand-rolled D-Bus client adds protocol/security risk without a confinement benefit and is rejected. |
+| App's transitive `zbus` through eframe/AccessKit/AT-SPI | accessibility only, pre-existing, not an MS2 client. Keep app features unchanged. Ruling 34 permits the supervisor's pin to update this transitive dependency; Cargo.lock has one zbus version. |
 | [`extrasafe`](https://docs.rs/extrasafe/latest/extrasafe/) | Decline. It combines syscall, Landlock, and isolation helpers, but a second policy abstraction obscures our exact descriptor/argument rules. |
 | [`birdcage`](https://docs.rs/birdcage/latest/birdcage/) | Decline. Its Linux/macOS process sandbox does not supply Windows confinement and duplicates launch ownership. |
 | [`nix`](https://docs.rs/crate/nix/latest) | Decline as a new dependency. Existing job-sys uses rustix for these Unix operations. |
@@ -729,8 +735,11 @@ Keep narrow OS operations in job-sys. No Python/Node runtime ships with MS2.
 
 The selected zbus dependency tree has the following branches. Every direct
 Linux dependency is listed; repeated dependencies and lower-level runtime and
-proc-macro leaves are collapsed. This is a manifest inventory, not a claim that
-a workspace feature-resolution or build gate has run.
+proc-macro leaves are collapsed. Slice 1a records the complete qualified Linux
+normal/build tree and the license/checksum inventory in
+`docs/reports/ms2-s1a-evidence/supervisor-locked-tree.txt` and
+`supervisor-dependencies.json`. The latter records all 99 packages and their
+resolved features; it verifies no FFmpeg in the supervisor and no zbus in the helper.
 
 ```text
 kinewright-media-supervisor (Linux binary crate, no FFmpeg)
@@ -738,9 +747,9 @@ kinewright-media-supervisor (Linux binary crate, no FFmpeg)
     ├── zbus_macros 5.19.0 (build-time proc macro)
     │   ├── proc-macro-crate, proc-macro2, quote, syn
     │   └── zbus_names, zvariant, zvariant_utils
-    ├── zbus_names 4.3.4
+    ├── zbus_names 4.3.5
     │   └── serde, winnow, zvariant
-    ├── zvariant 5.14.0 [enumflags2]
+    ├── zvariant 5.15.1 [enumflags2]
     │   ├── endi, enumflags2, serde, winnow, zcheapstr
     │   └── zvariant_derive, zvariant_utils (shared proc-macro dependencies)
     ├── async-broadcast, async-executor, async-io, async-lock, async-process
@@ -759,7 +768,12 @@ This inventory comes from the
 Tokio, vsock, p2p/bus-implementation, and optional wire-format integrations.
 The blocking API still drives an async backend; budget that runtime in the
 supervisor allowance. In slice 1, record the complete locked normal/build tree
-for these features and verify that neither app nor helper links zbus.
+for these features. The helper has no zbus dependency. Ruling 34 permits the
+app's pre-existing accessibility dependency; MS2's systemd manager client
+exists only in the supervisor. CI runs `scripts/ms2_client_boundary.py` and
+its red witnesses: no other workspace crate may declare a direct zbus
+dependency, app source may not mention `org.freedesktop.systemd1`, and the
+lockfile contains one zbus version. Do not change app accessibility features.
 
 Review dependency licenses, release provenance, feature sets, and the locked
 transitive graph in slice 1. FFmpeg/OS FFI and shared mappings require justified

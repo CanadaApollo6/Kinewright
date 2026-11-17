@@ -1,0 +1,14 @@
+zbus v5.19.0
+├── accesskit_unix v0.21.1
+│   └── accesskit_winit v0.32.2
+│       └── egui-winit v0.35.0
+│           └── eframe v0.35.0
+│               └── kinewright-app v0.1.0 ($WORKSPACE/crates/kinewright-app)
+├── atspi-common v0.13.0
+│   ├── accesskit_atspi_common v0.18.1
+│   │   └── accesskit_unix v0.21.1 (*)
+│   ├── atspi v0.29.0
+│   │   └── accesskit_unix v0.21.1 (*)
+│   └── atspi-proxies v0.13.0
+│       └── atspi v0.29.0 (*)
+└── atspi-proxies v0.13.0 (*)

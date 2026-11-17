@@ -1,0 +1,9 @@
+{
+  "witness": "temporary direct zbus.workspace dependency inserted into the real app manifest",
+  "red_exit": 1,
+  "red_stderr": "crates/kinewright-app/Cargo.toml: kinewright-app declares direct zbus (zbus)\n",
+  "restored_app_manifest_sha256": "51932617658964215467ccbe699e77d26ecb55f49c750d462a4d6f912e8b514c",
+  "green_exit": 0,
+  "green_stdout": "MS2 client boundary: supervisor-only direct zbus, no app systemd client, one locked zbus\n",
+  "app_manifest_restored_exactly": true
+}

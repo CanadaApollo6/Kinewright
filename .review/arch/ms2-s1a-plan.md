@@ -13,9 +13,10 @@ Use the base FFmpeg unchanged; app/helper share owned_io opening so MS1 inherits
    first frame/still inspection, allocation sub-budget, blocked shim, namespace
    bootstrap, fd inventory, empty root, exact seccomp table, optional Landlock.
    Test each syscall predicate alone, final-filter join/close/cancel, and attacks.
-3. Supervisor binary. Blocking zbus only here, private typed socketpair,
+3. Supervisor binary. MS2's blocking zbus client only here, private typed socketpair,
    PID/starttime/parent checks, bounded scope records, verified transient controls.
    Test scope limits, blocked join, supervisor separation and native emptiness.
+   Ruling 34 CI gate: direct zbus only here, no app systemd client; retain AT-SPI.
 4. Spawner and kill chain. Dedicated non-returning abort-guarded thread,
    parent-death edges plus pidfd race checks, reservations, bounded queue,
    deadlines/cancellation/revocation and supervisor-loss recovery.
