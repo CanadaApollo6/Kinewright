@@ -1,6 +1,6 @@
 {
-  "version": "8.0.3",
-  "sha256": "6136812ea6d4e68bdba27e33c2a94382711cdf4f8602ffef056ff792bd6f9818",
+  "version": "9.0.2",
+  "sha256": "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e",
   "decoders": [
     "h264",
     "hevc",

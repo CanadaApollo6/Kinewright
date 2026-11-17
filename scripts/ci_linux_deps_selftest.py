@@ -63,7 +63,7 @@ raise AssertionError(command)
 
 
 def collection_script():
-    action = (ROOT / ".github/actions/ci-native/action.yml").read_text()
+    action = (ROOT / ".github/actions/ci-apt/action.yml").read_text()
     block = action.split("id: apt-collect", 1)[1].split("run: |\n", 1)[1].split("\n    #", 1)[0]
     return textwrap.dedent(block)
 
@@ -322,7 +322,7 @@ class Workflow(unittest.TestCase):
             self.assertNotEqual(collect(home), partial)
 
     def test_failed_installs_save_partial_content_and_prefer_complete_cache(self):
-        text = (ROOT / ".github/actions/ci-native/action.yml").read_text()
+        text = (ROOT / ".github/actions/ci-apt/action.yml").read_text()
         self.assertEqual(text.count("always() && runner.os == 'Linux'"), 2)
         self.assertIn("steps.apt-collect.outputs.digest", text)
         self.assertIn("'complete' || 'partial'", text)

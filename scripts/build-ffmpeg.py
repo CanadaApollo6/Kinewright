@@ -21,7 +21,8 @@ ROOT = Path(__file__).resolve().parent.parent
 PROFILE = json.loads((ROOT / 'scripts/ffmpeg-profile.json').read_text())
 
 
-def configure(profile):
+def configure(profile, system=None):
+    system = system or platform.system()
     args = ['--disable-everything', '--disable-autodetect', '--disable-network',
             '--disable-doc', '--disable-debug', '--enable-x86asm', '--x86asmexe=nasm', '--disable-iconv', '--enable-gpl',
             '--enable-version3', '--enable-avcodec', '--enable-avformat',
@@ -33,14 +34,14 @@ def configure(profile):
         for kind in ['decoders', 'demuxers', 'parsers', 'encoders', 'muxers', 'bsfs', 'filters']:
             args += [f'--enable-{kind[:-1]}=' + ','.join(PROFILE[kind])]
     elif profile == 'recorder':
-        device_decoders = PROFILE['capture_decoders'] + (['bmp'] if platform.system() == 'Windows' else [])
+        device_decoders = PROFILE['capture_decoders'] + (['bmp'] if system == 'Windows' else [])
         args += ['--disable-shared', '--enable-static', '--enable-ffmpeg', '--disable-ffprobe',
                  '--disable-ffplay', '--enable-avdevice', '--enable-encoder=libx264,aac,pcm_s16le',
                  '--enable-muxer=mp4,ipod,wav',
                  '--enable-bsf=' + ','.join(PROFILE['capture_bsfs']),
                  '--enable-decoder=' + ','.join(device_decoders),
                  '--enable-filter=' + ','.join(PROFILE['capture_filters'])]
-        if platform.system() == 'Windows':
+        if system == 'Windows':
             args += ['--enable-indev=dshow,gdigrab']
         else:
             args += ['--enable-indev=v4l2,xcbgrab,alsa,pulse', '--enable-libxcb',
@@ -56,13 +57,76 @@ def configure(profile):
                  '--enable-encoder=libx264,libx265,libvpx_vp9,ffv1,mpeg2video,mpeg4,mjpeg,png,rawvideo,pcm_s16le,pcm_f32le,aac,ac3,qtrle,subrip',
                  '--enable-muxer=mp4,ipod,mov,matroska,webm,avi,nut,mpeg1system,mpeg2video,mpegts,image2,image2pipe,rawvideo,framehash,pcm_f32le,wav',
                  '--enable-bsfs', '--enable-filters', '--enable-indev=lavfi']
-    if platform.system() == 'Windows':
+    if system == 'Windows':
         args += ['--toolchain=msvc', '--arch=x86_64', '--target-os=win64',
                  '--pkg-config=' + (ROOT / 'third_party/pkgconf/pkgconf/.bin/pkgconf.exe').as_posix(),
                  '--pkg-config-flags=--static']
     tools = tool_commands()
     args += [f'--{name}=' + shlex.join(tools[name]) for name in ['cc', 'cxx', 'ld', 'ar']]
     return args
+
+
+# Where configure finds each --enable-<kind>= component list (configure's
+# find_things_extern/find_filters_extern). Configure only warns when an enable
+# matches nothing, and stays silent when one name of several is missing, so a
+# component dropped upstream would silently leave a profile.
+COMPONENT_SOURCES = {
+    'decoder': ('libavcodec/allcodecs.c', 'decoder'),
+    'encoder': ('libavcodec/allcodecs.c', 'encoder'),
+    'parser': ('libavcodec/parsers.c', 'parser'),
+    'bsf': ('libavcodec/bitstream_filters.c', 'bsf'),
+    'demuxer': ('libavformat/allformats.c', 'demuxer'),
+    'muxer': ('libavformat/allformats.c', 'muxer'),
+    'protocol': ('libavformat/protocols.c', 'protocol'),
+    'indev': ('libavdevice/alldevices.c', 'demuxer'),
+    'outdev': ('libavdevice/alldevices.c', 'muxer'),
+}
+
+
+def source_components(read):
+    """Component names per configure kind; `read` returns a source file's text."""
+    components = {}
+    for kind, (path, suffix) in COMPONENT_SOURCES.items():
+        pattern = re.compile(rf'^[^#\n]*extern\b[^\n]*\bff_(\w+)_{suffix};', re.M)
+        components[kind] = set(pattern.findall(read(path)))
+    filters = read('libavfilter/allfilters.c')
+    components['filter'] = set(re.findall(r'^extern const \w+ ff_[avfsinkrc]{2,5}_(\w+);', filters, re.M))
+    # The buffer sources and sinks are declared `extern  const`, outside configure's
+    # list, and always built. Their enables are inert; count them as present by the
+    # names they register (ff_vsink_buffer registers "buffersink").
+    for kind, name in re.findall(r'^extern  const \w+ ff_([avfsinkrc]{2,5})_(\w+);', filters, re.M):
+        components['filter'].add(name + 'sink' if kind.endswith('sink') else name)
+    return components
+
+
+def missing_components(args, components):
+    missing = []
+    for argument in args:
+        match = re.fullmatch(r'--enable-(\w+)=(.+)', argument)
+        if match and match[1] in components:
+            missing += [f'{match[1]} {name}' for name in match[2].split(',')
+                        if name not in components[match[1]]]
+    return missing
+
+
+def check_components(read):
+    """Refuse every profile, on both build systems, that names an absent component."""
+    components = source_components(read)
+    missing = sorted({f'{profile}: {entry}' for profile in ['libraries', 'recorder', 'testgen']
+                      for system in ['Linux', 'Windows']
+                      for entry in missing_components(configure(profile, system), components)})
+    if missing:
+        raise SystemExit(f'FFmpeg {PROFILE["version"]} source lacks profile components: ' + '; '.join(missing))
+
+
+def archive_reader(archive):
+    source = tarfile.open(archive)
+    def read(path):
+        member = source.extractfile(f'ffmpeg-{PROFILE["version"]}/{path}')
+        if member is None:
+            raise SystemExit(f'FFmpeg source has no {path}')
+        return member.read().decode()
+    return source, read
 
 
 def tool_commands():
@@ -298,6 +362,7 @@ def build(profile, no_binary_cache=False):
         with tarfile.open(archive) as source:
             source.extractall(work, filter='data')
         source_dir = work / f'ffmpeg-{PROFILE["version"]}'
+        check_components(lambda path: (source_dir / path).read_text())
         if prefix.exists():
             shutil.rmtree(prefix)
         install_prefix = prefix.as_posix()
@@ -339,9 +404,16 @@ if __name__ == '__main__':
     parser.add_argument('--log-digests', action='store_true')
     parser.add_argument('--check-msvc-shell', action='store_true')
     parser.add_argument('--fetch-source', action='store_true', help='Fetch or verify the pinned source cache without building')
+    parser.add_argument('--check-components', action='store_true',
+                        help='Refuse profiles that name a component the pinned source lacks')
     options = parser.parse_args()
     if options.fetch_source:
         print(f'FFmpeg source verified {PROFILE["sha256"]}: {verified_source()}', flush=True)
+    elif options.check_components:
+        archive, read = archive_reader(verified_source())
+        with archive:
+            check_components(read)
+        print(f'Every profile component exists in FFmpeg {PROFILE["version"]}', flush=True)
     elif options.log_digests:
         log_digests()
     elif options.check_msvc_shell:

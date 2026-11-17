@@ -42,7 +42,7 @@ Programme documents whose exit gate says `cargo test --workspace` mean the fast
 tier unless they say otherwise; CI runs the slow tier on every push to `main`.
 
 `source` the setup script in the same shell as Cargo. It builds the pinned minimal
-FFmpeg 8.0.3 libraries and a separate recording-only CLI from verified upstream
+FFmpeg 9.0.2 libraries and a separate recording-only CLI from verified upstream
 source. See [MS1 minimal FFmpeg](MS1-MINIMAL-FFMPEG.md) for the exact profile,
 checksum, prerequisites and measurements. The build uses four make jobs and the
 shared heavy-build lock. An unchanged install is reused.

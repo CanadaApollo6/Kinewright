@@ -15,11 +15,44 @@ builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
 
 
+def profile_component_sources(omit=()):
+    """Minimal upstream component lists declaring every name all profiles enable."""
+    files = {}
+    for profile in ['libraries', 'recorder', 'testgen']:
+        for system in ['Linux', 'Windows']:
+            for argument in builder.configure(profile, system):
+                kind, _, names = argument.removeprefix('--enable-').partition('=')
+                if not names or kind not in [*builder.COMPONENT_SOURCES, 'filter']:
+                    continue
+                for name in names.split(','):
+                    if (kind, name) in omit:
+                        continue
+                    if kind == 'filter':
+                        path, line = 'libavfilter/allfilters.c', f'extern const FFFilter ff_vf_{name};'
+                    else:
+                        path, suffix = builder.COMPONENT_SOURCES[kind]
+                        line = f'extern const FFCodec ff_{name}_{suffix};'
+                    files.setdefault(path, set()).add(line)
+    for path, _ in builder.COMPONENT_SOURCES.values():
+        files.setdefault(path, set())
+    files.setdefault('libavfilter/allfilters.c', set())
+    return {path: '\n'.join(sorted(lines)) + '\n' for path, lines in files.items()}
+
+
+def add_source_files(source, files):
+    for path, text in files.items():
+        entry = tarfile.TarInfo(f'ffmpeg-{builder.PROFILE["version"]}/{path}')
+        entry.size = len(text.encode())
+        source.addfile(entry, io.BytesIO(text.encode()))
+
+
 class SourceAdmission(unittest.TestCase):
     @staticmethod
     def lavformat_cbs_state(args):
-        # FFmpeg 8.0.3 libavformat/Makefile builds cbs.o for MOV, also selected by HLS.
-        # libavformat/cbs.h masks every CBS type except AV1/APV, including H.264.
+        # FFmpeg 8.0.3 built libavformat cbs.o for MOV (also selected by HLS) with an
+        # empty type table unless AV1/APV was selected. 9.0.2's mov_muxer selects
+        # cbs_av1_lavf and cbs_apv_lavf itself; libavformat/cbs.h still masks every
+        # other CBS type, so this stays the conservative check.
         def enabled(kind):
             names = set()
             for arg in args:
@@ -61,6 +94,56 @@ class SourceAdmission(unittest.TestCase):
         self.assertEqual(self.lavformat_cbs_state(['--enable-muxer=mov', '--enable-parser=apv']),
                          (True, {'apv'}))
         self.assertEqual(self.lavformat_cbs_state(['--enable-muxer=wav']), (False, set()))
+
+    def test_profile_naming_an_absent_component_is_refused(self):
+        files = profile_component_sources()
+        builder.check_components(files.__getitem__)
+        files = profile_component_sources(omit={('decoder', 'h264'), ('indev', 'gdigrab')})
+        with self.assertRaises(SystemExit) as refused:
+            builder.check_components(files.__getitem__)
+        message = str(refused.exception)
+        for entry in ['libraries: decoder h264', 'testgen: decoder h264', 'recorder: indev gdigrab']:
+            self.assertIn(entry, message)
+
+    def test_unconditional_buffer_filters_count_by_their_registered_names(self):
+        files = profile_component_sources(omit={('filter', name) for name in
+                                                ['buffer', 'buffersink', 'abuffer', 'abuffersink']})
+        with self.assertRaisesRegex(SystemExit, 'filter buffersink'):
+            builder.check_components(files.__getitem__)
+        files['libavfilter/allfilters.c'] += (
+            'extern  const FFFilter ff_asrc_abuffer;\nextern  const FFFilter ff_vsrc_buffer;\n'
+            'extern  const FFFilter ff_asink_abuffer;\nextern  const FFFilter ff_vsink_buffer;\n')
+        builder.check_components(files.__getitem__)
+
+    def test_build_refuses_a_missing_component_before_configure(self):
+        with tempfile.TemporaryDirectory(dir=builder.ROOT/'target') as directory:
+            root = Path(directory)
+            archive = root/'source.tar.xz'
+            with tarfile.open(archive, 'w:xz') as source:
+                add_source_files(source, profile_component_sources(omit={('demuxer', 'mov')}))
+            profile = dict(builder.PROFILE, sha256=builder.file_digest(archive))
+            with patch.object(builder, 'ROOT', root), \
+                 patch.object(builder, 'PROFILE', profile), \
+                 patch.object(builder, 'ensure_nasm'), \
+                 patch.object(builder, 'fingerprint', return_value=('test-key', {})), \
+                 patch.object(builder, 'verified_source', return_value=archive), \
+                 patch.object(builder, 'run') as run:
+                with self.assertRaisesRegex(SystemExit, 'libraries: demuxer mov'):
+                    builder.build('libraries')
+                run.assert_not_called()
+            self.assertFalse((root/'third_party/ffmpeg').exists())
+
+    def test_pinned_source_has_every_profile_component(self):
+        archive = builder.ROOT/'target/ffmpeg-source'/builder.PROFILE['sha256']/'source.tar.xz'
+        self.assertTrue(archive.is_file(), 'run scripts/build-ffmpeg.py --fetch-source first')
+        builder.verify_source(archive)
+        source, read = builder.archive_reader(archive)
+        with source:
+            builder.check_components(read)
+            components = builder.source_components(read)
+        # A vacuous reader would pass every profile; the pin has the full upstream lists.
+        self.assertGreater(len(components['decoder']), 500)
+        self.assertGreater(len(components['demuxer']), 300)
 
     def test_bad_source_never_executes_or_replaces_an_install(self):
         scratch = builder.ROOT / 'target'
@@ -149,7 +232,7 @@ class SourceDownload(unittest.TestCase):
         self.assertEqual(download.call_count, 3)
         self.assertEqual([call.args for call in sleep.call_args_list], [(2,), (4,)])
         for call in download.call_args_list:
-            self.assertEqual(call.args, ('https://ffmpeg.org/releases/ffmpeg-8.0.3.tar.xz',))
+            self.assertEqual(call.args, ('https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz',))
             self.assertEqual(call.kwargs, {'timeout': 30})
         self.assertEqual(list((self.root/'target/ffmpeg-source').iterdir()), [archive.parent])
 
@@ -188,6 +271,7 @@ class BuildIdentity(unittest.TestCase):
                 entry = tarfile.TarInfo(license_name)
                 entry.size = len(b'test license')
                 source.addfile(entry, io.BytesIO(b'test license'))
+                add_source_files(source, profile_component_sources())
             profile = dict(builder.PROFILE, sha256=builder.file_digest(archive))
             runtime = root/'third_party/ffmpeg'
             recorder = root/'third_party/ffmpeg-recorder'
@@ -201,7 +285,7 @@ class BuildIdentity(unittest.TestCase):
                     # FFmpeg's MSVC install rule puts import libraries in SHLIBDIR=bin.
                     for name in names:
                         (runtime/'bin'/f'{name}.lib').write_bytes(name.encode())
-                    (runtime/'bin/avcodec-62.dll').write_bytes(b'runtime DLL')
+                    (runtime/'bin/avcodec-63.dll').write_bytes(b'runtime DLL')
                 else:
                     self.assertEqual(command[-1], 'install-progs')
                     (recorder/'bin').mkdir(parents=True)
@@ -220,7 +304,7 @@ class BuildIdentity(unittest.TestCase):
                 self.assertTrue((runtime/'lib'/f'{name}.lib').is_file(), f'Required import library missing: {name}.lib')
                 self.assertEqual((runtime/'lib'/f'{name}.lib').read_bytes(), name.encode())
                 self.assertFalse((runtime/'bin'/f'{name}.lib').exists())
-            self.assertEqual((runtime/'bin/avcodec-62.dll').read_bytes(), b'runtime DLL')
+            self.assertEqual((runtime/'bin/avcodec-63.dll').read_bytes(), b'runtime DLL')
             self.assertEqual((recorder/'bin/ffmpeg.exe').read_bytes(), b'static recorder')
             self.assertFalse((recorder/'lib').exists())
 

@@ -40,7 +40,9 @@ runs:
         key: ffmpeg-source-${{ steps.source.outputs.sha256 }}
     - name: Verify or fetch source before use
       shell: bash
-      run: python scripts/build-ffmpeg.py --fetch-source
+      run: |
+        python scripts/build-ffmpeg.py --fetch-source
+        python scripts/build-ffmpeg.py --check-components
     - name: Save verified source from repository pushes
       if: inputs.producer == 'true' && github.event_name == 'push' && github.repository == 'CanadaApollo6/Kinewright' && steps.source-cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4

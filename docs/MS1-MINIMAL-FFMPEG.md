@@ -4,11 +4,16 @@
 
 Kinewright is GPL-3.0-only; GPL/version3 and x264/x265 stay enabled, with no nonfree components.
 
-All three profiles use `https://ffmpeg.org/releases/ffmpeg-8.0.3.tar.xz`;
-SHA-256: `6136812ea6d4e68bdba27e33c2a94382711cdf4f8602ffef056ff792bd6f9818`.
-The pin was checked against the detached signature using the
-[official release key](https://ffmpeg.org/download.html#release_8.0), fingerprint
-`FCF986EA15E6E293A5644F10B4322F04D67658D8`. It preserves our FFmpeg 8 ABI.
+All three profiles use `https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz`;
+SHA-256: `8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e`.
+The pin was checked against the detached signature `ffmpeg-9.0.2.tar.xz.asc` using the
+official release key (`https://ffmpeg.org/ffmpeg-devel.asc`), fingerprint
+`FCF986EA15E6E293A5644F10B4322F04D67658D8`, the same key that signed the earlier
+8.0.3 pin. It provides the FFmpeg 9 ABI (libavcodec 63) that `ffmpeg-next 9.1.0` binds.
+Every build, and `build-ffmpeg.py --check-components`, refuses a profile that names a
+decoder, demuxer, parser, encoder, muxer, bitstream filter, filter, protocol or device
+absent from the pinned source's component lists; configure itself would only warn.
+`docs/reports/ff9-own-build.md` records the 8.0.3 to 9.0.2 component and dependency diff.
 
 `scripts/build-ffmpeg.py` downloads into new empty `target/ffmpeg-source/download-*`
 directories: three attempts, a 30 s socket timeout, and 2/4 s backoff. SHA-256 is
@@ -40,11 +45,12 @@ command and all workflows. Fixtures are generated; only the app icon is committe
 | Hardware acceleration | Media code calls no FFmpeg hardware APIs | No hwaccels or external hardware libraries enabled |
 | Protocols | Local file output/input and custom certified IO | Only file protocol; network disabled |
 
-FFmpeg selects H.263 implementation code and its parser with MPEG-4 part 2.
-The MOV muxer selects the AC3/EAC3 parser for its packet inspection. These two
-parsers (H.263 and AC3/EAC3) are the complete dependency-only parser set;
-disabling them would also disable the required MPEG-4 decoder or MOV muxer.
-Their codecs remain runtime-refused. No Dolby decoder is enabled.
+FFmpeg selects the H.263 decoder with MPEG-4 part 2. In 8.0.3 the H.263 decoder
+also selected the H.263 parser; 9.0.2's `h263_decoder_select` no longer does, so
+that parser is gone. The MOV muxer selects the AC3/EAC3 parser for its packet
+inspection. AC3/EAC3 is the complete dependency-only parser set; disabling it
+would also disable the required MOV muxer. Its codecs, and H.263, remain
+runtime-refused. No Dolby decoder is enabled.
 Matroska adds `pgs_frame_merge` and VP9 adds `vp9_superframe` bitstream filters.
 The filter library always registers audio and video buffer source/sink pairs.
 `avcodec` also supplies required internal conversion helpers.
@@ -140,7 +146,7 @@ Known exception: the frozen JA S1 predecessor control keeps its historical full 
 ## Local consumption and CI
 
 Linux `source scripts/setup-ffmpeg.sh` builds or reuses the shared and recorder
-profiles, exports the FFmpeg 8 headers/libraries and recorder PATH, and verifies
+profiles, exports the FFmpeg 9 headers/libraries and recorder PATH, and verifies
 the ABI. C/C++, make, Python 3.12+, pkg-config and explicit development libraries
 are prerequisites. The dependency installer lists Debian/Arch packages; setup installs none.
 
@@ -228,12 +234,12 @@ non-glibc external dependency closure is 39,412,832 bytes across 26 libraries.
 The combined payload is 55,831,440 bytes, before application and licence files.
 These dependency sizes are host-specific and include PulseAudio dependencies.
 
-| Linux x86_64 | Before | MS1 |
-| --- | ---: | ---: |
-| Registered decoders | 550 | 38 |
-| Registered demuxers | 362 | 14 |
-| Registered parsers | 64 | 16 |
-| FFmpeg shared-library bytes | 211,707,496 | 11,634,104 |
+| Linux x86_64 | Before | MS1 (8.0.3) | FF9 (9.0.2) |
+| --- | ---: | ---: | ---: |
+| Registered decoders | 550 | 38 | 38 |
+| Registered demuxers | 362 | 14 | 14 |
+| Registered parsers | 64 | 16 | 15 |
+| FFmpeg shared-library bytes | 211,707,496 | 11,634,104 | 12,039,864 |
 
 The old Linux baseline is the checksum-verified mifi archive named by the old
 setup. Windows baseline sizes are not measured on this Linux worker. CI prints

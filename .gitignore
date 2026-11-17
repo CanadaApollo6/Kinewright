@@ -11,7 +11,10 @@ dist/
 # verify the exact archive.
 third_party/ffmpeg/
 third_party/ffmpeg.zip
-third_party/ffmpeg-archives/
+third_party/ffmpeg-recorder/
+third_party/ffmpeg-testgen/
+third_party/ffmpeg-deps/
+third_party/nasm/
 third_party/nemo-speech/
 third_party/tools/
 third_party/pkgconf/

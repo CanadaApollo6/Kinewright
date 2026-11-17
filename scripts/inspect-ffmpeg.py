@@ -9,10 +9,10 @@ import sys
 root = Path(sys.argv[1]).resolve()
 if os.name == 'nt':
     dll_search = os.add_dll_directory(str(root / 'bin'))
-    codec = C.CDLL(str(root / 'bin/avcodec-62.dll'))
-    fmt = C.CDLL(str(root / 'bin/avformat-62.dll'))
-    filters = C.CDLL(str(root / 'bin/avfilter-11.dll'))
-    util = C.CDLL(str(root / 'bin/avutil-60.dll'))
+    codec = C.CDLL(str(root / 'bin/avcodec-63.dll'))
+    fmt = C.CDLL(str(root / 'bin/avformat-63.dll'))
+    filters = C.CDLL(str(root / 'bin/avfilter-12.dll'))
+    util = C.CDLL(str(root / 'bin/avutil-61.dll'))
 else:
     codec = C.CDLL(str(root / 'lib/libavcodec.so'))
     fmt = C.CDLL(str(root / 'lib/libavformat.so'))
@@ -78,7 +78,8 @@ if '--check' in sys.argv:
                   'mpegaudio': ('mp1', 'mp2', 'mp3', 'mp3adu'),
                   'mpegvideo': ('mpeg1video', 'mpeg2video')}
     expected_parsers = {tuple(sorted(parser_ids.get(n, (n,)))) for n in profile['parsers']}
-    expected_parsers |= {('ac3', 'eac3'), ('h263',)}
+    # 9.0.2's h263_decoder no longer selects the H.263 parser; MOV's AC3 parser remains.
+    expected_parsers |= {('ac3', 'eac3')}
     assert {tuple(sorted(p)) for p in report['parsers']} == expected_parsers, report['parsers']
     assert set(report['filters']) == set(profile['filters']) | {'abuffer', 'abuffersink'}, report['filters']
     assert set(report['bsfs']) == set(profile['bsfs']) | {'pgs_frame_merge', 'vp9_superframe'}, report['bsfs']
