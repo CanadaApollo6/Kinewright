@@ -236,40 +236,6 @@ fn c5e_pending_history(f: &Fixture, core: &Core, cycles: usize, phase: &str) {
         profile.history_decoded
     );
 }
-#[derive(Debug)]
-enum C5eApprovalExit {
-    Cap(usize),
-    HistoryLimit { approved: usize },
-}
-impl C5eApprovalExit {
-    fn approvals(&self) -> usize {
-        match self {
-            Self::Cap(count) | Self::HistoryLimit { approved: count } => *count,
-        }
-    }
-    fn keeps_deletion(&self) -> bool {
-        matches!(self, Self::HistoryLimit { .. })
-    }
-}
-fn c5e_undo_counters(f: &Fixture) -> (String, u64, [u64; 6]) {
-    let host = f.host.owner.upgrade().unwrap();
-    let host = host.lock().unwrap();
-    let owner = host.owner().unwrap();
-    let usage = owner.store().unwrap().usage().unwrap();
-    (
-        // The authenticated root includes the receipt registries.
-        owner.root_sha256().unwrap(),
-        owner.metadata_generation().unwrap(),
-        [
-            usage.objects,
-            usage.edges,
-            usage.physical_bytes,
-            usage.metadata_bytes,
-            usage.owned_bytes,
-            usage.unclassified_bytes,
-        ],
-    )
-}
 fn c5e_approval_edits(
     f: &Fixture,
     execution: &ExecutionIdentity,
@@ -277,8 +243,10 @@ fn c5e_approval_edits(
     count: usize,
     depth: &mut u64,
     storage: &mut C5eStorage,
-) -> C5eApprovalExit {
+) -> usize {
     let mcp = C4Mcp::new(f, &execution.run, &execution.task);
+    let cycles_started = Instant::now();
+    let mut window_started = cycles_started;
     for clip in 1..=count {
         let before_document = document_for_test(core);
         let revision = grant_test_revision(core);
@@ -391,85 +359,10 @@ fn c5e_approval_edits(
         );
         // Restore the same owned clip between deletions. This reaches the full
         // approval cap without requiring more than the admitted object scope.
-        // Independent snapshots prove that a refused Undo accepts no work.
-        let before_undo = core.export_history().unwrap();
-        let before_history_id = core.change_id().unwrap();
-        let before_projection = f.projection(&execution.run);
-        let before_accounting = spending_record(f, &execution.run);
-        let before_counters = c5e_undo_counters(f);
         let undone = mcp.invoke(
             "undo_task_edit",
             serde_json::json!({"expected_revision":grant_test_revision(core)}),
         );
-        if undone.is_error != Some(false) {
-            let words = format!(
-                "consent_policy: {}",
-                kinewright_project::operation_history::TASK_LIMIT_REASON
-            );
-            assert_eq!(undone.is_error, Some(true), "C5E_TYPED_HISTORY_REFUSAL");
-            assert_eq!(
-                undone.structured_content,
-                Some(serde_json::json!({"content":[{"type":"text","text":words}],"is_error":true})),
-                "C5E_TYPED_HISTORY_REFUSAL {undone:?}"
-            );
-            assert!(
-                count == 256 && clip > 224,
-                "C5E_HISTORY_MINIMUM_CYCLES approved={clip} cap={count}"
-            );
-            assert!(
-                core.export_history().unwrap() == before_undo,
-                "C5E_REFUSED_UNDO_HISTORY_UNCHANGED"
-            );
-            assert_eq!(
-                core.change_id().unwrap(),
-                before_history_id,
-                "C5E_REFUSED_UNDO_REVISION_UNCHANGED"
-            );
-            assert_eq!(
-                f.projection(&execution.run),
-                before_projection,
-                "C5E_REFUSED_UNDO_PROJECTION_UNCHANGED"
-            );
-            assert_eq!(
-                spending_record(f, &execution.run),
-                before_accounting,
-                "C5E_REFUSED_UNDO_ACCOUNTING_UNCHANGED"
-            );
-            assert_eq!(
-                c5e_undo_counters(f),
-                before_counters,
-                "C5E_REFUSED_UNDO_COUNTERS_AND_RECEIPTS_UNCHANGED"
-            );
-            assert!(
-                before_undo
-                    .history()
-                    .document
-                    .clip(kinewright_core::ClipId(1))
-                    .is_none(),
-                "C5E_BOUNDARY_DELETION_STILL_APPLIED"
-            );
-            let host = f.host.owner.upgrade().unwrap();
-            let host = host.lock().unwrap();
-            let summary = host.edit_approval_summary(&before_projection);
-            assert_eq!(summary.approvals.len(), clip);
-            assert!(
-                summary.approvals.last().is_some_and(|row| row.applied
-                    && row.removed_clips == 1
-                    && row.removed_tracks == 0
-                    && row.issue.is_none()),
-                "C5E_BOUNDARY_DELETION_AUDITED_KEPT {summary:?}"
-            );
-            drop(host);
-            c5e_pending_history(f, core, clip, "refused_undo_kept_delete");
-            c5e_depth(f, depth);
-            c5e_storage(f, storage);
-            eprintln!(
-                "C5E_APPROVAL_EXIT history_limit approved={clip} completed_cycles={} deletion_kept=true undo_unchanged=true",
-                clip - 1
-            );
-            // The history rework makes the cap the only exit; then assert exactly 256.
-            return C5eApprovalExit::HistoryLimit { approved: clip };
-        }
         assert_eq!(
             undone.is_error,
             Some(false),
@@ -499,9 +392,18 @@ fn c5e_approval_edits(
                 serde_json::to_string(&profile).unwrap()
             );
         }
+        if clip % 16 == 0 {
+            let now = Instant::now();
+            eprintln!(
+                "C5E_CYCLE_WINDOW cycle={clip} elapsed_seconds={:.6} mean_seconds_per_cycle={:.6}",
+                now.duration_since(cycles_started).as_secs_f64(),
+                now.duration_since(window_started).as_secs_f64() / 16.0,
+            );
+            window_started = now;
+        }
     }
     eprintln!("C5E_APPROVAL_EXIT cap approved={count} completed_cycles={count}");
-    C5eApprovalExit::Cap(count)
+    count
 }
 
 #[test]
@@ -537,6 +439,7 @@ fn c5e_run(size: C5eSize) {
         orchestration_accounting::{RUN_MILLIS, UsageMode, UsageSample, UsageValues},
         run_admission,
     };
+    let qualification_started = Instant::now();
     let mut document = Document::default();
     kinewright_core::apply_batch(
         &mut document,
@@ -655,7 +558,7 @@ fn c5e_run(size: C5eSize) {
     .unwrap();
     let mut all_attempts = vec![];
     let mut histories = vec![];
-    let mut approval_exit = C5eApprovalExit::Cap(0);
+    let mut approved_cycles = 0;
     let mut last = parent.clone();
     // Seven serial specialists fit the three simultaneous dependency slots.
     // One task reaches its 80-send ceiling; the run reaches its shared 128-send ceiling.
@@ -706,7 +609,7 @@ fn c5e_run(size: C5eSize) {
             if round == 0 {
                 history_turn(&f, &execution, &client, &endpoint, 1, true);
                 history = Some(if task_index == 0 {
-                    approval_exit = c5e_approval_edits(
+                    approved_cycles = c5e_approval_edits(
                         &f,
                         &execution,
                         &core,
@@ -714,11 +617,8 @@ fn c5e_run(size: C5eSize) {
                         &mut maximum,
                         &mut storage,
                     );
-                    if approval_exit.keeps_deletion() {
-                        core.export_history().unwrap()
-                    } else {
-                        c4_mcp_edit_redo(&C4Mcp::new(&f, &run, &task), &core)
-                    }
+                    assert_eq!(approved_cycles, size.approvals(), "C5E_EXACT_APPROVE_DELETE_UNDO_CYCLES");
+                    c4_mcp_edit_redo(&C4Mcp::new(&f, &run, &task), &core)
                 } else {
                     core.export_history().unwrap()
                 });
@@ -726,7 +626,7 @@ fn c5e_run(size: C5eSize) {
                     &f,
                     &core,
                     if task_index == 0 {
-                        approval_exit.approvals()
+                        approved_cycles
                     } else {
                         0
                     },
@@ -821,7 +721,27 @@ fn c5e_run(size: C5eSize) {
             c5e_depth(&f, &mut maximum);
             c5e_storage(&f, &mut storage);
         }
-        histories.push((task, history.unwrap(), sends));
+        // Product frozen results retain references, not full expected-state
+        // captures. Check the durable owner before releasing this proof lease;
+        // Snapshot equality already compares exactly this combined identity.
+        let history = history.unwrap();
+        let identity = history.identity().unwrap();
+        assert_eq!(
+            c5e_history(&f, &run, &task).identity().unwrap(),
+            identity,
+            "C5E_DURABLE_PROOF_IS_EXACT_BEFORE_RELEASE"
+        );
+        drop(history);
+        histories.push((task, identity, sends));
+        {
+            let host = f.host.owner.upgrade().unwrap();
+            let owner = host.lock().unwrap();
+            assert_eq!(
+                owner.core().history_pool().lease_counts(kinewright_project::operation_history::Role::Task).unwrap().0,
+                owner.hooks.runs[&run].tasks.len(),
+                "C5E_BETWEEN_TASKS_ONLY_PRODUCT_ACTOR_LEASES"
+            );
+        }
         eprintln!("C5_FIX1_MAX_TASK {task_index} sends={sends}");
     }
     if matches!(size, C5eSize::Maximal | C5eSize::SendsOnly) {
@@ -853,7 +773,7 @@ fn c5e_run(size: C5eSize) {
         let profile = owner.owner().unwrap().retained_run_profile(&run).unwrap();
         eprintln!(
             "C5_LINEAR_CAPS approvals={} {}",
-            approval_exit.approvals(),
+            approved_cycles,
             serde_json::to_string(&profile).unwrap()
         );
     }
@@ -953,17 +873,17 @@ fn c5e_run(size: C5eSize) {
     let state = f.projection(&run);
     assert_eq!(
         state.edit_approvals.len(),
-        approval_exit.approvals(),
+        approved_cycles,
         "C5E_STOP_APPROVALS"
     );
     assert_eq!(
         state.edit_applications.len(),
-        approval_exit.approvals(),
+        approved_cycles,
         "C5E_STOP_APPLICATIONS"
     );
     assert_eq!(
         state.edit_approvals.iter().collect::<BTreeSet<_>>().len(),
-        approval_exit.approvals(),
+        approved_cycles,
         "C5E_DISTINCT_APPROVALS"
     );
     assert_eq!(
@@ -972,7 +892,7 @@ fn c5e_run(size: C5eSize) {
             .iter()
             .collect::<BTreeSet<_>>()
             .len(),
-        approval_exit.approvals(),
+        approved_cycles,
         "C5E_DISTINCT_APPLICATIONS"
     );
     assert_eq!(state.cleanup, RunCleanup::Settled);
@@ -993,7 +913,7 @@ fn c5e_run(size: C5eSize) {
         }
         assert_eq!(t.usage.len(), sends * 2);
         assert_eq!(t.totals.token_lower_bound, *sends as u64 * 7);
-        assert_eq!(c5e_history(&f, &run, task), *history);
+        assert_eq!(c5e_history(&f, &run, task).identity().unwrap(), *history);
     }
     for execution in &all_attempts {
         assert!(matches!(
@@ -1029,7 +949,7 @@ fn c5e_run(size: C5eSize) {
     );
     assert_eq!(f.projection(&run), state, "C5_FIX1_MAX_REOPEN_PROJECTION");
     for (task, history, _) in &histories {
-        assert_eq!(c5e_history(&f, &run, task), *history);
+        assert_eq!(c5e_history(&f, &run, task).identity().unwrap(), *history);
     }
     assert_eq!(
         f.host
@@ -1052,57 +972,38 @@ fn c5e_run(size: C5eSize) {
     let approvals = &summary.approvals;
     assert_eq!(
         approvals.len(),
-        approval_exit.approvals(),
+        approved_cycles,
         "C5E_REOPEN_APPROVAL_COUNT"
     );
-    if approval_exit.keeps_deletion() {
-        assert!(
-            approvals.iter().all(|row| row.applied
-                && row.issue.is_none()
-                && row.removed_clips == 1
-                && row.removed_tracks == 0),
-            "C5E_REOPEN_KEPT_DELETION {approvals:?}"
-        );
-        assert!(summary.missing.is_empty(), "C5E_REOPEN_KEPT_NOT_MISSING");
-        assert!(
-            histories[0]
-                .1
-                .history()
-                .document
-                .clip(kinewright_core::ClipId(1))
-                .is_none(),
-            "C5E_REOPEN_DELETION_STILL_APPLIED"
-        );
-    } else {
-        assert!(
-            // Every deletion was undone before the marker edits replaced its redo
-            // tail. The application audits are retained, but no removal is kept.
-            approvals.iter().all(|row| !row.applied
-                && row.removed_clips == 1
-                && row.removed_tracks == 0
-                && row
-                    .issue
-                    .as_deref()
-                    .is_some_and(|words| words.contains("undone or not kept"))),
-            "C5E_REOPEN_UNDONE_APPROVALS {approvals:?}"
-        );
-        assert_eq!(
-            summary
-                .missing
-                .iter()
-                .map(|edit| &edit.approval)
-                .collect::<BTreeSet<_>>(),
-            state.edit_approvals.iter().collect::<BTreeSet<_>>(),
-            "C5E_REOPEN_EVERY_UNDONE_APPROVAL_IS_NAMED"
-        );
-    }
+    assert!(
+        // Every deletion was undone before the marker edits replaced its redo
+        // tail. The application audits are retained, but no removal is kept.
+        approvals.iter().all(|row| !row.applied
+            && row.removed_clips == 1
+            && row.removed_tracks == 0
+            && row
+                .issue
+                .as_deref()
+                .is_some_and(|words| words.contains("undone or not kept"))),
+        "C5E_REOPEN_UNDONE_APPROVALS {approvals:?}"
+    );
+    assert_eq!(
+        summary
+            .missing
+            .iter()
+            .map(|edit| &edit.approval)
+            .collect::<BTreeSet<_>>(),
+        state.edit_approvals.iter().collect::<BTreeSet<_>>(),
+        "C5E_REOPEN_EVERY_UNDONE_APPROVAL_IS_NAMED"
+    );
     assert!(summary.uncertain.is_empty(), "C5E_REOPEN_COVERAGE_KNOWN");
     drop(owner);
+    drop(host);
     eprintln!("C5E_TAIL reopen_exact=true kept_audit=true");
     eprintln!(
         "C5E_RETAINED_MAXIMA {storage:?} max_depth={maximum} approvals={} h1_edit_publications={}",
-        approval_exit.approvals(),
-        approval_exit.approvals() * 2
+        approved_cycles,
+        approved_cycles * 2
     );
     eprintln!(
         "C5_FIX1_MAXIMAL clocks={} tasks={} sends={} attempts={} max_depth={maximum} stop=true cleanup=true reopen_exact=true",
@@ -1139,11 +1040,17 @@ fn c5e_run(size: C5eSize) {
             );
             eprintln!(
                 "C5_OPEN approvals={} sample={sample} seconds={:.6}",
-                approval_exit.approvals(),
+                approved_cycles,
                 opened.as_secs_f64()
             );
             drop(project);
         }
+    }
+    if matches!(size, C5eSize::Maximal) {
+        let elapsed = qualification_started.elapsed();
+        eprintln!("C5E_MAXIMAL_QUALIFICATION cycles={approved_cycles} seconds={:.6} authority_seconds=3600 renewed=false tail_complete=true", elapsed.as_secs_f64());
+        assert_eq!(approved_cycles, 256, "C5E_EXACTLY_256_CYCLES_WITH_THE_COMPLETE_TAIL");
+        assert!(elapsed < Duration::from_secs(3600), "C5E_COMPLETE_TAIL_FITS_THE_ORIGINAL_AUTHORITY: {elapsed:?}");
     }
 }
 

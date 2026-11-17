@@ -168,7 +168,7 @@ ja_s4_connector s4b_installed_codex_local_policy crates/kinewright-agent/tests/j
 
 ja_s4_connector s4b_installed_codex_network crates/kinewright-agent/tests/ja_s4_connector.rs linux on-demand # C5c unpaid native DNS TCP TLS witness
 
-kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded crates/kinewright-agent/src/writer_host/c5e_tests.rs linux on-demand # C5 maximal durable run and bounded graph depth
+kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded crates/kinewright-agent/src/writer_host/c5e_tests.rs linux on-demand # --release: exactly 256 approve/delete/Undo cycles, complete maximal tail and seven cold opens inside the original 3600-second authority
 
 ja_s4_guardian s4b_c5_fix1_guardian_execs_sealed_image_after_source_barrier crates/kinewright-agent/tests/ja_s4_guardian.rs linux on-demand # C5 fix1 sealed-image native barrier; explicitly run in its gate
 ja_s4_guardian s4b_c5_fix4_provider_cannot_read_namespace_init crates/kinewright-agent/tests/ja_s4_guardian.rs linux on-demand # C5 fix4 non-dumpable namespace init and /proc/1 probes; explicitly run in its gate

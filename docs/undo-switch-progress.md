@@ -166,3 +166,125 @@ collection count, role limit or deadline changed. The final gates pass 5,464
 workspace fast tests, 697 Project slow tests plus the explicit 20,000-clip case,
 54 unpaid TE1 tests, all 64 session seeds, clippy/fmt, workspace and three separate
 shipping builds, and lint/self-tests. The maximal qualification remains pending.
+
+## Maximal qualification stop
+
+`8ac25708` is the last green checkpoint. The exact 256-cycle run completed
+all 256 approve/delete/Undo cycles but failed at `C4_TASK_STATUS` with
+`task_authority_expired` after 3629.08 seconds, before completing the tail.
+Per the brief's stop rule, no authority, limit or fixture was changed and no
+run repeated. New paired measurements and final qualification gates are not
+run. The test-only qualifier changes and [failure report](undo-maximal-qualification.md)
+remain uncommitted for the lead's decision. No build/test remains running.
+
+## Optimized maximal qualification stop
+
+The lead authorized one optimized rerun under the original 3,600-second authority.
+All 256 approve/delete/Undo cycles completed in 466.215756 seconds, with mean
+window cost growing 0.510396 to 3.565586 seconds/cycle (R² 0.987279). The full
+test failed at 817.34 seconds with typed `history_backpressure` while obtaining
+an attempt history, after Freeze and task markers 0 through 4. The remaining
+tail and seven cold opens did not complete. No fixture, authority or limit
+changed and no growth fix or rerun followed. Qualification changes remain
+uncommitted; paired timings and final gates are not run under the stop rule.
+The independent Windows import fix is committed as `1236997e` and checked
+separately. See [the qualification report](undo-maximal-qualification.md).
+
+The two import guards are the sole contents of `1236997e`. Project all-target
+clippy passes. The requested Project MSVC test check was attempted and blocked
+before Project tests by FFmpeg's missing target `errno.h` and AWS-LC's native C
+build; it is not a Windows compile pass. Both checks and the release test have
+finished. Full logs are linked from the qualification report.
+
+## Capacity ruling: fixture proof retention
+
+The one authorized diagnostic release run reproduces the refusal at task index
+5, round 0, after 816.46 seconds. Every lease reconciles: six actual Task actors
+and five fixture-owned expected-state captures, each charged exactly its
+34,620,352-byte creation envelope. The Task pool holds 380,823,872 bytes; the
+next actor plus the required largest-capture headroom would need 450,064,576,
+above its 419,430,400 ceiling. All pools have zero workspace use at inspection.
+The frozen task remains within its original envelope, and no run has durably
+settled. This is the designed-refusal / fixture-order case, not an over-charge.
+[The complete lease table and code trace](undo-capacity-classification.md)
+record all fourteen leases across the three roles. The corrected fixture releases each full proof capture only after checking its
+saved combined identity; the same expected identity remains for every later
+cold-open comparison. Actual actor lifetimes and all fixture constants stay
+unchanged. The between-task lease guard is red on the original Small order
+(3 leases versus 2 actors) and green after correction. The maximal release
+qualification then passes all 256 cycles, 720 clocks, eight tasks, 128 sends,
+24 attempts, the whole tail and seven cold opens in **1406.485695 seconds**,
+without renewing the original 3600-second authority. Its whole-project cold
+opens range from 4.350219 to 4.537343 seconds. The per-commit gate passes 3,130 core/project/agent tests, workspace clippy,
+fmt and manifest lint. Paired measurements and the final gates follow this
+qualification checkpoint.
+
+## Owed after HX
+
+### HX-G1 — Remove quadratic durable-publication growth
+
+**Open; deferred by the lead. No growth fix in the qualification pass.** The
+single release measurement completed the 256-cycle approval loop in
+466.215756 seconds. Every window contains sixteen approve/delete/Undo cycles,
+including the existing diagnostic work. Mean seconds per cycle grow roughly
+linearly: 0.510396 to 3.565586; the fit against cycle index has R² 0.987279.
+Consequently the aggregate cost has a quadratic term. Preserve the original
+3,600-second authority, all capacity bounds and the full durability proofs.
+
+| Window ending cycle | Elapsed seconds | Mean seconds per cycle |
+| --- | --- | --- |
+| 16 | 8.166343 | 0.510396 |
+| 32 | 17.862616 | 0.606017 |
+| 48 | 29.439592 | 0.723561 |
+| 64 | 43.778985 | 0.896212 |
+| 80 | 61.061127 | 1.080134 |
+| 96 | 80.845150 | 1.236501 |
+| 112 | 103.511871 | 1.416670 |
+| 128 | 129.330346 | 1.613655 |
+| 144 | 158.377350 | 1.815438 |
+| 160 | 190.749030 | 2.023230 |
+| 176 | 226.289105 | 2.221255 |
+| 192 | 266.173289 | 2.492761 |
+| 208 | 309.549265 | 2.710999 |
+| 224 | 357.452552 | 2.993955 |
+| 240 | 409.166384 | 3.232115 |
+| 256 | 466.215756 | 3.565586 |
+
+At cycles 32 → 256, the existing counters report:
+
+| Counter | Cycle 32 | Cycle 256 |
+| --- | ---: | ---: |
+| `manifest_decoded` bytes | 1,253,884 | 8,007,062 |
+| Manifest objects | 266 | 1,610 |
+| Snapshot count | 73 | 521 |
+| `snapshot_decoded_total` bytes | 9,260,771 | 184,025,071 |
+| Graph depth | 9 | 9 |
+| `max_history_encoded` bytes | 1,798 | 1,798 |
+
+Investigate `crates/kinewright-project/src/bundle_recovery/publication.rs:376`
+(manifest read), `:389–395` (graph accounting and membership map construction)
+and `:448` (manifest object walk). These are the leading publication suspects.
+The immutable memo avoids decoding every old object again: the total snapshot
+counter is retained footprint, not a per-approval work counter. Also separate
+the fixture's own every-32-cycle profile scan in
+`orchestration_retention.rs:298–353` from product publication work before
+claiming a CPU attribution. Add per-phase work counters before choosing a fix.
+
+For scale only, the least-squares window fit corresponds to per-cycle cost
+`t(n) ≈ 0.190007 + 0.012693765 n` seconds.
+Its sum is `T(N) ≈ a*N + b*N*(N+1)/2`, reproducing
+466.216 seconds at N=256. The task's 2,000-command room needs a
+clear work-count convention: each measured cycle contains one accepted Do and
+one accepted Undo. If 2,000 accepted edit transitions had this same publication
+mix, N=1,000 projects to **6543.2 seconds (1.82 hours)**.
+If the intended workload is 2,000 Do commands each followed by Undo, N=2,000
+projects to **25780.2 seconds (7.16 hours)**.
+These are extrapolations, not measurements or a qualification: the fixture's
+approval cap remains 256, and ordinary unapproved commands may have a different
+publication mix. Do not raise the cap to test this projection.
+
+Acceptance for the later job: counters demonstrate publication work proportional
+to the new cut, while preserving exact receipt replay, durable acknowledgements,
+namespace/dependency validation, all reachable states, and bounded memory.
+Measure the actual 2,000-command mix with its original authority when that job
+is scheduled. [All readings and source evidence](measurements/undo-maximal-qualification-release-failure.json.gz).
