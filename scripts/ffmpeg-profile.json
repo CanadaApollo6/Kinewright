@@ -103,6 +103,9 @@
     "pcm_f32le",
     "pcm_u8"
   ],
+  "capture_bsfs": [
+    "av1_metadata"
+  ],
   "capture_filters": [
     "buffer",
     "buffersink",

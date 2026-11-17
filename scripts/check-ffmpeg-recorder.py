@@ -33,6 +33,9 @@ expected = {'dshow', 'gdigrab'} if os.name == 'nt' else {'alsa', 'pulse', 'video
 assert demuxers == expected, demuxers
 filters = set(re.findall(r'^\s*[TS.]{2}\s+(\w+)\s', listing('-filters'), re.M))
 profile = json.loads((root / 'scripts/ffmpeg-profile.json').read_text())
+bsfs = {line.strip() for line in listing('-bsfs').splitlines()
+        if re.fullmatch(r'\w+', line.strip())}
+assert bsfs == set(profile['capture_bsfs']) | {'aac_adtstoasc', 'vp9_superframe'}, bsfs
 # FFmpeg's executable selects these orientation/crop dependencies itself.
 assert filters == set(profile['capture_filters']) | {'crop', 'hflip', 'vflip', 'rotate', 'transpose'}, filters
 muxers = {fields[1] for line in listing('-muxers').splitlines()

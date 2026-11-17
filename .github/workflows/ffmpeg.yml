@@ -17,6 +17,8 @@ jobs:
       key: ${{ steps.profiles.outputs.key }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check profile CBS dependencies before compiling
+        run: python -B scripts/test_ffmpeg_build.py SourceAdmission.test_profiles_supply_a_type_for_libavformat_cbs SourceAdmission.test_cbs_check_catches_missing_av1_even_with_vp9_enabled
       - uses: ./.github/actions/ffmpeg
         id: profiles
         with:
@@ -31,6 +33,8 @@ jobs:
       key: ${{ steps.profiles.outputs.key }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check profile CBS dependencies before compiling
+        run: python -B scripts/test_ffmpeg_build.py SourceAdmission.test_profiles_supply_a_type_for_libavformat_cbs SourceAdmission.test_cbs_check_catches_missing_av1_even_with_vp9_enabled
       - uses: ./.github/actions/ffmpeg
         id: profiles
         with:

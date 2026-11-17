@@ -12,6 +12,52 @@ spec.loader.exec_module(builder)
 
 
 class SourceAdmission(unittest.TestCase):
+    @staticmethod
+    def lavformat_cbs_state(args):
+        # FFmpeg 8.0.3 libavformat/Makefile builds cbs.o for MOV, also selected by HLS.
+        # libavformat/cbs.h masks every CBS type except AV1/APV, including H.264.
+        def enabled(kind):
+            names = set()
+            for arg in args:
+                if arg == f'--enable-{kind}s':
+                    names.add('*')
+                elif arg.startswith(f'--enable-{kind}='):
+                    names.update(arg.split('=', 1)[1].split(','))
+            return names
+
+        muxers = enabled('muxer')
+        needed = bool(muxers & {'*', 'mov', 'mp4', 'ipod', 'avif', 'f4v', 'hls', 'ismv', 'psp', 'tg2', 'tgp'})
+        # configure *_select dependencies that can populate that restricted table.
+        selectors = {
+            'av1': {'decoder': {'av1'}, 'parser': {'av1'},
+                    'encoder': {'av1_vaapi', 'av1_vulkan'},
+                    'bsf': {'av1_frame_merge', 'av1_frame_split', 'av1_metadata', 'dovi_rpu'}},
+            'apv': {'decoder': {'apv'}, 'parser': {'apv'}},
+        }
+        types = {codec for codec, kinds in selectors.items()
+                 if any(enabled(kind) & (names | {'*'}) for kind, names in kinds.items())}
+        return needed, types
+
+    def test_profiles_supply_a_type_for_libavformat_cbs(self):
+        for system in ['Linux', 'Windows']:
+            with patch.object(builder.platform, 'system', return_value=system):
+                for profile in ['libraries', 'recorder', 'testgen']:
+                    with self.subTest(system=system, profile=profile):
+                        needed, types = self.lavformat_cbs_state(builder.configure(profile))
+                        self.assertTrue(not needed or types,
+                                        f'{profile}: MOV requires an AV1/APV CBS type; other CBS types are masked')
+
+    def test_cbs_check_catches_missing_av1_even_with_vp9_enabled(self):
+        args = builder.configure('libraries')
+        args = [arg.replace('h264,hevc,av1,vp9', 'h264,hevc,vp9') for arg in args]
+        self.assertEqual(self.lavformat_cbs_state(args), (True, set()))
+        self.assertEqual(self.lavformat_cbs_state(['--enable-muxer=mp4', '--enable-bsf=h264_metadata']),
+                         (True, set()))
+        self.assertEqual(self.lavformat_cbs_state(['--enable-muxer=hls']), (True, set()))
+        self.assertEqual(self.lavformat_cbs_state(['--enable-muxer=mov', '--enable-parser=apv']),
+                         (True, {'apv'}))
+        self.assertEqual(self.lavformat_cbs_state(['--enable-muxer=wav']), (False, set()))
+
     def test_bad_source_never_executes_or_replaces_an_install(self):
         scratch = builder.ROOT / 'target'
         scratch.mkdir(parents=True, exist_ok=True)

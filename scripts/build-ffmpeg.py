@@ -34,6 +34,7 @@ def configure(profile):
         args += ['--disable-shared', '--enable-static', '--enable-ffmpeg', '--disable-ffprobe',
                  '--disable-ffplay', '--enable-avdevice', '--enable-encoder=libx264,aac,pcm_s16le',
                  '--enable-muxer=mp4,ipod,wav',
+                 '--enable-bsf=' + ','.join(PROFILE['capture_bsfs']),
                  '--enable-decoder=' + ','.join(device_decoders),
                  '--enable-filter=' + ','.join(PROFILE['capture_filters'])]
         if platform.system() == 'Windows':

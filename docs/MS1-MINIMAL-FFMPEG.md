@@ -96,7 +96,11 @@ It has no file demuxers or general media input. Its file protocol is
 needed to write recordings. It has libx264/AAC/PCM encoders and MP4/M4A/WAV muxers,
 crop/scale/format, audio conversion and recording-duration trim filters, plus their
 internal dependencies.
-Upstream selects crop/orientation filters for the executable, plus MOV's AC3 parser and AAC/VP9 bitstream filters; no Dolby or VP9 decoder is enabled.
+Upstream selects crop/orientation filters, MOV's AC3 parser and AAC/VP9 bitstream filters.
+MP4/M4A select MOV, which always builds libavformat CBS with only AV1/APV types.
+The recorder enables `av1_metadata` BSF to select CBS_AV1 and avoid MSVC's empty
+table error; `--enable-cbs-av1` is not a public configure option. No AV1 decoder
+or parser is added. The shared profile already selects CBS_AV1 through its AV1 parser.
 Windows enables dshow and gdigrab. Linux enables v4l2, xcbgrab, ALSA and PulseAudio.
 
 The recorder's device-only decoders are rawvideo, MJPEG and PCM s16le, s32le,
@@ -108,8 +112,7 @@ They never open user-supplied media files. Linux camera input requests 30 fps;
 Windows leaves camera input rate/format unforced. Both encode at 30 fps and allow
 device format negotiation, including MJPEG. H.264 is never requested and stays absent.
 H.264-only capture devices are unsupported. MJPEG stays for ordinary USB webcams. Device listing also selects a capture input.
-The CLI is not used for import or export.
-Feedback voice captures microphone input to 16 kHz mono PCM WAV. The Linux
+The CLI is not used for import/export. Feedback voice captures 16 kHz mono PCM WAV. The Linux
 file-backed feedback source is compiled only in tests and explicitly uses testgen.
 Moving recording onto the libraries is a later slice, likely with MS2.
 Recorder lookup uses only the installed bundle or this checkout's recorder prefix; no environment override or PATH fallback can select another FFmpeg.
@@ -214,15 +217,14 @@ The existing generic media incident displays the refusal's codec and message.
 
 ## Measurements and exclusions
 
-Registrations are measured with `scripts/inspect-ffmpeg.py`, using FFmpeg's
-codec, demuxer and parser iterators rather than executable feature listings.
+Registrations use `scripts/inspect-ffmpeg.py` and native codec/demuxer/parser iterators.
 AVCC H.264/HEVC is decoded directly by their native decoders, so the separate
 Annex B conversion filters and the unused AAC-LATM parser are omitted.
 Physical sizes count each versioned shared library once; symlinks, headers and
 import libraries are excluded. System dependencies are reported separately.
-On this host, the recorder is 4,612,472 bytes. Its and the libraries' combined
+On this host, the recorder is 4,784,504 bytes. Its and the libraries' combined
 non-glibc external dependency closure is 39,412,832 bytes across 26 libraries.
-The combined payload is 55,659,408 bytes, before application and licence files.
+The combined payload is 55,831,440 bytes, before application and licence files.
 These dependency sizes are host-specific and include PulseAudio dependencies.
 
 | Linux x86_64 | Before | MS1 |
@@ -236,7 +238,7 @@ The old Linux baseline is the checksum-verified mifi archive named by the old
 setup. Windows baseline sizes are not measured on this Linux worker. CI prints
 the Windows source-build counts and DLL sizes, and refuses unexpected registry
 counts. Original evidence is in `docs/reports/ms1.md`; rework evidence is in
-`docs/reports/ms1-review-fixes.md`.
+`docs/reports/ms1-review-fixes.md`; CBS build evidence is in `docs/reports/ms1-cbs.md`.
 
 Excluded common interchange includes WebP, GIF, BMP, TIFF, JPEG XL, JPEG 2000,
 AVIF/HEIF image workflows, MPEG-1 video, WMV/WMA, Theora, AC3/EAC3, MP2, DTS and ADPCM. They are not
