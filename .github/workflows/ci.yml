@@ -24,6 +24,11 @@ on:
       - '.gitignore'
   workflow_dispatch:
 
+# Cargo 1.100 moves intermediate test executables. Qualify that migration
+# separately from MS2; the existing subprocess tests use the 1.99 layout.
+env:
+  KINEWRIGHT_CI_RUST: '1.99.1'
+
 jobs:
   pf1-wrapper:
     name: Linux PF1 wrapper witnesses
@@ -58,7 +63,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable-x86_64-pc-windows-msvc
+          toolchain: ${{ env.KINEWRIGHT_CI_RUST }}-x86_64-pc-windows-msvc
           components: rustfmt, clippy
 
       # Default key includes rustc (host/release/hash) and a hash of every
@@ -170,7 +175,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable-x86_64-pc-windows-msvc
+          toolchain: ${{ env.KINEWRIGHT_CI_RUST }}-x86_64-pc-windows-msvc
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -204,6 +209,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.KINEWRIGHT_CI_RUST }}
           components: rustfmt, clippy
 
       # Default key includes rustc (host/release/hash) and a hash of every
@@ -323,6 +329,9 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+        with:
+          toolchain: ${{ env.KINEWRIGHT_CI_RUST }}
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2

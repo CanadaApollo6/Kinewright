@@ -1,6 +1,6 @@
 # MS2 slice 1a
 Status: IN PROGRESS; ruling 34 applied, supervisor qualified; Linux IX admission remains in process until rewiring.
-Commits: `4a55b8d4` plan; `79d93705` IPC; `90741cf4`/`ac1c60ce` historical stops; `2d926a59` helper; `7afcde61` supervisor; isolated polling fix in this commit.
+Commits: `4a55b8d4` plan; `79d93705` IPC; `90741cf4`/`ac1c60ce` historical stops; `2d926a59` helper; `7afcde61` supervisor; `ef8195b2` polling; CI toolchain pin in this commit.
 FFmpeg: base setup unchanged; libavcodec 62.11.100 SHA256 `daf171e4d0648d5483f94a0d1fb97fd42c1b99c5f8ce990865235f6e0b8831fa`; MS1 is independent and untouched.
 App/helper share the extracted owned_io opener, so later MS1 policy reaches both there.
 Ruling 32: exact madvise 0/4/8/102/103; native guard install/remove succeeds; other advice/high-bit aliases die with SIGSYS and controls survive.
@@ -22,4 +22,4 @@ Remaining: spawner/kill chain, complete degraded supervision, measurements, admi
 Windows supervisor/helper/IPC/job-sys MSVC cross-check passed; shared FFmpeg/media Windows check, final app build and native Ubuntu qualification: NOT RUN.
 Target remains below 40 GB. No desktop policy changes, hardware GPU use or push.
 1b: LPAC spike, SID/install ACLs, storage denial/quota, Job/CPU/mitigation and handle/IPC canaries, then Windows probe/admission integration; Windows stays in process.
-CI follow-up: standalone polling no longer relies on supervisor feature unification; 29 tests and shipping-host build pass; Cargo-version and AU6 corrections remain in progress.
+CI: 1.100 changed test paths and field-index linting; dependency-free red/green proofs recorded. All 6 C8 cases and Linux workspace clippy pass on pinned 1.99.1; AU6 iterator fix follows.
