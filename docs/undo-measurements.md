@@ -490,3 +490,97 @@ two history copies and five exact measurements, serializes 980,932 document
 bytes, and performs 4,006 kernel validation, 2,000 duration and 4,000 identity
 passes. Its owner scans the document four times and hashes the 617,427-byte
 combined owner once. These are open/replay costs, not warm-command work.
+
+## H2b final product-path measurements
+
+The maximal qualification is green; its complete 256-cycle project opens are
+reported separately in [the qualification report](undo-maximal-qualification.md).
+These are the unchanged heavy fixture's five fixed alternating old-Core / product
+pairs, on source `a3d34c1a`. The product is the shipping actor plus owner before
+writer publication/acknowledgement. The control is the hashed, frozen old binary
+retained before deletion; no legacy source or compatibility reader was restored.
+Both binary and fixture hashes were checked before the first pair. No owned
+build/test overlapped timing, and every run used normal shared-lock admission
+and nice 10. No quiet-machine wait, retry, tuning or sample selection occurred.
+
+The ten runs span **2026-11-17T14:45:53Z–2026-11-17T14:47:44Z**. One-minute load at the recorded
+boundaries ranges **1.75–2.37**. Bash records process CPU/time;
+`VmHWM` records peak RSS. All ten exits are zero and every lane reports zero
+errors. [Source and method](measurements/undo-product-final-manifest.json),
+[all raw outputs and load/time observations](measurements/undo-product-final.json.gz),
+[complete samples and phase counters](measurements/undo-product-final-summary.json).
+The checkpoint-1 table above remains historical; its numbers are not replaced.
+
+Milliseconds: median of five lane summaries [minimum, maximum]. The checkpoint-1
+product column is historical; final Core/product values are paired.
+
+| Lane | Checkpoint-1 product | Final paired old Core | Final product | Target / result |
+| --- | ---: | ---: | ---: | --- |
+| Hand edit, 1,000 | 0.258 | 0.201 [0.201, 0.211] | 0.258 [0.257, 0.264] | ≤1.5× paired Core: 5/5 |
+| Hand edit, 10,000 | 0.271 | 0.378 [0.374, 0.385] | 0.273 [0.266, 0.282] | ≤1.5× paired Core: 5/5 |
+| 120-batch apply | 30.401 | 28.056 [27.812, 28.189] | 30.291 [30.126, 30.665] | ≤1.5× paired Core: 5/5 |
+| Gesture Redo | 16.118 | 0.001 [0.001, 0.003] | 15.844 [15.763, 16.017] | <50 ms: 5/5 |
+| Edit at fold bound | 1.410 | 0.206 [0.205, 0.237] | 1.440 [1.436, 1.584] | <2 ms: **154/160; 6 misses; worst 2.239** |
+| Validated open, 2,000 | 350.408 | N/A | 347.975 [343.488, 349.249] | <1,000 ms: 5/5 |
+| Cold Undo | 250.734 | N/A | 249.200 [248.380, 251.288] | Measured; no tuning target |
+| Walk p95 | 5.650 | 0.002 [0.002, 0.002] | 5.686 [5.674, 5.743] | <100 ms: 5/5 |
+| Walk worst | 250.124 | 0.064 [0.017, 0.085] | 247.499 [246.436, 261.871] | <1,000 ms: 5/5 |
+
+All five edit-depth sample ranges overlap. The largest paired product/Core
+ratios are **1.315** at 1,000 steps,
+**0.736** at 10,000 steps and
+**1.092** for gesture apply.
+The strict fold target **misses in six of 160 samples**. Its five lane medians
+are 1.436366, 1.445033, 1.439672, 1.584188 and 1.439300 ms; all samples are
+retained, including the 2.239076 ms worst. No performance change or repeat was
+made after seeing the miss. Phase counters are identical in all five pairs:
+they show no reintroduced baseline/resource/seed/ledger traversal, but cannot
+attribute individual milliseconds or the tail variation to a specific pass.
+
+Peak process RSS is **8868.434 MiB old / 67.762 MiB
+product**, including 10,000 retained steps. The unchanged 1,024 MiB pool total
+is admission accounting, not RSS. The old control has no successful native
+validated-open or cold-Undo lane, so these rows have no old comparison.
+
+### Final phase counters
+
+The counts match checkpoint 1 exactly. A warm edit uses one history-side
+whole-document candidate copy, **zero exact measurements and zero document
+bytes serialized**. Its 188 history-accounting bytes and 264.5 owner-payload
+bytes serialized per command are not document serialization. The owner has
+zero document/resource/seed/ledger scans, zero seed copies and zero owner
+identity hashes. The separate operation-kernel counts stay **2 validation /
+1 duration / 2 identity passes per edit**. No kernel validation was made
+incremental; these history counters do not make that claim.
+
+A fold uses **2 history document copies, 1 exact baseline measurement,
+245,242 document bytes serialized, 4 kernel validation / 2 duration / 4 identity
+passes**. Its owner touches exactly one folded command and three origin
+lookups; this fixture has zero folded payload/resource/seed/ancestry entries.
+All owner document, resource, seed-capacity, seed-prune, seed-verify and ledger
+scans are zero; there is no seed-map copy or owner identity hash. The named
+fold work and unrelated-baseline guards remain intact. Counters demonstrate
+work proportional to the folded step; they do not allocate its elapsed time.
+
+Gesture Redo uses one history copy, zero exact measurements/serialization,
+and the unchanged kernel's 240 validation, 120 duration and 240 identity passes.
+Cold Undo is **249.199941 ms** [248.379858, 251.287708]: it replays **1,999
+operations**, with three history copies, two exact measurements and 490,466
+document bytes serialized. The kernel makes 3,998 validation and 1,999 duration
+passes; the owner makes zero document scans or identity hashes. The accepted
+historical miss is not a tuning target, and separate runs do not establish
+causal improvement.
+
+Validated open is **347.974835 ms** [343.488050, 349.249121], including native
+checkpoint/editing-session validation. It uses two history copies, five exact
+measurements, 980,932 document bytes serialized, 4,006 kernel validation,
+2,000 duration and 4,000 identity passes. The owner makes four document scans,
+two resource scans, two seed verifications, one lineage encoding and one
+617,427-byte owner hash. These are validation/replay boundary costs; warm
+commands have none of those document/seed scans. The end-to-end timers do not
+split those counts into individual CPU durations.
+
+After sealing hashes and raw output, completed release build outputs were
+removed from this worktree to keep `target/` below 40 GB during the debug gates.
+No release process was using them; the isolated frozen control remains.
+The source/method and binary hashes in the manifest describe the measured run.

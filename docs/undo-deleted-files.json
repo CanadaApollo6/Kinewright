@@ -1,0 +1,173 @@
+{
+  "scope": "All tracked changes through this file's containing checkpoint commit. Text counts include tests, documentation and JSON evidence; binary archives are excluded. Git renames are listed separately from deletions. Both ranges are provided so retirement savings are not confused with the complete switch's additions.",
+  "implementation_commit": "a3d34c1a8fa5b68466a68c79d3a603f5bd8c54e9",
+  "full_h2b_switch": {
+    "base": "2a914931ec8227a0e180130879dc7b26707c8252",
+    "deleted_file_count": 28,
+    "inserted_text_lines": 51591,
+    "deleted_text_lines": 32584,
+    "net_text_line_change": 19007,
+    "rust_inserted_lines": 53305,
+    "rust_deleted_lines": 47504,
+    "rust_net_line_change": 5801,
+    "binary_diff_entries_excluded_from_text_counts": 20,
+    "deleted_files": [
+      "crates/kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright-assets/studio/objects/0dde884becd2ca617697a199e1a802b8f59b8b64221a8be0bbcfe822ea12aef7",
+      "crates/kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright-assets/studio/objects/66b8262bd1584aa4c00ce5d2082b78dde67cb5ab96458aa9664282e03b3f3b45",
+      "crates/kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright-assets/studio/objects/cef8b5290a8e9d9edb3994a5d2dc3732fe14b78e163f0c79b6fd3fea3c44c5f2",
+      "crates/kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright-assets/studio/objects/d6482056edac617b6107651f48c38ecd5c62daf0157007230daa5e47090b1c70",
+      "crates/kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright-assets/studio/objects/db706499829352e473755210aecb121b79bb667a3c7e73650585bfc06a89538a",
+      "crates/kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright-assets/studio/objects/f8db7b57d54166b97ff29a01d0c4651bbe106139f306c64919f174c56682c0ad",
+      "crates/kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright-assets/studio/objects/f99a0a244ce93d1c8fbdec2e3b12c793add03f199ed7cebc120ae97a2d695649",
+      "crates/kinewright-agent/tests/fixtures/ja/s2-manual-floor-control.json",
+      "crates/kinewright-core/src/actor.rs",
+      "crates/kinewright-core/src/actor/manual_history.rs",
+      "crates/kinewright-core/src/history.rs",
+      "crates/kinewright-core/src/history_journal.rs",
+      "crates/kinewright-core/src/history_size.rs",
+      "crates/kinewright-core/src/history_transition.rs",
+      "crates/kinewright-core/tests/history_journal.rs",
+      "crates/kinewright-core/tests/ja_s1_history.rs",
+      "crates/kinewright-core/tests/ownership_measure.rs",
+      "crates/kinewright-project/examples/ja_s1_history_read.rs",
+      "crates/kinewright-project/src/cleanup_measurement_tests.rs",
+      "crates/kinewright-project/src/history_record.rs",
+      "crates/kinewright-project/src/history_size.rs",
+      "crates/kinewright-project/src/lineage_journal.rs",
+      "crates/kinewright-project/src/manual_history.rs",
+      "crates/kinewright-project/src/task_history_admission.rs",
+      "crates/kinewright-project/tests/history_capacity_heap.rs",
+      "docs/reports/history-capacity-stage1.md",
+      "scripts/ja-s1-fix-r4-mutations.py",
+      "scripts/ja-s1-history-mutations.sh"
+    ],
+    "renames": [
+      {
+        "before": "crates/kinewright-agent/tests/fixtures/ja/s2-manual-floor.json",
+        "after": "crates/kinewright-agent/tests/fixtures/ja/s2-manual-first-save.json",
+        "similarity_percent": 90
+      },
+      {
+        "before": "crates/kinewright-core/tests/au1_core.rs",
+        "after": "crates/kinewright-project/tests/kernel_contracts/au1_core.rs",
+        "similarity_percent": 98
+      },
+      {
+        "before": "crates/kinewright-core/tests/au2_core.rs",
+        "after": "crates/kinewright-project/tests/kernel_contracts/au2_core.rs",
+        "similarity_percent": 99
+      },
+      {
+        "before": "crates/kinewright-core/tests/au4_core.rs",
+        "after": "crates/kinewright-project/tests/kernel_contracts/au4_core.rs",
+        "similarity_percent": 99
+      },
+      {
+        "before": "crates/kinewright-core/tests/cc3_core.rs",
+        "after": "crates/kinewright-project/tests/kernel_contracts/cc3_core.rs",
+        "similarity_percent": 99
+      },
+      {
+        "before": "crates/kinewright-core/tests/cc4_core.rs",
+        "after": "crates/kinewright-project/tests/kernel_contracts/cc4_core.rs",
+        "similarity_percent": 99
+      },
+      {
+        "before": "crates/kinewright-core/tests/cc5_core.rs",
+        "after": "crates/kinewright-project/tests/kernel_contracts/cc5_core.rs",
+        "similarity_percent": 99
+      },
+      {
+        "before": "crates/kinewright-core/tests/contracts.rs",
+        "after": "crates/kinewright-project/tests/kernel_contracts/contracts.rs",
+        "similarity_percent": 99
+      },
+      {
+        "before": "crates/kinewright-core/tests/mo2_core.rs",
+        "after": "crates/kinewright-project/tests/kernel_contracts/mo2_core.rs",
+        "similarity_percent": 99
+      }
+    ]
+  },
+  "post_reader_audit": {
+    "base": "69057aea05cbd47abc4195c199dd99e6ea35e7a1",
+    "deleted_file_count": 21,
+    "inserted_text_lines": 13966,
+    "deleted_text_lines": 18913,
+    "net_text_line_change": -4947,
+    "rust_inserted_lines": 20510,
+    "rust_deleted_lines": 33887,
+    "rust_net_line_change": -13377,
+    "binary_diff_entries_excluded_from_text_counts": 13,
+    "deleted_files": [
+      "crates/kinewright-agent/tests/fixtures/ja/s2-manual-floor-control.json",
+      "crates/kinewright-core/src/actor.rs",
+      "crates/kinewright-core/src/actor/manual_history.rs",
+      "crates/kinewright-core/src/history.rs",
+      "crates/kinewright-core/src/history_journal.rs",
+      "crates/kinewright-core/src/history_size.rs",
+      "crates/kinewright-core/src/history_transition.rs",
+      "crates/kinewright-core/tests/history_journal.rs",
+      "crates/kinewright-core/tests/ja_s1_history.rs",
+      "crates/kinewright-core/tests/ownership_measure.rs",
+      "crates/kinewright-project/examples/ja_s1_history_read.rs",
+      "crates/kinewright-project/src/cleanup_measurement_tests.rs",
+      "crates/kinewright-project/src/history_record.rs",
+      "crates/kinewright-project/src/history_size.rs",
+      "crates/kinewright-project/src/lineage_journal.rs",
+      "crates/kinewright-project/src/manual_history.rs",
+      "crates/kinewright-project/src/task_history_admission.rs",
+      "crates/kinewright-project/tests/history_capacity_heap.rs",
+      "docs/reports/history-capacity-stage1.md",
+      "scripts/ja-s1-fix-r4-mutations.py",
+      "scripts/ja-s1-history-mutations.sh"
+    ],
+    "renames": [
+      {
+        "before": "crates/kinewright-agent/tests/fixtures/ja/s2-manual-floor.json",
+        "after": "crates/kinewright-agent/tests/fixtures/ja/s2-manual-first-save.json",
+        "similarity_percent": 90
+      },
+      {
+        "before": "crates/kinewright-core/tests/au1_core.rs",
+        "after": "crates/kinewright-project/tests/kernel_contracts/au1_core.rs",
+        "similarity_percent": 98
+      },
+      {
+        "before": "crates/kinewright-core/tests/au2_core.rs",
+        "after": "crates/kinewright-project/tests/kernel_contracts/au2_core.rs",
+        "similarity_percent": 99
+      },
+      {
+        "before": "crates/kinewright-core/tests/au4_core.rs",
+        "after": "crates/kinewright-project/tests/kernel_contracts/au4_core.rs",
+        "similarity_percent": 99
+      },
+      {
+        "before": "crates/kinewright-core/tests/cc3_core.rs",
+        "after": "crates/kinewright-project/tests/kernel_contracts/cc3_core.rs",
+        "similarity_percent": 99
+      },
+      {
+        "before": "crates/kinewright-core/tests/cc4_core.rs",
+        "after": "crates/kinewright-project/tests/kernel_contracts/cc4_core.rs",
+        "similarity_percent": 99
+      },
+      {
+        "before": "crates/kinewright-core/tests/cc5_core.rs",
+        "after": "crates/kinewright-project/tests/kernel_contracts/cc5_core.rs",
+        "similarity_percent": 99
+      },
+      {
+        "before": "crates/kinewright-core/tests/contracts.rs",
+        "after": "crates/kinewright-project/tests/kernel_contracts/contracts.rs",
+        "similarity_percent": 99
+      },
+      {
+        "before": "crates/kinewright-core/tests/mo2_core.rs",
+        "after": "crates/kinewright-project/tests/kernel_contracts/mo2_core.rs",
+        "similarity_percent": 99
+      }
+    ]
+  }
+}

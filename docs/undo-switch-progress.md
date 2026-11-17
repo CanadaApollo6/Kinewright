@@ -219,6 +219,29 @@ opens range from 4.350219 to 4.537343 seconds. The per-commit gate passes 3,130 
 fmt and manifest lint. Paired measurements and the final gates follow this
 qualification checkpoint.
 
+## Final paired measurements
+
+The fixed five alternating pairs on `a3d34c1a` complete with zero errors and
+no repeats. Product medians are 0.258075 ms at 1,000 steps, 0.273180 at 10,000,
+30.290638 for 120-batch apply, 15.843536 for gesture Redo, 347.974835 for
+validated open and 249.199941 for cold Undo. Every paired relative/absolute
+target passes except the strict fold-sample target: 154/160 below 2 ms,
+six misses, worst 2.239076 ms, median 1.439672. Counters match checkpoint 1
+exactly in every pair: one warm copy, zero warm exact measurements and zero
+owner document scans; fold owner work remains proportional to the folded step.
+No timing-driven code change, tuning, quiet wait or rerun followed the miss.
+[All samples, paired controls and phase counts](undo-measurements.md#h2b-final-product-path-measurements)
+are preserved beside the old tables. The final Linux gate passes 5,464 fast,
+5,588 slow and 54 unpaid opt-in TE1 tests, all 64 session seeds / 65,536 attempts,
+the explicit 20,000-clip path, workspace and feature clippy, fmt, workspace and
+three separate shipping builds, lint and 3/52/26 script self-tests. The first
+fast attempt's unattributed signal 143 remains unqualified; the complete run
+supplies the pass. The final MSVC workspace/test check is blocked before Project tests in the
+accepted native cross-environment limit (FFmpeg `errno.h`, Whisper `stdio.h`,
+AWS-LC `pthread_rwlock_t`); Windows CI remains the check.
+[The final checkpoint report](undo-switch-final.md) collects the exact scope,
+strict fold miss, inventory, deletion ranges, authority doors and H4 contract.
+
 ## Owed after HX
 
 ### HX-G1 — Remove quadratic durable-publication growth
