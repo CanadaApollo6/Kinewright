@@ -3357,8 +3357,11 @@ mod tests {
     fn unlisted_stream_colour_tags_import_as_unknown() {
         crate::initialize_ffmpeg().expect("FFmpeg initializes");
         let directory = crate::test_support::TempDirectory::new("unlisted-colour-import");
-        let source = directory.path("source.ts");
-        let path = directory.path("unlisted.ts");
+        let source = directory.path("source.avi");
+        let path = directory.path("unlisted.avi");
+        // AVI carries no colour description of its own and is in the shipping
+        // demuxer set (MPEG-TS is not, MS1), so the tags read back come from the
+        // H.264 VUI alone.
         crate::test_support::run_ffmpeg(
             &[
                 "-f",
@@ -3389,7 +3392,7 @@ mod tests {
                 "-color_range",
                 "1",
                 "-f",
-                "mpegts",
+                "avi",
             ],
             &source,
         );
@@ -3408,7 +3411,7 @@ mod tests {
                     std::ffi::OsStr::new("-bsf:v"),
                     std::ffi::OsStr::new(&filter),
                     std::ffi::OsStr::new("-f"),
-                    std::ffi::OsStr::new("mpegts"),
+                    std::ffi::OsStr::new("avi"),
                 ],
                 &path,
             );
