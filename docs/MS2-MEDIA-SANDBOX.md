@@ -1,6 +1,7 @@
 # MS2 media sandbox
 
-Status: design with review-round-1 rulings incorporated; implementation unproven.
+Status: design with review-round-1 and round-2 rulings incorporated;
+implementation unproven.
 Source baseline is `origin/main` at `266f8890e259fb20d4c8f10d778b5b5fed6b3257`.
 This document records decisions and future proof gates. No implementation,
 build, confinement test, GPU run, or performance measurement accompanied it.
@@ -62,8 +63,8 @@ request/cursor per helper, with a selected video/audio decoder pair when needed.
 Independent cursors on the same source serialize; they do not create hidden
 extra processes. This trades some seek throughput for bounded memory.
 
-The host supervisor admits at most two helpers across preview, export, and
-analysis, counting probe helpers and blocked bootstraps. Playback has priority.
+The app's supervision thread admits at most two helpers across preview, export,
+and analysis, counting probe helpers and blocked bootstraps. Playback has priority.
 Background work yields at chunk boundaries.
 The trusted outer PID-namespace shim is included in each helper's private
 reservation and `TasksMax`, never an additional decoder. The independent
@@ -73,8 +74,14 @@ one active plus one replaceable pending request per consumer. Coalesce obsolete
 seeks. Evict an idle helper after five seconds or immediately under pressure.
 A different source always requires a fresh process. No warm cross-file reuse.
 
-The probe helper only probes. After its validated raster is accepted, the host
-reaps it and starts a fresh decode helper with inherited rings sized for that
+The probe helper returns metadata only, but its bounded admission probe includes
+first-frame decode and still inspection. These operations are confined in slice
+1a, not deferred to frame streaming or thumbnails. The existing admission path
+at `crates/kinewright-project/src/owned_media.rs:415` calls the probe that decodes
+a first frame at `crates/kinewright-media/src/owned_io.rs:579` and inspects still
+orientation at `:582`. No decoded pixels leave this probe.
+After its validated raster is accepted, the host reaps it and starts a fresh
+decode helper with inherited rings sized for that
 raster. A decode helper never probes or negotiates a larger ring. This sequence
 costs two confined launches and two FFmpeg input initializations per cold source.
 Only the host opens the file; the decode helper parses required headers without
@@ -87,7 +94,7 @@ codec/level/reference-set measurements. They are not evidence that 4K fits.
 
 | Reservation | Per helper | Global bound |
 | --- | --- | --- |
-| Audio/probe private memory, runtime included | 128 MiB | 256 MiB; alternative to video private rows |
+| Audio/probe private memory, runtime included | 128 MiB provisional; probe must be measured separately | 256 MiB provisional; alternative to video private rows |
 | Video private memory, runtime/native buffers included | 384 MiB | 768 MiB; new helper reservation |
 | Preview rings, separately charged | Two slots × 64 MiB | 256 MiB; new shared-memory reservation |
 | Export rings, replacing preview rings | Two slots × 128 MiB | 512 MiB; new shared-memory reservation |
@@ -129,6 +136,11 @@ guard is a component inside it. Degraded mode has a hard address-space bound
 and polled RSS, with the overshoot qualification below. Reconcile existing
 cursor/buffer ledger charges, never charge twice.
 Without measurement, do not remove the guard or claim these targets sufficient.
+Slice 1a includes this replacement allocation sub-budget for the admission
+probe, including its first-frame decode and still inspection. Measure probe
+PSS and peak address space on 1080p, UHD, and still fixtures before freezing
+probe `MemoryMax` or `RLIMIT_AS`. The probe figures above and below remain
+provisional until those measurements; an audio-only peak does not qualify them.
 
 Measure private bytes, shared mappings, PSS, and peak RSS separately on Linux.
 Record cgroup `memory.current`, `memory.peak`, and `memory.events` as well.
@@ -282,7 +294,7 @@ checkpoint, never an unlimited extension of a probe. App deadlines count useful
 validated output, not heartbeats. Suspend stream deadlines while the host has
 withheld all credits. Cancellation has a 250 ms cooperative grace through the
 AVIO interrupt flag. Then terminate, reap, and discard all partial results.
-A separate supervisor thread enforces deadlines even inside a stuck FFmpeg call.
+An app supervision thread enforces deadlines even inside a stuck FFmpeg call.
 
 ## Linux confinement
 
@@ -292,43 +304,97 @@ the helper is too late. Package eager binding in the ELF rather than passing
 `LD_BIND_NOW`. The single-threaded bootstrap initializes runtime state without
 reading media. The host opens one regular local file `O_RDONLY | O_CLOEXEC`,
 rejects devices/FIFOs/sockets, and passes the descriptor, never its path.
-Preserve pinning, digest, selected-stream, and revocable-authority checks from
-`crates/kinewright-project/src/owned_media.rs:691` and `owned_io.rs:33`.
-Writable external sources require an immutable host snapshot first. The helper's
-chunk verification cannot authorize publication. Never mmap source bytes in the
-app, where truncation could cause SIGBUS.
+The host guarantee is full-file verification at admission, the retained pin,
+and open-fd identity. `CertifiedSource::verify` at
+`crates/kinewright-media/src/owned_io.rs:306` checks the full digest, while
+`crates/kinewright-project/src/owned_media.rs:694` opens the descriptor and pins
+the source roots before verification. Keep selected-stream and host authority
+checks. Writable external sources require an immutable host snapshot first.
+Drop in-helper per-chunk SHA checks; a compromised decoder cannot attest to
+its reads or authorize publication. Revocation kills the helper and invalidates
+its outstanding results, since it already holds the source fd. Never mmap source
+bytes in the app, where truncation could cause SIGBUS.
 
 ### Resource ownership and app loss
 
-A small trusted `kinewright-media-supervisor` process outside the helper scope
-owns D-Bus scope requests, retained process identities, and cleanup. It blocks
-on the app lifetime pipe independently of the UI and stops the scope on EOF.
-The helper has a separate lifetime pipe held only by this supervisor. No helper
-inherits the bus connection. Keep this owner in job-sys, separate from agent
-provider launch and the helper's untrusted runtime.
+The app spawns a blocked outer shim. The shim forks the payload, which is PID 1
+in its new PID namespace. Arm `PR_SET_PDEATHSIG=SIGKILL` on both edges, after
+each fork and after credential changes that clear it. The shim checks `getppid`
+against the app PID captured before spawn. Keep the app's spawning thread alive
+for the shim's lifetime, because PDEATHSIG follows that thread's death. After
+forking, the single-threaded shim only waits for and reaps its payload. It does
+not exit early. App death kills the shim, whose death kills the payload even
+with the watchdog disabled. Both primary and degraded modes use this chain.
+
+Ruling 24 needs one technical correction to its payload race check. A namespace
+init's parent is outside its PID namespace, so `getppid()` returns 0 even while
+the shim lives. Reparenting can leave that value unchanged. Thus a comparison
+with 0 cannot close loss before PDEATHSIG is armed. Before the fork, the shim
+opens a pidfd on itself for the child to inherit. After arming PDEATHSIG, the
+payload checks `getppid()` and polls that pidfd with zero timeout. Exit on parent
+death, HUP, NVAL, or any check failure, then close the pidfd before lockdown.
+The pidfd check covers pre-arm shim loss; PDEATHSIG covers loss after arming.
+[PID-namespace parent visibility](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html),
+[PDEATHSIG timing and credential resets](https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html),
+and [pidfd exit notification](https://man7.org/linux/man-pages/man2/pidfd_open.2.html)
+define these checks. Parent death is signalled from the ancestor namespace;
+the [kernel reparent path](https://codebrowser.dev/linux/linux/kernel/exit.c.html#forget_original_parent)
+delivers PDEATHSIG to the payload's thread group, and
+[ancestor signal handling](https://codebrowser.dev/linux/linux/kernel/signal.c.html#send_signal_locked)
+forces delivery to namespace init.
+
+The separate trusted `kinewright-media-supervisor` binary only creates,
+verifies, and stops scopes. It never parents helpers or touches helper media,
+control pipes, or rings. It links no FFmpeg. Keep its OS primitives in job-sys
+without linking its D-Bus client into the app or helper. The app holds a pidfd
+on the supervisor. Supervisor death closes launch admission; the app kills its
+own shims, reaps them, verifies empty scopes, and restarts the supervisor before
+accepting new launches. Dead members leave stale scopes empty. The supervisor's
+own cgroup path must be outside every helper scope.
+
+The app and supervisor use one private socketpair. Only the supervisor inherits
+its endpoint across exec. Keep both endpoints `CLOEXEC` everywhere else and
+exclude them from every shim/helper fd inventory. Use the bounded framing rules
+above for typed lifecycle commands `CreateScope`, `VerifyScope`, and `StopScope`
+and their typed results, with at most two live scope records and two outstanding
+replies. A create request names only a PID the app spawned.
+The supervisor independently resolves PID plus starttime, checks the app's child
+relationship, and retains that identity. It generates the unit name itself;
+later commands use its bounded scope ID, never helper-supplied PIDs or unit
+names. No generic D-Bus forwarding exists. Its curated exec environment contains
+only `DBUS_SESSION_BUS_ADDRESS`, with no loader variables or FFmpeg settings.
+
+The payload's lifetime pipe has a writer held only by the app. Its watchdog
+calls `exit_group` on HUP, EOF, or NVAL. Self-`tgkill(SIGKILL)` cannot reliably
+kill namespace init. The watchdog is cooperative and is never the app-loss
+guarantee; the two parent-death edges provide that guarantee after bootstrap.
 
 The primary resource mechanism is a transient systemd **user scope**, created
 with D-Bus `StartTransientUnit`, never a shell or `systemd-run`. Set `MemoryMax`
 to the private reservation plus separately reserved ring pages charged there,
 `MemorySwapMax=0`, `TasksMax=8`, `CPUQuota=200%` for video or 100% for probe/audio,
 and `OOMPolicy=kill`. The bus encodes CPUQuota as `CPUQuotaPerSecUSec` (2,000,000
-or 1,000,000). Verify the resulting controls and keep the app outside the scope.
+or 1,000,000). Verify the resulting controls and keep the app and supervisor
+outside every helper scope.
 `Cgroup::create` at `crates/kinewright-job-sys/src/linux.rs:135` requires its
 caller's service name, so a GUI process cannot use it as a generic allocator.
 Add the scope path rather than relaxing that existing guardian invariant.
 
-Choose the blocked-child join. Before any media read, the child waits on a
-release pipe while the supervisor attaches it to the scope, verifies host PID
-plus `/proc/<pid>/stat` starttime and actual membership, then releases it.
+Choose the blocked-child join. Before any media read or payload fork, the shim
+waits on the app's release pipe while the supervisor attaches it to the scope
+and verifies host PID plus `/proc/<pid>/stat` starttime and actual membership.
+The app releases the shim only after that typed verification succeeds. The
+payload inherits membership, which is also verified before media parsing.
 `CLONE_INTO_CGROUP` is an atomic alternative only with an already-owned cgroup;
 no check-then-move running decoder is allowed. Set the limits before release.
 [Scope contract](https://www.freedesktop.org/software/systemd/man/latest/systemd.scope.html)
 and [D-Bus interface](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html).
 
 Without a user manager or enforceable controllers, log degraded resource mode.
-Use `RLIMIT_AS` (provisionally 1 GiB video / 256 MiB audio, including mappings),
-a supervisor RSS poll every 100 ms with kill above the admitted total, and CPU
-rlimits/wall deadlines. Polling can overshoot; it is not a hard RSS guarantee.
+Use `RLIMIT_AS`, provisionally 1 GiB video or 256 MiB audio/probe including
+mappings, plus CPU rlimits/wall deadlines. Probe limits await the slice-1a
+measurements. An app supervision thread polls RSS every 100 ms and kills above
+the admitted total. Polling can overshoot; it is not a hard RSS guarantee.
 Seccomp clone argument checks prohibit processes but cannot count threads.
 Therefore degraded mode uses single-threaded FFmpeg and a fixed trusted watchdog
 created before a final TSYNC filter that denies all further clone calls.
@@ -336,31 +402,35 @@ Do not claim a numeric thread cap from stateless BPF. Primary mode combines the
 checked pthread flags below with `TasksMax`.
 [Seccomp limitations](https://man7.org/linux/man-pages/man2/seccomp.2.html).
 
-A scope does not automatically die with its creator. Ruling 5's lifecycle claim
-needs the named supervisor above to call `StopUnit` on app EOF, and systemd then
-kills the scope members. Test supervisor loss separately with parent-death and
-helper-lifetime protections. The scope lifecycle follows its member processes,
-not its creator ([systemd scope semantics](https://www.freedesktop.org/software/systemd/man/latest/systemd.scope.html)).
+A scope does not automatically die with its creator. The parent-death chain
+kills its members when the app dies, including when the supervisor has also
+died. The supervisor can stop residual scope units when the app socket closes;
+that cleanup is additional to the kill chain. The scope lifecycle follows its
+member processes, not its creator
+([systemd scope semantics](https://www.freedesktop.org/software/systemd/man/latest/systemd.scope.html)).
 
 ### Ordered bootstrap and host evidence
 
-1. Perform the blocked resource join. Call `setsid` and arm
-   `PR_SET_PDEATHSIG=SIGKILL`, then compare `getppid` with the captured parent;
-   refuse if it changed. Repeat after credential changes and in fork children,
-   because fork/credential changes can clear the setting. Inside the PID
-   namespace the outer parent may appear as PID 0, so the lifetime handshake
-   also guards loss that `getppid` cannot distinguish.
-   [Parent-death semantics](https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html).
+1. In the app-spawned shim, arm `PR_SET_PDEATHSIG=SIGKILL`, compare `getppid`
+   with the captured app PID, and refuse if it changed. Call `setsid`, then
+   perform the blocked resource join. A missing release, app EOF, or supervisor
+   failure aborts bootstrap before any media parsing.
 2. Unshare `CLONE_NEWUSER`, deny setgroups, map only the caller UID/GID, then
-   enter `CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWPID`. Fork so the payload enters
-   the PID namespace. Reuse the single-threaded fork pattern at
+   enter `CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWPID`. Re-arm the shim's PDEATHSIG
+   and check the app parent after credential changes. Open the shim's self-pidfd,
+   then fork so the payload enters the PID namespace. The payload immediately
+   arms its own PDEATHSIG and performs the parent/pidfd race checks above.
+   Repeat the arm/check sequence after any further credential change.
+   Reuse the single-threaded fork pattern at
    `crates/kinewright-job-sys/src/namespace.rs:199`, called from
    `crates/kinewright-agent/src/job_guardian/linux.rs:131`. Retain/reap the outer
    bootstrap too. Keep loopback down. No media is parsed in either bootstrap.
 3. Before pivoting, inventory fds, put command-read, response-write,
    lifetime-read, and source-read into fixed slots, map inherited rings, and
    close their fds. Close every other fd, including stdio, directory fds,
-   sockets, resource controls, and release/verification pipes when spent.
+   sockets, the parent pidfd, resource controls, the app/supervisor socketpair,
+   and release/verification pipes when spent. The waiting shim closes its
+   copies of media/control/ring/lifetime descriptors after the fork.
    Verify the inventory while procfs is accessible. Make mounts private, pivot
    into an empty root, detach the old root, and set cwd to `/`. Mount no procfs,
    sysfs, devices, home, or project. Drop all capabilities.
@@ -378,8 +448,9 @@ not its creator ([systemd scope semantics](https://www.freedesktop.org/software/
 6. Install the table's seccomp filter, default-deny foreign audit architectures
    and x32, and filter full-width arguments. Primary-mode decode threads inherit
    it. In degraded mode, pre-created parked trusted threads receive it with
-   TSYNC; cloning is denied thereafter. The watchdog polls the lifetime fd for
-   HUP/EOF and terminates its own thread group on loss using allowed self-tgkill.
+   TSYNC; cloning is denied thereafter. The watchdog terminates its thread
+   group with `exit_group` on lifetime HUP, EOF, or NVAL. It is never the
+   non-cooperative kill guarantee.
 7. Pause before `PR_SET_DUMPABLE=0`. The host independently inspects `Seccomp`,
    `NoNewPrivs`, user/mount/network/PID namespace links, and cgroup membership
    against retained PID/starttime. Then complete the dumpable drop and readiness.
@@ -391,24 +462,38 @@ not its creator ([systemd scope semantics](https://www.freedesktop.org/software/
 Missing user namespaces or seccomp fails closed as `SandboxUnavailable`.
 Other required boundary setup failures also refuse that launch; absence of
 cgroups or Landlock alone uses the specified degraded mode. No in-process or
-unsandboxed fallback, sudo setup, or kernel-policy change is permitted.
-Slice 1a must qualify availability on a stock desktop and the CI runner.
+unsandboxed fallback or runtime kernel-policy change is permitted.
+
+For Ubuntu's AppArmor restriction on unprivileged user namespaces, ship a
+packaged-helper profile granting `userns` at the installed executable path.
+Install and load it at package install time so the shim and its forked payload
+can establish the boundary. The Ubuntu CI runner installs that same profile
+with sudo in a CI configuration step before its availability gate. This is
+installer/CI setup, not a change to Riel's machine or a runtime sudo prompt.
+Without the profile, restricted Ubuntu reports `SandboxUnavailable`; it never
+disables the restriction or falls back to host parsing. Riel's Arch machines
+do not have this Ubuntu restriction. Slice 1a qualifies both the stock Arch
+desktop and the Ubuntu runner, including the missing-profile refusal.
+[Ubuntu AppArmor user-namespace policy](https://documentation.ubuntu.com/security/security-features/privilege-restriction/apparmor/#apparmor-unprivileged-user-namespace-restrictions).
 
 ### Seccomp syscall table
 
-All unlisted syscalls are denied. This is an allowlist to qualify against the
-packaged libc/FFmpeg, not permission to widen it from a generic trace preset.
+The default action is `SECCOMP_RET_KILL_PROCESS`, including unlisted syscalls,
+rejected arguments, foreign audit architectures, and x32. The only policy errno
+exception is the enumerated `clone3` → `ENOSYS` fallback below. Qualify this
+allowlist against the packaged libc/FFmpeg; do not widen it from a generic trace preset.
 Ring fds exist only before final lockdown; afterward their mapping rule has no
 live fd to use. Descriptor numbers cannot be reused through opens or duplication.
 
 | Syscall(s) | Allowed arguments / result after lockdown |
 | --- | --- |
-| `read`, `pread64`, `lseek` | arg0 exactly source-read or command-read fd; no lifetime or arbitrary fd |
+| `read` | arg0 exactly source-read, command-read, or lifetime-read fd; lifetime read is only for EOF detection |
+| `pread64`, `lseek` | arg0 exactly source-read or command-read fd; no lifetime or arbitrary fd |
 | `write`, `writev` | arg0 exactly response-write fd; no stderr |
 | `mmap` | `PROT_EXEC` absent; anonymous with fd −1, or only a designated ring fd; never source-backed |
 | `mprotect`, `pkey_mprotect` | `PROT_EXEC` absent, including mixed write/exec requests |
 | `munmap`, `brk`, `madvise` | Runtime memory only; madvise restricted to NORMAL, DONTNEED, FREE |
-| `futex` | WAIT/WAKE private operations and required private bitset variants only |
+| `futex` | Exact op values `FUTEX_WAIT` (0), `FUTEX_WAKE` (1), `FUTEX_WAIT_PRIVATE` (128), `FUTEX_WAKE_PRIVATE` (129), `FUTEX_WAIT_BITSET` (9), `FUTEX_WAIT_BITSET_PRIVATE` (137), and those two bitset waits with `FUTEX_CLOCK_REALTIME` (265, 393). Bitset waits require arg5=`FUTEX_BITSET_MATCH_ANY`; deny every other operation/flag combination, including requeue, PI, wake-op, and wake-bitset |
 | `clock_gettime`, `clock_nanosleep`, `nanosleep`, `sched_yield` | Reviewed runtime clocks/waits |
 | `poll`, `ppoll` | Lifetime-HUP watchdog; BPF cannot inspect pollfd arrays, but these calls grant no read/write authority |
 | `fstat` | Source/command/response fd only; never path lookup |
@@ -417,7 +502,7 @@ live fd to use. Descriptor numbers cannot be reused through opens or duplication
 | `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn`, `sigaltstack` | Runtime signal management |
 | `tgkill` | arg0 equals helper tgid captured at filter installation in its PID namespace |
 | `clone` | Primary mode only: exact reviewed pthread flags `CLONE_VM \| CLONE_FS \| CLONE_FILES \| CLONE_SIGHAND \| CLONE_THREAD \| CLONE_SYSVSEM \| CLONE_SETTLS \| CLONE_PARENT_SETTID \| CLONE_CHILD_CLEARTID`, no exit signal; degraded mode denies |
-| `clone3` | Return `ENOSYS` to reach checked legacy clone; degraded mode still denies clone |
+| `clone3` | Sole `SECCOMP_RET_ERRNO(ENOSYS)` exception, to reach checked legacy clone; degraded mode still kills legacy clone |
 | `set_robust_list`, `rseq` | Reviewed libc per-thread registration |
 | `exit`, `exit_group` | Allowed |
 | `kill`, `tkill`, `pidfd_send_signal`, `rt_sigqueueinfo`, `rt_tgsigqueueinfo` | Denied, including brute-forced external pids |
@@ -430,11 +515,24 @@ live fd to use. Descriptor numbers cannot be reused through opens or duplication
 | `ptrace`, `process_vm_readv`, `process_vm_writev`, `mount`, `bpf`, `keyctl`, `perf_event_open`, `io_uring_setup`, `io_uring_enter`, `io_uring_register` | Denied |
 | Filesystem mutations and all remaining syscalls | Denied by default |
 
+Shared futex waits are required even for process-local pthreads.
+[glibc's join path](https://codebrowser.dev/glibc/glibc/nptl/pthread_join_common.c.html#102)
+waits for `CLONE_CHILD_CLEARTID` using `LLL_SHARED`.
+Its [absolute-wait implementation](https://codebrowser.dev/glibc/glibc/nptl/futex-internal.c.html#83)
+uses `FUTEX_WAIT_BITSET`, with the realtime flag for `CLOCK_REALTIME`. Hence a
+private-only policy breaks `pthread_join` when the worker is still running.
+Qualify the exact set against the packaged glibc, with a positive witness that
+enters join before releasing a still-running worker. Decoder close and cancel
+must also complete under the final filter. Unsupported futex operations remain
+process-killing denials, not a generic futex allow.
+
 Each named denial and each argument predicate gets its own negative witness,
 including high argument bits, source/command/response fd swaps, ring/source mmap,
 exec permission changes, wrong-tgid `tgkill`, and alternate clone flags. Signals
 also attack synthetic parent, supervisor, and sibling processes with known and
-brute-forced pids. Verify unchanged canaries and actual native refusal.
+brute-forced pids. Verify unchanged canaries and actual native refusal. Seccomp
+denials assert whole-process `SIGSYS` termination; the separate clone3 witness
+asserts `ENOSYS` and the checked legacy fallback.
 
 ## Windows confinement
 
@@ -568,9 +666,12 @@ explicit-retry launches across all sources: at most two/s, burst four, and 20
 per rolling minute. On exhaustion, pause admission as `ResourceLimit`, report
 the cooldown, and require explicit resume after 60 s; no endlessly draining
 launch queue for projects containing hundreds of hostile sources.
-The supervisor retains the reservation until the process is reaped and native
-membership is empty. Cleanup failure retains ownership and blocks replacement.
-Parent loss closes the lifetime pipe; the native supervisor kills the helper.
+The app's supervision thread retains the reservation until the process is
+reaped and native membership is empty. Cleanup failure retains ownership and
+blocks replacement.
+On Linux, app loss triggers the app → shim → payload PDEATHSIG chain, independent
+of the scope supervisor and cooperative watchdog. On Windows, app loss closes
+the Job handle and triggers kill-on-close.
 
 Reuse process ownership and native cleanup in `kinewright-job-sys`, especially
 `src/linux.rs:121` and `src/windows.rs:261`. Extend that crate with an explicit
@@ -603,10 +704,45 @@ Keep narrow OS operations in job-sys. No Python/Node runtime ships with MS2.
 | --- | --- |
 | [`landlock`](https://docs.rs/landlock/latest/landlock/) | Add a pinned direct Linux dependency. Require enforcement of selected known rights when available; log absent ABI/policy as defence in depth unavailable. Namespace/seccomp remain load-bearing. |
 | [`seccompiler`](https://docs.rs/seccompiler/latest/seccompiler/) | Add a pinned Linux dependency, with JSON policy loading disabled. Typed argument rules compile the reviewed policy to BPF; the policy remains our responsibility. |
+| [`zbus` 5.19.0](https://docs.rs/zbus/5.19.0/zbus/blocking/) | Use the blocking API in the separate Linux supervisor binary only, with `default-features = false` and `async-io`, `blocking-api` enabled. It supplies D-Bus authentication, framing, signatures, and typed systemd calls. Its async runtime dependencies remain in that binary. A hand-rolled D-Bus client adds protocol/security risk without a confinement benefit and is rejected. |
 | [`extrasafe`](https://docs.rs/extrasafe/latest/extrasafe/) | Decline. It combines syscall, Landlock, and isolation helpers, but a second policy abstraction obscures our exact descriptor/argument rules. |
 | [`birdcage`](https://docs.rs/birdcage/latest/birdcage/) | Decline. Its Linux/macOS process sandbox does not supply Windows confinement and duplicates launch ownership. |
 | [`nix`](https://docs.rs/crate/nix/latest) | Decline as a new dependency. Existing job-sys uses rustix for these Unix operations. |
 | [`windows`](https://microsoft.github.io/windows-docs-rs/doc/windows/) | Useful typed Win32 bindings, but extend the existing pinned `windows-sys` features in job-sys instead of introducing another binding layer. |
+
+The selected zbus dependency tree has the following branches. Every direct
+Linux dependency is listed; repeated dependencies and lower-level runtime and
+proc-macro leaves are collapsed. This is a manifest inventory, not a claim that
+a workspace feature-resolution or build gate has run.
+
+```text
+kinewright-media-supervisor (Linux binary crate, no FFmpeg)
+└── zbus 5.19.0 [async-io, blocking-api]
+    ├── zbus_macros 5.19.0 (build-time proc macro)
+    │   ├── proc-macro-crate, proc-macro2, quote, syn
+    │   └── zbus_names, zvariant, zvariant_utils
+    ├── zbus_names 4.3.4
+    │   └── serde, winnow, zvariant
+    ├── zvariant 5.14.0 [enumflags2]
+    │   ├── endi, enumflags2, serde, winnow, zcheapstr
+    │   └── zvariant_derive, zvariant_utils (shared proc-macro dependencies)
+    ├── async-broadcast, async-executor, async-io, async-lock, async-process
+    ├── async-recursion, async-task, async-trait, blocking
+    │   └── shared runtime branches: async-channel, async-signal, concurrent-queue,
+    │       crossbeam-utils, event-listener-strategy, fastrand, futures-io,
+    │       parking, pin-project-lite, piper, polling, signal-hook-registry, slab
+    ├── enumflags2, event-listener, futures-core, futures-lite, ordered-stream
+    ├── serde, serde_repr, hex, tracing, uuid, winnow
+    └── libc, rustix (Linux OS bindings, including linux-raw-sys and bitflags)
+```
+
+This inventory comes from the
+[published zbus 5.19.0 manifest and release lockfile](https://crates.io/api/v1/crates/zbus/5.19.0/download).
+`async-fs` is a feature name here, not an additional crate dependency. Disable
+Tokio, vsock, p2p/bus-implementation, and optional wire-format integrations.
+The blocking API still drives an async backend; budget that runtime in the
+supervisor allowance. In slice 1, record the complete locked normal/build tree
+for these features and verify that neither app nor helper links zbus.
 
 Review dependency licenses, release provenance, feature sets, and the locked
 transitive graph in slice 1. FFmpeg/OS FFI and shared mappings require justified
@@ -628,14 +764,17 @@ Run these later, on both native platforms. None has been run for this design.
   signal isolation, and independent memory/CPU/job/handle restrictions. Removing
   only that mechanism must change its specific refusal, not leave another guard
   masking the result. Separately run full-stack attacks and negative controls
-  with deliberate combinations removed. No real credentials or host policy changes.
+  with deliberate combinations removed. No real credentials or changes to the
+  desktop's host policy; the Ubuntu CI profile install is the explicit setup exception.
 - Probe bootstrap ordering with a helper that attempts each attack before its
   first request. Inspect every inherited descriptor/handle and token/namespace
   property independently. Missing user namespaces/seccomp, invalid required
   mitigations, and corrupted bundles must refuse before parsing. Absent Landlock
   logs reduced defence in depth; missing controllers/user manager must exercise
-  degraded rlimits/RSS enforcement successfully. Gate both a stock desktop and
-  CI runner. Native Windows storage writes must be denied or hit a proven hard
+  degraded rlimits/RSS enforcement successfully. Gate both the stock Arch
+  desktop and Ubuntu CI runner with its installed AppArmor profile. Removing
+  the profile on the runner must produce `SandboxUnavailable` before parsing.
+  Native Windows storage writes must be denied or hit a proven hard
   quota before any source is read; there is no unbounded private-storage exception.
 - Fuzz the host's actual framing/parser/state validator with cargo-fuzz/libFuzzer
   and sanitizers. Include truncation, huge lengths, recursion, duplicate fields,
@@ -648,6 +787,22 @@ Run these later, on both native platforms. None has been run for this design.
   agent errors, responsive Save/undo, identical saved project content after
   reopen, unchanged previous export, empty native membership, and bounded
   respawn. Leave a deliberately surviving child to prove cleanup blocks reuse.
+- With the helper watchdog disabled, kill the app before readiness and during
+  decode, and kill the supervisor before readiness and during decode. Run all
+  four cases in both primary scope and degraded resource modes. Assert shim
+  and payload death and empty scopes in primary mode. Where the app survives,
+  assert reaping, refused launches until supervisor restart, and reservation
+  recovery only after cleanup.
+  Add a barrier before payload PDEATHSIG arming, kill the shim there, and assert
+  that the inherited pidfd closes the PID-0 race. Assert the supervisor's cgroup
+  path is outside every helper scope. These are slice-1a gates, not watchdog tests.
+- Under the final seccomp filter, join a worker that is still running and
+  exercise decoder close and cancel. Assert success, then test forbidden futex
+  operations and the kill-by-default action independently.
+- In slice 1a, pass valid video and still IX admission end to end, including
+  bounded first-frame decode, still orientation, and host interpretation checks.
+  Keep malformed-input refusals too. Record probe PSS and address-space peaks
+  for 1080p, UHD, and stills before freezing the probe's resource limits.
 - Compare colour/rotation/timestamp/sample-boundary output with baseline golden
   fixtures. Exercise all call sites above, including project admission, mixed
   timelines, exported-artifact checks, cache hits, and background analyses.
@@ -698,11 +853,11 @@ Publish CPU time, copy bandwidth, PSS/commit, and two-source contention as well 
 
 | Slice | Required deliverable and gate |
 | --- | --- |
-| 1a, Linux confinement + probe | Implement source admission, blocked scope join/degraded limits, namespaces/seccomp, typed probe validation, supervision, and isolated/full-stack attack witnesses end to end. Migrate all Linux import/project probes, including `crates/kinewright-project/src/owned_media.rs:415`, so IX admission never probes hostile media in the host. Return metadata only, no PCM/pixel rings. Qualify stock-desktop and CI availability, cleanup, and malformed IX probes. |
+| 1a, Linux confinement + probe | Implement source admission, blocked shim scope join/degraded limits, namespaces/seccomp, app-parented shim/payload PDEATHSIG, the separate zbus scope supervisor and typed lifecycle contract, and isolated/full-stack attack witnesses end to end. Migrate all Linux import/project probes, including `crates/kinewright-project/src/owned_media.rs:415`. Include bounded first-frame decode, admission-required still inspection, and the replacement allocation sub-budget now. Return metadata only, no PCM/pixel rings. Measure 1080p/UHD/still probe PSS and address-space peaks before freezing probe limits. Pass video and still IX admission success fixtures plus malformed refusals, final-filter join/close/cancel, and watchdog-disabled app/supervisor-loss witnesses in both modes. Assert supervisor cgroup separation. Ship the install-time AppArmor profile, install it on Ubuntu CI, and qualify stock Arch plus Ubuntu availability and missing-profile refusal. |
 | 1b, Windows confinement + probe | Start with the native LPAC spike. Pass suspended-token inspection, stable SID/install ACL, no writable storage or proven hard quota, Job/CPU/mitigation, inherited-handle, and named-pipe/ALPC/process canaries before the same end-to-end probe protocol and IX admission. No Windows safety claim before this gate. |
 | 2, waveform | First streaming consumer on both platforms. A validated probe precedes a fresh source-bound measurement helper. Stream bounded peak summaries through credited binary `DataChunk` frames. Add cancellation/checkpoint/launch-breaker witnesses and long-audio memory qualification. No loudness yet. |
 | 3, frames | Add agreed-geometry video and PCM rings for preview, playback, timeline rendering, and export source reads. Freeze ±64.0 PCM validation, preserve sample/colour/rotation contracts, and refuse mid-stream geometry changes. Gate snapshot-copy/parser fuzzing, shipping-config absolute fps, copy ceiling, two playheads, multicam, and churn. |
-| 4, loudness/thumbnails/rest | Add charged-cap loudness, source thumbnails/still inspection, recognition extraction, scene/beat/silence analysis, room tone, and cache inspection. Thumbnail pixels use bounded binary chunks, ≤256 KiB total per thumbnail, never encoded images for host decode. Delete all direct input/decode host APIs. Complete all-callers audit, native escape tests, affected/dependent-crate gates, memory soak, and security review. |
+| 4, loudness/thumbnails/rest | Add charged-cap loudness, source thumbnails, still pixel output beyond admission inspection, recognition extraction, scene/beat/silence analysis, room tone, and cache inspection. Thumbnail pixels use bounded binary chunks, ≤256 KiB total per thumbnail, never encoded images for host decode. Delete all direct input/decode host APIs. Complete all-callers audit, native escape tests, affected/dependent-crate gates, memory soak, and security review. |
 
 Each slice has its own security gate. Until slice 4, unmigrated operations retain
 their existing exposure; do not advertise complete media isolation. Partial
@@ -714,7 +869,10 @@ fully isolated until the remaining consumers migrate.
 
 Availability is decided. Missing user namespaces or seccomp fails closed;
 missing cgroups uses degraded rlimits/RSS supervision, and absent Landlock logs
-reduced defence in depth. Memory numbers remain provisional until measured.
+reduced defence in depth. Restricted Ubuntu needs the packaged install-time
+AppArmor profile, also installed by CI. Probe memory numbers remain provisional
+until the slice-1a PSS/address-space measurements; the admission first-frame and
+still work and replacement sub-budget are part of that slice.
 The native Windows spike comes first in 1b. The PCM wire limit is ±64.0 before
 slice 3. Start with two helpers; measure three-/four-angle multicam and scale
 reservations by raster before raising the process cap. These are decisions and
@@ -723,6 +881,11 @@ proof obligations, not unanswered product choices.
 Round-1 technical corrections are explicit above. Stateless seccomp cannot
 enforce a numeric thread count (ruling 3), and a systemd scope
 does not automatically follow its creator's lifetime (ruling 5). The fixed
-thread set and independent app-loss supervisor provide the missing mechanisms.
+thread set and app-parented shim/payload PDEATHSIG chain provide the missing
+mechanisms.
 Ruling 19's UHD reservation is corrected to 3,649 MiB / 3.563 GiB.
+Round 2 adopts the lifecycle-only zbus supervisor, shared futex forms,
+kill-by-default seccomp, and host-owned byte-identity guarantee. Ruling 24's
+payload `getppid` race check is corrected with an inherited shim pidfd because
+namespace init sees an outer parent as PID 0; the platform evidence is above.
 No new product question is opened by this document revision.
