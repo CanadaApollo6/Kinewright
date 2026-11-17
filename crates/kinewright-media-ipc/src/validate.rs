@@ -138,6 +138,7 @@ enum State {
 pub struct ProbeSession {
     request: u32,
     generation: u64,
+    selected: [Option<u32>; 2],
     state: State,
     epoch: Instant,
     frames: u32,
@@ -145,10 +146,11 @@ pub struct ProbeSession {
 }
 impl ProbeSession {
     #[must_use]
-    pub fn new(request: u32, generation: u64) -> Self {
+    pub fn new(request: u32, generation: u64, selected: [Option<u32>; 2]) -> Self {
         Self {
             request,
             generation,
+            selected,
             state: State::Ready,
             epoch: Instant::now(),
             frames: 0,
@@ -196,6 +198,14 @@ impl ProbeSession {
             }
             (State::Result, Message::ProbeResult { result }) => {
                 let result = ValidatedProbe::new(*result)?;
+                if self.selected != [None, None]
+                    && [
+                        result.metadata().video_stream,
+                        result.metadata().audio_stream,
+                    ] != self.selected
+                {
+                    return Err(bad);
+                }
                 self.state = State::Complete;
                 Ok(Some(result))
             }

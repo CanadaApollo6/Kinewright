@@ -1,0 +1,194 @@
+{
+  "parent_commit": "9edbcf98b434c459d33a8b286836b1f5950f062f",
+  "status": "step4 gates passed; production admission not rewired",
+  "cargo": "setup-ffmpeg.sh; flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=1 nice -n 10 cargo +1.99.1",
+  "tests": {
+    "passed": 43,
+    "failed": 0,
+    "ignored": 0
+  },
+  "native_lifecycle_cases": [
+    {
+      "mode": "degraded",
+      "stage": "decode",
+      "loss": "cancel"
+    },
+    {
+      "mode": "degraded",
+      "stage": "decode",
+      "loss": "deadline"
+    },
+    {
+      "mode": "degraded",
+      "stage": "decode",
+      "loss": "authority"
+    },
+    {
+      "mode": "degraded",
+      "stage": "before-ready",
+      "loss": "app"
+    },
+    {
+      "mode": "degraded",
+      "stage": "before-ready",
+      "loss": "supervisor"
+    },
+    {
+      "mode": "degraded",
+      "stage": "decode",
+      "loss": "app"
+    },
+    {
+      "mode": "degraded",
+      "stage": "decode",
+      "loss": "supervisor"
+    },
+    {
+      "mode": "primary",
+      "stage": "before-ready",
+      "loss": "app"
+    },
+    {
+      "mode": "primary",
+      "stage": "before-ready",
+      "loss": "supervisor"
+    },
+    {
+      "mode": "primary",
+      "stage": "decode",
+      "loss": "app"
+    },
+    {
+      "mode": "primary",
+      "stage": "decode",
+      "loss": "supervisor"
+    },
+    {
+      "mode": "primary",
+      "stage": "before-shim-arm",
+      "loss": "spawner"
+    },
+    {
+      "mode": "primary",
+      "stage": "decode",
+      "loss": "spawner"
+    },
+    {
+      "mode": "primary",
+      "stage": "before-arm",
+      "loss": "shim"
+    },
+    {
+      "mode": "degraded",
+      "stage": "before-shim-arm",
+      "loss": "spawner"
+    },
+    {
+      "mode": "degraded",
+      "stage": "decode",
+      "loss": "spawner"
+    },
+    {
+      "mode": "degraded",
+      "stage": "before-arm",
+      "loss": "shim"
+    }
+  ],
+  "mutations": {
+    "mutations": [
+      {
+        "mutation": "shim-parent-death",
+        "test": "watchdog_disabled_degraded_app_and_supervisor_loss",
+        "exit": 101,
+        "expected_assertion_failed": true,
+        "helper_sha256": "2310904da3573714ee603d1397d485feec3d8f616cf1b428d795a0d9099f4de6",
+        "log": "target/ms2-s1a/kill-mutations/shim-parent-death-red.log",
+        "log_sha256": "c018b9f165c3108b5b8437573c32fa755d53e85296b137915baff31a382d6c3e"
+      },
+      {
+        "mutation": "payload-parent-death",
+        "test": "watchdog_disabled_degraded_app_and_supervisor_loss",
+        "exit": 101,
+        "expected_assertion_failed": true,
+        "helper_sha256": "1c6441ff0f47802300143b69cef1e85abe08b71207019b7f4a8a6975ebcaf950",
+        "log": "target/ms2-s1a/kill-mutations/payload-parent-death-red.log",
+        "log_sha256": "1cae5777814370ff05120c8ce3a100c4e20d5a230822b74b03f678396810e8a9"
+      },
+      {
+        "mutation": "payload-parent-pidfd",
+        "test": "watchdog_disabled_spawner_abort_and_payload_prearm_race",
+        "exit": 101,
+        "expected_assertion_failed": true,
+        "helper_sha256": "52dfccaadb468e09e6afdcd2a55f1524f20305bc91f91c672497acca591bba8f",
+        "log": "target/ms2-s1a/kill-mutations/payload-parent-pidfd-red.log",
+        "log_sha256": "f066859cb6c0a9b5706bd8ad2cc4f258b236fea987fc70af06e10e003c80f55d"
+      },
+      {
+        "mutation": "spawner-abort-guard",
+        "test": "watchdog_disabled_spawner_abort_and_payload_prearm_race",
+        "exit": 101,
+        "expected_assertion_failed": true,
+        "helper_sha256": "418bb14b19d6e0435642f22492b0a15a3335a37719fc4cc41dacd927d547b6c2",
+        "log": "target/ms2-s1a/kill-mutations/spawner-abort-guard-red.log",
+        "log_sha256": "67bec59c11f58c21b84cb328d61fd08bc916cb94fae316f7187cd5cef1250bcd"
+      }
+    ],
+    "restored_controls": {
+      "exit": 0,
+      "log": "target/ms2-s1a/kill-mutations/restored-controls.log",
+      "log_sha256": "9cbee4f5bca5132621fb23d10794145e358e11181ce4f49ec9819877d2f3571d"
+    },
+    "source_restored": true
+  },
+  "selection_negative": {
+    "tests_ran": 1,
+    "exit": 101,
+    "reason": "explicit selection replacement accepted when host equality check removed; restored test passes"
+  },
+  "clippy": {
+    "all_targets": true,
+    "slow_features": true,
+    "default_features": true,
+    "deny_warnings": true
+  },
+  "msvc_check": "five touched packages, all targets, slow features passed; native Windows NOT RUN",
+  "static": {
+    "fmt": "passed",
+    "slow_manifest": 129,
+    "slow_parser_selftests": 45,
+    "client_boundary": "passed",
+    "actionlint": "passed"
+  },
+  "scope_inventory": "zero kinewright-* user units after full gates",
+  "not_yet_implemented": [
+    "degraded RSS enforcement/overshoot",
+    "probe measurements/frozen production limits",
+    "Linux admission rewiring",
+    "full-stack escape/fuzz/Ubuntu packaging"
+  ],
+  "archive": {
+    "file": "spawner-gates.tar.gz",
+    "sha256": "5de95968ca9973d2b6665bdb87320ba42a30a846a07bee351882e3193804a59d"
+  },
+  "sources": {
+    "crates/kinewright-job-sys/src/lib.rs": "674d388937e53c8c55c546c199897f559637c4a7df4324c76c86725840409be4",
+    "crates/kinewright-job-sys/src/media_boundary.rs": "249e45d03a5f79b6e7cccc58424303bb560646a7fad78ae0e0b33d64481108d8",
+    "crates/kinewright-job-sys/src/media_host.rs": "2d32ab30665e5039c5c72c9b3a877d9a83ca538779685bbcd33954b133f959d6",
+    "crates/kinewright-media-client/src/lib.rs": "5c9cec1af1bdbe85e4d5722d8968ba669734080a0187b4f446e9c69b70b78689",
+    "crates/kinewright-media-client/src/linux.rs": "4786ce95010aeb15e477fa7ca72aa00219c7b1020321dcf2b71251dcf4ac7661",
+    "crates/kinewright-media-client/src/linux/actor.rs": "a28bc54327c4f8ed47870cbf3672e288f2fb56ffa8816afe4914c82c72479ab8",
+    "crates/kinewright-media-client/src/linux/controller.rs": "14194a986b047f1dfd9a206c72b2c191ee1934b52163b50027df9fa34726074e",
+    "crates/kinewright-media-client/src/linux/worker.rs": "4fe7e02529338b28985d3b70a6eab9a8998f878d024c482fe9a6b72000bee044",
+    "crates/kinewright-media-client/tests/runtime_native.rs": "ff31039f28c64475f0223a826d30b709a762c7c206db357d44510cb9d3e6ad9a",
+    "crates/kinewright-media-client/tests/witness_native.rs": "704e4dd41a4e701102ee4cc1ef1f544f117c3b0e5bfe5c5bb136d161b0d81f2f",
+    "crates/kinewright-media-helper/src/bootstrap.rs": "8d466ff7ae1528b39301731526ad40b90c10905b93233c91f713891e42c1b856",
+    "crates/kinewright-media-helper/src/main.rs": "2bb7d1876f7aae7567464e686bee24708d54015fe38e5f87d878b084f6280c56",
+    "crates/kinewright-media-helper/src/probe.rs": "ca38d47b0bf7e17207f35f13163ea9a8c99659e606ef0d7db100eaeae8292d88",
+    "crates/kinewright-media-helper/src/witness.rs": "a836d1b4cdb48533ca6a1f7c3a1d6793290dabfd71946f42bcacdd4fc838db5e",
+    "crates/kinewright-media-helper/src/witness_main.rs": "9be08370f7b908d018f0cb37577e4771ba59e2d4695851217331c9c51cce2d77",
+    "crates/kinewright-media-helper/tests/probe_native.rs": "d4fb9b6bb04fbe3c215a3c84440d77e59b24792cdd3fef1f63963e0f465108a2",
+    "crates/kinewright-media-ipc/src/tests.rs": "e007526239175365ec796c975119c6847563f954470fb9a52b510c10aaf66a77",
+    "crates/kinewright-media-ipc/src/validate.rs": "20b84d1864b46043ae46e0a284b9fdcd2b4b332a65631e3a0c96eb77c69ca829",
+    "crates/kinewright-media-supervisor/src/service.rs": "a6001cb45669b7eff6beac886eb7928ab9c402f6298347d75bb8e2a32d6d447e"
+  }
+}

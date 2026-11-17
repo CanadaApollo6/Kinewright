@@ -17,6 +17,7 @@ pub fn probe(
     selection: [Option<u32>; 2],
     budget: u64,
     cancel: Arc<AtomicBool>,
+    mut decoder_checkpoint: impl FnMut(),
 ) -> Result<ProbeResult, Error> {
     let mut input = Input::open(file, length, budget, cancel)?;
     let original: Vec<_> = input
@@ -132,6 +133,7 @@ pub fn probe(
                 decoder
                     .send_packet(&packet)
                     .map_err(|_| Error::UnsupportedMedia)?;
+                decoder_checkpoint();
             } else {
                 decoder.send_eof().map_err(|_| Error::UnsupportedMedia)?;
                 eof = true;
@@ -212,7 +214,14 @@ mod tests {
         let cancelled = case == "cancelled";
         let cancel = Arc::new(AtomicBool::new(cancelled));
         boundary::install_filter(Mode::Degraded).unwrap();
-        let result = probe(source, length, [None, None], 2 * 1024 * 1024 * 1024, cancel);
+        let result = probe(
+            source,
+            length,
+            [None, None],
+            2 * 1024 * 1024 * 1024,
+            cancel,
+            || {},
+        );
         if cancelled {
             assert!(matches!(result, Err(Error::Cancelled)));
         } else {

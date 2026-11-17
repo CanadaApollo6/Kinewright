@@ -24,3 +24,7 @@ pub mod media_boundary;
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 pub mod media_scope;
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+pub mod media_host;

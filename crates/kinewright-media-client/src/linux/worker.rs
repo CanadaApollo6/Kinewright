@@ -1,0 +1,501 @@
+//! One pipe owner per probe. Its guard retains cleanup across caller/worker loss.
+use super::{CANCEL_GRACE, Failure, INITIAL_DEADLINE, Limits, Outcome, controller::Handle};
+use kinewright_job_sys::{
+    Cgroup, ProcessHandle,
+    media_boundary::{self, Mode},
+    media_host, media_scope,
+};
+use kinewright_media_ipc::{Frame, MediaSandboxError as Error, Message, ProbeSession, write_frame};
+use std::{
+    fs::{self, File},
+    io::{self, Read, Write},
+    os::{
+        fd::{AsFd, BorrowedFd},
+        unix::fs::DirBuilderExt,
+    },
+    path::{Path, PathBuf},
+    process::Child,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    },
+    thread::JoinHandle,
+    time::{Duration, Instant},
+};
+
+#[derive(Default)]
+pub(super) struct Shared {
+    pub cancel: AtomicBool,
+    pub payload: AtomicU32,
+    pub payload_start: AtomicU64,
+    pub ready: AtomicBool,
+    #[cfg(feature = "slow-tests")]
+    pub incomplete_reply: AtomicBool,
+    #[cfg(feature = "slow-tests")]
+    pub contained: AtomicBool,
+}
+pub(super) struct Running {
+    pub pin: Arc<ProcessHandle>,
+    pub shared: Arc<Shared>,
+    pub thread: JoinHandle<Done>,
+}
+pub(super) struct Done {
+    pub result: Outcome,
+    pub fallback: bool,
+}
+pub(super) struct Launch<'a> {
+    pub helper: &'a Path,
+    pub limits: Limits,
+    pub mode: Mode,
+    pub controller: Handle,
+    pub generation: u64,
+    pub selected: [Option<u32>; 2],
+    pub source: &'a File,
+    pub spawner: Option<BorrowedFd<'a>>,
+}
+struct Root(PathBuf);
+impl Drop for Root {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.0);
+    }
+}
+struct Lease {
+    child: Child,
+    pin: Arc<ProcessHandle>,
+    controller: Handle,
+    scope: Option<u32>,
+    group: Option<Cgroup>,
+    _lifetime: File,
+    _root: Root,
+    complete: bool,
+    reaped: bool,
+}
+
+pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
+    use rustix::pipe::{PipeFlags, pipe_with};
+    media_host::readonly_source(launch.source)?;
+    let root = Root(std::env::temp_dir().join(format!(
+        "kinewright-media-{}-{}",
+        std::process::id(),
+        launch.generation
+    )));
+    fs::DirBuilder::new().mode(0o700).create(&root.0)?;
+    let (command_read, command_write) = pipe_with(PipeFlags::CLOEXEC)?;
+    let (response_read, response_write) = pipe_with(PipeFlags::CLOEXEC)?;
+    let (lifetime_read, lifetime_write) = pipe_with(PipeFlags::CLOEXEC)?;
+    let (release_read, release_write) = pipe_with(PipeFlags::CLOEXEC)?;
+    let source = launch.source.try_clone()?;
+    let child = media_host::spawn_helper(
+        launch.helper,
+        &root.0,
+        launch.mode,
+        launch.limits.address_space,
+        [
+            command_read.as_fd(),
+            response_write.as_fd(),
+            lifetime_read.as_fd(),
+            source.as_fd(),
+            release_read.as_fd(),
+        ],
+        launch.spawner,
+    )?;
+    drop((command_read, response_write, lifetime_read, release_read));
+    let pin = match ProcessHandle::open(child.id()) {
+        Ok(pin) => Arc::new(pin),
+        Err(error) => {
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    // Actor signalling and worker cleanup share the same pinned identity. Neither
+    // resolves a numeric PID to signal it after this point.
+    let observed_pin = Arc::clone(&pin);
+    let shared = Arc::new(Shared::default());
+    let observed_shared = Arc::clone(&shared);
+    let mut lease = Lease {
+        child,
+        pin,
+        controller: launch.controller,
+        scope: None,
+        group: None,
+        _lifetime: File::from(lifetime_write),
+        _root: root,
+        complete: false,
+        reaped: false,
+    };
+    let generation = launch.generation;
+    let selected = launch.selected;
+    let limits = launch.limits;
+    let mode = launch.mode;
+    let thread = std::thread::Builder::new()
+        .name("media-probe-io".into())
+        .spawn(move || {
+            let end = Instant::now() + INITIAL_DEADLINE + CANCEL_GRACE;
+            let mut command = File::from(command_write);
+            let mut response = File::from(response_read);
+            let mut release = File::from(release_write);
+            let mut fallback = false;
+            let mut protocol = Protocol {
+                command: &mut command,
+                response: &mut response,
+                shared: &shared,
+                end,
+                generation,
+                cancelled: false,
+                traffic: ProbeSession::new(1, generation, selected),
+            };
+            let result = lease.probe(
+                &Settings {
+                    mode,
+                    limits,
+                    selected,
+                },
+                &source,
+                &mut release,
+                &mut protocol,
+                &mut fallback,
+            );
+            let successful_protocol = result.is_ok();
+            let status = lease.cleanup(!successful_protocol, end);
+            let result = if successful_protocol && !status {
+                Err(Failure::Sandbox(Error::Crashed))
+            } else {
+                result
+            };
+            Done { result, fallback }
+        })?;
+    Ok(Running {
+        pin: observed_pin,
+        shared: observed_shared,
+        thread,
+    })
+}
+impl Lease {
+    fn owned_group(&mut self) -> io::Result<()> {
+        let Some(scope) = self.scope else {
+            return Ok(());
+        };
+        let group = media_scope::membership(self.pin.pid())?;
+        let name = format!(
+            "kinewright-media-{}-{}-{}-{}-{scope}.scope",
+            std::process::id(),
+            self.controller.pin.pid(),
+            self.controller.pin.start(),
+            self.controller.generation
+        );
+        if group.file_name().and_then(|part| part.to_str()) == Some(name.as_str()) {
+            media_scope::outside(std::process::id(), &group)?;
+            if media_scope::membership(self.controller.pin.pid())?.starts_with(&group) {
+                return Err(io::Error::other("supervisor entered helper scope"));
+            }
+            self.group = Some(Cgroup::open(&group)?);
+        }
+        Ok(())
+    }
+    fn join_scope(&mut self, limits: Limits, fallback: &mut bool) -> Result<(), Failure> {
+        let bad = || Failure::Sandbox(Error::ProtocolViolation);
+        match self
+            .controller
+            .call(Message::CreateScope {
+                pid: self.pin.pid(),
+                memory_bytes: limits.private_memory,
+            })
+            .map_err(Failure::Sandbox)?
+        {
+            Message::ScopeCreated { scope } => self.scope = Some(scope),
+            Message::ScopeCreateFailed { scope, .. } => {
+                self.scope = Some(scope);
+                let _ = self.owned_group();
+                *fallback = true;
+                return Err(Failure::Sandbox(Error::SandboxUnavailable));
+            }
+            Message::ScopeUnavailable { scope, .. } => {
+                self.scope = scope;
+                *fallback = true;
+                return Err(Failure::Sandbox(Error::SandboxUnavailable));
+            }
+            Message::Failed {
+                error: Error::SandboxUnavailable,
+            } => {
+                *fallback = true;
+                return Err(Failure::Sandbox(Error::SandboxUnavailable));
+            }
+            Message::Failed { error } => return Err(Failure::Sandbox(error)),
+            _ => return Err(bad()),
+        }
+        self.owned_group().map_err(|_| bad())?;
+        let scope = self.scope.ok_or_else(bad)?;
+        match self
+            .controller
+            .call(Message::VerifyScope { scope })
+            .map_err(Failure::Sandbox)?
+        {
+            Message::ScopeVerified {
+                scope: actual,
+                starttime,
+            } if actual == scope && starttime == self.pin.start() => {}
+            Message::ScopeUnavailable { .. }
+            | Message::Failed {
+                error: Error::SandboxUnavailable,
+            } => {
+                *fallback = true;
+                return Err(Failure::Sandbox(Error::SandboxUnavailable));
+            }
+            Message::Failed { error } => return Err(Failure::Sandbox(error)),
+            _ => return Err(bad()),
+        }
+        self.owned_group().map_err(|_| bad())?;
+        let group = self.group.as_ref().ok_or_else(bad)?;
+        media_scope::verify_controls(group, limits.private_memory).map_err(|_| bad())?;
+        let members = group.members().map_err(|_| bad())?;
+        if members.len() != 1
+            || members[0].pid() != self.pin.pid()
+            || members[0].start() != self.pin.start()
+        {
+            return Err(bad());
+        }
+        Ok(())
+    }
+    fn probe(
+        &mut self,
+        settings: &Settings,
+        source: &File,
+        release: &mut File,
+        protocol: &mut Protocol<'_>,
+        fallback: &mut bool,
+    ) -> Outcome {
+        let generation = protocol.generation;
+        let bad = || Failure::Sandbox(Error::ProtocolViolation);
+        if settings.mode == Mode::Scope {
+            self.join_scope(settings.limits, fallback)?;
+        }
+        #[cfg(feature = "slow-tests")]
+        protocol.shared.contained.store(true, Ordering::Release);
+        release
+            .write_all(&[1])
+            .map_err(|_| Failure::Sandbox(Error::Crashed))?;
+        let forked = protocol.receive()?;
+        if (forked.request, forked.generation) != (1, 1) {
+            return Err(bad());
+        }
+        let Message::Forked { pid } = forked.message else {
+            return Err(bad());
+        };
+        let payload = media_scope::child(self.pin.pid(), pid).map_err(|_| bad())?;
+        protocol
+            .shared
+            .payload_start
+            .store(payload.start(), Ordering::Relaxed);
+        protocol.shared.payload.store(pid, Ordering::Release);
+        protocol.send(Message::EnterBoundary {})?;
+        let boundary = protocol.receive()?;
+        if boundary.request != 1
+            || boundary.generation != generation
+            || !matches!(boundary.message, Message::Boundary { .. })
+        {
+            return Err(bad());
+        }
+        let observation = media_host::observe_boundary(&self.pin, &payload, source)
+            .map_err(|_| Failure::Sandbox(Error::SandboxUnavailable))?;
+        for property in &observation.unobservable {
+            eprintln!("MS2_BOUNDARY_UNOBSERVABLE {property}");
+        }
+        if let Some(group) = &self.group
+            && media_scope::membership(pid).map_err(|_| bad())? != group.path()
+        {
+            return Err(bad());
+        }
+        protocol.send(Message::ConfirmBoundary {})?;
+        let ready = protocol.receive()?;
+        protocol.traffic.accept(ready).map_err(Failure::Sandbox)?;
+        protocol.shared.ready.store(true, Ordering::Release);
+        protocol.send(Message::Probe {
+            video: settings.selected[0],
+            audio: settings.selected[1],
+        })?;
+        let result_frame = protocol.receive()?;
+        let result = protocol
+            .traffic
+            .accept(result_frame)
+            .map_err(Failure::Sandbox)?;
+        let result = result.ok_or_else(bad)?;
+        #[cfg(feature = "slow-tests")]
+        protocol
+            .shared
+            .incomplete_reply
+            .store(true, Ordering::Release);
+        let complete = protocol.receive()?;
+        if !matches!(complete.message, Message::Complete {}) {
+            return Err(bad());
+        }
+        protocol
+            .traffic
+            .accept(complete)
+            .map_err(Failure::Sandbox)?;
+        protocol.close()?;
+        // observation (including the retained smaps fd) stays live through the
+        // whole native probe; measurement capture is added before limit selection.
+        drop(observation);
+        Ok(result)
+    }
+    fn cleanup(&mut self, force: bool, end: Instant) -> bool {
+        if force {
+            let _ = self.pin.kill();
+        }
+        while !media_host::exited(&self.pin).unwrap_or(false) {
+            if Instant::now() >= end {
+                let _ = self.pin.kill();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        loop {
+            if let Ok(members) = media_host::session_members(&self.pin) {
+                for process in &members {
+                    let _ = process.kill();
+                }
+                let clean = members
+                    .iter()
+                    .all(|process| media_host::reap_adopted(process).unwrap_or(false));
+                if clean {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut success = false;
+        while !self.reaped {
+            match self.child.wait() {
+                Ok(status) => {
+                    self.reaped = true;
+                    success = status.success();
+                }
+                Err(_) if self.pin.reaped().unwrap_or(false) => {
+                    self.reaped = true;
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        if let Some(group) = self.group.as_mut() {
+            while !group.empty().unwrap_or(false) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        if let Some(scope) = self.scope {
+            loop {
+                match self.controller.call(Message::StopScope { scope }) {
+                    Ok(Message::ScopeStopped { scope: actual }) if actual == scope => break,
+                    _ if media_host::exited(&self.controller.pin).unwrap_or(false) => break,
+                    _ => std::thread::sleep(Duration::from_millis(100)),
+                }
+            }
+        }
+        self.complete = self.reaped;
+        success
+    }
+}
+impl Drop for Lease {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.cleanup(true, Instant::now());
+        }
+    }
+}
+fn send(writer: &mut File, generation: u64, message: Message) -> Result<(), Failure> {
+    write_frame(
+        writer,
+        &Frame {
+            request: 1,
+            generation,
+            message,
+        },
+    )
+    .map_err(|_| Failure::Sandbox(Error::Crashed))
+}
+struct Interruptible<'a> {
+    file: &'a mut File,
+    command: &'a mut File,
+    shared: &'a Shared,
+    end: Instant,
+    generation: u64,
+    cancelled: &'a mut bool,
+}
+impl Read for Interruptible<'_> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        loop {
+            if Instant::now() >= self.end {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "probe deadline"));
+            }
+            if self.shared.cancel.load(Ordering::Acquire) && !*self.cancelled {
+                send(self.command, self.generation, Message::Cancel {})
+                    .map_err(io::Error::other)?;
+                *self.cancelled = true;
+            }
+            match media_boundary::wait_readable(self.file.as_fd(), Duration::from_millis(100)) {
+                Ok(()) => return self.file.read(output),
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+struct Settings {
+    mode: Mode,
+    limits: Limits,
+    selected: [Option<u32>; 2],
+}
+struct Protocol<'a> {
+    response: &'a mut File,
+    command: &'a mut File,
+    shared: &'a Shared,
+    end: Instant,
+    generation: u64,
+    cancelled: bool,
+    traffic: ProbeSession,
+}
+impl Protocol<'_> {
+    fn send(&mut self, message: Message) -> Result<(), Failure> {
+        send(self.command, self.generation, message)
+    }
+    fn receive(&mut self) -> Result<Frame, Failure> {
+        let mut reader = Interruptible {
+            file: self.response,
+            command: self.command,
+            shared: self.shared,
+            end: self.end,
+            generation: self.generation,
+            cancelled: &mut self.cancelled,
+        };
+        self.traffic
+            .read(&mut reader, Instant::now())
+            .map_err(|error| {
+                Failure::Sandbox(match error.kind() {
+                    io::ErrorKind::InvalidData => Error::ProtocolViolation,
+                    io::ErrorKind::TimedOut => Error::TimedOut,
+                    _ if !self.shared.ready.load(Ordering::Acquire) => Error::SandboxUnavailable,
+                    _ => Error::Crashed,
+                })
+            })
+    }
+    fn close(&mut self) -> Result<(), Failure> {
+        self.send(Message::Close {})?;
+        let mut extra = [0];
+        let mut reader = Interruptible {
+            file: self.response,
+            command: self.command,
+            shared: self.shared,
+            end: self.end,
+            generation: self.generation,
+            cancelled: &mut self.cancelled,
+        };
+        if reader
+            .read(&mut extra)
+            .map_err(|_| Failure::Sandbox(Error::Crashed))?
+            != 0
+        {
+            return Err(Failure::Sandbox(Error::ProtocolViolation));
+        }
+        Ok(())
+    }
+}

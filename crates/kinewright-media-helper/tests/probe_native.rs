@@ -176,7 +176,7 @@ fn run(directory: &Directory, source: &Path) -> Result<ProbeResult, MediaSandbox
     assert!(matches!(boundary.message, Message::Boundary { .. }));
     inspect_boundary(pid);
     send(&mut command, Message::ConfirmBoundary {});
-    let mut session = ProbeSession::new(1, 1);
+    let mut session = ProbeSession::new(1, 1, [None, None]);
     assert!(
         session
             .accept(read_frame(&mut response).unwrap())

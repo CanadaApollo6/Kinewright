@@ -79,6 +79,30 @@ fn watchdog(command: Arc<MediaFile>, request_id: u32, generation: u64) -> io::Re
 
 pub fn run() -> io::Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    #[cfg(feature = "slow-tests")]
+    let witness = crate::witness::Witness::Off;
+    #[cfg(feature = "slow-tests")]
+    let (args, witness) = if crate::WITNESS_EXECUTABLE {
+        let mut args = args;
+        let stage = args
+            .pop()
+            .ok_or_else(|| io::Error::other("witness stage"))?;
+        let witness = crate::witness::Witness::parse(&stage)?;
+        (args, witness)
+    } else {
+        (args, witness)
+    };
+    run_inner(
+        &args,
+        #[cfg(feature = "slow-tests")]
+        witness,
+    )
+}
+
+fn run_inner(
+    args: &[String],
+    #[cfg(feature = "slow-tests")] witness: crate::witness::Witness,
+) -> io::Result<()> {
     if args.len() != 4 {
         return Err(io::Error::other("media bootstrap arguments"));
     }
@@ -97,6 +121,8 @@ pub fn run() -> io::Result<()> {
     // SAFETY: fd 8, when present, is the sole optional inherited thread pidfd;
     // the helper has not opened files or created another owner for that descriptor.
     let spawner = unsafe { boundary::inherited_spawner() };
+    #[cfg(feature = "slow-tests")]
+    witness.before_shim_arm(app_pid, spawner.as_ref())?;
     boundary::arm_parent_death(app_pid, spawner.as_ref())?;
     boundary::new_session()?;
     let mut release = inherited(7);
@@ -118,12 +144,25 @@ pub fn run() -> io::Result<()> {
         let status = kinewright_job_sys::wait_payload_init(pid)?;
         std::process::exit(status);
     }
+    #[cfg(feature = "slow-tests")]
+    witness.before_arm(&parent)?;
     boundary::arm_parent_death(0, Some(&parent))?;
     drop(parent);
-    payload(&root, mode, budget)
+    payload(
+        &root,
+        mode,
+        budget,
+        #[cfg(feature = "slow-tests")]
+        witness,
+    )
 }
 
-fn payload(root: &std::path::Path, mode: Mode, budget: u64) -> io::Result<()> {
+fn payload(
+    root: &std::path::Path,
+    mode: Mode,
+    budget: u64,
+    #[cfg(feature = "slow-tests")] witness: crate::witness::Witness,
+) -> io::Result<()> {
     let command = Arc::new(inherited(boundary::COMMAND));
     let mut reader = command.as_ref();
     let mut response = inherited(boundary::RESPONSE);
@@ -135,25 +174,17 @@ fn payload(root: &std::path::Path, mode: Mode, budget: u64) -> io::Result<()> {
     })?;
     // No source reads or parser calls have occurred before resource join and
     // namespace setup. Prime runtime CPU detection before the filesystem disappears.
-    ffmpeg_next::init().map_err(io::Error::other)?;
-    ffmpeg_next::log::set_level(ffmpeg_next::log::Level::Quiet);
-    // SAFETY: CPU feature/count queries read runtime configuration only. The
-    // process-global native allocation ceiling is initialized before any parser.
-    unsafe {
-        ffmpeg_next::ffi::av_get_cpu_flags();
-        ffmpeg_next::ffi::av_cpu_count();
-        ffmpeg_next::ffi::av_max_alloc(
-            usize::try_from((budget / 2).min(256 * 1024 * 1024)).map_err(io::Error::other)?,
-        );
-    }
-    if std::fs::read_dir("/proc/self/task")?.count() != 1 {
-        return Err(io::Error::other("media runtime created bootstrap threads"));
-    }
+    prime_runtime(budget)?;
     boundary::close_inventory()?;
     boundary::empty_root(root)?;
     boundary::limits(budget)?;
     let landlock = boundary::landlock();
-    let control = watchdog(Arc::clone(&command), start.request, start.generation)?;
+    let control = control(
+        Arc::clone(&command),
+        &start,
+        #[cfg(feature = "slow-tests")]
+        witness,
+    )?;
     boundary::install_filter(mode)?;
     send(
         &mut response,
@@ -161,6 +192,8 @@ fn payload(root: &std::path::Path, mode: Mode, budget: u64) -> io::Result<()> {
         start.generation,
         Message::Boundary { landlock },
     )?;
+    #[cfg(feature = "slow-tests")]
+    witness.before_ready();
     let confirmation = expect(&mut reader, |message| {
         matches!(message, Message::ConfirmBoundary {})
     })?;
@@ -189,6 +222,10 @@ fn payload(root: &std::path::Path, mode: Mode, budget: u64) -> io::Result<()> {
         [video, audio],
         budget,
         Arc::clone(&control.cancel),
+        || {
+            #[cfg(feature = "slow-tests")]
+            witness.decoder_checkpoint(&mut response, request.request, request.generation);
+        },
     ) {
         Ok(result) => {
             send(
@@ -224,6 +261,41 @@ fn payload(root: &std::path::Path, mode: Mode, budget: u64) -> io::Result<()> {
     // fatal, and host wall deadlines retain non-cooperative cleanup authority.
     while !control.cancel.load(Ordering::Acquire) {
         std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    Ok(())
+}
+
+fn control(
+    command: Arc<MediaFile>,
+    start: &Frame,
+    #[cfg(feature = "slow-tests")] witness: crate::witness::Witness,
+) -> io::Result<Control> {
+    #[cfg(feature = "slow-tests")]
+    if witness != crate::witness::Witness::Off {
+        // Only the distinct witness executable can choose a mode without the
+        // cooperative monitor. Production always starts the trusted watchdog.
+        return Ok(Control {
+            active: Arc::new(AtomicBool::new(false)),
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+    }
+    watchdog(command, start.request, start.generation)
+}
+
+fn prime_runtime(budget: u64) -> io::Result<()> {
+    ffmpeg_next::init().map_err(io::Error::other)?;
+    ffmpeg_next::log::set_level(ffmpeg_next::log::Level::Quiet);
+    // SAFETY: CPU feature/count queries read runtime configuration only. The
+    // process-global native allocation ceiling is initialized before any parser.
+    unsafe {
+        ffmpeg_next::ffi::av_get_cpu_flags();
+        ffmpeg_next::ffi::av_cpu_count();
+        ffmpeg_next::ffi::av_max_alloc(
+            usize::try_from((budget / 2).min(256 * 1024 * 1024)).map_err(io::Error::other)?,
+        );
+    }
+    if std::fs::read_dir("/proc/self/task")?.count() != 1 {
+        return Err(io::Error::other("media runtime created bootstrap threads"));
     }
     Ok(())
 }

@@ -323,6 +323,14 @@ pub unsafe fn inherit_media_fds(
                 }
                 libc::close(fd);
             }
+            // Absence is explicit, even if an unrelated non-CLOEXEC parent fd
+            // occupied the optional thread-pidfd slot before the remapping.
+            if spawner.is_none() && libc::close(8) < 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::EBADF) {
+                    return Err(error);
+                }
+            }
             Ok(())
         });
     }

@@ -388,6 +388,8 @@ jobs:
           set -euo pipefail
           source ./scripts/setup-ffmpeg.sh
           set -euo pipefail
+          cargo build -p kinewright-media-helper --features slow-tests --bins || exit 1
+          cargo build -p kinewright-media-supervisor --bins || exit 1
           # Runs exactly the tests in ci/slow-tests.txt with every crate's
           # `slow-tests` feature on, and fails unless all of them ran and passed.
           python3 scripts/slow_tests.py slow || exit 1

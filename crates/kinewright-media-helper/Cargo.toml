@@ -6,6 +6,16 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "kinewright-media-helper"
+path = "src/main.rs"
+
+[[bin]]
+name = "kinewright-media-helper-witness"
+path = "src/witness_main.rs"
+required-features = ["slow-tests"]
+test = false
+
 [features]
 slow-tests = []
 

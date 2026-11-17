@@ -2409,6 +2409,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kinewright-media-client"
+version = "0.1.0"
+dependencies = [
+ "kinewright-core",
+ "kinewright-job-sys",
+ "kinewright-media-ipc",
+ "rustix 1.1.4",
+]
+
+[[package]]
 name = "kinewright-media-helper"
 version = "0.1.0"
 dependencies = [

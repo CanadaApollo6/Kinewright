@@ -1,0 +1,23 @@
+[package]
+name = "kinewright-media-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+slow-tests = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+kinewright-core = { path = "../kinewright-core" }
+kinewright-media-ipc = { path = "../kinewright-media-ipc" }
+kinewright-job-sys.workspace = true
+rustix = { version = "=1.1.4", features = ["pipe", "event", "thread", "process", "fs"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+assert_is_empty = "allow"

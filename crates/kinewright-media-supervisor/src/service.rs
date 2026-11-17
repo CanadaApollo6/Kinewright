@@ -271,7 +271,7 @@ impl Service {
             },
         )?;
         let mut last = 1;
-        let mut traffic = ProbeSession::new(1, self.generation);
+        let mut traffic = ProbeSession::new(1, self.generation, [None, None]);
         loop {
             // Charge framing before allocation; lifecycle sequencing is separate
             // from the probe state machine and never accepts media commands.

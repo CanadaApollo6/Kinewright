@@ -60,12 +60,16 @@ fn strict_json_including_nested_and_escaped_duplicate_keys() {
 #[test]
 fn state_rejects_stale_out_of_order_and_flooded_traffic() {
     let frame = || read_frame(&mut &encoded(Message::Ready {})[..]).unwrap();
-    let mut session = ProbeSession::new(1, 2);
+    let mut session = ProbeSession::new(1, 2, [None, None]);
     assert!(session.accept(frame()).unwrap().is_none());
     assert!(session.accept(frame()).is_err());
-    assert!(ProbeSession::new(1, 3).accept(frame()).is_err());
     assert!(
-        ProbeSession::new(1, 2)
+        ProbeSession::new(1, 3, [None, None])
+            .accept(frame())
+            .is_err()
+    );
+    assert!(
+        ProbeSession::new(1, 2, [None, None])
             .accept(Frame {
                 request: 1,
                 generation: 2,
@@ -74,7 +78,7 @@ fn state_rejects_stale_out_of_order_and_flooded_traffic() {
             .is_err()
     );
     let now = std::time::Instant::now();
-    let mut session = ProbeSession::new(1, 2);
+    let mut session = ProbeSession::new(1, 2, [None, None]);
     for _ in 0..256 {
         session.charge(40, now).unwrap();
     }
@@ -212,5 +216,54 @@ fn framing_caps_decoded_text_before_metadata_can_be_consumed() {
             result: Box::new(result),
         });
         assert_eq!(read_frame(&mut bytes.as_slice()).is_ok(), accepted);
+    }
+}
+
+#[test]
+fn explicit_stream_selection_cannot_be_replaced_or_widened() {
+    let alternative_video = || {
+        let mut result = probe();
+        let mut alternative = result.streams[0].clone();
+        alternative.index = 1;
+        result.streams.push(alternative);
+        result.video_stream = Some(1);
+        result
+    };
+    let with_audio = || {
+        let mut result = probe();
+        result.streams.push(Stream {
+            index: 1,
+            kind: StreamKind::Audio,
+            time_base: [1, 48_000],
+            timestamp_origin: 0,
+            duration: 48_000,
+            average_frame_rate: [0, 0],
+        });
+        result.kind = Kind::AudioVideo;
+        result.audio_stream = Some(1);
+        result
+    };
+    for (requested, result, accepted) in [
+        ([Some(0), None], alternative_video(), false),
+        ([Some(0), None], with_audio(), false),
+        ([None, Some(1)], with_audio(), false),
+        ([Some(1), None], alternative_video(), true),
+        ([Some(0), Some(1)], with_audio(), true),
+        ([None, None], alternative_video(), true),
+    ] {
+        let mut bytes = encoded(Message::Ready {});
+        bytes.extend(encoded(Message::ProbeResult {
+            result: Box::new(result),
+        }));
+        let mut input = bytes.as_slice();
+        let mut session = ProbeSession::new(1, 2, requested);
+        let ready = session.read(&mut input, std::time::Instant::now()).unwrap();
+        session.accept(ready).unwrap();
+        let reply = session.read(&mut input, std::time::Instant::now()).unwrap();
+        assert_eq!(
+            session.accept(reply).is_ok(),
+            accepted,
+            "request {requested:?}"
+        );
     }
 }

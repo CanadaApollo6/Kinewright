@@ -191,3 +191,9 @@ kinewright_job_sys media_boundary::tests::all_other_madvise_values_and_high_bits
 scope_native native_scope_limits_join_before_release_and_supervisor_stays_outside crates/kinewright-media-supervisor/tests/scope_native.rs linux-only # MS2 native user-manager availability counted explicitly
 scope_native native_scope_records_are_bounded_and_self_or_stale_requests_are_refused crates/kinewright-media-supervisor/tests/scope_native.rs linux-only # MS2 native user-manager availability counted explicitly
 scope_native native_socket_eof_stops_scope_and_waits_for_empty crates/kinewright-media-supervisor/tests/scope_native.rs linux-only # MS2 socket loss retains cleanup until native emptiness
+runtime_native runtime_png_automatic_admission_closes_and_cleans crates/kinewright-media-client/tests/runtime_native.rs linux-only # MS2 real spawner/probe native cleanup
+runtime_native runtime_png_degraded_admission_closes_and_cleans crates/kinewright-media-client/tests/runtime_native.rs linux-only # MS2 no-manager real spawner/probe native cleanup
+witness_native watchdog_disabled_primary_app_and_supervisor_loss crates/kinewright-media-client/tests/witness_native.rs linux-only
+witness_native watchdog_disabled_degraded_app_and_supervisor_loss crates/kinewright-media-client/tests/witness_native.rs linux-only
+witness_native watchdog_disabled_spawner_abort_and_payload_prearm_race crates/kinewright-media-client/tests/witness_native.rs linux-only
+witness_native cancellation_deadline_and_revocation_discard_partial_results crates/kinewright-media-client/tests/witness_native.rs linux-only

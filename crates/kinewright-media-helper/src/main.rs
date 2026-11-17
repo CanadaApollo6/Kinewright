@@ -10,6 +10,12 @@ mod probe;
 #[cfg(target_os = "linux")]
 mod still;
 
+#[cfg(all(target_os = "linux", feature = "slow-tests"))]
+mod witness;
+
+#[cfg(all(target_os = "linux", feature = "slow-tests"))]
+const WITNESS_EXECUTABLE: bool = false;
+
 fn main() {
     #[cfg(target_os = "linux")]
     if bootstrap::run().is_err() {
