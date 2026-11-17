@@ -56,7 +56,7 @@ pub fn verify_child(app: u32, process: &ProcessHandle) -> io::Result<()> {
         process,
         rustix::event::PollFlags::IN,
     )];
-    if rustix::event::poll(&mut fds, Some(&rustix::time::Timespec::default()))? != 0 {
+    if rustix::event::poll(&mut fds, Some(&rustix::event::Timespec::default()))? != 0 {
         return Err(invalid("scope pidfd exited"));
     }
     Ok(())

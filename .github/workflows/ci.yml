@@ -288,6 +288,8 @@ jobs:
           set -euo pipefail
           source ./scripts/setup-ffmpeg.sh
           set -euo pipefail
+          # Detect feature dependencies hidden by the supervisor workspace build.
+          cargo check -p kinewright-job-sys --all-targets || exit 1
           cargo build --workspace || exit 1
           readelf -d target/debug/kinewright-eval | grep -F '[libavcodec.so.62]' || exit 1
           # slow_tests.py runs `cargo test --workspace` (the slow tests are
