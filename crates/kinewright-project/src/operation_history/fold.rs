@@ -2,7 +2,7 @@
 //! change until Core and owner admission have both succeeded.
 use super::{CreationOrigin, Error, Lineage, Resource, Resources};
 use crate::bundle_records::{BatchId, BranchId, OccurrenceId};
-use kinewright_core::{Clip, ClipContent, ClipId, Document, Operation, OperationIdentityEffect};
+use kinewright_core::{Clip, ClipId, Document, Operation, OperationIdentityEffect};
 use serde::{Serialize, ser::SerializeMap};
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem::size_of;
@@ -275,9 +275,9 @@ impl ResourceIndex {
             out.contribute(r);
         }
         for clip in doc.tracks.iter().flat_map(|t| &t.clips) {
-            if matches!(clip.content, ClipContent::Title(_)) {
+            if let Some(resource) = Resources::clip_content(&clip.content) {
                 out.titles.insert(clip.id);
-                out.contribute(Resource::TitleFont);
+                out.contribute(resource);
             }
         }
         out.bytes = add(out.bytes, out.titles.len() as u64 * node::<ClipId, ()>())?;
@@ -817,8 +817,8 @@ impl ResourcePatch {
             .unwrap_or_else(|| state.titles.contains(&id));
         if old != new {
             self.delta(Resource::TitleFont, if new { 1 } else { -1 });
+            self.titles.insert(id, new);
         }
-        self.titles.insert(id, new);
     }
     fn apply(
         &mut self,
@@ -859,26 +859,10 @@ impl ResourcePatch {
                 Operation::RemoveLutAsset { lut_asset } => {
                     self.lut(state, lut_asset.0, None);
                 }
-                Operation::AddTitle { .. } => {
-                    for id in &effect.created {
-                        self.title(state, *id, true);
-                    }
-                }
-                Operation::AddTrack { track } => {
-                    for clip in &track.clips {
-                        if matches!(clip.content, ClipContent::Title(_)) {
-                            self.title(state, clip.id, true);
-                        }
-                    }
-                }
                 _ => {}
             }
-            for clip in &effect.split_results {
-                self.title(
-                    state,
-                    clip.id,
-                    matches!(clip.content, ClipContent::Title(_)),
-                );
+            for (id, content) in &effect.clip_contents {
+                self.title(state, *id, Resources::clip_content(content).is_some());
             }
         }
         Ok(())

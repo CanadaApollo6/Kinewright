@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[path = "session_model_store.rs"]
 mod storage;
-use storage::{MemoryStore, ModelStore};
+use storage::{MemoryStore, ModelStore, owned_resource};
 
 fn bounds() -> RoleBounds {
     RoleBounds {
@@ -77,6 +77,7 @@ fn message_id(message: &crate::operation_protocol::Message) -> u64 {
 struct Pending {
     message: crate::operation_protocol::Message,
     authority: u64,
+    resources: BTreeSet<Resource>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Root {
@@ -190,6 +191,13 @@ impl<S: ModelStore> Session<S> {
         let before = self.gui.identity().unwrap();
         match message.apply(&mut self.gui) {
             Ok(effects) => {
+                if !effects.folded.is_empty() {
+                    self.gui.fold.as_ref().unwrap().assert_matches(
+                        &self.gui.seeds,
+                        self.gui.history().baseline(),
+                        &self.gui.resources.baseline,
+                    );
+                }
                 self.coverage.folds += effects.folded.len();
                 self.coverage.approvals += usize::from(message.approval.is_some());
                 self.coverage.transitions += usize::from(message.transition.is_some());
@@ -200,6 +208,18 @@ impl<S: ModelStore> Session<S> {
                     Action::Close => self.coverage.closes += 1,
                 }
                 let id = message.id;
+                let resources = match &message.action {
+                    Action::Do { operations, .. } => Resources::payload(
+                        operations,
+                        &effects
+                            .applied
+                            .iter()
+                            .find(|command| command.key == effects.accepted)
+                            .unwrap()
+                            .identities,
+                    ),
+                    Action::Undo | Action::Redo | Action::Close => BTreeSet::new(),
+                };
                 let wire = message.into_wire(&self.gui_stream, effects.accepted);
                 assert!(
                     serde_json::to_vec(&wire).unwrap().len() as u64
@@ -211,6 +231,7 @@ impl<S: ModelStore> Session<S> {
                 self.pending.push_back(Pending {
                     message: wire,
                     authority: self.authority,
+                    resources,
                 });
             }
             Err(_) => assert_eq!(
@@ -257,6 +278,13 @@ impl<S: ModelStore> Session<S> {
                     .action
                     .apply(&message.context, &mut self.writer)
                     .expect("SHADOW_ACCEPTS_GUI_TRANSITION");
+                if !effects.folded.is_empty() {
+                    self.writer.fold.as_ref().unwrap().assert_matches(
+                        &self.writer.seeds,
+                        self.writer.history().baseline(),
+                        &self.writer.resources.baseline,
+                    );
+                }
                 assert_eq!(
                     &effects, &self.accepted[&id],
                     "SHADOW_ACCOUNTS_FOR_EACH_GUI_TRANSITION"
@@ -470,6 +498,7 @@ impl<S: ModelStore> Session<S> {
             .gui
             .resources()
             .values()
+            .filter(|resource| owned_resource(resource))
             .map(|r| self.store.resource(r))
             .collect::<Vec<_>>();
         references.extend(self.pending.iter().filter_map(|p| {
@@ -484,35 +513,42 @@ impl<S: ModelStore> Session<S> {
                 .iter()
                 .filter_map(|p| p.message.context.transition.as_ref().map(|a| a.id.clone())),
         );
-        for pending in &self.pending {
-            if let Action::Do { operations, .. } = &pending.message.action {
-                references.extend(
-                    Resources::payload(operations)
-                        .iter()
-                        .map(|r| self.store.resource(r)),
-                );
-            }
-        }
+        references.extend(
+            self.pending
+                .iter()
+                .flat_map(|pending| &pending.resources)
+                .filter(|resource| owned_resource(resource))
+                .map(|resource| self.store.resource(resource)),
+        );
         roots.extend(references);
         self.store.collect(&roots);
         for owner in [&self.gui, &self.writer] {
             let current = Resources::document(owner.history().document());
             for command in owner.history().redo().iter().flat_map(Step::commands) {
-                self.coverage.redo_payloads += Resources::payload(&command.operations)
+                self.coverage.redo_payloads += owner
+                    .origins
+                    .get(&command.id)
+                    .unwrap()
+                    .resources
                     .iter()
+                    .filter(|resource| owned_resource(resource))
                     .filter(|r| !current.contains(r))
                     .count();
             }
             for depth in 0..=owner.history().undo().len() + owner.history().redo().len() {
                 let boundary = owner.boundary(depth).unwrap();
                 for resource in &Resources::document(boundary.document()) {
-                    self.store.assert_exists(&self.store.resource(resource));
+                    if owned_resource(resource) {
+                        self.store.assert_exists(&self.store.resource(resource));
+                    }
                 }
             }
             // A payload can be reachable only by Redo, without appearing in
             // any current document. The union and all roots must survive GC.
             for resource in owner.resources().values() {
-                self.store.assert_exists(&self.store.resource(resource));
+                if owned_resource(resource) {
+                    self.store.assert_exists(&self.store.resource(resource));
+                }
             }
         }
         for checkpoint in &self.checkpoints {
@@ -628,6 +664,15 @@ mod stream;
 #[test]
 fn generated_sessions_preserve_acknowledgements_and_reachable_states() {
     stream::run::<MemoryStore>(8, 160);
+}
+#[test]
+fn generated_implicit_title_split_sessions_keep_font_through_collection_and_cold_open() {
+    stream::implicit_title_streams::<MemoryStore>();
+}
+#[test]
+#[cfg(target_os = "linux")]
+fn durable_implicit_title_split_sessions_keep_font_through_collection_and_cold_open() {
+    stream::implicit_title_streams::<storage::NativeStore>();
 }
 #[test]
 #[cfg_attr(

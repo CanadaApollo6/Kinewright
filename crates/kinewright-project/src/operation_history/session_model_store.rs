@@ -1,5 +1,17 @@
 use super::*;
 
+pub(super) fn owned_resource(resource: &Resource) -> bool {
+    match resource {
+        Resource::Media {
+            sha256: Some(_),
+            byte_len: Some(_),
+            ..
+        }
+        | Resource::Lut { .. }
+        | Resource::TitleFont => true,
+        Resource::Media { .. } => false,
+    }
+}
 pub(super) trait ModelStore: Default {
     fn save(&mut self, snapshot: &OwnerSnapshot) -> ObjectRef;
     fn load(&self, reference: &ObjectRef, pool: &HistoryPool) -> ValidatedOwnerSnapshot;
@@ -94,6 +106,7 @@ impl ModelStore for MemoryStore {
             .data
             .resources
             .iter()
+            .filter(|resource| owned_resource(resource))
             .map(|r| {
                 let object = self.resource(r);
                 self.assert_exists(&object);
@@ -215,14 +228,22 @@ impl ModelStore for NativeStore {
     fn save(&mut self, snapshot: &OwnerSnapshot) -> ObjectRef {
         let object = snapshot
             .persist(self.session.store_mut(), |r| {
-                Ok(Some(match r {
-                    Resource::Lut { sha256, byte_len } => ObjectRef {
+                Ok(match r {
+                    Resource::Lut { sha256, byte_len } => Some(ObjectRef {
                         sha256: sha256.clone(),
                         byte_length: *byte_len,
                         record_kind: RecordKind::OwnedLut,
-                    },
-                    _ => unreachable!("the durable stream uses LUT bindings"),
-                }))
+                    }),
+                    Resource::TitleFont => Some(reference(
+                        kinewright_core::title_font_bytes(),
+                        RecordKind::OwnedFont,
+                    )),
+                    Resource::Media { sha256: None, .. }
+                    | Resource::Media { byte_len: None, .. } => None,
+                    Resource::Media { .. } => {
+                        unreachable!("the title stream uses external media locators")
+                    }
+                })
             })
             .unwrap();
         let reference = object.reference.clone();

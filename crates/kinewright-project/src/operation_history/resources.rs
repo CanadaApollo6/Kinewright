@@ -28,6 +28,17 @@ pub struct Resources {
     pub(super) counts: BTreeMap<Resource, u64>,
 }
 impl Resources {
+    // Media and LUT bytes belong to their document asset tables. The embedded
+    // title font is the clip-local resource, including implicitly created clips.
+    pub(crate) fn clip_content(content: &ClipContent) -> Option<Resource> {
+        match content {
+            ClipContent::Title(_) => Some(Resource::TitleFont),
+            ClipContent::Media
+            | ClipContent::Freeze(_)
+            | ClipContent::Adjustment
+            | ClipContent::Solid(_) => None,
+        }
+    }
     #[must_use]
     pub fn document(document: &Document) -> BTreeSet<Resource> {
         super::owner::resource_document_scans(1);
@@ -40,18 +51,20 @@ impl Resources {
             sha256: a.sha256.clone(),
             byte_len: a.byte_len,
         }));
-        if document
-            .tracks
-            .iter()
-            .flat_map(|t| &t.clips)
-            .any(|c| matches!(c.content, ClipContent::Title(_)))
-        {
-            result.insert(Resource::TitleFont);
-        }
+        result.extend(
+            document
+                .tracks
+                .iter()
+                .flat_map(|track| &track.clips)
+                .filter_map(|clip| Self::clip_content(&clip.content)),
+        );
         result
     }
     #[must_use]
-    pub fn payload(operations: &[Operation]) -> BTreeSet<Resource> {
+    pub fn payload(
+        operations: &[Operation],
+        identities: &[kinewright_core::OperationIdentityEffect],
+    ) -> BTreeSet<Resource> {
         let mut result = BTreeSet::new();
         for operation in operations {
             match operation {
@@ -69,20 +82,15 @@ impl Resources {
                         byte_len: asset.byte_len,
                     });
                 }
-                Operation::AddTitle { .. } => {
-                    result.insert(Resource::TitleFont);
-                }
-                Operation::AddTrack { track }
-                    if track
-                        .clips
-                        .iter()
-                        .any(|c| matches!(c.content, ClipContent::Title(_))) =>
-                {
-                    result.insert(Resource::TitleFont);
-                }
                 _ => {}
             }
         }
+        result.extend(
+            identities
+                .iter()
+                .flat_map(|identity| &identity.clip_contents)
+                .filter_map(|(_, content)| Self::clip_content(content)),
+        );
         result
     }
     #[must_use]

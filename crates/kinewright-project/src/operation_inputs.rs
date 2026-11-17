@@ -10,7 +10,7 @@ use crate::{
     storage_budget::StorageReservation,
     store::{BundleRecord, ProjectStore},
 };
-use kinewright_core::{ClipContent, Operation};
+use kinewright_core::{MediaSourceFingerprint, Operation};
 
 pub struct ManualInputs {
     reference: ObjectRef,
@@ -175,6 +175,23 @@ impl ManualInputs {
         .iter()
         .any(|entry| entry.entry_id == "font:Inter")
     }
+    /// Whether these operations import bytes directly, so the command context
+    /// must carry this manifest. Clips that an edit creates implicitly (split
+    /// halves) reuse bytes the history already owns and import nothing. This
+    /// only classifies; admission stays in [`Self::check`], after the kernel.
+    pub(crate) fn imports(operations: &[Operation]) -> bool {
+        // As before this split: a hashed source names stored bytes.
+        let owned = |fingerprint: &MediaSourceFingerprint| fingerprint.content_sha256.is_some();
+        operations.iter().any(|operation| match operation {
+            Operation::AddAsset { asset } => owned(&asset.source_fingerprint),
+            Operation::RelinkAsset { candidate, .. } => owned(&candidate.fingerprint),
+            Operation::AddLutAsset { .. } | Operation::AddTitle { .. } => true,
+            Operation::AddTrack { track } => track.clips.iter().any(|clip| {
+                crate::operation_history::Resources::clip_content(&clip.content).is_some()
+            }),
+            _ => false,
+        })
+    }
     pub(crate) fn check(&self, operations: &[Operation]) -> Result<(), Error> {
         for operation in operations {
             let admitted = match operation {
@@ -219,10 +236,9 @@ impl ManualInputs {
                     }),
                 Operation::AddTitle { .. } => self.font(),
                 Operation::AddTrack { track }
-                    if track
-                        .clips
-                        .iter()
-                        .any(|clip| matches!(clip.content, ClipContent::Title(_))) =>
+                    if track.clips.iter().any(|clip| {
+                        crate::operation_history::Resources::clip_content(&clip.content).is_some()
+                    }) =>
                 {
                     self.font()
                 }

@@ -198,6 +198,131 @@ pub(super) fn run<S: ModelStore>(seeds: u64, length: u64) {
     run_range::<S>(1, seeds, length);
 }
 
+fn title_message<S: ModelStore>(
+    session: &mut Session<S>,
+    next: &mut u64,
+    operations: Vec<Operation>,
+    gesture: Option<String>,
+    context: &str,
+) {
+    let id = *next;
+    *next += 1;
+    session.send(Message {
+        id,
+        action: Action::Do {
+            operations,
+            gesture,
+        },
+        creation: origin(id + 2),
+        approval: None,
+        transition: None,
+    });
+    assert!(
+        session.accepted.contains_key(&id),
+        "IMPLICIT_TITLE_SESSION_ACCEPTED {context} id={id}"
+    );
+    session.drain(false, false);
+    session.assert_acknowledged();
+}
+
+pub(super) fn implicit_title_streams<S: ModelStore>() {
+    use crate::operation_history::resource_cases::{ImplicitEdit, session_operations, title_half};
+    let mut streams = 0;
+    for kind in ImplicitEdit::ALL {
+        for original in [false, true] {
+            for coalesced in [false, true] {
+                let context = format!("kind={kind:?} original={original} coalesced={coalesced}");
+                let mut store = S::default();
+                let font = store.blob(kinewright_core::title_font_bytes(), RecordKind::OwnedFont);
+                let mut session = Session::new(store);
+                let mut next = 0;
+                let (setup, insert) = session_operations(kind);
+                title_message(&mut session, &mut next, setup, None, &context);
+                for marker_id in 1..=4 {
+                    title_message(
+                        &mut session,
+                        &mut next,
+                        vec![marker(marker_id)],
+                        None,
+                        &context,
+                    );
+                }
+                let gesture = || coalesced.then(|| "implicit-title".to_owned());
+                title_message(&mut session, &mut next, vec![insert], gesture(), &context);
+                let removed = title_half(session.gui.history().document(), original);
+                title_message(
+                    &mut session,
+                    &mut next,
+                    vec![Operation::DeleteClip { clip: removed }],
+                    gesture(),
+                    &context,
+                );
+                for marker_id in 5..=10 {
+                    title_message(
+                        &mut session,
+                        &mut next,
+                        vec![marker(marker_id)],
+                        None,
+                        &context,
+                    );
+                }
+                assert!(
+                    session
+                        .gui
+                        .resources
+                        .baseline
+                        .contains(&Resource::TitleFont),
+                    "IMPLICIT_TITLE_SURVIVOR_KEEPS_FONT {context}"
+                );
+                session.save(false);
+                session.collect();
+                session.restart(false);
+                session.assert_equal();
+                session.store.assert_exists(&font);
+                session.save(true);
+                session.collect();
+                session.restart(false);
+                let remaining = session
+                    .gui
+                    .history()
+                    .document()
+                    .tracks
+                    .iter()
+                    .flat_map(|track| &track.clips)
+                    .find(|clip| matches!(clip.content, kinewright_core::ClipContent::Title(_)))
+                    .unwrap()
+                    .id;
+                title_message(
+                    &mut session,
+                    &mut next,
+                    vec![Operation::DeleteClip { clip: remaining }],
+                    None,
+                    &context,
+                );
+                for marker_id in 11..=16 {
+                    title_message(
+                        &mut session,
+                        &mut next,
+                        vec![marker(marker_id)],
+                        None,
+                        &context,
+                    );
+                }
+                session.checkpoints.clear();
+                session.collect();
+                session.restart(false);
+                session.store.assert_absent(&font);
+                assert!(
+                    !session.gui.resources().contains(&Resource::TitleFont),
+                    "IMPLICIT_TITLE_FONT_RETIRES_AFTER_LAST_REACHABLE_TITLE {context}"
+                );
+                streams += 1;
+            }
+        }
+    }
+    assert_eq!(streams, 12, "ALL_IMPLICIT_TITLE_SESSION_CLASSES_EXECUTED");
+}
+
 pub(super) fn run_range<S: ModelStore>(first: u64, last: u64, length: u64) {
     let started = std::time::Instant::now();
     let seeds = last - first + 1;

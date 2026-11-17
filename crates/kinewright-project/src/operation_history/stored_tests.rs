@@ -19,6 +19,116 @@ fn session(
     (temp, store)
 }
 
+#[test]
+fn implicit_title_split_folded_owner_record_reopens() {
+    let (_temp, mut session) = session("hx-implicit-title-fold");
+    let store = session.store_mut();
+    let font_bytes = kinewright_core::title_font_bytes();
+    let font = ObjectRef {
+        sha256: kinewright_media::sha256_bytes(font_bytes),
+        byte_length: font_bytes.len() as u64,
+        record_kind: RecordKind::OwnedFont,
+    };
+    let _font_pin = store.admit_blob(&mut &*font_bytes, &font, &[]).unwrap();
+    let (document, insert) = super::super::resource_cases::implicit_title_insert();
+    let pool = super::super::tests::story_pool();
+    let mut owner = OwnerHistory::measured(
+        &pool,
+        Role::Ordinary,
+        RetentionPolicy::Fold,
+        &origin(1),
+        kinewright_core::undo::RoleBounds {
+            step_cap: 1,
+            ..Role::Ordinary.bounds()
+        },
+        || Ok(document),
+    )
+    .unwrap();
+    for (at, operation) in [
+        insert,
+        Operation::DeleteClip {
+            clip: kinewright_core::ClipId(1),
+        },
+        Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: false,
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        owner
+            .execute(Command::Do(operation), origin(2 + at as u64), vec![], None)
+            .unwrap();
+    }
+    assert!(
+        owner.history().baseline().tracks[0]
+            .clips
+            .iter()
+            .any(|clip| matches!(clip.content, kinewright_core::ClipContent::Title(_))),
+        "IMPLICIT_TITLE_HALF_REMAINS_IN_BASELINE"
+    );
+    let snapshot = owner.capture().unwrap();
+    let saved = snapshot
+        .persist(store, |resource| match resource {
+            Resource::TitleFont => Ok(Some(font.clone())),
+            Resource::Media { sha256: None, .. } => Ok(None),
+            Resource::Media { .. } | Resource::Lut { .. } => Err(Error::MissingResource),
+        })
+        .unwrap();
+    StoredOwnerRecord::read(store, &saved.reference, &pool, Role::Ordinary)
+        .expect("FOLDED_IMPLICIT_TITLE_OWNER_REOPENS");
+}
+
+fn publication_refuses_undercount(prepared: bool) {
+    let (_temp, mut session) = session("hx-undercounted-baseline");
+    let store = session.store_mut();
+    let (document, _) = super::super::resource_cases::implicit_title_insert();
+    let pool = super::super::tests::story_pool();
+    let mut owner = OwnerHistory::new(
+        &pool,
+        Role::Ordinary,
+        RetentionPolicy::Fold,
+        &origin(1),
+        || Ok(document),
+    )
+    .unwrap();
+    let before = serde_json::to_vec(&store.manifest().unwrap()).unwrap();
+    let objects = store.usage().unwrap().objects;
+    let result = if prepared {
+        assert!(owner.resources.baseline.remove(&Resource::TitleFont));
+        owner.persist_prepared(store, owner.creation_sizing(), |_| Ok(None))
+    } else {
+        let mut snapshot = owner.capture().unwrap();
+        assert!(snapshot.data.resources.remove(&Resource::TitleFont));
+        snapshot.persist_checkpoint(store, |_| Ok(None))
+    };
+    assert!(
+        matches!(result, Err(Error::MissingResource)),
+        "PUBLICATION_REFUSES_UNDERCOUNTED_BASELINE prepared={prepared}"
+    );
+    assert_eq!(
+        store.usage().unwrap().objects,
+        objects,
+        "BASELINE_GUARD_PRECEDES_OBJECT_WRITES"
+    );
+    assert_eq!(
+        serde_json::to_vec(&store.manifest().unwrap()).unwrap(),
+        before,
+        "BASELINE_GUARD_LEAVES_PUBLISHED_GRAPH_UNCHANGED"
+    );
+}
+
+#[test]
+fn captured_publication_refuses_undercounted_baseline() {
+    publication_refuses_undercount(false);
+}
+
+#[test]
+fn prepared_publication_refuses_undercounted_baseline() {
+    publication_refuses_undercount(true);
+}
+
 fn stored_older_install(case: super::super::roundtrip_tests::InstallCase) {
     let (_temp, mut session) = session("hx-old-epoch-reopen");
     let store = session.store_mut();

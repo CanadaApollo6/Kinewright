@@ -109,6 +109,12 @@ fn assert_bound(document: &Document, bound: kinewright_core::undo::Charge, conte
 fn identities(document: &mut Document, operations: &[Operation]) -> Vec<OperationIdentityEffect> {
     let mut result = vec![];
     for operation in operations {
+        let old_contents: std::collections::BTreeMap<_, _> = document
+            .tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .map(|clip| (clip.id, std::mem::discriminant(&clip.content)))
+            .collect();
         let old: BTreeSet<_> = document
             .tracks
             .iter()
@@ -139,6 +145,15 @@ fn identities(document: &mut Document, operations: &[Operation]) -> Vec<Operatio
         result.push(OperationIdentityEffect {
             created: new.difference(&old).copied().collect(),
             deleted: old.difference(&new).copied().collect(),
+            clip_contents: document
+                .tracks
+                .iter()
+                .flat_map(|track| &track.clips)
+                .filter(|clip| {
+                    old_contents.get(&clip.id) != Some(&std::mem::discriminant(&clip.content))
+                })
+                .map(|clip| (clip.id, clip.content.clone()))
+                .collect(),
             split_parent: parent,
             split_results: children,
         });

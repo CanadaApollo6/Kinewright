@@ -810,7 +810,7 @@ impl OwnerSnapshot {
                     for reference in &origin.inputs {
                         reference.validate().map_err(|_| Error::InvalidOrigin)?;
                     }
-                    let payload = Resources::payload(&command.operations);
+                    let payload = Resources::payload(&command.operations, effects);
                     if payload.iter().any(|r| !recorded_resources.contains(r)) {
                         return Err(Error::MissingResource);
                     }

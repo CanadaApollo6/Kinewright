@@ -604,7 +604,7 @@ fn apply_batch_unpublished(
         Vec::new()
     };
     for (index, operation) in operations.iter().enumerate() {
-        let before = capture_identities.then(|| clip_identities(candidate));
+        let before = capture_identities.then(|| clip_identities(candidate, None).0);
         let split_parent =
             if let (true, Operation::SplitClip { clip, .. }) = (capture_identities, operation) {
                 candidate.clip(*clip).cloned()
@@ -631,17 +631,31 @@ fn apply_batch_unpublished(
     Ok(effects)
 }
 
-fn clip_identities(doc: &Document) -> std::collections::BTreeSet<ClipId> {
+type ClipIdentities = std::collections::BTreeMap<ClipId, std::mem::Discriminant<ClipContent>>;
+fn clip_identities(
+    doc: &Document,
+    before: Option<&ClipIdentities>,
+) -> (ClipIdentities, Vec<(ClipId, ClipContent)>) {
     #[cfg(feature = "history-metrics")]
     crate::undo::metrics::identity();
-    doc.tracks
+    let mut contents = Vec::new();
+    let identities = doc
+        .tracks
         .iter()
-        .flat_map(|t| t.clips.iter().map(|c| c.id))
-        .collect()
+        .flat_map(|track| &track.clips)
+        .map(|clip| {
+            let kind = std::mem::discriminant(&clip.content);
+            if before.is_some_and(|old| old.get(&clip.id) != Some(&kind)) {
+                contents.push((clip.id, clip.content.clone()));
+            }
+            (clip.id, kind)
+        })
+        .collect();
+    (identities, contents)
 }
 
 fn identity_effect(
-    before: &std::collections::BTreeSet<ClipId>,
+    before: &ClipIdentities,
     after: &Document,
     split_parent: Option<Clip>,
 ) -> crate::OperationIdentityEffect {
@@ -650,14 +664,23 @@ fn identity_effect(
             .tracks
             .iter()
             .flat_map(|track| &track.clips)
-            .filter(|clip| clip.id == parent.id || !before.contains(&clip.id))
+            .filter(|clip| clip.id == parent.id || !before.contains_key(&clip.id))
             .cloned()
             .collect()
     });
-    let after = clip_identities(after);
+    let (after, clip_contents) = clip_identities(after, Some(before));
     crate::OperationIdentityEffect {
-        created: after.difference(before).copied().collect(),
-        deleted: before.difference(&after).copied().collect(),
+        created: after
+            .keys()
+            .filter(|id| !before.contains_key(*id))
+            .copied()
+            .collect(),
+        deleted: before
+            .keys()
+            .filter(|id| !after.contains_key(*id))
+            .copied()
+            .collect(),
+        clip_contents,
         split_parent,
         split_results,
     }

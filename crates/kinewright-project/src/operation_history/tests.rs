@@ -482,7 +482,7 @@ fn resources_include_payloads_in_the_live_redo_tail() {
         serde_json::from_value(cases["AddLutAsset"]["document"].take()).unwrap();
     let operation: Operation =
         serde_json::from_value(cases["AddLutAsset"]["operation"].take()).unwrap();
-    let required = Resources::payload(std::slice::from_ref(&operation));
+    let required = Resources::payload(std::slice::from_ref(&operation), &[]);
     assert!(!required.is_empty());
     let mut owner = OwnerHistory::new(
         &HistoryPool::new(PoolLimits::default()),

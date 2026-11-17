@@ -129,6 +129,9 @@ mod identity_tests;
 mod fold_tests;
 
 #[cfg(test)]
+mod resource_cases;
+
+#[cfg(test)]
 mod install_review_tests;
 
 #[cfg(test)]

@@ -401,6 +401,8 @@ fn main() {
                 .unwrap();
             let captured = history.owner.capture().unwrap();
             let sealed = captured.persist(store, |_| Ok(None)).unwrap();
+            // Ordinary pool room is two leases: the live owner and one capture.
+            drop(captured);
             let bytes = serde_json::to_vec(
                 &*store
                     .read_record::<StoredOwnerRecord>(&sealed.reference)

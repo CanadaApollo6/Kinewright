@@ -944,6 +944,13 @@ fn reached(
     facts: &BTreeMap<CommandKey, Fact>,
     context: &str,
 ) {
+    if let Some(state) = &history.fold {
+        state.assert_matches(
+            &history.seeds,
+            history.history().baseline(),
+            &history.resources.baseline,
+        );
+    }
     let steps = model
         .undo
         .iter()
@@ -1019,4 +1026,84 @@ fn reached(
             );
         }
     }
+}
+
+#[test]
+fn generated_implicit_title_splits_preserve_every_folded_baseline() {
+    use super::resource_cases::{ImplicitEdit, implicit_title_case, title_half};
+    let mut streams = 0;
+    for kind in ImplicitEdit::ALL {
+        for original in [false, true] {
+            for cap in [1, 2, 3] {
+                for coalesced in [false, true] {
+                    let (document, insert) = implicit_title_case(kind);
+                    let mut insert = Some(insert);
+                    let mut model =
+                        model::Model::new(document.clone(), 1 << 20, model::Policy::Fold);
+                    model.step_cap = cap;
+                    let bounds = RoleBounds {
+                        step_cap: cap,
+                        ..Role::Ordinary.bounds()
+                    };
+                    let mut owner = OwnerHistory::measured(
+                        &super::tests::story_pool(),
+                        Role::Ordinary,
+                        RetentionPolicy::Fold,
+                        &origin(1),
+                        bounds,
+                        || Ok(document),
+                    )
+                    .unwrap();
+                    for at in 0..9 {
+                        let operation = match at {
+                            0 => insert.take().unwrap(),
+                            1 => Operation::DeleteClip {
+                                clip: title_half(&model.document(), original),
+                            },
+                            _ => commands::marker(900 + at),
+                        };
+                        let command = if coalesced && at < 2 {
+                            Command::DoBatchCoalesced {
+                                operations: vec![operation],
+                                coalesce_key: "implicit-title".into(),
+                            }
+                        } else {
+                            Command::Do(operation)
+                        };
+                        model.execute(&command).unwrap();
+                        let effects = owner
+                            .execute(command, origin(2 + at), vec![], None)
+                            .unwrap();
+                        assert_eq!(
+                            **owner.history().document(),
+                            model.document(),
+                            "IMPLICIT_TITLE_CURRENT_DIFFERENTIAL"
+                        );
+                        assert_eq!(
+                            **owner.history().baseline(),
+                            model.baseline,
+                            "IMPLICIT_TITLE_BASELINE_DIFFERENTIAL"
+                        );
+                        if !effects.folded.is_empty() {
+                            owner.fold.as_ref().unwrap().assert_matches(
+                                &owner.seeds,
+                                owner.history().baseline(),
+                                &owner.resources.baseline,
+                            );
+                        }
+                        super::roundtrip_tests::saved_open(&owner);
+                    }
+                    assert!(
+                        owner.resources.baseline.contains(&Resource::TitleFont),
+                        "SURVIVING_HALF_OWNS_BASELINE_FONT"
+                    );
+                    streams += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        streams, 36,
+        "ALL_IMPLICIT_TITLE_DIFFERENTIAL_CLASSES_EXECUTED"
+    );
 }

@@ -97,16 +97,18 @@ pub(crate) fn payload_memory_bound(bytes: &[u8]) -> Result<u64, BudgetError> {
     Ok(charge.get())
 }
 
-fn clip_payload(clip: &Clip) -> Result<u64, BudgetError> {
-    let title = match &clip.content {
+fn content_payload(content: &ClipContent) -> u64 {
+    match content {
         ClipContent::Title(title) => title.text.capacity() as u64,
         ClipContent::Media
         | ClipContent::Freeze(_)
         | ClipContent::Adjustment
         | ClipContent::Solid(_) => 0,
-    };
+    }
+}
+fn clip_payload(clip: &Clip) -> Result<u64, BudgetError> {
     sum([
-        title,
+        content_payload(&clip.content),
         allocation::<crate::Effect>(clip.effects.capacity())?,
         if clip.effects.is_empty() {
             0
@@ -176,15 +178,20 @@ fn transport_clip_payload(clip: &Clip) -> Result<u64, BudgetError> {
 fn identity_owned_bytes(
     created: &Vec<crate::ClipId>,
     deleted: &Vec<crate::ClipId>,
+    contents: &Vec<(crate::ClipId, ClipContent)>,
     parent: Option<&Clip>,
     results: &Vec<Clip>,
 ) -> Result<u64, BudgetError> {
     let mut bytes = sum([
         transport_vector_bytes(created)?,
         transport_vector_bytes(deleted)?,
+        transport_vector_bytes(contents)?,
         transport_vector_bytes(results)?,
         parent.map_or(Ok(0), transport_clip_payload)?,
     ])?;
+    for (_, content) in contents {
+        bytes = sum([bytes, content_payload(content)])?;
+    }
     for clip in results {
         bytes = sum([bytes, transport_clip_payload(clip)?])?;
     }
@@ -279,6 +286,7 @@ impl ReplayBudget {
             identity_owned_bytes(
                 &identity.created,
                 &identity.deleted,
+                &identity.clip_contents,
                 identity.split_parent.as_ref(),
                 &identity.split_results,
             )?,

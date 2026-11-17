@@ -932,7 +932,14 @@ fn prepare(
     let mut counters = COUNTERS.get();
     counters.payload_operations += event.operations.len() as u64;
     COUNTERS.set(counters);
-    let payload = Resources::payload(event.operations);
+    let identities = &event
+        .effects
+        .applied
+        .iter()
+        .find(|command| command.key == key)
+        .ok_or(Error::InvalidOrigin)?
+        .identities;
+    let payload = Resources::payload(event.operations, identities);
     let origin = CommandOrigin {
         key,
         payload_digest: event.payload_digest,

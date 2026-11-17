@@ -95,6 +95,20 @@ fn store_error(error: BundleError) -> Error {
         other => Error::Store(other.to_string()),
     }
 }
+fn require_baseline_resources(
+    document: &kinewright_core::Document,
+    contains: impl Fn(&Resource) -> bool,
+) -> Result<(), Error> {
+    // Publication may walk the baseline; warm edits and folds keep their
+    // incremental resource accounting and never pay for this independent check.
+    if super::Resources::document(document)
+        .iter()
+        .any(|resource| !contains(resource))
+    {
+        return Err(Error::MissingResource);
+    }
+    Ok(())
+}
 #[derive(Serialize)]
 struct BorrowedBody<'a> {
     #[serde(serialize_with = "write_undo")]
@@ -131,6 +145,9 @@ impl OwnerSnapshot {
     ) -> Result<SealedOwner, Error> {
         let _window = self.reservation.workspace()?;
         let data = &self.data;
+        require_baseline_resources(&data.history.baseline, |resource| {
+            data.resources.contains(resource)
+        })?;
         let baseline = store
             .admit_document(&data.history.baseline)
             .map_err(store_error)?;
@@ -278,6 +295,9 @@ impl super::OwnerHistory {
         mut resolve_resource: impl FnMut(&Resource) -> Result<Option<ObjectRef>, Error>,
     ) -> Result<SealedOwner, Error> {
         let _window = self.reservation.workspace()?;
+        require_baseline_resources(self.core.baseline(), |resource| {
+            self.resources.contains(resource)
+        })?;
         let baseline = store
             .admit_document(self.core.baseline())
             .map_err(store_error)?;

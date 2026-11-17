@@ -402,15 +402,7 @@ impl Producer {
             if !context.inputs.is_empty() {
                 return Err(HistoryError::InvalidOrigin.into());
             }
-            if crate::operation_history::Resources::payload(operations)
-                .iter()
-                .any(|resource| {
-                    !matches!(
-                        resource,
-                        crate::operation_history::Resource::Media { sha256: None, .. }
-                    )
-                })
-            {
+            if crate::operation_inputs::ManualInputs::imports(operations) {
                 context.inputs.push(self.lease.inputs.clone());
             }
         }
