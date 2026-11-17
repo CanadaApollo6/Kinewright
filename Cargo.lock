@@ -2374,6 +2374,17 @@ name = "kinewright-hash"
 version = "0.1.0"
 
 [[package]]
+name = "kinewright-interchange"
+version = "0.1.0"
+dependencies = [
+ "kinewright-core",
+ "proptest",
+ "roxmltree",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kinewright-job-sys"
 version = "0.1.0"
 dependencies = [

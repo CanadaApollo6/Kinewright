@@ -3,6 +3,7 @@ members = [
     "crates/kinewright-job-sys",
     "crates/kinewright-hash",
     "crates/kinewright-core",
+    "crates/kinewright-interchange",
     "crates/kinewright-media",
     "crates/kinewright-agent",
     "crates/kinewright-app",
