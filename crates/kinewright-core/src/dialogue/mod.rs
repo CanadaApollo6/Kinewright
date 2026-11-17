@@ -237,3 +237,6 @@ mod r4_tests;
 
 #[cfg(test)]
 mod r5_tests;
+
+#[cfg(test)]
+mod r6_tests;

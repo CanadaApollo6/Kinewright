@@ -1,0 +1,3945 @@
+{
+  "baseline": "0088d7d8",
+  "r5": {
+    "identity": {
+      "byte_length": 15360078,
+      "sha256": "3565188c90972ee3bc6993345c6ecbd611b5957abe12c4d56fa7ffad21c5b4c0"
+    },
+    "levels_cdb": {
+      "noise_floor_hundredths": -8238,
+      "speech_rms_hundredths": -4468
+    },
+    "thresholds_dbfs": {
+      "quiet": -64.69,
+      "floor_plus_15": -67.38
+    },
+    "selected": 121,
+    "applied": 58,
+    "counts": {
+      "filler": {
+        "refused": 40,
+        "moved": 14
+      },
+      "pause": {
+        "refused": 19,
+        "moved": 44,
+        "unaddressable": 4
+      }
+    },
+    "quiet_hits": {
+      "distinct_hops": 0,
+      "word_hops": [],
+      "unrequested_starts_inside": [],
+      "inside_words_with_sound": 0
+    },
+    "floor15_hits": {
+      "distinct_hops": 0,
+      "word_hops": [],
+      "unrequested_starts_inside": [],
+      "inside_words_with_sound": 0
+    },
+    "per_member_quiet_hits": {
+      "distinct_hops": 0,
+      "word_hops": [],
+      "unrequested_starts_inside": [],
+      "inside_words_with_sound": 0
+    },
+    "filler_lengths_seconds": {
+      "count": 14,
+      "median": 0.6666666666666666,
+      "p95": 1.2333333333333334,
+      "max": 1.2333333333333334
+    },
+    "acoustic_envelopes": [
+      {
+        "index": 32,
+        "word": "um",
+        "asr_start_us": 19120000,
+        "cut_us": [
+          18666666.666666668,
+          19600000.0
+        ],
+        "cut_seconds": 0.9333333333333333,
+        "flanks": [
+          {
+            "end_micros": 18720000,
+            "start_micros": 18320000
+          },
+          {
+            "end_micros": 19660000,
+            "start_micros": 19380000
+          }
+        ],
+        "bound_us": 1240000,
+        "over_bound": false
+      },
+      {
+        "index": 96,
+        "word": "um",
+        "asr_start_us": 42800000,
+        "cut_us": [
+          42533333.333333336,
+          43166666.666666664
+        ],
+        "cut_seconds": 0.6333333333333333,
+        "flanks": [
+          {
+            "end_micros": 42590000,
+            "start_micros": 42340000
+          },
+          {
+            "end_micros": 43220000,
+            "start_micros": 43130000
+          }
+        ],
+        "bound_us": 930000,
+        "over_bound": false
+      },
+      {
+        "index": 264,
+        "word": "um",
+        "asr_start_us": 178560000,
+        "cut_us": [
+          177966666.66666666,
+          178600000.0
+        ],
+        "cut_seconds": 0.6333333333333333,
+        "flanks": [
+          {
+            "end_micros": 178040000,
+            "start_micros": 177930000
+          },
+          {
+            "end_micros": 178700000,
+            "start_micros": 178570000
+          }
+        ],
+        "bound_us": 940000,
+        "over_bound": false
+      },
+      {
+        "index": 358,
+        "word": "um",
+        "asr_start_us": 228800000,
+        "cut_us": [
+          228600000.0,
+          229200000.0
+        ],
+        "cut_seconds": 0.6,
+        "flanks": [
+          {
+            "end_micros": 228630000,
+            "start_micros": 225160000
+          },
+          {
+            "end_micros": 229260000,
+            "start_micros": 229160000
+          }
+        ],
+        "bound_us": 930000,
+        "over_bound": false
+      },
+      {
+        "index": 401,
+        "word": "um",
+        "asr_start_us": 242240000,
+        "cut_us": [
+          242066666.66666666,
+          242833333.33333334
+        ],
+        "cut_seconds": 0.7666666666666667,
+        "flanks": [
+          {
+            "end_micros": 242110000,
+            "start_micros": 241580000
+          },
+          {
+            "end_micros": 242870000,
+            "start_micros": 242650000
+          }
+        ],
+        "bound_us": 1060000,
+        "over_bound": false
+      },
+      {
+        "index": 508,
+        "word": "um",
+        "asr_start_us": 304800000,
+        "cut_us": [
+          304600000.0,
+          305300000.0
+        ],
+        "cut_seconds": 0.7,
+        "flanks": [
+          {
+            "end_micros": 304650000,
+            "start_micros": 304290000
+          },
+          {
+            "end_micros": 305340000,
+            "start_micros": 304980000
+          }
+        ],
+        "bound_us": 990000,
+        "over_bound": false
+      },
+      {
+        "index": 571,
+        "word": "um",
+        "asr_start_us": 332160000,
+        "cut_us": [
+          331333333.3333333,
+          332300000.0
+        ],
+        "cut_seconds": 0.9666666666666667,
+        "flanks": [
+          {
+            "end_micros": 331430000,
+            "start_micros": 331300000
+          },
+          {
+            "end_micros": 332670000,
+            "start_micros": 332260000
+          }
+        ],
+        "bound_us": 1260000,
+        "over_bound": false
+      },
+      {
+        "index": 668,
+        "word": "um",
+        "asr_start_us": 372800000,
+        "cut_us": [
+          371966666.6666667,
+          373100000.0
+        ],
+        "cut_seconds": 1.1333333333333333,
+        "flanks": [
+          {
+            "end_micros": 372500000,
+            "start_micros": 371920000
+          },
+          {
+            "end_micros": 374830000,
+            "start_micros": 373060000
+          }
+        ],
+        "bound_us": 1440000,
+        "over_bound": false
+      },
+      {
+        "index": 679,
+        "word": "um",
+        "asr_start_us": 380240000,
+        "cut_us": [
+          379900000.0,
+          381133333.3333333
+        ],
+        "cut_seconds": 1.2333333333333334,
+        "flanks": [
+          {
+            "end_micros": 379960000,
+            "start_micros": 379030000
+          },
+          {
+            "end_micros": 381170000,
+            "start_micros": 380760000
+          }
+        ],
+        "bound_us": 1510000,
+        "over_bound": false
+      },
+      {
+        "index": 813,
+        "word": "um",
+        "asr_start_us": 439760000,
+        "cut_us": [
+          439266666.6666667,
+          440033333.3333333
+        ],
+        "cut_seconds": 0.7666666666666667,
+        "flanks": [
+          {
+            "end_micros": 439300000,
+            "start_micros": 439140000
+          },
+          {
+            "end_micros": 440080000,
+            "start_micros": 440000000
+          }
+        ],
+        "bound_us": 1080000,
+        "over_bound": false
+      }
+    ],
+    "applied_by_status": {
+      "moved": 58
+    },
+    "edge_moves_ms": {
+      "count": 116,
+      "median": 13.333333333333334,
+      "p95": 3813.3333333333335,
+      "max": 5546.666666666667
+    },
+    "signed_edge_move_range_ms": [
+      -5546.666666666667,
+      5536.666666666667
+    ],
+    "measurement_readiness_us": [
+      55944937,
+      29801
+    ],
+    "acoustic_envelope_unknown": [
+      {
+        "index": 54,
+        "word": "um",
+        "asr_start_us": 28000000,
+        "cut_us": [
+          27666666.666666668,
+          28033333.333333332
+        ],
+        "cut_seconds": 0.36666666666666664,
+        "flanks": [
+          {
+            "end_micros": 28180000,
+            "start_micros": 27520000
+          },
+          {
+            "end_micros": 28180000,
+            "start_micros": 27520000
+          }
+        ],
+        "cause": "same_gap"
+      },
+      {
+        "index": 516,
+        "word": "um",
+        "asr_start_us": 309200000,
+        "cut_us": [
+          309200000.0,
+          309633333.3333333
+        ],
+        "cut_seconds": 0.43333333333333335,
+        "flanks": [
+          null,
+          {
+            "end_micros": 309750000,
+            "start_micros": 309250000
+          }
+        ],
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "index": 746,
+        "word": "uh",
+        "asr_start_us": 409920000,
+        "cut_us": [
+          409800000.0,
+          410233333.3333333
+        ],
+        "cut_seconds": 0.43333333333333335,
+        "flanks": [
+          {
+            "end_micros": 409840000,
+            "start_micros": 409670000
+          },
+          null
+        ],
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "index": 882,
+        "word": "uh",
+        "asr_start_us": 472880000,
+        "cut_us": [
+          472900000.0,
+          473133333.3333333
+        ],
+        "cut_seconds": 0.23333333333333334,
+        "flanks": [
+          {
+            "end_micros": 473250000,
+            "start_micros": 472840000
+          },
+          {
+            "end_micros": 473250000,
+            "start_micros": 472840000
+          }
+        ],
+        "cause": "same_gap"
+      }
+    ],
+    "asr_span_context_over": [
+      {
+        "index": 32,
+        "word": "um",
+        "asr_start_us": 19120000,
+        "cut_us": [
+          18666666.666666668,
+          19600000.0
+        ],
+        "cut_seconds": 0.9333333333333333,
+        "flanks": [
+          {
+            "end_micros": 18720000,
+            "start_micros": 18320000
+          },
+          {
+            "end_micros": 19660000,
+            "start_micros": 19380000
+          }
+        ],
+        "bound_us": 660000
+      },
+      {
+        "index": 96,
+        "word": "um",
+        "asr_start_us": 42800000,
+        "cut_us": [
+          42533333.333333336,
+          43166666.666666664
+        ],
+        "cut_seconds": 0.6333333333333333,
+        "flanks": [
+          {
+            "end_micros": 42590000,
+            "start_micros": 42340000
+          },
+          {
+            "end_micros": 43220000,
+            "start_micros": 43130000
+          }
+        ],
+        "bound_us": 470000
+      },
+      {
+        "index": 264,
+        "word": "um",
+        "asr_start_us": 178560000,
+        "cut_us": [
+          177966666.66666666,
+          178600000.0
+        ],
+        "cut_seconds": 0.6333333333333333,
+        "flanks": [
+          {
+            "end_micros": 178040000,
+            "start_micros": 177930000
+          },
+          {
+            "end_micros": 178700000,
+            "start_micros": 178570000
+          }
+        ],
+        "bound_us": 490000
+      },
+      {
+        "index": 358,
+        "word": "um",
+        "asr_start_us": 228800000,
+        "cut_us": [
+          228600000.0,
+          229200000.0
+        ],
+        "cut_seconds": 0.6,
+        "flanks": [
+          {
+            "end_micros": 228630000,
+            "start_micros": 225160000
+          },
+          {
+            "end_micros": 229260000,
+            "start_micros": 229160000
+          }
+        ],
+        "bound_us": 480000
+      },
+      {
+        "index": 401,
+        "word": "um",
+        "asr_start_us": 242240000,
+        "cut_us": [
+          242066666.66666666,
+          242833333.33333334
+        ],
+        "cut_seconds": 0.7666666666666667,
+        "flanks": [
+          {
+            "end_micros": 242110000,
+            "start_micros": 241580000
+          },
+          {
+            "end_micros": 242870000,
+            "start_micros": 242650000
+          }
+        ],
+        "bound_us": 600000
+      },
+      {
+        "index": 516,
+        "word": "um",
+        "asr_start_us": 309200000,
+        "cut_us": [
+          309200000.0,
+          309633333.3333333
+        ],
+        "cut_seconds": 0.43333333333333335,
+        "flanks": [
+          null,
+          {
+            "end_micros": 309750000,
+            "start_micros": 309250000
+          }
+        ],
+        "bound_us": 380000
+      },
+      {
+        "index": 571,
+        "word": "um",
+        "asr_start_us": 332160000,
+        "cut_us": [
+          331333333.3333333,
+          332300000.0
+        ],
+        "cut_seconds": 0.9666666666666667,
+        "flanks": [
+          {
+            "end_micros": 331430000,
+            "start_micros": 331300000
+          },
+          {
+            "end_micros": 332670000,
+            "start_micros": 332260000
+          }
+        ],
+        "bound_us": 510000
+      },
+      {
+        "index": 668,
+        "word": "um",
+        "asr_start_us": 372800000,
+        "cut_us": [
+          371966666.6666667,
+          373100000.0
+        ],
+        "cut_seconds": 1.1333333333333333,
+        "flanks": [
+          {
+            "end_micros": 372500000,
+            "start_micros": 371920000
+          },
+          {
+            "end_micros": 374830000,
+            "start_micros": 373060000
+          }
+        ],
+        "bound_us": 960000
+      },
+      {
+        "index": 679,
+        "word": "um",
+        "asr_start_us": 380240000,
+        "cut_us": [
+          379900000.0,
+          381133333.3333333
+        ],
+        "cut_seconds": 1.2333333333333334,
+        "flanks": [
+          {
+            "end_micros": 379960000,
+            "start_micros": 379030000
+          },
+          {
+            "end_micros": 381170000,
+            "start_micros": 380760000
+          }
+        ],
+        "bound_us": 790000
+      },
+      {
+        "index": 746,
+        "word": "uh",
+        "asr_start_us": 409920000,
+        "cut_us": [
+          409800000.0,
+          410233333.3333333
+        ],
+        "cut_seconds": 0.43333333333333335,
+        "flanks": [
+          {
+            "end_micros": 409840000,
+            "start_micros": 409670000
+          },
+          null
+        ],
+        "bound_us": 380000
+      },
+      {
+        "index": 813,
+        "word": "um",
+        "asr_start_us": 439760000,
+        "cut_us": [
+          439266666.6666667,
+          440033333.3333333
+        ],
+        "cut_seconds": 0.7666666666666667,
+        "flanks": [
+          {
+            "end_micros": 439300000,
+            "start_micros": 439140000
+          },
+          {
+            "end_micros": 440080000,
+            "start_micros": 440000000
+          }
+        ],
+        "bound_us": 460000
+      }
+    ],
+    "refusals": [
+      {
+        "kind": "filler",
+        "code": "acoustic: no measured quiet or sufficiently deep dip brackets this word boundary",
+        "count": 21,
+        "examples": [
+          {
+            "action": {
+              "index": 9,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                5760000,
+                5840000
+              ],
+              "original_project_us": [
+                5760000,
+                5840000
+              ],
+              "source_us": [
+                5760000,
+                5840000
+              ],
+              "text": "um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 1,
+              "index": 9
+            },
+            "reason": {
+              "at_us": 5760000,
+              "code": "acoustic",
+              "index": 0,
+              "outcome": "refused",
+              "quiet_us": [
+                4890000,
+                6000000
+              ],
+              "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 76,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                36240000,
+                36320000
+              ],
+              "original_project_us": [
+                36240000,
+                36320000
+              ],
+              "source_us": [
+                36240000,
+                36320000
+              ],
+              "text": "um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 1,
+              "index": 76
+            },
+            "reason": {
+              "at_us": 36320000,
+              "code": "acoustic",
+              "index": 10,
+              "outcome": "refused",
+              "quiet_us": [
+                36100000,
+                37230000
+              ],
+              "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 150,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                70560000,
+                70640000
+              ],
+              "original_project_us": [
+                70560000,
+                70640000
+              ],
+              "source_us": [
+                70560000,
+                70640000
+              ],
+              "text": "uh"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 1,
+              "index": 150
+            },
+            "reason": {
+              "at_us": 70560000,
+              "code": "acoustic",
+              "index": 18,
+              "outcome": "refused",
+              "quiet_us": [
+                69580000,
+                70610000
+              ],
+              "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+            },
+            "status": "refused"
+          }
+        ]
+      },
+      {
+        "kind": "filler",
+        "code": "acoustic: no project frame lies inside this edge's measured support",
+        "count": 2,
+        "examples": [
+          {
+            "action": {
+              "index": 40,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                22400000,
+                22480000
+              ],
+              "original_project_us": [
+                22400000,
+                22480000
+              ],
+              "source_us": [
+                22400000,
+                22480000
+              ],
+              "text": "um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 1,
+              "index": 40
+            },
+            "reason": {
+              "at_us": 22910000,
+              "code": "acoustic",
+              "index": 6,
+              "outcome": "refused",
+              "quiet_us": [
+                22910000,
+                22910000
+              ],
+              "reason": "no project frame lies inside this edge's measured support"
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 848,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                451520000,
+                451600000
+              ],
+              "original_project_us": [
+                451520000,
+                451600000
+              ],
+              "source_us": [
+                451520000,
+                451600000
+              ],
+              "text": "um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 91,
+              "index": 848
+            },
+            "reason": {
+              "at_us": 450970000,
+              "code": "acoustic",
+              "index": 16,
+              "outcome": "refused",
+              "quiet_us": [
+                450970000,
+                450970000
+              ],
+              "reason": "no project frame lies inside this edge's measured support"
+            },
+            "status": "refused"
+          }
+        ]
+      },
+      {
+        "kind": "filler",
+        "code": "acoustic: the measured edges do not bracket one forward removal",
+        "count": 1,
+        "examples": [
+          {
+            "action": {
+              "index": 503,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                299040000,
+                299120000
+              ],
+              "original_project_us": [
+                299040000,
+                299120000
+              ],
+              "source_us": [
+                299040000,
+                299120000
+              ],
+              "text": "uh"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 63,
+              "index": 503
+            },
+            "reason": {
+              "at_us": 297880000,
+              "code": "acoustic",
+              "index": 7,
+              "outcome": "refused",
+              "quiet_us": [
+                297880000,
+                297880000
+              ],
+              "reason": "the measured edges do not bracket one forward removal"
+            },
+            "status": "refused"
+          }
+        ]
+      },
+      {
+        "kind": "filler",
+        "code": "selection_evidence/unattributed_sound",
+        "count": 9,
+        "examples": [
+          {
+            "action": {
+              "index": 115,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                53040000,
+                53120000
+              ],
+              "original_project_us": [
+                53040000,
+                53120000
+              ],
+              "source_us": [
+                53040000,
+                53120000
+              ],
+              "text": "um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 1,
+              "index": 115
+            },
+            "reason": {
+              "at_us": 53460000,
+              "code": "selection_evidence",
+              "component": {
+                "end_micros": 53470000,
+                "start_micros": 53460000
+              },
+              "index": 13,
+              "outcome": "refused",
+              "quiet_us": [
+                52620000,
+                53610000
+              ],
+              "violation": "unattributed_sound"
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 148,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                68640000,
+                68720000
+              ],
+              "original_project_us": [
+                68640000,
+                68720000
+              ],
+              "source_us": [
+                68640000,
+                68720000
+              ],
+              "text": "um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 1,
+              "index": 148
+            },
+            "reason": {
+              "at_us": 69020000,
+              "code": "selection_evidence",
+              "component": {
+                "end_micros": 69030000,
+                "start_micros": 69020000
+              },
+              "index": 17,
+              "outcome": "refused",
+              "quiet_us": [
+                68140000,
+                69110000
+              ],
+              "violation": "unattributed_sound"
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 135,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                62720000,
+                62800000
+              ],
+              "original_project_us": [
+                62720000,
+                62800000
+              ],
+              "source_us": [
+                62720000,
+                62800000
+              ],
+              "text": "um"
+            },
+            "reason": {
+              "at_us": 63400000,
+              "code": "selection_evidence",
+              "component": {
+                "end_micros": 63490000,
+                "start_micros": 63400000
+              },
+              "quiet_us": [
+                63370000,
+                63590000
+              ],
+              "violation": "unattributed_sound"
+            },
+            "status": "refused"
+          }
+        ]
+      },
+      {
+        "kind": "filler",
+        "code": "selection_evidence/unrequested_sound",
+        "count": 6,
+        "examples": [
+          {
+            "action": {
+              "index": 65,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                32480000,
+                32560000
+              ],
+              "original_project_us": [
+                32480000,
+                32560000
+              ],
+              "source_us": [
+                32480000,
+                32560000
+              ],
+              "text": "um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 1,
+              "index": 65
+            },
+            "reason": {
+              "at_us": 31690000,
+              "code": "selection_evidence",
+              "component": {
+                "end_micros": 32450000,
+                "start_micros": 31690000
+              },
+              "index": 9,
+              "outcome": "refused",
+              "quiet_us": [
+                31660000,
+                32560000
+              ],
+              "violation": "unrequested_sound",
+              "word": 64
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 202,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                126720000,
+                126800000
+              ],
+              "original_project_us": [
+                126720000,
+                126800000
+              ],
+              "source_us": [
+                126720000,
+                126800000
+              ],
+              "text": "uh"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 29,
+              "index": 202
+            },
+            "reason": {
+              "at_us": 127020000,
+              "code": "selection_evidence",
+              "component": {
+                "end_micros": 127030000,
+                "start_micros": 127020000
+              },
+              "index": 5,
+              "outcome": "refused",
+              "quiet_us": [
+                126460000,
+                127450000
+              ],
+              "violation": "unrequested_sound",
+              "word": 203
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 379,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                234640000,
+                234720000
+              ],
+              "original_project_us": [
+                234640000,
+                234720000
+              ],
+              "source_us": [
+                234640000,
+                234720000
+              ],
+              "text": "um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 29,
+              "index": 379
+            },
+            "reason": {
+              "at_us": 234020000,
+              "code": "selection_evidence",
+              "component": {
+                "end_micros": 234030000,
+                "start_micros": 234020000
+              },
+              "index": 27,
+              "outcome": "refused",
+              "quiet_us": [
+                231550000,
+                234790000
+              ],
+              "violation": "unrequested_sound",
+              "word": 378
+            },
+            "status": "refused"
+          }
+        ]
+      },
+      {
+        "kind": "filler",
+        "code": "selection_evidence/unrequested_word_start",
+        "count": 1,
+        "examples": [
+          {
+            "action": {
+              "index": 88,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                40320000,
+                40400000
+              ],
+              "original_project_us": [
+                40320000,
+                40400000
+              ],
+              "source_us": [
+                40320000,
+                40400000
+              ],
+              "text": "um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 1,
+              "index": 88
+            },
+            "reason": {
+              "at_us": 40480000,
+              "code": "selection_evidence",
+              "index": 11,
+              "outcome": "refused",
+              "quiet_us": [
+                40480000,
+                40480000
+              ],
+              "violation": "unrequested_word_start",
+              "word": 89
+            },
+            "status": "refused"
+          }
+        ]
+      },
+      {
+        "kind": "pause",
+        "code": "no_surviving_address",
+        "count": 4,
+        "examples": [
+          {
+            "action": {
+              "index": 571,
+              "kind": "pause",
+              "next": 572,
+              "nominal_source_us": [
+                333440000,
+                334220000
+              ],
+              "original_project_us": [
+                333260000,
+                334340000
+              ],
+              "source_us": [
+                333260000,
+                334340000
+              ],
+              "text": "um / and"
+            },
+            "reason": {
+              "code": "no_surviving_address"
+            },
+            "status": "unaddressable"
+          },
+          {
+            "action": {
+              "index": 668,
+              "kind": "pause",
+              "next": 669,
+              "nominal_source_us": [
+                373240000,
+                374710000
+              ],
+              "original_project_us": [
+                373060000,
+                374830000
+              ],
+              "source_us": [
+                373060000,
+                374830000
+              ],
+              "text": "um / okay"
+            },
+            "reason": {
+              "code": "no_surviving_address"
+            },
+            "status": "unaddressable"
+          },
+          {
+            "action": {
+              "index": 679,
+              "kind": "pause",
+              "next": 680,
+              "nominal_source_us": [
+                381490000,
+                381930000
+              ],
+              "original_project_us": [
+                381310000,
+                382050000
+              ],
+              "source_us": [
+                381310000,
+                382050000
+              ],
+              "text": "um / so"
+            },
+            "reason": {
+              "code": "no_surviving_address"
+            },
+            "status": "unaddressable"
+          }
+        ]
+      },
+      {
+        "kind": "pause",
+        "code": "selection_evidence/pause_limited",
+        "count": 13,
+        "examples": [
+          {
+            "action": {
+              "index": 25,
+              "kind": "pause",
+              "next": 26,
+              "nominal_source_us": [
+                14120000,
+                14570000
+              ],
+              "original_project_us": [
+                13940000,
+                14690000
+              ],
+              "source_us": [
+                13940000,
+                14690000
+              ],
+              "text": "it / and"
+            },
+            "reason": {
+              "at_us": 12080000,
+              "available": {
+                "end_micros": 12700000,
+                "start_micros": 0
+              },
+              "code": "selection_evidence",
+              "full_micros": 1390000,
+              "leave_micros": 300000,
+              "quiet_us": [
+                12080000,
+                12080000
+              ],
+              "usable_micros": 170000,
+              "violation": "pause_limited"
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 174,
+              "kind": "pause",
+              "next": 175,
+              "nominal_source_us": [
+                81240000,
+                81800000
+              ],
+              "original_project_us": [
+                81060000,
+                81920000
+              ],
+              "source_us": [
+                81060000,
+                81920000
+              ],
+              "text": "good / alright"
+            },
+            "reason": {
+              "at_us": 78320000,
+              "available": {
+                "end_micros": 79633333,
+                "start_micros": 64200000
+              },
+              "code": "selection_evidence",
+              "full_micros": 1060000,
+              "leave_micros": 300000,
+              "quiet_us": [
+                77500000,
+                79270000
+              ],
+              "usable_micros": 193333,
+              "violation": "pause_limited"
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 176,
+              "kind": "pause",
+              "next": 177,
+              "nominal_source_us": [
+                90860000,
+                91300000
+              ],
+              "original_project_us": [
+                90680000,
+                91420000
+              ],
+              "source_us": [
+                90680000,
+                91420000
+              ],
+              "text": "so / this"
+            },
+            "reason": {
+              "at_us": 86400000,
+              "available": {
+                "end_micros": 87200000,
+                "start_micros": 85800000
+              },
+              "code": "selection_evidence",
+              "full_micros": 900000,
+              "leave_micros": 300000,
+              "quiet_us": [
+                86100000,
+                86790000
+              ],
+              "usable_micros": 190000,
+              "violation": "pause_limited"
+            },
+            "status": "refused"
+          }
+        ]
+      },
+      {
+        "kind": "pause",
+        "code": "selection_evidence/unrequested_word_start",
+        "count": 6,
+        "examples": [
+          {
+            "action": {
+              "index": 18,
+              "kind": "pause",
+              "next": 19,
+              "nominal_source_us": [
+                9440000,
+                10100000
+              ],
+              "original_project_us": [
+                9260000,
+                10220000
+              ],
+              "source_us": [
+                9260000,
+                10220000
+              ],
+              "text": "so / that's"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 1,
+              "index": 18
+            },
+            "reason": {
+              "at_us": 9680000,
+              "code": "selection_evidence",
+              "index": 1,
+              "outcome": "refused",
+              "quiet_us": [
+                9680000,
+                9680000
+              ],
+              "violation": "unrequested_word_start",
+              "word": 19
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 225,
+              "kind": "pause",
+              "next": 226,
+              "nominal_source_us": [
+                136410000,
+                136960000
+              ],
+              "original_project_us": [
+                136230000,
+                137080000
+              ],
+              "source_us": [
+                136230000,
+                137080000
+              ],
+              "text": "affection / from"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 29,
+              "index": 225
+            },
+            "reason": {
+              "at_us": 136960000,
+              "code": "selection_evidence",
+              "index": 9,
+              "outcome": "refused",
+              "quiet_us": [
+                136960000,
+                136960000
+              ],
+              "violation": "unrequested_word_start",
+              "word": 226
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 467,
+              "kind": "pause",
+              "next": 468,
+              "nominal_source_us": [
+                275140000,
+                276470000
+              ],
+              "original_project_us": [
+                274960000,
+                276590000
+              ],
+              "source_us": [
+                274960000,
+                276590000
+              ],
+              "text": "home / um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 29,
+              "index": 467
+            },
+            "reason": {
+              "at_us": 275600000,
+              "code": "selection_evidence",
+              "index": 31,
+              "outcome": "refused",
+              "quiet_us": [
+                275600000,
+                275600000
+              ],
+              "violation": "unrequested_word_start",
+              "word": 468
+            },
+            "status": "refused"
+          }
+        ]
+      }
+    ],
+    "whole_batch_refusals": 0,
+    "transcript_bytes_per_cut": 1432.2586206896551,
+    "duration_seconds": [
+      480.0,
+      427.8333333333333
+    ],
+    "tool_costs": {
+      "get_timeline_transcript": {
+        "latency_ms": {
+          "count": 23,
+          "median": 30.153,
+          "p95": 30.698,
+          "max": 38.355
+        },
+        "reply_bytes": {
+          "count": 23,
+          "median": 3110,
+          "p95": 10012,
+          "max": 11850
+        }
+      },
+      "cut_dialogue": {
+        "latency_ms": {
+          "count": 25,
+          "median": 44.853,
+          "p95": 384.292,
+          "max": 461.811
+        },
+        "reply_bytes": {
+          "count": 25,
+          "median": 688,
+          "p95": 13858,
+          "max": 14065
+        }
+      },
+      "check_dialogue_cut": {
+        "latency_ms": {
+          "count": 1,
+          "median": 58.391,
+          "p95": 58.391,
+          "max": 58.391
+        },
+        "reply_bytes": {
+          "count": 1,
+          "median": 16697,
+          "p95": 16697,
+          "max": 16697
+        }
+      }
+    },
+    "warm_byte_identical": true,
+    "resource": {
+      "exit_code": 0,
+      "wall_s": 73.67816021991894,
+      "user_s": 161.223509,
+      "system_s": 9.977503,
+      "peak_rss_kib": 1062744,
+      "load_before": [
+        3.60498046875,
+        7.16162109375,
+        10.775390625
+      ],
+      "load_after": [
+        7.015625,
+        7.466796875,
+        10.5986328125
+      ],
+      "nice": 10,
+      "method": "Linux wait4 rusage.ru_maxrss, KiB; child only"
+    },
+    "neighbour_uses": 26,
+    "were_window_kept": true,
+    "were_overlaps": [],
+    "were_associated_um_request": {
+      "action": {
+        "index": 65,
+        "kind": "filler",
+        "next": null,
+        "nominal_source_us": [
+          32480000,
+          32560000
+        ],
+        "original_project_us": [
+          32480000,
+          32560000
+        ],
+        "source_us": [
+          32480000,
+          32560000
+        ],
+        "text": "um"
+      },
+      "address_used": {
+        "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+        "clip": 1,
+        "index": 65
+      },
+      "reason": {
+        "at_us": 31690000,
+        "code": "selection_evidence",
+        "component": {
+          "end_micros": 32450000,
+          "start_micros": 31690000
+        },
+        "index": 9,
+        "outcome": "refused",
+        "quiet_us": [
+          31660000,
+          32560000
+        ],
+        "violation": "unrequested_sound",
+        "word": 64
+      },
+      "status": "refused"
+    },
+    "source_coverage_verified": true,
+    "check_totals": {
+      "dip_intrusions": 2,
+      "holes": 82,
+      "joins": 60,
+      "pauses": 108,
+      "repeats": 10,
+      "room_tone_jumps": 6,
+      "short_air": 3,
+      "sounding_holes": 75
+    },
+    "hole_bases": [
+      {
+        "after_word_start_us": 1000000,
+        "kind": "measured_voice_without_nearby_word_start"
+      }
+    ]
+  },
+  "r6": {
+    "identity": {
+      "byte_length": 15360078,
+      "sha256": "3565188c90972ee3bc6993345c6ecbd611b5957abe12c4d56fa7ffad21c5b4c0"
+    },
+    "levels_cdb": {
+      "noise_floor_hundredths": -8238,
+      "speech_rms_hundredths": -4468
+    },
+    "thresholds_dbfs": {
+      "quiet": -64.69,
+      "floor_plus_15": -67.38
+    },
+    "selected": 121,
+    "applied": 63,
+    "counts": {
+      "filler": {
+        "refused": 39,
+        "moved": 15
+      },
+      "pause": {
+        "refused": 19,
+        "moved": 48
+      }
+    },
+    "quiet_hits": {
+      "distinct_hops": 0,
+      "word_hops": [],
+      "unrequested_starts_inside": [],
+      "inside_words_with_sound": 0
+    },
+    "floor15_hits": {
+      "distinct_hops": 0,
+      "word_hops": [],
+      "unrequested_starts_inside": [],
+      "inside_words_with_sound": 0
+    },
+    "per_member_quiet_hits": {
+      "distinct_hops": 0,
+      "word_hops": [],
+      "unrequested_starts_inside": [],
+      "inside_words_with_sound": 0
+    },
+    "filler_lengths_seconds": {
+      "count": 15,
+      "median": 0.7,
+      "p95": 1.2333333333333334,
+      "max": 1.2333333333333334
+    },
+    "acoustic_envelopes": [
+      {
+        "index": 32,
+        "word": "um",
+        "asr_start_us": 19120000,
+        "cut_us": [
+          18666666.666666668,
+          19600000.0
+        ],
+        "cut_seconds": 0.9333333333333333,
+        "flanks": [
+          {
+            "end_micros": 18720000,
+            "start_micros": 18320000
+          },
+          {
+            "end_micros": 19660000,
+            "start_micros": 19380000
+          }
+        ],
+        "bound_us": 1240000,
+        "over_bound": false
+      },
+      {
+        "index": 96,
+        "word": "um",
+        "asr_start_us": 42800000,
+        "cut_us": [
+          42533333.333333336,
+          43166666.666666664
+        ],
+        "cut_seconds": 0.6333333333333333,
+        "flanks": [
+          {
+            "end_micros": 42590000,
+            "start_micros": 42340000
+          },
+          {
+            "end_micros": 43220000,
+            "start_micros": 43130000
+          }
+        ],
+        "bound_us": 930000,
+        "over_bound": false
+      },
+      {
+        "index": 264,
+        "word": "um",
+        "asr_start_us": 178560000,
+        "cut_us": [
+          177966666.66666666,
+          178600000.0
+        ],
+        "cut_seconds": 0.6333333333333333,
+        "flanks": [
+          {
+            "end_micros": 178040000,
+            "start_micros": 177930000
+          },
+          {
+            "end_micros": 178700000,
+            "start_micros": 178570000
+          }
+        ],
+        "bound_us": 940000,
+        "over_bound": false
+      },
+      {
+        "index": 358,
+        "word": "um",
+        "asr_start_us": 228800000,
+        "cut_us": [
+          228600000.0,
+          229200000.0
+        ],
+        "cut_seconds": 0.6,
+        "flanks": [
+          {
+            "end_micros": 228630000,
+            "start_micros": 225160000
+          },
+          {
+            "end_micros": 229260000,
+            "start_micros": 229160000
+          }
+        ],
+        "bound_us": 930000,
+        "over_bound": false
+      },
+      {
+        "index": 401,
+        "word": "um",
+        "asr_start_us": 242240000,
+        "cut_us": [
+          242066666.66666666,
+          242833333.33333334
+        ],
+        "cut_seconds": 0.7666666666666667,
+        "flanks": [
+          {
+            "end_micros": 242110000,
+            "start_micros": 241580000
+          },
+          {
+            "end_micros": 242870000,
+            "start_micros": 242650000
+          }
+        ],
+        "bound_us": 1060000,
+        "over_bound": false
+      },
+      {
+        "index": 508,
+        "word": "um",
+        "asr_start_us": 304800000,
+        "cut_us": [
+          304600000.0,
+          305300000.0
+        ],
+        "cut_seconds": 0.7,
+        "flanks": [
+          {
+            "end_micros": 304650000,
+            "start_micros": 304290000
+          },
+          {
+            "end_micros": 305340000,
+            "start_micros": 304980000
+          }
+        ],
+        "bound_us": 990000,
+        "over_bound": false
+      },
+      {
+        "index": 571,
+        "word": "um",
+        "asr_start_us": 332160000,
+        "cut_us": [
+          331333333.3333333,
+          332300000.0
+        ],
+        "cut_seconds": 0.9666666666666667,
+        "flanks": [
+          {
+            "end_micros": 331430000,
+            "start_micros": 331300000
+          },
+          {
+            "end_micros": 332670000,
+            "start_micros": 332260000
+          }
+        ],
+        "bound_us": 1260000,
+        "over_bound": false
+      },
+      {
+        "index": 668,
+        "word": "um",
+        "asr_start_us": 372800000,
+        "cut_us": [
+          371966666.6666667,
+          373100000.0
+        ],
+        "cut_seconds": 1.1333333333333333,
+        "flanks": [
+          {
+            "end_micros": 372500000,
+            "start_micros": 371920000
+          },
+          {
+            "end_micros": 374830000,
+            "start_micros": 373060000
+          }
+        ],
+        "bound_us": 1440000,
+        "over_bound": false
+      },
+      {
+        "index": 679,
+        "word": "um",
+        "asr_start_us": 380240000,
+        "cut_us": [
+          379900000.0,
+          381133333.3333333
+        ],
+        "cut_seconds": 1.2333333333333334,
+        "flanks": [
+          {
+            "end_micros": 379960000,
+            "start_micros": 379030000
+          },
+          {
+            "end_micros": 381170000,
+            "start_micros": 380760000
+          }
+        ],
+        "bound_us": 1510000,
+        "over_bound": false
+      },
+      {
+        "index": 773,
+        "word": "um",
+        "asr_start_us": 424880000,
+        "cut_us": [
+          424533333.3333333,
+          425733333.3333333
+        ],
+        "cut_seconds": 1.2,
+        "flanks": [
+          {
+            "end_micros": 424720000,
+            "start_micros": 424500000
+          },
+          {
+            "end_micros": 426130000,
+            "start_micros": 425700000
+          }
+        ],
+        "bound_us": 1500000,
+        "over_bound": false
+      },
+      {
+        "index": 813,
+        "word": "um",
+        "asr_start_us": 439760000,
+        "cut_us": [
+          439266666.6666667,
+          440033333.3333333
+        ],
+        "cut_seconds": 0.7666666666666667,
+        "flanks": [
+          {
+            "end_micros": 439300000,
+            "start_micros": 439140000
+          },
+          {
+            "end_micros": 440080000,
+            "start_micros": 440000000
+          }
+        ],
+        "bound_us": 1080000,
+        "over_bound": false
+      }
+    ],
+    "applied_by_status": {
+      "moved": 63
+    },
+    "edge_moves_ms": {
+      "count": 126,
+      "median": 13.333333333333334,
+      "p95": 3773.3333333333335,
+      "max": 5546.666666666667
+    },
+    "signed_edge_move_range_ms": [
+      -5546.666666666667,
+      5536.666666666667
+    ],
+    "measurement_readiness_us": [
+      37653992,
+      28821
+    ],
+    "acoustic_envelope_unknown": [
+      {
+        "index": 54,
+        "word": "um",
+        "asr_start_us": 28000000,
+        "cut_us": [
+          27666666.666666668,
+          28033333.333333332
+        ],
+        "cut_seconds": 0.36666666666666664,
+        "flanks": [
+          {
+            "end_micros": 28180000,
+            "start_micros": 27520000
+          },
+          {
+            "end_micros": 28180000,
+            "start_micros": 27520000
+          }
+        ],
+        "cause": "same_gap"
+      },
+      {
+        "index": 516,
+        "word": "um",
+        "asr_start_us": 309200000,
+        "cut_us": [
+          309200000.0,
+          309633333.3333333
+        ],
+        "cut_seconds": 0.43333333333333335,
+        "flanks": [
+          null,
+          {
+            "end_micros": 309750000,
+            "start_micros": 309250000
+          }
+        ],
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "index": 746,
+        "word": "uh",
+        "asr_start_us": 409920000,
+        "cut_us": [
+          409800000.0,
+          410233333.3333333
+        ],
+        "cut_seconds": 0.43333333333333335,
+        "flanks": [
+          {
+            "end_micros": 409840000,
+            "start_micros": 409670000
+          },
+          null
+        ],
+        "cause": "no_two_quiet_flanks"
+      },
+      {
+        "index": 882,
+        "word": "uh",
+        "asr_start_us": 472880000,
+        "cut_us": [
+          472900000.0,
+          473133333.3333333
+        ],
+        "cut_seconds": 0.23333333333333334,
+        "flanks": [
+          {
+            "end_micros": 473250000,
+            "start_micros": 472840000
+          },
+          {
+            "end_micros": 473250000,
+            "start_micros": 472840000
+          }
+        ],
+        "cause": "same_gap"
+      }
+    ],
+    "asr_span_context_over": [
+      {
+        "index": 32,
+        "word": "um",
+        "asr_start_us": 19120000,
+        "cut_us": [
+          18666666.666666668,
+          19600000.0
+        ],
+        "cut_seconds": 0.9333333333333333,
+        "flanks": [
+          {
+            "end_micros": 18720000,
+            "start_micros": 18320000
+          },
+          {
+            "end_micros": 19660000,
+            "start_micros": 19380000
+          }
+        ],
+        "bound_us": 660000
+      },
+      {
+        "index": 96,
+        "word": "um",
+        "asr_start_us": 42800000,
+        "cut_us": [
+          42533333.333333336,
+          43166666.666666664
+        ],
+        "cut_seconds": 0.6333333333333333,
+        "flanks": [
+          {
+            "end_micros": 42590000,
+            "start_micros": 42340000
+          },
+          {
+            "end_micros": 43220000,
+            "start_micros": 43130000
+          }
+        ],
+        "bound_us": 470000
+      },
+      {
+        "index": 264,
+        "word": "um",
+        "asr_start_us": 178560000,
+        "cut_us": [
+          177966666.66666666,
+          178600000.0
+        ],
+        "cut_seconds": 0.6333333333333333,
+        "flanks": [
+          {
+            "end_micros": 178040000,
+            "start_micros": 177930000
+          },
+          {
+            "end_micros": 178700000,
+            "start_micros": 178570000
+          }
+        ],
+        "bound_us": 490000
+      },
+      {
+        "index": 358,
+        "word": "um",
+        "asr_start_us": 228800000,
+        "cut_us": [
+          228600000.0,
+          229200000.0
+        ],
+        "cut_seconds": 0.6,
+        "flanks": [
+          {
+            "end_micros": 228630000,
+            "start_micros": 225160000
+          },
+          {
+            "end_micros": 229260000,
+            "start_micros": 229160000
+          }
+        ],
+        "bound_us": 480000
+      },
+      {
+        "index": 401,
+        "word": "um",
+        "asr_start_us": 242240000,
+        "cut_us": [
+          242066666.66666666,
+          242833333.33333334
+        ],
+        "cut_seconds": 0.7666666666666667,
+        "flanks": [
+          {
+            "end_micros": 242110000,
+            "start_micros": 241580000
+          },
+          {
+            "end_micros": 242870000,
+            "start_micros": 242650000
+          }
+        ],
+        "bound_us": 600000
+      },
+      {
+        "index": 516,
+        "word": "um",
+        "asr_start_us": 309200000,
+        "cut_us": [
+          309200000.0,
+          309633333.3333333
+        ],
+        "cut_seconds": 0.43333333333333335,
+        "flanks": [
+          null,
+          {
+            "end_micros": 309750000,
+            "start_micros": 309250000
+          }
+        ],
+        "bound_us": 380000
+      },
+      {
+        "index": 571,
+        "word": "um",
+        "asr_start_us": 332160000,
+        "cut_us": [
+          331333333.3333333,
+          332300000.0
+        ],
+        "cut_seconds": 0.9666666666666667,
+        "flanks": [
+          {
+            "end_micros": 331430000,
+            "start_micros": 331300000
+          },
+          {
+            "end_micros": 332670000,
+            "start_micros": 332260000
+          }
+        ],
+        "bound_us": 510000
+      },
+      {
+        "index": 668,
+        "word": "um",
+        "asr_start_us": 372800000,
+        "cut_us": [
+          371966666.6666667,
+          373100000.0
+        ],
+        "cut_seconds": 1.1333333333333333,
+        "flanks": [
+          {
+            "end_micros": 372500000,
+            "start_micros": 371920000
+          },
+          {
+            "end_micros": 374830000,
+            "start_micros": 373060000
+          }
+        ],
+        "bound_us": 960000
+      },
+      {
+        "index": 679,
+        "word": "um",
+        "asr_start_us": 380240000,
+        "cut_us": [
+          379900000.0,
+          381133333.3333333
+        ],
+        "cut_seconds": 1.2333333333333334,
+        "flanks": [
+          {
+            "end_micros": 379960000,
+            "start_micros": 379030000
+          },
+          {
+            "end_micros": 381170000,
+            "start_micros": 380760000
+          }
+        ],
+        "bound_us": 790000
+      },
+      {
+        "index": 746,
+        "word": "uh",
+        "asr_start_us": 409920000,
+        "cut_us": [
+          409800000.0,
+          410233333.3333333
+        ],
+        "cut_seconds": 0.43333333333333335,
+        "flanks": [
+          {
+            "end_micros": 409840000,
+            "start_micros": 409670000
+          },
+          null
+        ],
+        "bound_us": 380000
+      },
+      {
+        "index": 773,
+        "word": "um",
+        "asr_start_us": 424880000,
+        "cut_us": [
+          424533333.3333333,
+          425733333.3333333
+        ],
+        "cut_seconds": 1.2,
+        "flanks": [
+          {
+            "end_micros": 424720000,
+            "start_micros": 424500000
+          },
+          {
+            "end_micros": 426130000,
+            "start_micros": 425700000
+          }
+        ],
+        "bound_us": 600000
+      },
+      {
+        "index": 813,
+        "word": "um",
+        "asr_start_us": 439760000,
+        "cut_us": [
+          439266666.6666667,
+          440033333.3333333
+        ],
+        "cut_seconds": 0.7666666666666667,
+        "flanks": [
+          {
+            "end_micros": 439300000,
+            "start_micros": 439140000
+          },
+          {
+            "end_micros": 440080000,
+            "start_micros": 440000000
+          }
+        ],
+        "bound_us": 460000
+      }
+    ],
+    "refusals": [
+      {
+        "kind": "filler",
+        "code": "acoustic: no measured quiet or sufficiently deep dip brackets this word boundary",
+        "count": 21,
+        "examples": [
+          {
+            "action": {
+              "index": 9,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                5760000,
+                5840000
+              ],
+              "original_project_us": [
+                5760000,
+                5840000
+              ],
+              "source_us": [
+                5760000,
+                5840000
+              ],
+              "text": "um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 1,
+              "index": 9
+            },
+            "reason": {
+              "at_us": 5760000,
+              "code": "acoustic",
+              "index": 0,
+              "outcome": "refused",
+              "quiet_us": [
+                4890000,
+                6000000
+              ],
+              "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 76,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                36240000,
+                36320000
+              ],
+              "original_project_us": [
+                36240000,
+                36320000
+              ],
+              "source_us": [
+                36240000,
+                36320000
+              ],
+              "text": "um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 1,
+              "index": 76
+            },
+            "reason": {
+              "at_us": 36320000,
+              "code": "acoustic",
+              "index": 10,
+              "outcome": "refused",
+              "quiet_us": [
+                36100000,
+                37230000
+              ],
+              "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 150,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                70560000,
+                70640000
+              ],
+              "original_project_us": [
+                70560000,
+                70640000
+              ],
+              "source_us": [
+                70560000,
+                70640000
+              ],
+              "text": "uh"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 1,
+              "index": 150
+            },
+            "reason": {
+              "at_us": 70560000,
+              "code": "acoustic",
+              "index": 18,
+              "outcome": "refused",
+              "quiet_us": [
+                69580000,
+                70610000
+              ],
+              "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+            },
+            "status": "refused"
+          }
+        ]
+      },
+      {
+        "kind": "filler",
+        "code": "acoustic: no project frame lies inside this edge's measured support",
+        "count": 3,
+        "examples": [
+          {
+            "action": {
+              "index": 40,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                22400000,
+                22480000
+              ],
+              "original_project_us": [
+                22400000,
+                22480000
+              ],
+              "source_us": [
+                22400000,
+                22480000
+              ],
+              "text": "um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 1,
+              "index": 40
+            },
+            "reason": {
+              "at_us": 22910000,
+              "code": "acoustic",
+              "index": 6,
+              "outcome": "refused",
+              "quiet_us": [
+                22910000,
+                22910000
+              ],
+              "reason": "no project frame lies inside this edge's measured support"
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 148,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                68640000,
+                68720000
+              ],
+              "original_project_us": [
+                68640000,
+                68720000
+              ],
+              "source_us": [
+                68640000,
+                68720000
+              ],
+              "text": "um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 1,
+              "index": 148
+            },
+            "reason": {
+              "at_us": 69130000,
+              "code": "acoustic",
+              "index": 17,
+              "outcome": "refused",
+              "quiet_us": [
+                69130000,
+                69130000
+              ],
+              "reason": "no project frame lies inside this edge's measured support"
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 848,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                451520000,
+                451600000
+              ],
+              "original_project_us": [
+                451520000,
+                451600000
+              ],
+              "source_us": [
+                451520000,
+                451600000
+              ],
+              "text": "um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 97,
+              "index": 848
+            },
+            "reason": {
+              "at_us": 450970000,
+              "code": "acoustic",
+              "index": 16,
+              "outcome": "refused",
+              "quiet_us": [
+                450970000,
+                450970000
+              ],
+              "reason": "no project frame lies inside this edge's measured support"
+            },
+            "status": "refused"
+          }
+        ]
+      },
+      {
+        "kind": "filler",
+        "code": "acoustic: the measured edges do not bracket one forward removal",
+        "count": 1,
+        "examples": [
+          {
+            "action": {
+              "index": 503,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                299040000,
+                299120000
+              ],
+              "original_project_us": [
+                299040000,
+                299120000
+              ],
+              "source_us": [
+                299040000,
+                299120000
+              ],
+              "text": "uh"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 63,
+              "index": 503
+            },
+            "reason": {
+              "at_us": 297880000,
+              "code": "acoustic",
+              "index": 7,
+              "outcome": "refused",
+              "quiet_us": [
+                297880000,
+                297880000
+              ],
+              "reason": "the measured edges do not bracket one forward removal"
+            },
+            "status": "refused"
+          }
+        ]
+      },
+      {
+        "kind": "filler",
+        "code": "selection_evidence/unattributed_sound",
+        "count": 7,
+        "examples": [
+          {
+            "action": {
+              "index": 115,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                53040000,
+                53120000
+              ],
+              "original_project_us": [
+                53040000,
+                53120000
+              ],
+              "source_us": [
+                53040000,
+                53120000
+              ],
+              "text": "um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 1,
+              "index": 115
+            },
+            "reason": {
+              "at_us": 53550000,
+              "code": "selection_evidence",
+              "component": {
+                "end_micros": 53580000,
+                "start_micros": 53550000
+              },
+              "index": 13,
+              "outcome": "refused",
+              "quiet_us": [
+                52620000,
+                53610000
+              ],
+              "violation": "unattributed_sound"
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 135,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                62720000,
+                62800000
+              ],
+              "original_project_us": [
+                62720000,
+                62800000
+              ],
+              "source_us": [
+                62720000,
+                62800000
+              ],
+              "text": "um"
+            },
+            "reason": {
+              "at_us": 63400000,
+              "code": "selection_evidence",
+              "component": {
+                "end_micros": 63490000,
+                "start_micros": 63400000
+              },
+              "quiet_us": [
+                63370000,
+                63590000
+              ],
+              "violation": "unattributed_sound"
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 206,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                128960000,
+                129040000
+              ],
+              "original_project_us": [
+                128960000,
+                129040000
+              ],
+              "source_us": [
+                128960000,
+                129040000
+              ],
+              "text": "um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 29,
+              "index": 206
+            },
+            "reason": {
+              "at_us": 128280000,
+              "code": "selection_evidence",
+              "component": {
+                "end_micros": 128320000,
+                "start_micros": 128280000
+              },
+              "index": 6,
+              "outcome": "refused",
+              "quiet_us": [
+                127880000,
+                129380000
+              ],
+              "violation": "unattributed_sound"
+            },
+            "status": "refused"
+          }
+        ]
+      },
+      {
+        "kind": "filler",
+        "code": "selection_evidence/unrequested_sound",
+        "count": 6,
+        "examples": [
+          {
+            "action": {
+              "index": 65,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                32480000,
+                32560000
+              ],
+              "original_project_us": [
+                32480000,
+                32560000
+              ],
+              "source_us": [
+                32480000,
+                32560000
+              ],
+              "text": "um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 1,
+              "index": 65
+            },
+            "reason": {
+              "at_us": 31690000,
+              "code": "selection_evidence",
+              "component": {
+                "end_micros": 32450000,
+                "start_micros": 31690000
+              },
+              "index": 9,
+              "outcome": "refused",
+              "quiet_us": [
+                31660000,
+                32560000
+              ],
+              "violation": "unrequested_sound",
+              "word": 64
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 202,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                126720000,
+                126800000
+              ],
+              "original_project_us": [
+                126720000,
+                126800000
+              ],
+              "source_us": [
+                126720000,
+                126800000
+              ],
+              "text": "uh"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 29,
+              "index": 202
+            },
+            "reason": {
+              "at_us": 127020000,
+              "code": "selection_evidence",
+              "component": {
+                "end_micros": 127030000,
+                "start_micros": 127020000
+              },
+              "index": 5,
+              "outcome": "refused",
+              "quiet_us": [
+                126460000,
+                127450000
+              ],
+              "violation": "unrequested_sound",
+              "word": 203
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 379,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                234640000,
+                234720000
+              ],
+              "original_project_us": [
+                234640000,
+                234720000
+              ],
+              "source_us": [
+                234640000,
+                234720000
+              ],
+              "text": "um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 29,
+              "index": 379
+            },
+            "reason": {
+              "at_us": 234020000,
+              "code": "selection_evidence",
+              "component": {
+                "end_micros": 234030000,
+                "start_micros": 234020000
+              },
+              "index": 27,
+              "outcome": "refused",
+              "quiet_us": [
+                231550000,
+                234790000
+              ],
+              "violation": "unrequested_sound",
+              "word": 378
+            },
+            "status": "refused"
+          }
+        ]
+      },
+      {
+        "kind": "filler",
+        "code": "selection_evidence/unrequested_word_start",
+        "count": 1,
+        "examples": [
+          {
+            "action": {
+              "index": 88,
+              "kind": "filler",
+              "next": null,
+              "nominal_source_us": [
+                40320000,
+                40400000
+              ],
+              "original_project_us": [
+                40320000,
+                40400000
+              ],
+              "source_us": [
+                40320000,
+                40400000
+              ],
+              "text": "um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 1,
+              "index": 88
+            },
+            "reason": {
+              "at_us": 40480000,
+              "code": "selection_evidence",
+              "index": 11,
+              "outcome": "refused",
+              "quiet_us": [
+                40480000,
+                40480000
+              ],
+              "violation": "unrequested_word_start",
+              "word": 89
+            },
+            "status": "refused"
+          }
+        ]
+      },
+      {
+        "kind": "pause",
+        "code": "selection_evidence/pause_limited",
+        "count": 13,
+        "examples": [
+          {
+            "action": {
+              "index": 25,
+              "kind": "pause",
+              "next": 26,
+              "nominal_source_us": [
+                14120000,
+                14570000
+              ],
+              "original_project_us": [
+                13940000,
+                14690000
+              ],
+              "source_us": [
+                13940000,
+                14690000
+              ],
+              "text": "it / and"
+            },
+            "reason": {
+              "at_us": 12080000,
+              "available": {
+                "end_micros": 12700000,
+                "start_micros": 0
+              },
+              "code": "selection_evidence",
+              "full_micros": 1390000,
+              "leave_micros": 300000,
+              "quiet_us": [
+                12080000,
+                12080000
+              ],
+              "usable_micros": 170000,
+              "violation": "pause_limited"
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 174,
+              "kind": "pause",
+              "next": 175,
+              "nominal_source_us": [
+                81240000,
+                81800000
+              ],
+              "original_project_us": [
+                81060000,
+                81920000
+              ],
+              "source_us": [
+                81060000,
+                81920000
+              ],
+              "text": "good / alright"
+            },
+            "reason": {
+              "at_us": 78320000,
+              "available": {
+                "end_micros": 79633333,
+                "start_micros": 64200000
+              },
+              "code": "selection_evidence",
+              "full_micros": 1060000,
+              "leave_micros": 300000,
+              "quiet_us": [
+                77500000,
+                79270000
+              ],
+              "usable_micros": 193333,
+              "violation": "pause_limited"
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 176,
+              "kind": "pause",
+              "next": 177,
+              "nominal_source_us": [
+                90860000,
+                91300000
+              ],
+              "original_project_us": [
+                90680000,
+                91420000
+              ],
+              "source_us": [
+                90680000,
+                91420000
+              ],
+              "text": "so / this"
+            },
+            "reason": {
+              "at_us": 86400000,
+              "available": {
+                "end_micros": 87200000,
+                "start_micros": 85800000
+              },
+              "code": "selection_evidence",
+              "full_micros": 900000,
+              "leave_micros": 300000,
+              "quiet_us": [
+                86100000,
+                86790000
+              ],
+              "usable_micros": 190000,
+              "violation": "pause_limited"
+            },
+            "status": "refused"
+          }
+        ]
+      },
+      {
+        "kind": "pause",
+        "code": "selection_evidence/unrequested_word_start",
+        "count": 6,
+        "examples": [
+          {
+            "action": {
+              "index": 18,
+              "kind": "pause",
+              "next": 19,
+              "nominal_source_us": [
+                9440000,
+                10100000
+              ],
+              "original_project_us": [
+                9260000,
+                10220000
+              ],
+              "source_us": [
+                9260000,
+                10220000
+              ],
+              "text": "so / that's"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 1,
+              "index": 18
+            },
+            "reason": {
+              "at_us": 9680000,
+              "code": "selection_evidence",
+              "index": 1,
+              "outcome": "refused",
+              "quiet_us": [
+                9680000,
+                9680000
+              ],
+              "violation": "unrequested_word_start",
+              "word": 19
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 225,
+              "kind": "pause",
+              "next": 226,
+              "nominal_source_us": [
+                136410000,
+                136960000
+              ],
+              "original_project_us": [
+                136230000,
+                137080000
+              ],
+              "source_us": [
+                136230000,
+                137080000
+              ],
+              "text": "affection / from"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 29,
+              "index": 225
+            },
+            "reason": {
+              "at_us": 136960000,
+              "code": "selection_evidence",
+              "index": 9,
+              "outcome": "refused",
+              "quiet_us": [
+                136960000,
+                136960000
+              ],
+              "violation": "unrequested_word_start",
+              "word": 226
+            },
+            "status": "refused"
+          },
+          {
+            "action": {
+              "index": 467,
+              "kind": "pause",
+              "next": 468,
+              "nominal_source_us": [
+                275140000,
+                276470000
+              ],
+              "original_project_us": [
+                274960000,
+                276590000
+              ],
+              "source_us": [
+                274960000,
+                276590000
+              ],
+              "text": "home / um"
+            },
+            "address_used": {
+              "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+              "clip": 29,
+              "index": 467
+            },
+            "reason": {
+              "at_us": 275600000,
+              "code": "selection_evidence",
+              "index": 31,
+              "outcome": "refused",
+              "quiet_us": [
+                275600000,
+                275600000
+              ],
+              "violation": "unrequested_word_start",
+              "word": 468
+            },
+            "status": "refused"
+          }
+        ]
+      }
+    ],
+    "whole_batch_refusals": 0,
+    "transcript_bytes_per_cut": 1224.936507936508,
+    "duration_seconds": [
+      480.0,
+      422.8666666666667
+    ],
+    "tool_costs": {
+      "get_timeline_transcript": {
+        "latency_ms": {
+          "count": 19,
+          "median": 28.469,
+          "p95": 29.047,
+          "max": 29.047
+        },
+        "reply_bytes": {
+          "count": 19,
+          "median": 3151,
+          "p95": 11850,
+          "max": 11850
+        }
+      },
+      "cut_dialogue": {
+        "latency_ms": {
+          "count": 25,
+          "median": 34.884,
+          "p95": 385.804,
+          "max": 424.368
+        },
+        "reply_bytes": {
+          "count": 25,
+          "median": 688,
+          "p95": 14065,
+          "max": 14544
+        }
+      },
+      "check_dialogue_cut": {
+        "latency_ms": {
+          "count": 1,
+          "median": 57.194,
+          "p95": 57.194,
+          "max": 57.194
+        },
+        "reply_bytes": {
+          "count": 1,
+          "median": 16759,
+          "p95": 16759,
+          "max": 16759
+        }
+      }
+    },
+    "warm_byte_identical": true,
+    "resource": {
+      "exit_code": 0,
+      "wall_s": 54.67643103993032,
+      "user_s": 135.838878,
+      "system_s": 7.800405,
+      "peak_rss_kib": 1065120,
+      "load_before": [
+        2.8037109375,
+        3.8603515625,
+        5.51416015625
+      ],
+      "load_after": [
+        2.33203125,
+        3.53466796875,
+        5.3046875
+      ],
+      "nice": 19,
+      "method": "Linux wait4 rusage.ru_maxrss, KiB; child only"
+    },
+    "neighbour_uses": 26,
+    "were_window_kept": true,
+    "were_overlaps": [],
+    "were_associated_um_request": {
+      "action": {
+        "index": 65,
+        "kind": "filler",
+        "next": null,
+        "nominal_source_us": [
+          32480000,
+          32560000
+        ],
+        "original_project_us": [
+          32480000,
+          32560000
+        ],
+        "source_us": [
+          32480000,
+          32560000
+        ],
+        "text": "um"
+      },
+      "address_used": {
+        "binding": "b9aa115c7428fdb9e5d1c9536e8daf91ae1ee84b8960af3bf64b336b17138aff",
+        "clip": 1,
+        "index": 65
+      },
+      "reason": {
+        "at_us": 31690000,
+        "code": "selection_evidence",
+        "component": {
+          "end_micros": 32450000,
+          "start_micros": 31690000
+        },
+        "index": 9,
+        "outcome": "refused",
+        "quiet_us": [
+          31660000,
+          32560000
+        ],
+        "violation": "unrequested_sound",
+        "word": 64
+      },
+      "status": "refused"
+    },
+    "source_coverage_verified": true,
+    "check_totals": {
+      "dip_intrusions": 2,
+      "holes": 81,
+      "joins": 65,
+      "pauses": 107,
+      "repeats": 10,
+      "room_tone_jumps": 7,
+      "short_air": 3,
+      "sounding_holes": 74
+    },
+    "hole_bases": [
+      {
+        "after_word_start_us": 1000000,
+        "kind": "measured_voice_without_nearby_word_start"
+      }
+    ]
+  },
+  "preflight": "dq-r6-preflight.json",
+  "transients": {
+    "eligible_initial_refusals": [
+      115,
+      148,
+      436,
+      552,
+      662,
+      773
+    ],
+    "newly_applied_fillers": [
+      773
+    ],
+    "rows": [
+      {
+        "index": 115,
+        "word": "um",
+        "asr_start_us": 53040000,
+        "newly_applied": false,
+        "status": "refused",
+        "reason": {
+          "at_us": 53550000,
+          "code": "selection_evidence",
+          "component": {
+            "end_micros": 53580000,
+            "start_micros": 53550000
+          },
+          "index": 13,
+          "outcome": "refused",
+          "quiet_us": [
+            52620000,
+            53610000
+          ],
+          "violation": "unattributed_sound"
+        },
+        "initial_component": {
+          "end_micros": 53470000,
+          "start_micros": 53460000
+        },
+        "previous_kept": {
+          "index": 114,
+          "end_micros": 52080000,
+          "start_micros": 52000000,
+          "text": "okay"
+        },
+        "previous_start_to_cut_us": 470000.0,
+        "source_window_us": [
+          52470000.0,
+          53610000.0
+        ],
+        "edited_center_us": 48806666.666666664,
+        "after_kind": "retained filler (refused)",
+        "before": {
+          "file": "01-before.wav",
+          "frames": 66240,
+          "sample_rate": 16000,
+          "channels": 1,
+          "window_us": [
+            50970000.0,
+            55110000.0
+          ]
+        },
+        "after": {
+          "file": "01-after.wav",
+          "frames": 144000,
+          "sample_rate": 48000,
+          "channels": 2,
+          "window_us": [
+            47306666.666666664,
+            50306666.666666664
+          ]
+        }
+      },
+      {
+        "index": 148,
+        "word": "um",
+        "asr_start_us": 68640000,
+        "newly_applied": false,
+        "status": "refused",
+        "reason": {
+          "at_us": 69130000,
+          "code": "acoustic",
+          "index": 17,
+          "outcome": "refused",
+          "quiet_us": [
+            69130000,
+            69130000
+          ],
+          "reason": "no project frame lies inside this edge's measured support"
+        },
+        "initial_component": {
+          "end_micros": 69030000,
+          "start_micros": 69020000
+        },
+        "previous_kept": {
+          "index": 147,
+          "end_micros": 67360000,
+          "start_micros": 67280000,
+          "text": "there"
+        },
+        "previous_start_to_cut_us": 860000.0,
+        "source_window_us": [
+          68140000.0,
+          69130000.0
+        ],
+        "edited_center_us": 63473333.333333336,
+        "after_kind": "retained filler (refused)",
+        "before": {
+          "file": "02-before.wav",
+          "frames": 63840,
+          "sample_rate": 16000,
+          "channels": 1,
+          "window_us": [
+            66640000.0,
+            70630000.0
+          ]
+        },
+        "after": {
+          "file": "02-after.wav",
+          "frames": 144000,
+          "sample_rate": 48000,
+          "channels": 2,
+          "window_us": [
+            61973333.333333336,
+            64973333.333333336
+          ]
+        }
+      },
+      {
+        "index": 436,
+        "word": "um",
+        "asr_start_us": 256800000,
+        "newly_applied": false,
+        "status": "refused",
+        "reason": {
+          "at_us": 255970000,
+          "code": "selection_evidence",
+          "component": {
+            "end_micros": 256010000,
+            "start_micros": 255970000
+          },
+          "index": 30,
+          "outcome": "refused",
+          "quiet_us": [
+            255910000,
+            256960000
+          ],
+          "violation": "unattributed_sound"
+        },
+        "initial_component": {
+          "end_micros": 255960000,
+          "start_micros": 255940000
+        },
+        "previous_kept": {
+          "index": 435,
+          "end_micros": 255440000,
+          "start_micros": 255360000,
+          "text": "about"
+        },
+        "previous_start_to_cut_us": 190000.0,
+        "source_window_us": [
+          255550000.0,
+          256960000.0
+        ],
+        "edited_center_us": 223400000.0,
+        "after_kind": "retained filler (refused)",
+        "before": {
+          "file": "03-before.wav",
+          "frames": 70560,
+          "sample_rate": 16000,
+          "channels": 1,
+          "window_us": [
+            254050000.0,
+            258460000.0
+          ]
+        },
+        "after": {
+          "file": "03-after.wav",
+          "frames": 144000,
+          "sample_rate": 48000,
+          "channels": 2,
+          "window_us": [
+            221900000.0,
+            224900000.0
+          ]
+        }
+      },
+      {
+        "index": 552,
+        "word": "uh",
+        "asr_start_us": 325920000,
+        "newly_applied": false,
+        "status": "refused",
+        "reason": {
+          "at_us": 325060000,
+          "code": "selection_evidence",
+          "component": {
+            "end_micros": 326000000,
+            "start_micros": 325060000
+          },
+          "index": 17,
+          "outcome": "refused",
+          "quiet_us": [
+            325000000,
+            326470000
+          ],
+          "violation": "unattributed_sound"
+        },
+        "initial_component": {
+          "end_micros": 325040000,
+          "start_micros": 325030000
+        },
+        "previous_kept": {
+          "index": 551,
+          "end_micros": 322800000,
+          "start_micros": 322720000,
+          "text": "um"
+        },
+        "previous_start_to_cut_us": 2280000.0,
+        "source_window_us": [
+          325000000.0,
+          326530000.0
+        ],
+        "edited_center_us": 286920000.0,
+        "after_kind": "retained filler (refused)",
+        "before": {
+          "file": "04-before.wav",
+          "frames": 72480,
+          "sample_rate": 16000,
+          "channels": 1,
+          "window_us": [
+            323500000.0,
+            328030000.0
+          ]
+        },
+        "after": {
+          "file": "04-after.wav",
+          "frames": 144000,
+          "sample_rate": 48000,
+          "channels": 2,
+          "window_us": [
+            285420000.0,
+            288420000.0
+          ]
+        }
+      },
+      {
+        "index": 662,
+        "word": "um",
+        "asr_start_us": 369600000,
+        "newly_applied": false,
+        "status": "refused",
+        "reason": {
+          "at_us": 368760000,
+          "code": "selection_evidence",
+          "component": {
+            "end_micros": 369400000,
+            "start_micros": 368760000
+          },
+          "index": 23,
+          "outcome": "refused",
+          "quiet_us": [
+            368610000,
+            369780000
+          ],
+          "violation": "unattributed_sound"
+        },
+        "initial_component": {
+          "end_micros": 368690000,
+          "start_micros": 368680000
+        },
+        "previous_kept": {
+          "index": 661,
+          "end_micros": 365520000,
+          "start_micros": 365360000,
+          "text": "okay"
+        },
+        "previous_start_to_cut_us": 3250000.0,
+        "source_window_us": [
+          368610000.0,
+          369790000.0
+        ],
+        "edited_center_us": 328833333.3333333,
+        "after_kind": "retained filler (refused)",
+        "before": {
+          "file": "05-before.wav",
+          "frames": 66880,
+          "sample_rate": 16000,
+          "channels": 1,
+          "window_us": [
+            367110000.0,
+            371290000.0
+          ]
+        },
+        "after": {
+          "file": "05-after.wav",
+          "frames": 144000,
+          "sample_rate": 48000,
+          "channels": 2,
+          "window_us": [
+            327333333.3333333,
+            330333333.3333333
+          ]
+        }
+      },
+      {
+        "index": 773,
+        "word": "um",
+        "asr_start_us": 424880000,
+        "newly_applied": true,
+        "status": "moved",
+        "reason": null,
+        "initial_component": {
+          "end_micros": 425640000,
+          "start_micros": 425630000
+        },
+        "previous_kept": {
+          "index": 772,
+          "end_micros": 423760000,
+          "start_micros": 423680000,
+          "text": "shelf"
+        },
+        "previous_start_to_cut_us": 853333.3333333334,
+        "source_window_us": [
+          424533333.3333333,
+          425733333.3333333
+        ],
+        "edited_center_us": 375600000.0,
+        "after_kind": "applied join",
+        "before": {
+          "file": "06-before.wav",
+          "frames": 67200,
+          "sample_rate": 16000,
+          "channels": 1,
+          "window_us": [
+            423033375.0,
+            427233375.0
+          ]
+        },
+        "after": {
+          "file": "06-after.wav",
+          "frames": 144000,
+          "sample_rate": 48000,
+          "channels": 2,
+          "window_us": [
+            374100000.0,
+            377100000.0
+          ]
+        }
+      }
+    ]
+  },
+  "reanchors": [
+    {
+      "clip": 63,
+      "cut": [
+        9001,
+        9025
+      ],
+      "edges": [
+        [
+          8830,
+          1,
+          [
+            1000300000,
+            3
+          ],
+          "quiet"
+        ],
+        [
+          8830,
+          1,
+          [
+            1002700000,
+            3
+          ],
+          "quiet"
+        ]
+      ],
+      "index": 19,
+      "kept_air_micros": [
+        280000,
+        1
+      ],
+      "other_pauses_micros": [
+        370000,
+        150000,
+        410000,
+        640000,
+        120000,
+        70000
+      ],
+      "outcome": "ready",
+      "reanchored_after": {
+        "from": 571,
+        "to": 570
+      }
+    },
+    {
+      "clip": 63,
+      "cut": [
+        10196,
+        10239
+      ],
+      "edges": [
+        [
+          9967,
+          1,
+          [
+            1119800000,
+            3
+          ],
+          "quiet"
+        ],
+        [
+          9967,
+          1,
+          [
+            374700000,
+            1
+          ],
+          "quiet"
+        ]
+      ],
+      "index": 25,
+      "kept_air_micros": [
+        1030000,
+        3
+      ],
+      "other_pauses_micros": [
+        60000
+      ],
+      "outcome": "ready",
+      "reanchored_after": {
+        "from": 668,
+        "to": 667
+      }
+    },
+    {
+      "clip": 63,
+      "cut": [
+        10443,
+        10456
+      ],
+      "edges": [
+        [
+          10115,
+          1,
+          [
+            381500000,
+            1
+          ],
+          "quiet"
+        ],
+        [
+          10115,
+          1,
+          [
+            1145800000,
+            3
+          ],
+          "quiet"
+        ]
+      ],
+      "index": 29,
+      "kept_air_micros": [
+        920000,
+        3
+      ],
+      "other_pauses_micros": [
+        80000,
+        150000,
+        80000
+      ],
+      "outcome": "ready",
+      "reanchored_after": {
+        "from": 679,
+        "to": 678
+      }
+    },
+    {
+      "clip": 97,
+      "cut": [
+        11839,
+        11872
+      ],
+      "edges": [
+        [
+          11652,
+          1,
+          [
+            1320800000,
+            3
+          ],
+          "quiet"
+        ],
+        [
+          11652,
+          1,
+          [
+            1324100000,
+            3
+          ],
+          "quiet"
+        ]
+      ],
+      "index": 14,
+      "kept_air_micros": [
+        300000,
+        1
+      ],
+      "other_pauses_micros": [
+        70000,
+        80000
+      ],
+      "outcome": "ready",
+      "reanchored_after": {
+        "from": 813,
+        "to": 812
+      }
+    }
+  ],
+  "were_export": {
+    "source_window_seconds": [
+      31.72,
+      31.82
+    ],
+    "kept": true,
+    "edited_window_seconds": [
+      28.12,
+      28.22
+    ],
+    "clip": 11,
+    "source_rms_dbfs": -36.320003851959164,
+    "edited_rms_dbfs": -39.32875081350326,
+    "export_rate": 48000,
+    "export_channels": 2,
+    "export_minus_source_db": -3.008746961544098
+  },
+  "gate": {
+    "core": {
+      "binaries": 21,
+      "passed": 936,
+      "failed": 0,
+      "ignored": 2,
+      "summed_test_seconds": 22.15
+    },
+    "agent": {
+      "binaries": 32,
+      "passed": 1840,
+      "failed": 0,
+      "ignored": 105,
+      "summed_test_seconds": 1516.06
+    },
+    "source_sha256": {
+      "crates/kinewright-agent/src/dialogue_rehearsal_tests.rs": "31c49d363eecd7bd45cf6dd52fa99b0f6deac6ba0991e9f183d72b44ef3f14fc",
+      "crates/kinewright-core/src/dialogue/selection.rs": "7a115066902156940173ab9ddbd652e319f037791eacf9a66e244e39d982619b",
+      "crates/kinewright-agent/src/dialogue_tools/cut.rs": "cc9b93d7844f2c7a6f26e0c881fe34e642a4eec3af6a92ee49d1152022e82214",
+      "scripts/dq-media-transient-proof.py": "8dac91a0933105222b8b923ed305449258483fb92b11c017b9feeafb739738b1"
+    },
+    "clippy_all_targets": "passed",
+    "fmt": "passed",
+    "slow_lint": "passed",
+    "mcp_server": "86 passed",
+    "deliberate_breaks": {
+      "results": [
+        {
+          "mutation": "deny-short-blips",
+          "test": "r6_ten_and_twenty_ms_detached_blips_need_only_rms_quiet_neighbours",
+          "exit": 101,
+          "assertion": "R6_RMS_QUIET_TRANSIENT"
+        },
+        {
+          "mutation": "admit-thirty-ms",
+          "test": "r6_thirty_ms_detached_component_still_refuses",
+          "exit": 101,
+          "assertion": "called `Result::unwrap_err()`"
+        },
+        {
+          "mutation": "disable-reanchor",
+          "test": "dq_r6_removed_filler_anchor_reanchors_and_recalculates_retained_air",
+          "exit": 101,
+          "assertion": "R6_PAUSE_REANCHORED"
+        }
+      ],
+      "restored_sha256": {
+        "crates/kinewright-core/src/dialogue/selection.rs": "7a115066902156940173ab9ddbd652e319f037791eacf9a66e244e39d982619b",
+        "crates/kinewright-agent/src/dialogue_tools/cut.rs": "cc9b93d7844f2c7a6f26e0c881fe34e642a4eec3af6a92ee49d1152022e82214"
+      }
+    },
+    "final_audit_reproof": "same complete transient JSON, same 12 WAVs and index byte for byte; LF inventory digest reproduced with audible clip scopes"
+  },
+  "listening_validation": {
+    "count": 12,
+    "files": [
+      {
+        "file": "target/dq-media/rehearsal/r6/listen/01-before.wav",
+        "source_frames": [
+          815520,
+          881760
+        ],
+        "frames": 66240,
+        "decoded_bytes": 264960,
+        "sha256": "878d6836b2b2e218984765b00616b43afd1969b82086e2c7a632e56aa90037dd",
+        "copied_samples_exact": true,
+        "decoded_float_samples_exact": true
+      },
+      {
+        "file": "target/dq-media/rehearsal/r6/listen/01-after.wav",
+        "source_frames": [
+          2270720,
+          2414720
+        ],
+        "frames": 144000,
+        "decoded_bytes": 1152000,
+        "sha256": "796e9ab87e7db9e8666deac56fcec847c4aa49564a2e792deb941f751f2ceb37",
+        "copied_samples_exact": true,
+        "decoded_float_samples_exact": true
+      },
+      {
+        "file": "target/dq-media/rehearsal/r6/listen/02-before.wav",
+        "source_frames": [
+          1066240,
+          1130080
+        ],
+        "frames": 63840,
+        "decoded_bytes": 255360,
+        "sha256": "68c6552ad6d094f8b5bd4dca0713aaa7c86c5ef5cd3f9ce1c507b36f1ff45f7d",
+        "copied_samples_exact": true,
+        "decoded_float_samples_exact": true
+      },
+      {
+        "file": "target/dq-media/rehearsal/r6/listen/02-after.wav",
+        "source_frames": [
+          2974720,
+          3118720
+        ],
+        "frames": 144000,
+        "decoded_bytes": 1152000,
+        "sha256": "4fefa119e214a8d8caf403f62a9d9da897c837099ea888a002cd999b184cfa82",
+        "copied_samples_exact": true,
+        "decoded_float_samples_exact": true
+      },
+      {
+        "file": "target/dq-media/rehearsal/r6/listen/03-before.wav",
+        "source_frames": [
+          4064800,
+          4135360
+        ],
+        "frames": 70560,
+        "decoded_bytes": 282240,
+        "sha256": "a3abef282bbf798aba9ce8f4e8e369495945dc896eaac5104086c494ebb4d295",
+        "copied_samples_exact": true,
+        "decoded_float_samples_exact": true
+      },
+      {
+        "file": "target/dq-media/rehearsal/r6/listen/03-after.wav",
+        "source_frames": [
+          10651200,
+          10795200
+        ],
+        "frames": 144000,
+        "decoded_bytes": 1152000,
+        "sha256": "5602bceab16a4052b9159099fe437a372bf6f8e6bf52aa8be1a5d64448e13382",
+        "copied_samples_exact": true,
+        "decoded_float_samples_exact": true
+      },
+      {
+        "file": "target/dq-media/rehearsal/r6/listen/04-before.wav",
+        "source_frames": [
+          5176000,
+          5248480
+        ],
+        "frames": 72480,
+        "decoded_bytes": 289920,
+        "sha256": "fbd05804c8cbeb29bb269e22ae34e82517121dd15450434690f24eb6d690f4d4",
+        "copied_samples_exact": true,
+        "decoded_float_samples_exact": true
+      },
+      {
+        "file": "target/dq-media/rehearsal/r6/listen/04-after.wav",
+        "source_frames": [
+          13700160,
+          13844160
+        ],
+        "frames": 144000,
+        "decoded_bytes": 1152000,
+        "sha256": "723239bcde5d3991f1540f4417b0508b78fa92a4fc040b30c1e08c25c2af5d03",
+        "copied_samples_exact": true,
+        "decoded_float_samples_exact": true
+      },
+      {
+        "file": "target/dq-media/rehearsal/r6/listen/05-before.wav",
+        "source_frames": [
+          5873760,
+          5940640
+        ],
+        "frames": 66880,
+        "decoded_bytes": 267520,
+        "sha256": "1ed64a5e254a6ccceebb39a19eee64e1dc6fe411ecf291a7cbd95e32787b83c1",
+        "copied_samples_exact": true,
+        "decoded_float_samples_exact": true
+      },
+      {
+        "file": "target/dq-media/rehearsal/r6/listen/05-after.wav",
+        "source_frames": [
+          15712000,
+          15856000
+        ],
+        "frames": 144000,
+        "decoded_bytes": 1152000,
+        "sha256": "28835426be4079fa107e527f27f9e936f01d8e9b747e14749a80383db0ba3ff1",
+        "copied_samples_exact": true,
+        "decoded_float_samples_exact": true
+      },
+      {
+        "file": "target/dq-media/rehearsal/r6/listen/06-before.wav",
+        "source_frames": [
+          6768534,
+          6835734
+        ],
+        "frames": 67200,
+        "decoded_bytes": 268800,
+        "sha256": "48088edc910aa6d8491affac187c9f9afd38db9b85676acefafc2ad3a98bde11",
+        "copied_samples_exact": true,
+        "decoded_float_samples_exact": true
+      },
+      {
+        "file": "target/dq-media/rehearsal/r6/listen/06-after.wav",
+        "source_frames": [
+          17956800,
+          18100800
+        ],
+        "frames": 144000,
+        "decoded_bytes": 1152000,
+        "sha256": "dcee10f205947f58df4b2044edaacc5f8140cf2cc5b32b04709a5aa853663b50",
+        "copied_samples_exact": true,
+        "decoded_float_samples_exact": true
+      }
+    ],
+    "original_wav_sha256": "5eb12387e272b89c4ea626f65522d66860dd5e5dbd02a59bb816393068d3548b",
+    "edited_wav_sha256": "d37a93287601b84627c00b11ddfb8f0fc9213c3f31158aa4c8dc44b6f4262ad3",
+    "warm_replies_sha256": "d50214d07a4abf231b780b7c2681eba9b274e784909a564e0d83d4fc1e0c5392",
+    "original_matches_r5": true,
+    "warm_replies_identical": true
+  },
+  "inputs": {
+    "driver_sha256": "31c49d363eecd7bd45cf6dd52fa99b0f6deac6ba0991e9f183d72b44ef3f14fc",
+    "audio": "/home/riels/.cache/kw-probe-asr/audio/derived/ami8.wav",
+    "model_root": "/home/riels/.cache/kw-probe-asr/models/nemotron-speech-streaming-en-0.6b",
+    "parent": "0088d7d8",
+    "claim": "R6: same driver and settings; six eligible initial blockers, actual terminal outcomes, zero safety counters.",
+    "audio_sha256": "3565188c90972ee3bc6993345c6ecbd611b5957abe12c4d56fa7ffad21c5b4c0",
+    "audio_bytes": 15360078
+  },
+  "preflight_inventory_sha256": "2287d4f84f888b27577f2ac06f65c1d774f6c16c7f1c54fe84b2ea81291da05e"
+}

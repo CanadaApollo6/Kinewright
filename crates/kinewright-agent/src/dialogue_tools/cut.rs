@@ -49,6 +49,11 @@ pub(crate) struct Edge(
     #[serde(skip_serializing_if = "Option::is_none")] pub Option<(usize, &'static str, u64)>,
 );
 #[derive(Debug, Serialize)]
+pub(crate) struct ReanchoredAfter {
+    from: usize,
+    to: usize,
+}
+#[derive(Debug, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 #[allow(
     clippy::large_enum_variant,
@@ -64,6 +69,8 @@ pub(crate) enum Outcome {
         kept_air_micros: Option<ExactMicros>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         other_pauses_micros: Vec<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reanchored_after: Option<ReanchoredAfter>,
     },
     Refused {
         index: usize,
@@ -85,7 +92,13 @@ struct AddressSpan {
     clip: ClipId,
     source: [ExactMicros; 2],
 }
+struct PauseContext {
+    available: kinewright_core::dialogue::Span,
+    address: AddressSpan,
+    reanchored: ReanchoredAfter,
+}
 struct Cut {
+    reanchored_after: Option<ReanchoredAfter>,
     addresses: [AddressSpan; 2],
     request: CutRequest,
     index: usize,
@@ -272,6 +285,7 @@ fn resolve(
     index: usize,
     removal: &Removal,
     value: &BoundDialogue,
+    pause: Option<PauseContext>,
 ) -> Result<Cut, Refusal> {
     let (first, last, overrule, mut req) = selected(removal);
     let evidence_request = req;
@@ -356,6 +370,7 @@ fn resolve(
                     played.source.end.floor(),
                 )
                 .map_err(|e| request(e.to_string()))?;
+                let available = pause.as_ref().map_or(available, |p| p.available);
                 value
                     .dialogue
                     .resolve_pause_in(after_word, leave_micros, available)
@@ -407,9 +422,14 @@ fn resolve(
         Removal::Words { .. } => value.dialogue.settings().minimum_word_cut_micros,
         Removal::Pause { .. } => value.dialogue.settings().minimum_pause_cut_micros,
     };
+    let replacement = pause.as_ref().map(|p| p.address);
     Ok(Cut {
+        reanchored_after: pause.map(|p| p.reanchored),
         request: evidence_request,
         addresses: [first, last].map(|a| {
+            if let Some(address) = replacement {
+                return address;
+            }
             let word = &words[a.index];
             AddressSpan {
                 clip: ClipId(a.clip),
@@ -848,11 +868,97 @@ fn retained_air(
 }
 
 struct Accepted {
+    request: CutRequest,
     asset: kinewright_core::AssetId,
     index: usize,
     window: super::retention::Window,
     addresses: [AddressSpan; 2],
     width: i64,
+}
+fn reanchor(
+    cut: &Cut,
+    working: &Document,
+    value: &BoundDialogue,
+    accepted: &[Accepted],
+    origins: &super::retention::Origins,
+) -> Result<Option<PauseContext>, Refusal> {
+    let CutRequest::TrimPause { after_word, .. } = cut.request else {
+        return Ok(None);
+    };
+    let words = value.dialogue.words();
+    let Some(owner) = accepted.iter().find(|old| {
+        old.asset == cut.asset
+            && removes(old.window, cut.addresses[0])
+            && matches!(old.request, CutRequest::RemoveWords { from, to, .. }
+                if (from..=to).contains(&after_word)
+                    && words[from..=to].iter().all(|w| kinewright_core::is_filler_word(&w.text)))
+    }) else {
+        return Ok(None);
+    };
+    let unavailable = |cause| Refusal::PauseReanchorUnavailable {
+        anchor: after_word,
+        removed_by: owner.index,
+        cause,
+    };
+    let pieces = spans(working)?;
+    let same = |s: &&super::check::PlayedSpan| {
+        s.track == cut.track
+            && s.asset == cut.asset
+            && s.proven
+            && *origins.get(&s.clip).unwrap_or(&s.clip) == cut.clip
+    };
+    let anchor = ExactMicros::integer(words[after_word].start_micros);
+    if pieces
+        .iter()
+        .filter(same)
+        .any(|s| s.source.start <= anchor && anchor < s.source.end)
+    {
+        return Ok(None);
+    }
+    let surviving = (0..after_word)
+        .rev()
+        .find_map(|i| {
+            let start = ExactMicros::integer(words[i].start_micros);
+            pieces
+                .iter()
+                .filter(same)
+                .find(|s| s.source.start <= start && start < s.source.end)
+                .map(|s| {
+                    (
+                        i,
+                        AddressSpan {
+                            clip: cut.clip,
+                            source: [
+                                start,
+                                ExactMicros::integer(words[i].end_micros).min(s.source.end),
+                            ],
+                        },
+                    )
+                })
+        })
+        .ok_or_else(|| unavailable(super::PauseReanchorCause::NoSameSideWord))?;
+    let next = words.get(after_word + 1).ok_or(Refusal::Word)?;
+    let available = pieces
+        .iter()
+        .filter(same)
+        .find(|s| {
+            s.source.start > anchor
+                && s.source.start < ExactMicros::integer(next.start_micros)
+                && s.source.end > ExactMicros::integer(words[after_word].start_micros)
+        })
+        .ok_or_else(|| unavailable(super::PauseReanchorCause::NoRemainingPause))?;
+    Ok(Some(PauseContext {
+        available: kinewright_core::dialogue::Span::new(
+            available.source.start.ceil(),
+            available.source.end.floor(),
+        )
+        .map_err(|e| request(e.to_string()))?,
+        address: surviving.1,
+        reanchored: ReanchoredAfter {
+            from: after_word,
+            to: surviving.0,
+        },
+    }))
 }
 fn removes(window: super::retention::Window, address: AddressSpan) -> bool {
     window.clip == address.clip
@@ -928,6 +1034,7 @@ pub(crate) fn plan(
                 index,
                 removal,
                 &bindings[&doc.clip(ClipId(first.clip)).ok_or(Refusal::Word)?.asset],
+                None,
             )
         })
         .collect();
@@ -939,7 +1046,7 @@ pub(crate) fn plan(
     let mut created = Vec::new();
     let mut track = None;
     for (index, proposal) in proposals.into_iter().enumerate() {
-        let cut = match proposal {
+        let mut cut = match proposal {
             Ok(c) => c,
             Err(reason) => {
                 outcomes.push(Outcome::Refused { index, reason });
@@ -952,6 +1059,28 @@ pub(crate) fn plan(
                 reason: request("submit removals on one dialogue track"),
             });
             continue;
+        }
+        match reanchor(&cut, &working, &bindings[&cut.asset], &accepted, &origins) {
+            Ok(Some(context)) => {
+                cut = match resolve(
+                    doc,
+                    index,
+                    &args.removals[index],
+                    &bindings[&cut.asset],
+                    Some(context),
+                ) {
+                    Ok(cut) => cut,
+                    Err(reason) => {
+                        outcomes.push(Outcome::Refused { index, reason });
+                        continue;
+                    }
+                };
+            }
+            Ok(None) => {}
+            Err(reason) => {
+                outcomes.push(Outcome::Refused { index, reason });
+                continue;
+            }
         }
         if let Some(reason) = conflict(&cut, &accepted) {
             outcomes.push(Outcome::Refused { index, reason });
@@ -998,6 +1127,7 @@ pub(crate) fn plan(
                     edge.0 += removed;
                 }
                 accepted.push(Accepted {
+                    request: cut.request,
                     asset: cut.asset,
                     index,
                     window,
@@ -1016,6 +1146,7 @@ pub(crate) fn plan(
                     edges,
                     kept_air_micros: None,
                     other_pauses_micros: cut.other_pauses_micros,
+                    reanchored_after: cut.reanchored_after,
                 });
             }
             Err(reason) => outcomes.push(Outcome::Refused { index, reason }),

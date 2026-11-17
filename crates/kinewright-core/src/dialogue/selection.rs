@@ -10,6 +10,7 @@ use thiserror::Error;
 pub const WORD_ATTRIBUTION_MICROS: u64 = 300_000;
 /// R4's voiced, start-containing components began up to 730 ms before ASR.
 const EARLY_VOICE_MICROS: u64 = 750_000;
+const DETACHED_TRANSIENT_MICROS: u64 = 20_000;
 
 /// Fixed-size evidence: no copied word text or unbounded diagnostic string.
 #[derive(Debug, PartialEq, Eq, Serialize, Error)]
@@ -44,7 +45,9 @@ impl Dialogue {
     /// after onset, without an intervening word start. Detached transients do
     /// not get that extension. All plausible owners must be requested: a kept start within
     /// that reach, or whose forward 300 ms window overlaps the component,
-    /// vetoes removal. Supplied word ends never establish sound ownership.
+    /// vetoes removal. A wholly contained detached blip of at most 20 ms
+    /// needs no owner; each neighbour must be RMS-quiet, independently of
+    /// VAD and peak. Supplied word ends never establish sound ownership.
     /// Acoustic overrules do not waive this check.
     ///
     /// # Errors
@@ -106,7 +109,7 @@ impl Dialogue {
                     owned = true;
                 }
             }
-            if !owned {
+            if !owned && !self.detached_transient(component, removed) {
                 return Err(self.refuse(
                     SelectionIssue::UnattributedSound { component }.into(),
                     component.start_micros.max(start.floor()),
@@ -118,6 +121,27 @@ impl Dialogue {
 }
 
 impl Dialogue {
+    // A complete sub-word blip needs one RMS-quiet hop on either side.
+    // VAD and peak do not disqualify those neighbours. This exception does
+    // not waive the unrequested-start or plausible kept-owner checks above.
+    fn detached_transient(&self, component: Span, removed: [ExactMicros; 2]) -> bool {
+        if component.duration() > DETACHED_TRANSIENT_MICROS
+            || removed[0] > ExactMicros::integer(component.start_micros)
+            || ExactMicros::integer(component.end_micros) > removed[1]
+        {
+            return false;
+        }
+        let hop = u64::from(self.profile.hop_micros());
+        let first = usize::try_from(component.start_micros / hop).expect("profile index");
+        let end = usize::try_from(component.end_micros.div_ceil(hop)).expect("profile index");
+        let quiet = |i| {
+            self.profile
+                .hop(i)
+                .is_some_and(|h| h.rms_dbfs_hundredths <= self.thresholds.quiet_rms_max)
+        };
+        first.checked_sub(1).is_some_and(quiet) && quiet(end)
+    }
+
     fn early_voice(&self, component: Span, word: usize) -> bool {
         let start = self.words[word].start_micros;
         if start < component.start_micros

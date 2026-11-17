@@ -1517,6 +1517,198 @@ Final R5 `target/` size is **25.028 GB**, below 40 GB.
 `target/dq1/` and all media evidence remain intact. All started jobs have ended;
 no push was made.
 
+## R6: detached sub-word transients and same-batch pause anchors
+
+R6 starts from R5 `0088d7d8`. The same audio, model, driver, settings and editor
+are used. No thresholds or client requests were tuned. Native task-scoped
+measurement wiring remains a separate open job.
+
+### Measure before changing code
+
+The inventory is [dq-r6-detached-components.csv](dq-r6-detached-components.csv):
+every detached RMS component, length, voice-hop count, immediate neighbours,
+Core-proposal, clip-intersected audible-proposal and framed-cut containment,
+and ASR starts. Every gap hop on this take is RMS-quiet, so no pause candidate
+contains an above-quiet component. There are **1,410 detached components**,
+including **538 at most 20 ms** (353 one-hop and 185 two-hop). These counts are
+not counts of removable fillers. Components conservatively retain all RMS-above-
+quiet hops, including unvoiced ones, as the existing attribution guard does.
+
+Detachment uses **at least one RMS-quiet hop on each side**, regardless of VAD;
+a voiced hop below the calibrated quiet RMS counts as quiet. No Core peak limit
+or non-voice condition is added. Thus #115, #148 and #662 qualify. The R4 safety
+line remains calibrated quiet, with floor +15 dB reported as context.
+
+The expected **six initial refusal blockers** qualify: #115, #148, #436, #552,
+#662 and #773. This is below the stop threshold of ten. Complete candidate
+simulation against the baseline predicted only #773 would apply: other guards
+can refuse after the first blocker clears. The baseline observer preserves all
+original validation and frame guards; its hashes, complete candidate results and
+inventory digest are in [dq-r6-preflight.json](dq-r6-preflight.json).
+
+The exception needs full component containment and never waives an unrequested
+ASR start or plausible kept-word ownership. Longer components remain refused.
+Pause re-anchoring retains the original measured exchange, replaces the removed
+filler anchor with the nearest preceding surviving start in the same clip lineage,
+and re-resolves against the actual remaining source span. It preserves air,
+`pause_limited`, unrequested-start and final extent checks. Refused/missing same-
+side anchors have a bounded typed `pause_reanchor_unavailable` cause. The ready
+reply records `reanchored_after: {from,to}`. Requests still process in batch order;
+a later filler cannot revoke a previously accepted pause's address.
+
+### R5 and R6 proof
+
+| Measure | R5 | R6 |
+|---|---:|---:|
+| Fillers selected / applied / refused / unavailable | 54 / 14 / 40 / 0 | 54 / 15 / 39 / 0 |
+| Pauses selected / applied / refused / unavailable | 67 / 44 / 19 / 4 | 67 / 48 / 19 / 0 |
+| Applied cuts | 58 | 63 |
+| Exactly as asked / edge moved | 0 / 58 | 0 / 63 |
+| Above-quiet hit hops | 0 | 0 |
+| Floor +15 hit hops | 0 | 0 |
+| Unrequested ASR starts inside cuts | 0 | 0 |
+| Per-member above-quiet / unrequested-start controls | 0 / 0 | 0 / 0 |
+| Acoustic filler envelope over / checked / unavailable | 0 / 10 / 4 | 0 / 11 / 4 |
+| ASR-span envelope context only | 11 | 12 |
+| Filler duration median / p95 / maximum, s | 0.667 / 1.233 / 1.233 | 0.700 / 1.233 / 1.233 |
+| Duration before / after, s | 480.000000 / 427.833333 | 480.000000 / 422.866667 |
+| Whole-batch refusals | 0 | 0 |
+| Transcript bytes / cut | 1,432.3 | 1,224.9 |
+| Neighbour address uses | 26 | 26 |
+| Peak whole-child RSS, KiB | 1,062,744 | 1,065,120 |
+| Warm replies byte-identical | True | True |
+| `were` 31.72..31.82 s retained | True | True |
+
+Stored speech/noise is -44.68 / -82.38 dBFS; quiet is -64.69, floor +15 is -67.38.
+The unchanged 10 ms source-grid RMS audit clips every hop to cut/word-window
+bounds. It checks missing final source coverage and stricter per-member controls.
+Word ends remain approximate and never establish sound ownership.
+
+| Refusal kind / code | R5 | R6 |
+|---|---:|---:|
+| filler / acoustic: no measured quiet or sufficiently deep dip brackets this word boundary | 21 | 21 |
+| filler / acoustic: no project frame lies inside this edge's measured support | 2 | 3 |
+| filler / acoustic: the measured edges do not bracket one forward removal | 1 | 1 |
+| filler / selection_evidence/unattributed_sound | 9 | 7 |
+| filler / selection_evidence/unrequested_sound | 6 | 6 |
+| filler / selection_evidence/unrequested_word_start | 1 | 1 |
+| pause / no_surviving_address | 4 | 0 |
+| pause / selection_evidence/pause_limited | 13 | 13 |
+| pause / selection_evidence/unrequested_word_start | 6 | 6 |
+
+### The six eligible first blockers and the actual outcomes
+
+| Filler / ASR s | Initial component s / ms / voice hops | R6 terminal result |
+|---|---|---|
+| #115 / 53.040 | 53.460..53.470 / 10 / 1 | refused unattributed_sound |
+| #148 / 68.640 | 69.020..69.030 / 10 / 1 | refused no project frame lies inside this edge's measured support |
+| #436 / 256.800 | 255.940..255.960 / 20 / 0 | refused unattributed_sound |
+| #552 / 325.920 | 325.030..325.040 / 10 / 0 | refused unattributed_sound |
+| #662 / 369.600 | 368.680..368.690 / 10 / 1 | refused unattributed_sound |
+| #773 / 424.880 | 425.630..425.640 / 10 / 0 | moved  |
+
+Newly applied fillers: [773]. The listening pack includes
+all six initially eligible candidates, including #115, #148 and #662, and every
+newly applied filler. `target/dq-media/rehearsal/r6/listen/index.txt` labels
+ready joins separately from retained context for refused candidates. Before WAVs
+copy source PCM with 1.5 s each side of the full candidate/cut; ready after WAVs
+copy 1.5 s each side of the final production export join. Refused after WAVs
+centre the retained ASR start and do not imply an edit.
+
+
+The later blockers are unchanged safety decisions, not a widened transient rule:
+#115 reaches 53.550..53.580 s (30 ms); #436 reaches 255.970..256.010 s (40 ms);
+#552 reaches 325.060..326.000 s (940 ms); #662 reaches 368.760..369.400 s
+(640 ms). #148 reaches a frame-support refusal at 69.130 s. No boundary or
+attribution window was tuned to force these requests through.
+The inventory distinguishes a normalized Core proposal from its audible clip
+intersection: for example, #135 reaches an existing 90 ms blocker at 63.4 s
+beyond that clip's 62.8 s end. This conservative refusal is retained; no unheard
+tail is counted as an applied removal.
+
+### Re-anchored pauses
+
+4 ready members report a replacement anchor. The full typed outcomes
+and exact edges are in the diagnostic JSON; no Core safety refusal is downgraded.
+
+| Removed anchor → surviving anchor | Original pause, s | Applied source cut, s |
+|---|---|---|
+| #571 → #570 `space` | 333.260..334.340 | 333.433333..334.233333 |
+| #668 → #667 `next` | 373.060..374.830 | 373.266667..374.700000 |
+| #679 → #678 `finance` | 381.310..382.050 | 381.500000..381.933333 |
+| #813 → #812 `want` | 440.100..441.500 | 440.266667..441.366667 |
+
+The four R5 missing-address cases now apply, including the required
+333.26 s and 440.10 s pauses.
+
+### Named `were` check
+
+The source interval 31.72..31.82 s is fully retained. It maps to
+28.120000..28.220000 s in the
+new `edited.wav`. Source/export RMS is -36.320 /
+-39.329 dBFS under unchanged mono-centre gain. The associated
+`um` request remains `refused`.
+
+### Check flags and tool observations
+
+| Check kind | R5 | R6 |
+|---|---:|---:|
+| dip_intrusions | 2 | 2 |
+| holes | 82 | 81 |
+| joins | 60 | 65 |
+| pauses | 108 | 107 |
+| repeats | 10 | 10 |
+| room_tone_jumps | 6 | 7 |
+| short_air | 3 | 3 |
+| sounding_holes | 75 | 74 |
+
+| Tool | R5 / R6 calls | R5 median / worst ms | R6 median / worst ms | R5 median / worst bytes | R6 median / worst bytes |
+|---|---:|---:|---:|---:|---:|
+| `get_timeline_transcript` | 23 / 19 | 30.153 / 38.355 | 28.469 / 29.047 | 3,110.000 / 11,850.000 | 3,151.000 / 11,850.000 |
+| `cut_dialogue` | 25 / 25 | 44.853 / 461.811 | 34.884 / 424.368 | 688.000 / 14,065.000 | 688.000 / 14,544.000 |
+| `check_dialogue_cut` | 1 / 1 | 58.391 / 58.391 | 57.194 / 57.194 | 16,697.000 / 16,697.000 | 16,759.000 / 16,759.000 |
+
+The two complete runs use explicit read-only input/model paths and a fresh
+private cache. The measured words, profile, settings and gaps equal R5, the
+original export is byte-identical, and warm complete replies are byte-identical.
+The driver SHA-256 remains
+`31c49d363eecd7bd45cf6dd52fa99b0f6deac6ba0991e9f183d72b44ef3f14fc`.
+The production engine asserts CPU mode, uses software lavapipe, no audio device,
+no download and a network namespace. Exports and complete evidence remain in
+`target/dq-media/rehearsal/r6/`; R5 is retained. Timing/RSS are observations of
+one cold/warm pair including consent and serialization, not speedup claims.
+
+
+### Verification
+
+The lighter local gate passed: Core all-target tests (936 passed, 2 ignored;
+22.15 s summed test time); Agent all-target tests with `slow-tests` (1,840 passed,
+105 ignored; 1,516.06 s summed test time), including all 86 `mcp_server` tests
+and the registry/native-role/app pins. Clippy for both crates on all targets
+with the slow feature, fmt and slow-test lint passed. No pin was re-written.
+Shipping builds, app tests and the full workspace suite were omitted under the
+lead's lighter gate. The final included test file also passes standalone rustfmt.
+
+The nine focused tests cover 10/20 ms RMS-only detachment despite voiced/high-
+peak neighbours, a 30 ms refusal, another ASR start, partial containment, kept
+ownership, recalculated pause air and single undo, an unsafe replacement gap,
+non-filler conflicts and a typed absent same-side anchor. The earlier R5
+negative transient witness now uses 30 ms because 20 ms is permitted by R6.
+Three deliberate wrong changes each failed their named assertion, then were
+reverted: deny short blips (`R6_RMS_QUIET_TRANSIENT`), admit 30 ms (the 30 ms
+refusal assertion), and disable re-anchoring (`R6_PAUSE_REANCHORED`). Final
+production source hashes match the restored, passing sources.
+
+The real on-demand test passed in 54.66 s, containing both complete runs.
+All 45 warm replies match byte for byte. All twelve listening WAVs pass ffprobe
+and independent FFmpeg decoding; decoded float samples match the copied source
+or export slices exactly. The applied listening centre is a real final document
+join. `original.wav` is byte-identical to R5. This evidence and exact file hashes
+are retained in [dq-media-r6-diagnostics.json](dq-media-r6-diagnostics.json).
+The resource sample records niceness 19 and load averages; no timing speedup
+is inferred from the table. `target/` is 32.13 GB, below 40 GB, with R5 retained.
+No build or test remains running. No push was made.
+
 ## M5: enable measured dialogue editing on the app branch
 
 M5 starts from `5d0e8b4f`, after the lead accepted R4. The app branch now
