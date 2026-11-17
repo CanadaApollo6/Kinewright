@@ -3,7 +3,7 @@ use kinewright_media_client::{Config, Limits, Request, Runtime, Source};
 use kinewright_media_ipc::Kind;
 use std::{
     fs::{self, File},
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, atomic::AtomicBool},
@@ -137,7 +137,10 @@ fn run_case(degraded: bool) {
             "KW_RUNTIME_FIXTURE",
             if degraded { "degraded" } else { "automatic" },
         )
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        // The child's own libtest headers must not interleave with this
+        // test's output; only its evidence lines are relayed below.
+        .stdout(Stdio::piped());
     if let Some(address) = address {
         command.env("DBUS_SESSION_BUS_ADDRESS", address);
     }
@@ -145,6 +148,17 @@ fn run_case(degraded: bool) {
     let end = Instant::now() + Duration::from_secs(20);
     loop {
         if let Some(status) = child.0.try_wait().unwrap() {
+            let mut output = String::new();
+            child
+                .0
+                .stdout
+                .take()
+                .unwrap()
+                .read_to_string(&mut output)
+                .unwrap();
+            for line in output.lines().filter(|line| line.contains("MS2_")) {
+                println!("{}", &line[line.find("MS2_").unwrap_or(0)..]);
+            }
             assert!(status.success(), "runtime fixture: {status}");
             break;
         }
