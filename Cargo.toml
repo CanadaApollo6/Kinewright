@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/kinewright-job-sys",
+    "crates/kinewright-media-ipc",
     "crates/kinewright-hash",
     "crates/kinewright-core",
     "crates/kinewright-media",

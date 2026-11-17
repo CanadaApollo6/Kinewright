@@ -2406,6 +2406,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kinewright-media-ipc"
+version = "0.1.0"
+dependencies = [
+ "kinewright-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kinewright-project"
 version = "0.1.0"
 dependencies = [
