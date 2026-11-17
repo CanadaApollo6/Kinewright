@@ -1275,6 +1275,248 @@ with `target/dq1/` and all `target/dq-media/` evidence retained. Final target si
 is **29.4 GB** (decimal), below the 40 GB limit.
 
 
+## R5: bounded early voiced onsets
+
+This repeats the R4 take and editor after merging dq2 `96784ee5`, the retained
+ruling 11. Ruling 10 stopped after measurement and adds no split rule. M5 is now
+on for the app; native task roles still exclude the dialogue tools.
+
+The plain merge is `af7bbb55`, on M5 `d4815603`. The driver remains
+`31c49d363eecd7bd45cf6dd52fa99b0f6deac6ba0991e9f183d72b44ef3f14fc`.
+Audio, model, words, profile, settings and gap runs match R4. The editor still
+selects the same 54 standalone fillers (40 `um`, 14 `uh`) and 67 measured pauses,
+uses at most 32 ready-member requests, ranged reads and returned neighbours,
+and changes no client setting or anchor rule.
+
+**Filler yield is 14 of 54.** The requested 40/54 target is not met.
+Above-quiet hits, floor +15 hits and unrequested ASR starts inside cuts are all zero.
+The early-prefix measure below examines sound outside the old forward word windows.
+
+### R5 proof beside R4
+
+| Measure | R4 | R5 |
+|---|---:|---:|
+| Stored speech / noise floor, dBFS | -44.68 / -82.38 | -44.68 / -82.38 |
+| Selected removal candidates | 121 | 121 |
+| Applied cuts | 56 | 58 |
+| Applied exactly as requested / after moving an edge | 0 / 56 | 0 / 58 |
+| Above-quiet hit hops in unrequested-word windows | 0 | 0 |
+| Floor +15 dB hit hops | 0 | 0 |
+| Unrequested ASR starts inside cuts | 0 | 0 |
+| Starts not selected by that particular cut, stricter control | 0 | 0 |
+| Per-member above-quiet hit hops, stricter control | 0 | 0 |
+| Acoustic filler envelope: over / checked / unavailable | 0 / 6 / 4 | 0 / 10 / 4 |
+| ASR-span envelope count, context only | 7 | 11 |
+| Filler cut length median / p95 / max, s | 0.617 / 1.233 / 1.233 | 0.667 / 1.233 / 1.233 |
+| Whole-batch refusals | 0 | 0 |
+| Transcript bytes / applied cut | 1,430.2 | 1,432.3 |
+| Edited duration from 480 s, s | 429.233333 | 427.833333 |
+| Peak whole-child RSS, KiB | 1,064,748 | 1,062,744 |
+| Warm complete replies byte-identical | True | True |
+| Returned neighbour-address uses | 26 | 26 |
+| `were` source 31.72..31.82 s fully kept | True | True |
+
+The calibrated quiet line is -64.69 dBFS; floor +15 is -67.38 dBFS. The source
+10 ms grid, clipping at cut and word-window boundaries, strict comparison and
+(cut, grid-hop) de-duplication are unchanged from R4. The main count excludes
+words requested by any filler removal; the stricter control excludes only that
+member's selected word. Exact reported removals match missing final source
+coverage. Acoustic envelopes require two distinct measured quiet flanks; missing
+flanks remain unavailable. Approximate ASR ends are context only.
+
+### Fillers and pauses
+
+| Kind | R4 selected / applied / refused / unavailable | R5 selected / applied / refused / unavailable |
+|---|---:|---:|
+| filler | 54 / 10 / 44 / 0 | 54 / 14 / 40 / 0 |
+| pause | 67 / 46 / 19 / 2 | 67 / 44 / 19 / 4 |
+
+Applied members have outcome `ready`; their edge adjustment is counted above.
+Terminal refusals, including missing addresses, follow.
+
+| Kind and code | R4 | R5 | Up to three R5 examples, original ASR/gap starts in seconds |
+|---|---:|---:|---|
+| filler: acoustic: no measured quiet or sufficiently deep dip brackets this word boundary | 21 | 21 | `um` at 5.760; `um` at 36.240; `uh` at 70.560 |
+| filler: acoustic: no project frame lies inside this edge's measured support | 1 | 2 | `um` at 22.400; `um` at 451.520 |
+| filler: acoustic: the measured edges do not bracket one forward removal | 1 | 1 | `uh` at 299.040 |
+| filler: selection_evidence/unattributed_sound | 14 | 9 | `um` at 53.040; `um` at 68.640; `um` at 62.720 |
+| filler: selection_evidence/unrequested_sound | 6 | 6 | `um` at 32.480; `uh` at 126.720; `um` at 234.640 |
+| filler: selection_evidence/unrequested_word_start | 1 | 1 | `um` at 40.320 |
+| pause: no_surviving_address | 2 | 4 | `um / and` at 333.260; `um / okay` at 373.060; `um / so` at 381.310 |
+| pause: selection_evidence/pause_limited | 13 | 13 | `it / and` at 13.940; `good / alright` at 81.060; `so / this` at 90.680 |
+| pause: selection_evidence/unrequested_word_start | 6 | 6 | `so / that's` at 9.260; `affection / from` at 136.230; `home / um` at 274.960 |
+
+### What still refuses
+
+Four formerly unattributed fillers now apply: words 32, 264, 571 and 813.
+Words 115, 148 and 551 pass attribution for the former long component, then
+refuse a different detached component. Word 848 reaches the existing project-
+frame-support refusal. Ruling 11 adds no permission for detached components.
+The nine terminal unattributed components below are all detached; five have
+zero VAD-voice hops. Their source signal is not identified as a breath, click
+or word. No further attribution or split rule is inferred.
+
+| Word index / filler ASR s | Refused component s | Onset minus ASR, ms | Length ms | Voice hops / total |
+|---|---|---:|---:|---:|
+| #115 / 53.040 | 53.460..53.470 | +420 | 10 | 1 / 1 |
+| #135 / 62.720 | 63.400..63.490 | +680 | 90 | 0 / 9 |
+| #148 / 68.640 | 69.020..69.030 | +380 | 10 | 1 / 1 |
+| #206 / 128.960 | 128.280..128.320 | -680 | 40 | 4 / 4 |
+| #436 / 256.800 | 255.940..255.960 | -860 | 20 | 0 / 2 |
+| #551 / 322.720 | 323.150..323.210 | +430 | 60 | 0 / 6 |
+| #552 / 325.920 | 325.030..325.040 | -890 | 10 | 0 / 1 |
+| #662 / 369.600 | 368.680..368.690 | -920 | 10 | 1 / 1 |
+| #773 / 424.880 | 425.630..425.640 | +750 | 10 | 0 / 1 |
+
+The two newly unavailable pause requests are `um / and` at 333.260..334.340 s
+and `um / but` at 440.100..441.500 s. Their original anchors, fillers 571 and
+813, are now removed. The unchanged editor does not replace a missing original
+anchor. Those two pause trims removed 1.900 s in R4. The four added filler cuts
+remove 3.300 s, so the result is 1.400 s shorter overall.
+
+### The named `were` case
+
+The 31.72..31.82 s source interval is fully kept, checked against every applied cut.
+The associated `um` at 32.48 s ends as `refused`
+with `selection_evidence/unrequested_sound`, naming kept word 64 (`were`)
+and measured component 31.690..32.450 s.
+Its full typed evidence and source coverage are in the
+[diagnostic JSON](dq-media-r5-diagnostics.json).
+
+The interval maps to 28.120000..28.220000 s in the new `edited.wav`.
+Source/export RMS is -36.320 / -39.329 dBFS,
+a -3.009 dB change under the unchanged mono-centre gain.
+
+### Early components and listening pack
+
+There are **4 applied fillers** whose attributed, start-containing RMS
+component begins more than 300 ms before the filler ASR start. Components are
+reconstructed from the saved production centidB profile using Core's RMS-only
+above-quiet rule. Each is voiced and no more than 750 ms early. No ASR end is
+used to identify the previous word or assign ownership.
+
+The previous kept word is the latest preceding ASR start surviving all final
+cuts. Its gap to the left edge is an ASR-start distance, not a measured speech
+end. Prefix RMS covers every source-grid hop inside the cut before the filler's
+ASR start, clipped at those exact boundaries. These prefixes are outside some
+previous words' 300 ms windows. RMS identifies sound, not which word made it.
+No auditory word-ownership verdict is claimed.
+
+| Pack | Filler index / ASR s | Component s / early ms | Applied source cut, s | Previous kept word / ASR s | Previous start to cut left, ms |
+|---|---|---|---|---|---:|
+| 01 | #32 `um` / 19.120 | 18.720..19.290 / 400 | 18.666667..19.600000 | #31 `time` / 16.240 | 2,426.667 |
+| 02 | #264 `um` / 178.560 | 178.040..178.570 / 520 | 177.966667..178.600000 | #263 `monkey` / 166.640 | 11,326.667 |
+| 03 | #571 `um` / 332.160 | 331.430..332.200 / 730 | 331.333333..332.300000 | #570 `space` / 330.560 | 773.333 |
+| 04 | #813 `um` / 439.760 | 439.300..440.000 / 460 | 439.266667..440.033333 | #812 `want` / 438.480 | 786.667 |
+
+| Pack | Loudest above-quiet pre-filler hop, source s | RMS dBFS | dB above quiet |
+|---|---|---:|---:|
+| 01 | 18.790000..18.800000 | -37.173 | 27.517 |
+| 02 | 178.260000..178.270000 | -31.000 | 33.690 |
+| 03 | 331.540000..331.550000 | -36.147 | 28.543 |
+| 04 | 439.390000..439.400000 | -39.400 | 25.290 |
+
+The pack is `target/dq-media/rehearsal/r5/listen/`. `index.txt` gives the words,
+source cut, component, previous start, final join, loudest hop and actual sample
+windows. For each numbered row, `NN-before.wav` copies the source with 1.5 s
+on either side of the entire cut. `NN-after.wav` copies 1.5 s on either side
+of the final edited join. The source clips retain mono 16 kHz PCM; after clips
+retain the production stereo 48 kHz float export. Join mapping accounts for all
+applied removals and is checked against final document boundaries.
+
+All eight WAV files independently decode through FFmpeg. The after clips'
+float sample bytes match the production export slices exactly. The loudest
+pre-ASR above-quiet hop in each case is 25.290..33.690 dB above quiet. This
+measures the prefix the old word windows miss; it does not identify whose
+speech that prefix contains. Listening remains the evidence for that question.
+
+### Check flags and call observations
+
+| Check total | R4 | R5 |
+|---|---:|---:|
+| dip_intrusions | 1 | 2 |
+| edge_in_sound | 0 | 0 |
+| holes | 86 | 82 |
+| joins | 58 | 60 |
+| pauses | 110 | 108 |
+| quiet_phrases | 0 | 0 |
+| repeats | 10 | 10 |
+| room_tone_jumps | 5 | 6 |
+| short_air | 3 | 3 |
+| sounding_holes | 79 | 75 |
+
+| Tool | R4 calls | R5 calls | R5 median / worst, ms | R5 median / worst reply bytes |
+|---|---:|---:|---:|---:|
+| `get_timeline_transcript` | 21 | 23 | 30.153 / 38.355 | 3,110.0 / 11,850.0 |
+| `cut_dialogue` | 25 | 25 | 44.853 / 461.811 | 688.0 / 14,065.0 |
+| `check_dialogue_cut` | 1 | 1 | 58.391 / 58.391 | 16,697.0 / 16,697.0 |
+
+This is one cold/warm pair in the same unoptimized Rust test profile and Release
+native SDK. Tool time includes scripted consent and complete reply serialization.
+The resource wrapper starts after the lock and uses kernel `wait4` whole-child
+counters. It covers both runs, model preparation and production WAV exports,
+not offline diagnostics. These are descriptive observations, not a speedup or
+throughput comparison. Cache/readiness, load, CPU and complete warm reply equality
+are retained in the diagnostic JSON.
+
+Artifacts are under `target/dq-media/rehearsal/r5/`. The existing ignored driver
+runs offline with explicit input/model/cache roots, software lavapipe, no audio
+device and no download. The original export is byte-identical to R4. The new
+`edited.wav`, complete calls/replies, document snapshots, measurement and resource
+counters are retained. R4 evidence remains unchanged.
+
+The Explain the Number principle keeps actual applied yield separate from
+eligibility and keeps timing observations separate from a performance claim.
+The new audit's four synthetic controls and three deliberate wrong variants are
+recorded under `audit-breaks/`; the final source is unchanged by those variants.
+
+
+The check retains `measured_voice_without_nearby_word_start` hole labelling,
+with 1,000,000 us forward support and a 100 ms minimum. It reads no ASR end.
+Sounding holes use the calibrated quiet RMS limit. These warnings do not prove
+omitted speech. All four unavailable acoustic envelopes are unchanged from R4;
+the ten measured envelopes have zero overruns, not a proof for all 14 fillers.
+
+| Other observations | R4 | R5 |
+|---|---:|---:|
+| Absolute edge moves median / p95 / max, ms | 13.333 / 3,813.333 / 5,546.667 | 13.333 / 3,813.333 / 5,546.667 |
+| Signed edge moves min / max, ms | -5,546.667 / 5,536.667 | -5,546.667 / 5,536.667 |
+| Measurement readiness first / warm, ms | 37,321.961 / 29.456 | 55,944.937 / 29.801 |
+| Whole-child wall / user / system, s | 54.150 / 134.908 / 7.809 | 73.678 / 161.224 / 9.978 |
+
+R5 load averages at start/end were [3.60498046875, 7.16162109375, 10.775390625] and [7.015625, 7.466796875, 10.5986328125]. These observations do not isolate a timing difference.
+
+### R5 validation and boundaries
+
+The lighter local gate passed Core's full suite **933 / 0 / 2 ignored**, Agent
+MCP slow integration **86 / 0 / 0**, and all measurement/pin tests **13 / 0 / 0**.
+Core and Agent all-target Clippy with the Agent slow and measurement features,
+Cargo fmt, explicit imported-test rustfmt and slow-test lint passed. The pin's
+full observed-field check recomputed equality; no pin changed. The three M5
+smoke tests also pass on the merged driver executable, including native-manifest
+exclusion. No Agent library-wide, App, workspace or shipping rerun is claimed
+under the changed-crate gate. Worker 1's earlier history-watchdog result stays
+recorded in its report and is not claimed fixed here.
+
+The ignored real-model rehearsal passed once, containing both complete runs,
+with 121 terminal requests each. Both full reply streams are byte-identical;
+the same 906 words, profile, gaps and settings match R4. The added audit has
+four passing synthetic tests. Three copied-script mutations each fail the
+intended assertion: including sound after the filler start, choosing an already
+removed predecessor, and including the exactly-300-ms boundary. Final source
+bytes match their hashes. Beyond the requested Core merge, no production file
+or driver was edited.
+
+The first gate wrapper waited on the shared lock, then ended with SIGTERM
+before its first Cargo command began; the signal source is unknown. No Core
+log existed. The replacement wrapper completed every listed check. It is the
+passing gate evidence, not a relabelled aborted invocation.
+
+
+Final R5 `target/` size is **25.028 GB**, below 40 GB.
+`target/dq1/` and all media evidence remain intact. All started jobs have ended;
+no push was made.
+
 ## M5: enable measured dialogue editing on the app branch
 
 M5 starts from `5d0e8b4f`, after the lead accepted R4. The app branch now
