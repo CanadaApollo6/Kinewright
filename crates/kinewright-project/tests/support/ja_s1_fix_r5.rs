@@ -18,7 +18,6 @@ fn temp(label: &str) -> TempDirectory {
 }
 fn limits() -> StorageLimits {
     StorageLimits {
-        branch_history_bytes: 1 << 20,
         ..StorageLimits::default()
     }
 }

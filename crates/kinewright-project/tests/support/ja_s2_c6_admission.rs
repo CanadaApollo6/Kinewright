@@ -50,7 +50,7 @@ pub fn fixture(root: &Path, kind: &str, declaration: &str) -> std::path::PathBuf
         let mut record = serde_json::json!({
             "role":"rescue_copy_v1", "schema":1, "project_id":raw["studio"]["project_id"],
             "originating_session":"11111111111111111111111111111111", "full_capture_sha256":"a".repeat(64), "selected_capture_sha256":"b".repeat(64),
-            "capture_checkpoints":[],"old_floor":0,"new_floor":0,"removed_undo":0,"redo_preserved":true,"gesture_preserved":true,
+            "capture_checkpoints":[],"redo_preserved":true,"gesture_preserved":true,
             "acknowledged_root":null,"acknowledged_absence":"unsaved source", "recovery_origin":null,"omissions":[],"attempts":[],
             "summary":{"count":0,"count_overflow":false,"digest":"","unresolved":false}
         });

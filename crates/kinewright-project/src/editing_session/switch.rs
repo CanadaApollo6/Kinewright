@@ -230,7 +230,6 @@ impl Ja1EditingSession {
                 checkpoint_generation: checkpoint.generation,
                 switch_generation: root.manual_switch_generation,
             })),
-            manual: None,
             context: None,
             version: 1,
             action: "switch".into(),
@@ -253,7 +252,6 @@ impl Ja1EditingSession {
             comment_text: None,
             comment_strokes: None,
             evidence: vec![],
-            transition: None,
         };
         envelope.encoded_bytes()?;
         Ok(envelope)

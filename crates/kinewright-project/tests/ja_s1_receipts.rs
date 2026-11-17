@@ -48,7 +48,6 @@ fn envelope(bundle: &mut ProjectBundle, core: &Core, inputs: &ObjectRef) -> Comm
     let issuer = bundle.issue_issuer(core, inputs, 1).unwrap();
     CommandEnvelope {
         switch: None,
-        manual: None,
         context: None,
         version: 1,
         action: "edit".into(),
@@ -69,7 +68,6 @@ fn envelope(bundle: &mut ProjectBundle, core: &Core, inputs: &ObjectRef) -> Comm
         comment_text: None,
         comment_strokes: None,
         evidence: vec![],
-        transition: None,
     }
 }
 fn committed(lookup: ReceiptLookup) -> CommandReceipt {

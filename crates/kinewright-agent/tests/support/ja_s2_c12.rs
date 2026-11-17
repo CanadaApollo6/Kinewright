@@ -407,7 +407,7 @@ fn composed() {
         let preview = host.ok(HostCommand::PreviewRescue {
             snapshot: HostSnapshot::capture(gui.core()).unwrap(),
         });
-        assert!(!preview.status.rescue_trim_required && !preview.status.rescue_omission_required);
+        assert!(!preview.status.rescue_omission_required);
         let destination = root.path(if failed {
             "failed.kinewright"
         } else {

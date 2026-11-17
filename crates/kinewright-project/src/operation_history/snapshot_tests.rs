@@ -13,12 +13,6 @@ fn history(pool: &HistoryPool) -> OwnerHistory {
 }
 #[test]
 fn snapshot_restores_the_same_approved_command_after_discard() {
-    let old = kinewright_core::Core::spawn(document()).unwrap();
-    old.request(remove()).unwrap();
-    let selected = old.export_history().unwrap();
-    old.request(Command::Undo).unwrap();
-    old.request(remove()).unwrap();
-    old.restore_history(selected).unwrap();
     let pool = super::tests::story_pool();
     let mut owner = history(&pool);
     let a = owner
@@ -50,11 +44,6 @@ fn snapshot_restores_the_same_approved_command_after_discard() {
         "SNAPSHOT_SAME_COMMAND_AUDIT_AGREES"
     );
     assert_eq!(
-        owner.ledger().get(a).unwrap().answer(),
-        old_answer(&old),
-        "SNAPSHOT_SAME_COMMAND_EQUALS_ACTUAL_OLD_AUDIT"
-    );
-    assert_eq!(
         owner.ledger().get(b).unwrap().fate,
         Fate::Discarded,
         "INSTALL_DISCARDS_OTHER_LINE_COMMAND"
@@ -80,12 +69,6 @@ fn snapshot_restores_the_same_approved_command_after_discard() {
 }
 #[test]
 fn snapshot_restores_the_same_approved_command_to_redo() {
-    let old = kinewright_core::Core::spawn(document()).unwrap();
-    old.request(remove()).unwrap();
-    old.request(Command::Undo).unwrap();
-    let selected = old.export_history().unwrap();
-    old.request(Command::Redo).unwrap();
-    old.restore_history(selected).unwrap();
     let pool = super::tests::story_pool();
     let mut owner = history(&pool);
     let a = owner
@@ -111,11 +94,6 @@ fn snapshot_restores_the_same_approved_command_to_redo() {
         owner.ledger().get(a).unwrap().answer(),
         ApprovalAnswer::Missing,
         "SNAPSHOT_UNDONE_AUDIT_AGREES"
-    );
-    assert_eq!(
-        owner.ledger().get(a).unwrap().answer(),
-        old_answer(&old),
-        "SNAPSHOT_UNDONE_EQUALS_ACTUAL_OLD_AUDIT"
     );
     assert_eq!(owner.history().document().tracks.len(), 1);
 }
@@ -284,19 +262,6 @@ fn origin_spare_capacity_is_charged_before_commit() {
         identity,
         "ORIGIN_REFUSAL_ATOMIC"
     );
-}
-
-fn old_answer(old: &kinewright_core::Core) -> ApprovalAnswer {
-    let Command::DoBatch(operations) = remove() else {
-        unreachable!()
-    };
-    crate::edit_audit::owner_differential_proof(
-        &old.export_history().unwrap(),
-        Some(0),
-        Some(&operations),
-        &approval().targets,
-        true,
-    )
 }
 
 #[test]

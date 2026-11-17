@@ -49,7 +49,7 @@ pub struct BundleCopy {
     before: DestinationBefore,
     status: CopyStatus,
     input_rebindings: BTreeMap<ObjectRef, ObjectRef>,
-    tag: Option<kinewright_core::HistorySaveTag>,
+    tag: Option<crate::history_save::PublicationTag>,
 }
 enum CopySource {
     Local(Arc<Mutex<SourceCopyHold>>),
@@ -89,7 +89,7 @@ impl CopySource {
 }
 pub(crate) struct PendingCopySource {
     pool: crate::operation_history::HistoryPool,
-    tag: kinewright_core::HistorySaveTag,
+    tag: crate::history_save::PublicationTag,
     source: Arc<Mutex<SourceCopyHold>>,
 }
 pub(crate) fn close_copy_source(pending: &mut Option<PendingCopySource>) {
@@ -821,7 +821,7 @@ impl ProjectBundle {
             {
                 let _source_root =
                     self.store
-                        .reserve(0, self.admission.raw_bytes().len() as u64, 0, false)?;
+                        .reserve(0, self.admission.raw_bytes().len() as u64, false)?;
                 self.store
                     .with_namespace(|n| n.verify_admitted_root(self.admission.raw_bytes()))?;
             }
@@ -1229,7 +1229,6 @@ impl SessionStore {
             count
                 .checked_mul(512)
                 .ok_or(BundleError::Capacity("capture record roots"))?,
-            0,
             false,
         )?;
         let roots = root_charge.hold(

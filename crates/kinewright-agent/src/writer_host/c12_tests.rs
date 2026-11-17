@@ -151,8 +151,8 @@ impl HostSession {
     ) -> Result<RescueOutcome, BundleError> {
         // The same frozen preparation and exact explicit consent enter the real
         // dispatcher. This observation never supplies an outcome or a receipt.
-        let choices = selection.consent_choices_probe(consent);
-        let (trim, omission) = choices.as_ref().copied().unwrap_or((false, false));
+        let choices = selection.omission_consent_probe(consent);
+        let omission = choices.as_ref().copied().unwrap_or(false);
         let supplied = if choices.is_ok() {
             selection.consent()
         } else {
@@ -161,12 +161,8 @@ impl HostSession {
         self.0.choice = Some(Choice::Rescue {
             selection: Box::new(selection),
             consent: supplied,
-            trim: false,
             omission: false,
         });
-        if trim {
-            refusal(self.run(HostCommand::ConsentTrim))?;
-        }
         if omission {
             refusal(self.run(HostCommand::ConsentOmission))?;
         }
@@ -357,7 +353,7 @@ fn w11_host_recopy_compacts_provenance_and_keeps_independent_bytes() {
             snapshot: history.clone(),
         }))
         .unwrap();
-        assert!(!preview.status.rescue_trim_required && !preview.status.rescue_omission_required);
+        assert!(!preview.status.rescue_omission_required);
         let next = root.path(&format!("round-{round}/a.kinewright"));
         let rescued = refusal(host.run(HostCommand::RescueTo {
             destination: next.clone(),

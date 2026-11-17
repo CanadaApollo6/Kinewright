@@ -43,7 +43,6 @@ pub enum Error {
     MutationRefused(CoreMutationRefusal),
     CaptureChanged,
     CounterExhausted,
-    LeasedQueryRequired,
     RecorderDisabled,
     System(String),
 }
@@ -1189,12 +1188,6 @@ impl State {
                     .find(|clip| clip.id == *id)
                     .cloned(),
             ),
-            // Large independently retained readers use capture/boundary and keep the lease.
-            Query::AppliedOperations => return Err(Error::LeasedQueryRequired),
-            Query::OpLog => {
-                let _ = history.op_log().ok_or(Error::RecorderDisabled)?;
-                return Err(Error::LeasedQueryRequired);
-            }
         }))
     }
     #[expect(

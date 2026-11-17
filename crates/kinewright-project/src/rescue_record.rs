@@ -62,9 +62,7 @@ pub struct RescueCopyV1 {
     pub full_capture_sha256: String,
     pub capture_checkpoints: Vec<ObjectRef>,
     pub selected_capture_sha256: String,
-    pub old_floor: u64,
-    pub new_floor: u64,
-    pub removed_undo: u64,
+
     pub redo_preserved: bool,
     pub gesture_preserved: bool,
     pub acknowledged_root: Option<ObjectRef>,
@@ -157,7 +155,6 @@ impl BundleRecord for RescueCopyV1 {
         }
         if !hash(&self.full_capture_sha256)
             || !hash(&self.selected_capture_sha256)
-            || self.new_floor < self.old_floor
             || !self.redo_preserved
             || !self.gesture_preserved
             || self.acknowledged_root.is_some() == self.acknowledged_absence.is_some()

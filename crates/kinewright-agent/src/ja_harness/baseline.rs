@@ -514,9 +514,6 @@ fn event_value(event: Event) -> Value {
         } => {
             json!({"accepted":true,"revision":revision,"document":doc,"journal_command":journal_command})
         }
-        Event::QueryResult(QueryResult::AppliedOperations(ops) | QueryResult::OpLog(ops)) => {
-            json!({"operations":ops})
-        }
         other => json!({"accepted":false,"event":format!("{other:?}")}),
     }
 }

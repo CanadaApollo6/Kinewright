@@ -2,81 +2,38 @@
     clippy::cast_precision_loss,
     reason = "measurement JSON reports byte counts and durations as f64"
 )]
-//! Paired raw-Core / operation-history measurements. No media files or GUI are opened.
+//! Native operation-history measurements. No media files or GUI are opened.
 #[path = "../tests/support/undo_fixture.rs"]
 mod fixture;
 use kinewright_core::undo::{History, PhaseCounters, Record, RetentionPolicy, RoleBounds};
-use kinewright_core::{Command, Core, Document, Event, Operation, Query, QueryResult, TrackId};
+use kinewright_core::{Command, Document, Operation, TrackId};
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
-#[allow(
-    clippy::large_enum_variant,
-    reason = "the benchmark owns exactly one executor"
-)]
-enum Engine {
-    Old(Core),
-    New(History),
-}
+struct Engine(History);
 impl Engine {
     fn new(side: &str, document: Document, limits: RoleBounds) -> Self {
-        match side {
-            "old" => Self::Old(Core::spawn(document).unwrap()),
-            "new" => Self::New(History::new(document, RetentionPolicy::Fold, limits).unwrap()),
-            _ => panic!("old or new"),
-        }
+        assert_eq!(side, "new");
+        Self(History::new(document, RetentionPolicy::Fold, limits).unwrap())
     }
     fn execute(&mut self, command: Command) {
-        match self {
-            Self::Old(core) => assert!(matches!(
-                core.request(command).unwrap(),
-                Event::DocumentChanged { .. }
-            )),
-            Self::New(history) => {
-                std::hint::black_box(history.execute(command).unwrap());
-            }
-        }
+        let Self(history) = self;
+        std::hint::black_box(history.execute(command).unwrap());
     }
     fn document(&self) -> Arc<Document> {
-        match self {
-            Self::Old(core) => {
-                let Event::QueryResult(QueryResult::Document(document)) =
-                    core.request(Command::Query(Query::Document)).unwrap()
-                else {
-                    panic!("document")
-                };
-                document
-            }
-            Self::New(history) => Arc::clone(history.document()),
-        }
+        let Self(history) = self;
+        Arc::clone(history.document())
     }
     fn depth(&self) -> usize {
-        match self {
-            Self::Old(core) => core.export_history().unwrap().cursor.undo.len(),
-            Self::New(history) => history.undo().len(),
-        }
+        let Self(history) = self;
+        history.undo().len()
     }
     fn top_operation_count(&self) -> usize {
-        match self {
-            Self::Old(core) => core
-                .export_history()
-                .unwrap()
-                .cursor
-                .undo
-                .last()
-                .unwrap()
-                .operations
-                .len(),
-            Self::New(history) => history.undo().back().unwrap().operations().count(),
-        }
+        let Self(history) = self;
+        history.undo().back().unwrap().operations().count()
     }
     fn memory(&self) -> u64 {
-        match self {
-            Self::Old(core) => {
-                kinewright_core::history_size::history_live_bytes(&core.export_history().unwrap())
-                    .unwrap()
-            }
-            Self::New(history) => history.retained_live_bound().unwrap(),
-        }
+        let Self(history) = self;
+        history.retained_live_bound().unwrap()
     }
 }
 fn limits(checkpoints: usize) -> RoleBounds {
@@ -131,10 +88,10 @@ fn rss() -> Option<u64> {
 )]
 fn main() {
     let args: Vec<_> = std::env::args().collect();
-    let side = args.get(1).expect("old or new");
+    let side = args.get(1).expect("new");
     let checkpoints = args.get(2).map_or(4, |s| s.parse().unwrap());
     let document = fixture::heavy();
-    let document_live = kinewright_core::history_size::document_live_bytes(&document).unwrap();
+    let document_live = kinewright_core::undo::document_capacity_bytes(&document).unwrap();
     let fixture_json = serde_json::to_vec(&document).unwrap().len();
     if side == "fixture" {
         println!(
@@ -168,23 +125,9 @@ fn main() {
     }
     rows.insert("single_undo_ms".into(), quantile(&single, 50));
     samples.insert("single_undo_ms".into(), single);
-    let mut open_refused = false;
-    match &engine {
-        Engine::Old(core) => {
-            let captured = core.export_history().unwrap();
-            let transport = kinewright_core::HistoryTransport::capture(&captured).unwrap();
-            let counters = PhaseCounters::read();
-            let start = Instant::now();
-            let opened = transport.resolve_verified();
-            rows.insert("open_ms".into(), start.elapsed().as_secs_f64() * 1000.0);
-            phase("open", counters, 1);
-            assert!(
-                matches!(opened, Err(kinewright_core::HistoryError::Capacity)),
-                "old bounded transport at 2000 heavy steps"
-            );
-            open_refused = true;
-        }
-        Engine::New(history) => {
+    {
+        let Engine(history) = &engine;
+        {
             let bytes = history.record().encode().unwrap();
             let counters = PhaseCounters::read();
             let start = Instant::now();
@@ -319,14 +262,16 @@ fn main() {
     for index in 0..32 {
         folded.execute(edit(index));
     }
-    if let Engine::New(history) = &folded {
+    {
+        let Engine(history) = &folded;
         assert_eq!(history.undo().len(), 10, "FOLDING_HAS_STARTED");
         assert_eq!(history.undo().front().unwrap().commands()[0].position, 22);
     }
     let mut fold = vec![];
     for index in 32..64 {
         fold.push(timed(&mut folded, edit(index), "fold"));
-        if let Engine::New(history) = &folded {
+        {
+            let Engine(history) = &folded;
             assert_eq!(
                 history.baseline().tracks[0].sync_lock,
                 index % 2 == 1,
@@ -334,7 +279,8 @@ fn main() {
             );
         }
     }
-    if let Engine::New(history) = &folded {
+    {
+        let Engine(history) = &folded;
         assert_eq!(history.undo().len(), 10, "STEADY_FOLD_DEPTH");
         assert_eq!(history.charge().encoded, 465, "STEADY_FOLD_LITERAL_CHARGE");
         assert_eq!(history.undo().front().unwrap().commands()[0].position, 54);
@@ -358,6 +304,6 @@ fn main() {
     }
     println!(
         "{}",
-        serde_json::json!({"history_counters_available":side=="new","phases":phases,"side":side,"checkpoints":checkpoints,"metrics":rows,"samples":samples,"expected_old_open_refusal":open_refused,"errors":0})
+        serde_json::json!({"history_counters_available":side=="new","phases":phases,"side":side,"checkpoints":checkpoints,"metrics":rows,"samples":samples,"errors":0})
     );
 }

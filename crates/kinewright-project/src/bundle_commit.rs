@@ -6,18 +6,13 @@ use crate::{
         BundleError, BundleSaveReport, BundleWriteAdmission, ProjectBundle, StudioRoot,
         SupportInventory,
     },
-    bundle_records::{
-        BatchId, BranchCheckpoint, HeadId, LineageRecord, ObjectRef, OccurrenceId, RecordKind,
-    },
+    bundle_records::{BatchId, BranchCheckpoint, HeadId, ObjectRef, RecordKind},
     owned_inputs::OwnedInputManifest,
     receipts::{CommandEnvelope, CommandReceipt, ReceiptLookup, ReceiptResult},
     store::SealedObject,
 };
-use kinewright_core::{ClipId, HistorySnapshot, JournalCommand};
-use std::{
-    borrow::Cow,
-    collections::{BTreeMap, BTreeSet},
-};
+
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommitBarrier {
@@ -49,15 +44,6 @@ impl BranchPublication {
     }
 }
 pub struct BundleCommit;
-#[derive(Clone, Copy)]
-#[allow(
-    dead_code,
-    reason = "legacy oracle retained until the final H2b deletion checkpoint"
-)]
-pub(crate) struct BranchSeed<'a> {
-    pub lineage: &'a LineageRecord,
-    pub role: crate::history_record::HistoryRole,
-}
 #[derive(Clone, Copy)]
 pub(crate) enum PublicationView<'a> {
     Capture(&'a crate::operation_actor::CapturedHistory),
@@ -206,10 +192,7 @@ impl BundleCommit {
             }
             return Ok(lookup);
         }
-        if envelope.action == "metadata"
-            || envelope.transition.is_some()
-            || envelope.manual.is_some()
-        {
+        if envelope.action == "metadata" {
             return Err(BundleError::Unsupported(
                 "typed owner ingress required".into(),
             ));
@@ -263,7 +246,7 @@ impl BundleCommit {
         if encoded > bundle.store.limits().command_bytes {
             return Err(BundleError::Capacity("command bytes"));
         }
-        let reservation = bundle.store.reserve(0, encoded, 0, false)?;
+        let reservation = bundle.store.reserve(0, encoded, false)?;
         if envelope
             .context
             .as_ref()
@@ -690,18 +673,6 @@ impl BundleCommit {
         )?
         .published()
     }
-    #[allow(
-        dead_code,
-        reason = "legacy oracle retained until the final H2b deletion checkpoint"
-    )]
-    pub(crate) fn publish(
-        bundle: &mut ProjectBundle,
-        capture: &crate::operation_actor::CapturedHistory,
-        inputs: &ObjectRef,
-    ) -> Result<BundleSaveReport, BundleError> {
-        let branch = bundle.manual_branch_id.clone();
-        Self::publish_capture(bundle, capture, inputs, &branch)
-    }
     pub(crate) fn publish_branch(
         bundle: &mut ProjectBundle,
         capture: &crate::operation_actor::CapturedHistory,
@@ -709,31 +680,6 @@ impl BundleCommit {
         branch: &crate::bundle_records::BranchId,
     ) -> Result<BundleSaveReport, BundleError> {
         Self::publish_capture(bundle, capture, inputs, branch)
-    }
-    #[allow(
-        dead_code,
-        reason = "legacy oracle retained until the final H2b deletion checkpoint"
-    )]
-    pub(crate) fn publish_prepared(
-        bundle: &mut ProjectBundle,
-        update: &crate::operation_actor::PreparedUpdate,
-        inputs: &ObjectRef,
-        branch: &crate::bundle_records::BranchId,
-        stream: Option<crate::operation_protocol::StreamState>,
-    ) -> Result<BundleSaveReport, BundleError> {
-        Self::publish_branch_impl(
-            bundle,
-            Some(PublicationView::Prepared(update)),
-            inputs,
-            branch,
-            None,
-            false,
-            &[],
-            stream,
-            None,
-            None,
-        )?
-        .published()
     }
     pub(crate) fn publish_selection(
         bundle: &mut ProjectBundle,
@@ -1228,17 +1174,13 @@ impl BundleCommit {
                     .clone()
                     .unwrap_or_else(|| ReceiptResult::Edit {
                         checkpoint_ref: checkpoint_ref.clone(),
-                        batch_id: envelope
-                            .manual
-                            .as_ref()
-                            .map(|m| m.batch_id.clone())
-                            .or_else(|| match view {
-                                Some(
-                                    PublicationView::Prepared(update)
-                                    | PublicationView::Reinstall(update, _),
-                                ) => update.accepted_batch().cloned(),
-                                _ => None,
-                            }),
+                        batch_id: match view {
+                            Some(
+                                PublicationView::Prepared(update)
+                                | PublicationView::Reinstall(update, _),
+                            ) => update.accepted_batch().cloned(),
+                            _ => None,
+                        },
                     })
             };
             if matches!(result, ReceiptResult::Comment { .. }) {
@@ -1248,10 +1190,7 @@ impl BundleCommit {
                     .ok_or(BundleError::Capacity("comment count"))?;
             }
             receipts.detailed.push(CommandReceipt {
-                recovery_origin: envelope
-                    .manual
-                    .as_ref()
-                    .and_then(|m| m.recovery_origin.clone()),
+                recovery_origin: None,
                 id: envelope.id.clone(),
                 digest: envelope.digest()?,
                 project_id: bundle.project_id.clone(),
@@ -1306,7 +1245,7 @@ impl BundleCommit {
         let mut retained = roots.clone();
         retained.extend(evidence.clone());
         retained.extend(recovery.references());
-        inventory.required_fields = bundle.store.support_fields(&retained, None)?;
+        inventory.required_fields = bundle.store.support_fields(&retained)?;
         let closure = bundle.store.closure(&retained)?;
         let roles = bundle.store.evidence_roles(&closure)?;
         let requires_switch =
@@ -1671,7 +1610,7 @@ fn publish_root_from_admission(
     let saved_path = bundle.store.resolved_root()?;
     let collection = bundle.store.collection_status()?;
     let identity = bundle.store.with_namespace(|n| Ok(n.identity().clone()))?;
-    let tag = kinewright_core::HistorySaveTag {
+    let tag = crate::history_save::PublicationTag {
         destination: identity.resolved_root,
         parent_device: identity.parent_device,
         parent_inode: identity.parent_inode,
@@ -1764,347 +1703,10 @@ fn encode_publication_root(
     Ok((next, encoded_root))
 }
 
-pub(crate) struct BoundedHistory {
-    pub history: HistorySnapshot,
-    #[allow(
-        dead_code,
-        reason = "legacy oracle retained until the final H2b deletion checkpoint"
-    )]
-    pub floor: Option<kinewright_core::HistoryTransition>,
-}
-
-#[allow(
-    dead_code,
-    reason = "legacy oracle retained until the final H2b deletion checkpoint"
-)]
-pub(crate) fn bound_history(
-    history: &HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<HistorySnapshot, BundleError> {
-    select_history(history, limits).map(|selected| selected.history)
-}
-
-#[allow(
-    dead_code,
-    reason = "legacy oracle retained until the final H2b deletion checkpoint"
-)]
-pub(crate) fn select_history(
-    history: &HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<BoundedHistory, BundleError> {
-    observed_bound(history, limits, |bounded| {
-        bounded.unwrap_or_else(|| BoundedHistory {
-            history: history.clone(),
-            floor: None,
-        })
-    })
-}
-
-/// [`bound_history`], borrowing `history` when it already fits (the common
-/// path) instead of copying it.
-#[allow(
-    dead_code,
-    reason = "legacy oracle retained until the final H2b deletion checkpoint"
-)]
-fn bound_history_borrowed<'a>(
-    history: &'a HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<Cow<'a, HistorySnapshot>, BundleError> {
-    observed_bound(history, limits, |bounded| match bounded {
-        Some(selected) => Cow::Owned(selected.history),
-        None => Cow::Borrowed(history),
-    })
-}
-
-/// Bound `history` and turn the result (`None`: it fits as it is) into the
-/// caller's value. The test-util profile times both, so a caller's copy of
-/// a fitting history is counted once, inside this one call.
-fn observed_bound<T>(
-    history: &HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-    finish: impl FnOnce(Option<BoundedHistory>) -> T,
-) -> Result<T, BundleError> {
-    #[cfg(any(test, feature = "test-util"))]
-    let started = std::time::Instant::now();
-    let result = bound_history_inner(history, limits).map(finish);
-    #[cfg(any(test, feature = "test-util"))]
-    crate::io_observer::note_history_bound(started.elapsed());
-    result
-}
-
-#[allow(
-    clippy::too_many_lines,
-    reason = "the conservative prefilter and authoritative fit share one selection policy"
-)]
-fn bound_history_inner(
-    history: &HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<Option<BoundedHistory>, BundleError> {
-    let fits = |h: &HistorySnapshot| {
-        crate::history_size::verify_history_admission(
-            h,
-            crate::history_record::HistoryRole::Ordinary,
-            limits,
-        )
-        .is_ok()
-    };
-    if fits(history) {
-        return Ok(None);
-    }
-    // A retained command is unchanged by flooring. Complete batch costs are
-    // also stable when the suffix never undoes below the new baseline. Keep
-    // that exception: an excursion can rewrite effects and cursor counters.
-    let commands = suffix_costs(history.batches.iter().map(|batch| &batch.command), limits);
-    let batches = suffix_costs(
-        history.batches.iter().map(|batch| {
-            let mut batch = kinewright_core::JournalBatch::from(batch);
-            batch.order = 0;
-            batch.undo_entries = 0;
-            batch
-        }),
-        limits,
-    );
-    let undo_costs = suffix_costs(history.cursor.undo.iter(), limits);
-    let redo_cost = history
-        .cursor
-        .redo
-        .iter()
-        .map(|boundary| record_cost(boundary, limits).unwrap_or(u64::MAX))
-        .fold(0_u64, u64::saturating_add);
-    let current_cost = record_cost(&history.document, limits).unwrap_or(u64::MAX);
-    let mut minimum_undo = vec![usize::MAX; history.batches.len() + 1];
-    for index in (0..history.batches.len()).rev() {
-        minimum_undo[index] = minimum_undo[index + 1].min(history.batches[index].undo_entries);
-    }
-    let skeleton = kinewright_core::HistoryJournal {
-        floor_offset: 0,
-        baseline_sha256: "0".repeat(64),
-        document_sha256: "0".repeat(64),
-        batches: vec![],
-        cursor: kinewright_core::JournalCursor {
-            undo: vec![],
-            redo: vec![],
-        },
-    };
-    let overhead = record_cost(&skeleton, limits)?;
-    let hash = record_cost(&"0".repeat(64), limits)?;
-    kinewright_core::HistoryTransition::find_floor(
-        history.clone(),
-        |cut, dropped, baseline| {
-            let count = history.batches.len() - cut;
-            let Some(undo) = history.cursor.undo.len().checked_sub(dropped) else {
-                return false;
-            };
-            let Some(offset) = history.floor_offset.checked_add(cut as u64) else {
-                return false;
-            };
-            let redo = history.cursor.redo.len();
-            let excursion = dropped > 0 && minimum_undo[cut] < dropped;
-            // A successful floor preserves these exact cursor suffixes. Their
-            // document-bearing admission costs are therefore a safe prefilter,
-            // including when an excursion rewrites the retained batch effects.
-            let ordinary = undo_costs[dropped]
-                .saturating_add(redo_cost)
-                .saturating_add(current_cost)
-                .saturating_add(record_cost(baseline, limits).unwrap_or(u64::MAX))
-                .saturating_add(if excursion {
-                    commands[cut]
-                } else {
-                    batches[cut]
-                })
-                .saturating_add(8192);
-            let mut journal = overhead
-                .saturating_add(if excursion {
-                    commands[cut]
-                } else {
-                    batches[cut]
-                })
-                .saturating_add(hash.saturating_mul((undo + redo) as u64))
-                .saturating_add(
-                    2 * (count.saturating_sub(1) + undo.saturating_sub(1) + redo.saturating_sub(1))
-                        as u64,
-                )
-                .saturating_add(2 * u64::from(offset.checked_ilog10().unwrap_or(0)));
-            if !excursion {
-                let mut threshold = 10;
-                while threshold < count {
-                    journal = journal.saturating_add(2 * (count - threshold) as u64);
-                    threshold *= 10;
-                }
-            }
-            // Replay room is decided only by `fits`. A structural JSON
-            // estimate is not a lower bound for the typed replay reservation.
-            count <= kinewright_core::HISTORY_COMMANDS
-                && ordinary <= limits.branch_history_bytes
-                && journal <= limits.branch_history_bytes
-        },
-        fits,
-    )
-    .map(|transition| {
-        Some(BoundedHistory {
-            history: transition.after().clone(),
-            floor: Some(transition),
-        })
-    })
-    .map_err(|_| BundleError::Capacity("history baseline exceeds branch allowance"))
-}
-
-fn record_cost(
-    value: &impl serde::Serialize,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<u64, BundleError> {
-    let bytes = serde_json::to_vec(value).map_err(crate::bundle::encoding_error)?;
-    crate::store::preflight_record(&bytes, limits)
-}
-
 // Ordinary Save keeps its document-bearing decoded admission budget. Count
 // one boundary at a time; the persisted/transport form stays compact and this
 // check never builds a second complete document-bearing JSON history.
-pub(crate) fn ordinary_history_admission_cost(
-    history: &HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<u64, BundleError> {
-    let header = (
-        history.floor_offset,
-        &history.baseline,
-        &history.document,
-        &history.batches,
-    );
-    history
-        .cursor
-        .undo
-        .iter()
-        .chain(&history.cursor.redo)
-        .try_fold(
-            record_cost(&header, limits)?.saturating_add(8192),
-            |sum, boundary| {
-                sum.checked_add(record_cost(boundary, limits)?)
-                    .and_then(|bytes| bytes.checked_add(64))
-                    .ok_or(BundleError::Capacity("ordinary history admission overflow"))
-            },
-        )
-}
 
-#[cfg(feature = "test-util")]
-/// The ordinary document-bearing admission cost, without a full encoded copy.
-/// # Errors
-/// Refuses arithmetic overflow or a component beyond the record limit.
-pub fn ordinary_history_admission_cost_probe(
-    history: &HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<u64, BundleError> {
-    ordinary_history_admission_cost(history, limits)
-}
-
-fn suffix_costs<T: serde::Serialize + PartialEq>(
-    values: impl DoubleEndedIterator<Item = T>,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Vec<u64> {
-    let mut costs = vec![0_u64];
-    let mut cache: Vec<(T, u64)> = vec![];
-    for value in values.rev() {
-        let cost = if let Some((_, cost)) = cache.iter().find(|(prior, _)| prior == &value) {
-            *cost
-        } else {
-            let cost = record_cost(&value, limits).unwrap_or(u64::MAX);
-            if cache.len() == 16 {
-                cache.remove(0);
-            }
-            cache.push((value, cost));
-            cost
-        };
-        costs.push(costs.last().unwrap().saturating_add(cost));
-    }
-    costs.reverse();
-    costs
-}
-
-fn barrier(bundle: &ProjectBundle, barrier: CommitBarrier) -> Result<(), BundleError> {
-    let path = bundle.store.resolved_root()?;
-    let label = match barrier {
-        CommitBarrier::B0 => "bundle_B0",
-        CommitBarrier::B1 => "bundle_B1",
-        CommitBarrier::B2 => "bundle_B2",
-        CommitBarrier::B3 => "bundle_B3",
-        CommitBarrier::B4 => "bundle_B4",
-        CommitBarrier::B5 => "bundle_B5",
-    };
-    crate::namespace::note(label, &path);
-    Ok(())
-}
-#[allow(
-    dead_code,
-    reason = "legacy oracle retained until the final H2b deletion checkpoint"
-)]
-pub(crate) fn validate_inputs(
-    history: &HistorySnapshot,
-    manifest: &OwnedInputManifest,
-) -> Result<(), BundleError> {
-    // All retained source identities, including disabled and undone assets, require owned bytes.
-    let documents = std::iter::once(&history.baseline)
-        .chain(std::iter::once(&history.document))
-        .chain(
-            history
-                .cursor
-                .undo
-                .iter()
-                .chain(&history.cursor.redo)
-                .map(|e| &e.document),
-        );
-    for document in documents {
-        validate_document_inputs(document, manifest)?;
-    }
-    Ok(())
-}
-#[allow(
-    dead_code,
-    reason = "legacy oracle retained until the final H2b deletion checkpoint"
-)]
-pub(crate) fn retain_history_inputs(history: &HistorySnapshot, manifest: &mut OwnedInputManifest) {
-    let documents: Vec<_> = std::iter::once(&history.baseline)
-        .chain(std::iter::once(&history.document))
-        .chain(
-            history
-                .cursor
-                .undo
-                .iter()
-                .chain(&history.cursor.redo)
-                .map(|e| &e.document),
-        )
-        .collect();
-    manifest.entries.retain(|entry| {
-        documents.iter().any(|document| {
-            document
-                .media_pool
-                .iter()
-                .any(|a| entry.matches_media_asset(a))
-                || document.lut_assets.iter().any(|a| {
-                    lut_entry_id_matches(&entry.entry_id, a)
-                        && entry.object.sha256 == a.sha256
-                        && entry.object.byte_length == a.byte_len
-                })
-                || (entry.entry_id == "font:Inter"
-                    && document
-                        .tracks
-                        .iter()
-                        .flat_map(|t| &t.clips)
-                        .any(|c| matches!(c.content, kinewright_core::ClipContent::Title(_))))
-        })
-    });
-    for entry in &mut manifest.entries {
-        if entry.object.record_kind == RecordKind::OwnedLut
-            && let Some(asset) = documents.iter().flat_map(|d| &d.lut_assets).find(|a| {
-                lut_entry_id_matches(&entry.entry_id, a)
-                    && entry.object.sha256 == a.sha256
-                    && entry.object.byte_length == a.byte_len
-            })
-        {
-            entry.entry_id = format!("lut:{}:{}:{}", asset.id.0, asset.sha256, asset.byte_len);
-        }
-    }
-    manifest.entries.sort_by(|a, b| a.entry_id.cmp(&b.entry_id));
-    manifest.entries.dedup();
-}
 pub(crate) fn lut_entry_id_matches(id: &str, asset: &kinewright_core::LutAsset) -> bool {
     id == format!("lut:{}", asset.id.0)
         || id == format!("lut:{}:{}", asset.id.0, asset.sha256)
@@ -2189,162 +1791,6 @@ pub(crate) fn validate_document_inputs(
     Ok(())
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "one ordered history replay of occurrence maps"
-)]
-pub(crate) fn lineage(
-    branch: &crate::bundle_records::BranchId,
-    history: &HistorySnapshot,
-    batches: &[BatchId],
-    old: Option<&LineageRecord>,
-    origin_history: Option<&LineageRecord>,
-) -> Result<LineageRecord, BundleError> {
-    let seed = BatchId::fresh()?;
-    let baseline: BTreeMap<ClipId, OccurrenceId> = if let Some(old) = old {
-        old.baseline.clone()
-    } else {
-        history
-            .baseline
-            .tracks
-            .iter()
-            .flat_map(|t| &t.clips)
-            .enumerate()
-            .map(|(i, c)| {
-                (
-                    c.id,
-                    OccurrenceId {
-                        branch_origin: branch.clone(),
-                        creation_batch_id: seed.clone(),
-                        result_ordinal: i as u64,
-                    },
-                )
-            })
-            .collect()
-    };
-    let origins: BTreeMap<_, _> = old
-        .into_iter()
-        .chain(origin_history)
-        .flat_map(|old| {
-            old.baseline
-                .values()
-                .chain(old.current.values())
-                .chain(old.undo.iter().flat_map(|m| m.values()))
-                .chain(old.redo.iter().flat_map(|m| m.values()))
-                .chain(
-                    old.split_ancestry
-                        .iter()
-                        .flat_map(|(child, parent, _)| [child, parent]),
-                )
-        })
-        .map(|o| (o.creation_batch_id.clone(), o.branch_origin.clone()))
-        .collect();
-    let mut current = baseline.clone();
-    let mut undo = vec![];
-    let mut redo = vec![];
-    let mut split_ancestry =
-        old.map_or_else(Vec::new, |old| ancestry(&baseline, &old.split_ancestry));
-    for (batch, id) in history.batches.iter().zip(batches) {
-        let origin = origins.get(id).unwrap_or(branch);
-        match &batch.command {
-            JournalCommand::Undo => {
-                if let Some(previous) = undo.pop() {
-                    redo.push(current);
-                    current = previous;
-                }
-            }
-            JournalCommand::Redo => {
-                if let Some(next) = redo.pop() {
-                    undo.push(current);
-                    current = next;
-                }
-            }
-            _ => {
-                let before = current.clone();
-                let mut ordinal = 0_u64;
-                for effect in &batch.identity_effects {
-                    let parent = effect
-                        .split_parent
-                        .as_ref()
-                        .and_then(|c| current.get(&c.id))
-                        .cloned();
-                    for deleted in &effect.deleted {
-                        current.remove(deleted);
-                    }
-                    let children: BTreeSet<_> = effect.split_results.iter().map(|c| c.id).collect();
-                    for created in effect.created.iter().filter(|c| !children.contains(c)) {
-                        current.insert(
-                            *created,
-                            OccurrenceId {
-                                branch_origin: origin.clone(),
-                                creation_batch_id: id.clone(),
-                                result_ordinal: ordinal,
-                            },
-                        );
-                        ordinal += 1;
-                    }
-                    for child in &effect.split_results {
-                        let occurrence = OccurrenceId {
-                            branch_origin: origin.clone(),
-                            creation_batch_id: id.clone(),
-                            result_ordinal: ordinal,
-                        };
-                        ordinal += 1;
-                        split_ancestry.push((
-                            occurrence.clone(),
-                            parent.clone().ok_or_else(|| {
-                                BundleError::Corrupt("unknown split parent occurrence".into())
-                            })?,
-                            child.clone(),
-                        ));
-                        current.insert(child.id, occurrence);
-                    }
-                }
-                if batch.undo_entries == undo.len() + 1 {
-                    undo.push(before);
-                } else if batch.undo_entries != undo.len() {
-                    return Err(BundleError::Corrupt("lineage gesture boundary".into()));
-                }
-                redo.clear();
-            }
-        }
-        if undo.len() != batch.undo_entries || redo.len() != batch.redo_entries {
-            return Err(BundleError::Corrupt("lineage cursor counts".into()));
-        }
-    }
-    split_ancestry = ancestry(&current, &split_ancestry);
-    Ok(LineageRecord {
-        branch_origin: branch.clone(),
-        baseline,
-        current,
-        undo,
-        redo,
-        split_ancestry,
-    })
-}
-
-fn ancestry(
-    current: &BTreeMap<ClipId, OccurrenceId>,
-    all: &[(OccurrenceId, OccurrenceId, kinewright_core::Clip)],
-) -> Vec<(OccurrenceId, OccurrenceId, kinewright_core::Clip)> {
-    let mut retained: BTreeSet<_> = current.values().cloned().collect();
-    loop {
-        let before = retained.len();
-        for (child, parent, _) in all {
-            if retained.contains(child) {
-                retained.insert(parent.clone());
-            }
-        }
-        if before == retained.len() {
-            break;
-        }
-    }
-    all.iter()
-        .filter(|(child, _, _)| retained.contains(child))
-        .cloned()
-        .collect()
-}
-
 pub(crate) fn serialize_root(
     store: &crate::store::ProjectStore,
     document: &kinewright_core::Document,
@@ -2368,7 +1814,7 @@ pub(crate) fn serialize_root(
     };
     serde_json::to_writer_pretty(&mut counter, &file)
         .map_err(|_| BundleError::Capacity("root encoded bytes"))?;
-    let encoded = store.reserve(0, counter.bytes, 0, false)?;
+    let encoded = store.reserve(0, counter.bytes, false)?;
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(
@@ -2382,48 +1828,6 @@ pub(crate) fn serialize_root(
         return Err(BundleError::Corrupt("unstable root serialization".into()));
     }
     Ok((bytes, encoded))
-}
-
-#[cfg(feature = "test-util")]
-/// Exercise the production floor selection with explicit downward limits.
-/// # Errors
-/// Returns the same admission error as a save at these limits.
-pub fn bound_history_probe(
-    history: &HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<HistorySnapshot, BundleError> {
-    bound_history(history, limits)
-}
-
-#[cfg(feature = "test-util")]
-/// Minimum single-history allowance, including its measured replay peak.
-/// This is not retained residency; use `restored_history_live_bytes` for that.
-/// # Errors
-/// Refuses an invalid or excessive record.
-pub fn history_cost_probe(
-    history: &HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<u64, BundleError> {
-    let record = crate::history_record::HistoryRecord::capture(
-        history,
-        crate::history_record::HistoryRole::Ordinary,
-    )?;
-    let retained = crate::history_size::native_history_live_bytes(history)?;
-    let charge = record_cost(&record, limits)?
-        .max(retained)
-        .max(ordinary_history_admission_cost(history, limits)?);
-    // This sizing witness intentionally measures cuts which admission rejects.
-    // An already excessive retained cut needs no further materialization.
-    if retained > kinewright_core::history_size::TRANSPORT_LIVE_BYTES {
-        return Ok(charge);
-    }
-    let peak = kinewright_core::history_size::measure_replay_peak(
-        &record.journal,
-        &history.baseline,
-        &history.document,
-    )
-    .map_err(crate::bundle::history_error)?;
-    Ok(charge.max(peak))
 }
 
 pub(crate) fn validate_manifest_extension(
@@ -2452,6 +1856,7 @@ pub(crate) fn validate_manifest_extension(
 #[cfg(all(test, target_os = "linux"))]
 mod fu1_tests {
     use super::*;
+    use kinewright_core::JournalCommand;
     use kinewright_core::{
         Command, Document, Event, Operation, Query, QueryResult, Track, TrackId, TrackKind,
     };
@@ -2507,13 +1912,11 @@ mod fu1_tests {
                 locked: false,
             })),
             switch: None,
-            manual: None,
             context: None,
             lease: None,
             comment_text: None,
             comment_strokes: None,
             evidence: vec![],
-            transition: None,
         };
         assert!(
             matches!(BundleCommit::command_target(&mut bundle, &envelope, &core, &inputs, &[], true, &target), Err(BundleError::Unsupported(message)) if message == "unknown branch")
@@ -2538,4 +1941,18 @@ mod fu1_tests {
             receipt
         );
     }
+}
+
+fn barrier(bundle: &ProjectBundle, barrier: CommitBarrier) -> Result<(), BundleError> {
+    let path = bundle.store.resolved_root()?;
+    let label = match barrier {
+        CommitBarrier::B0 => "bundle_B0",
+        CommitBarrier::B1 => "bundle_B1",
+        CommitBarrier::B2 => "bundle_B2",
+        CommitBarrier::B3 => "bundle_B3",
+        CommitBarrier::B4 => "bundle_B4",
+        CommitBarrier::B5 => "bundle_B5",
+    };
+    crate::namespace::note(label, &path);
+    Ok(())
 }

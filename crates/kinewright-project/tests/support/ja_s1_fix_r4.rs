@@ -5,6 +5,7 @@ use kinewright_core::*;
 use kinewright_media::test_support::TempDirectory;
 #[cfg(target_os = "linux")]
 use kinewright_project::operation_actor::Core;
+use kinewright_project::storage_budget::StorageLimits;
 #[cfg(target_os = "linux")]
 use kinewright_project::{
     bundle::{BundleError, BundleWriteAdmission, ProjectBundle},
@@ -12,33 +13,8 @@ use kinewright_project::{
     io_observer,
     owned_inputs::OwnedInputManifest,
 };
-use kinewright_project::{
-    bundle_commit::{bound_history_probe, history_cost_probe as live_history_cost_probe},
-    storage_budget::StorageLimits,
-};
 #[cfg(target_os = "linux")]
 use std::path::Path;
-use std::time::Instant;
-
-fn history_cost_probe(
-    history: &HistorySnapshot,
-    limits: &StorageLimits,
-) -> Result<u64, kinewright_project::bundle::BundleError> {
-    let journal = HistoryJournal::capture(history).unwrap();
-    let replay = kinewright_core::history_size::measure_replay_peak(
-        &journal,
-        &history.baseline,
-        &history.document,
-    )
-    .unwrap();
-    Ok(live_history_cost_probe(history, limits)?
-        .max(
-            kinewright_project::bundle_commit::ordinary_history_admission_cost_probe(
-                history, limits,
-            )?,
-        )
-        .max(replay))
-}
 
 #[cfg(target_os = "linux")]
 fn temp(label: &str) -> TempDirectory {
@@ -85,33 +61,8 @@ fn grow(core: &Core) {
 #[cfg(target_os = "linux")]
 fn limits() -> StorageLimits {
     StorageLimits {
-        branch_history_bytes: 1 << 20,
         ..StorageLimits::default()
     }
-}
-fn exhaustive(history: &HistorySnapshot, limits: &StorageLimits) -> Option<HistorySnapshot> {
-    let policy =
-        kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(limits).unwrap();
-    let fits = |h: &HistorySnapshot| policy.check(h).is_ok();
-    if fits(history) {
-        return Some(history.clone());
-    }
-    (1..=history.batches.len()).find_map(|cut| {
-        HistoryTransition::floor(history.clone(), cut)
-            .ok()
-            .map(|t| t.after().clone())
-            .filter(fits)
-    })
-}
-fn compare(history: &HistorySnapshot, limits: &StorageLimits) -> Option<HistorySnapshot> {
-    let expected = exhaustive(history, limits);
-    let actual = bound_history_probe(history, limits).ok();
-    assert_eq!(
-        actual, expected,
-        "production prefilter disagrees at cap {}",
-        limits.branch_history_bytes
-    );
-    actual
 }
 
 #[cfg(target_os = "linux")]
@@ -419,191 +370,4 @@ fn command_lands_mid_save_above_pending_floor() {
             .into_capture()
             .unwrap()
     );
-}
-
-fn legacy_core() -> kinewright_core::Core {
-    kinewright_core::Core::spawn(Document {
-        tracks: vec![Track {
-            id: TrackId(1),
-            kind: TrackKind::Video,
-            sync_lock: true,
-            clips: vec![],
-        }],
-        ..Document::default()
-    })
-    .unwrap()
-}
-fn legacy_apply(core: &kinewright_core::Core, command: Command) {
-    assert!(matches!(
-        core.request(command).unwrap(),
-        Event::DocumentChanged { .. }
-    ));
-}
-fn legacy_edit(core: &kinewright_core::Core, locked: bool) {
-    legacy_apply(
-        core,
-        Command::Do(Operation::SetTrackSyncLock {
-            track: TrackId(1),
-            locked,
-        }),
-    );
-}
-fn excursion(edits: usize, undos: usize, tail: usize) -> HistorySnapshot {
-    let core = legacy_core();
-    for i in 0..edits {
-        legacy_edit(&core, i % 2 == 0);
-    }
-    for _ in 0..undos {
-        legacy_apply(&core, Command::Undo);
-    }
-    for _ in 0..undos {
-        legacy_apply(&core, Command::Redo);
-    }
-    for i in 0..tail {
-        legacy_edit(&core, i % 2 == 0);
-    }
-    core.export_history().unwrap()
-}
-#[test]
-fn prefilter_small_excursion_keeps_first_valid_cut() {
-    let history = excursion(2, 2, 1);
-    let valid: Vec<_> = (1..=7)
-        .filter(|cut| HistoryTransition::floor(history.clone(), *cut).is_ok())
-        .collect();
-    assert_eq!(valid, [1, 2, 6, 7]);
-    let first = HistoryTransition::floor(history.clone(), 1)
-        .unwrap()
-        .after()
-        .clone();
-    let limits = StorageLimits {
-        branch_history_bytes: history_cost_probe(&first, &StorageLimits::default()).unwrap(),
-        ..StorageLimits::default()
-    };
-    assert_eq!(compare(&history, &limits).unwrap().floor_offset, 1);
-}
-#[test]
-fn prefilter_large_excursion_keeps_twenty_undo_steps() {
-    let history = excursion(100, 30, 5);
-    let expected = HistoryTransition::floor(history.clone(), 85)
-        .unwrap()
-        .after()
-        .clone();
-    let limits = StorageLimits {
-        branch_history_bytes: history_cost_probe(&expected, &StorageLimits::default()).unwrap(),
-        ..StorageLimits::default()
-    };
-    let started = Instant::now();
-    let actual = bound_history_probe(&history, &limits).unwrap();
-    eprintln!(
-        "R4_EXCURSION bound_ms={:.3}",
-        started.elapsed().as_secs_f64() * 1000.0
-    );
-    assert_eq!(actual, exhaustive(&history, &limits).unwrap());
-    assert_eq!(actual.floor_offset, 85);
-    assert_eq!(actual.cursor.undo.len(), 20);
-}
-
-#[test]
-fn production_prefilter_matches_ten_thousand_seeded_histories() {
-    const SEED: u64 = 0x4a41_3153_3152_3401;
-    let mut rng = SEED;
-    let mut next = || {
-        rng ^= rng << 13;
-        rng ^= rng >> 7;
-        rng ^= rng << 17;
-        rng
-    };
-    for case in 0..10_000 {
-        let core = legacy_core();
-        let count = 1 + next() % 18;
-        for _ in 0..count {
-            let value = next();
-            let operation = Operation::SetTrackSyncLock {
-                track: TrackId(1),
-                locked: value & 1 == 0,
-            };
-            let command = match value % 6 {
-                0 => Command::Undo,
-                1 => Command::Redo,
-                2 | 3 => Command::DoBatchCoalesced {
-                    operations: vec![operation],
-                    coalesce_key: format!("gesture-{}", value % 3),
-                },
-                _ => Command::Do(operation),
-            };
-            legacy_apply(&core, command);
-        }
-        let history = core.export_history().unwrap();
-        let target = 1 + usize::try_from(next()).unwrap() % history.batches.len();
-        let candidate = HistoryTransition::floor(history.clone(), target).ok();
-        let charge = history_cost_probe(
-            candidate
-                .as_ref()
-                .map_or(&history, HistoryTransition::after),
-            &StorageLimits::default(),
-        )
-        .unwrap();
-        let limits = StorageLimits {
-            branch_history_bytes: charge.saturating_sub(next() % 17),
-            ..StorageLimits::default()
-        };
-        compare(&history, &limits);
-        if case == 9_999 {
-            eprintln!("R4_DIFFERENTIAL seed={SEED:#x} histories=10000");
-        }
-    }
-}
-
-#[test]
-#[cfg(target_os = "linux")]
-fn exact_cap_saves_and_one_byte_over_floors_one_more_step() {
-    let history = excursion(3, 0, 0);
-    let first = HistoryTransition::floor(history.clone(), 1)
-        .unwrap()
-        .after()
-        .clone();
-    let cap = history_cost_probe(&first, &StorageLimits::default()).unwrap();
-    for (allowance, floor) in [(cap, 1), (cap - 1, 2)] {
-        let temp = temp("r4-exact-cap");
-        let _path = temp.path("edit.kinewright");
-        let core = legacy_core();
-
-        let limits = StorageLimits {
-            branch_history_bytes: allowance,
-            ..StorageLimits::default()
-        };
-        let selected = compare(&history, &limits).unwrap();
-        assert_eq!(selected.floor_offset, floor);
-        core.restore_history(selected.clone()).unwrap();
-        assert_eq!(
-            core.export_history().unwrap(),
-            selected,
-            "LEGACY_EXACT_CAP_TRANSFORMATION_ORACLE"
-        );
-    }
-}
-
-#[test]
-fn prefilter_zero_undo_counters_cross_digit_boundaries() {
-    for count in [12, 102, 1002, 10002] {
-        let core = legacy_core();
-        for _ in 0..count {
-            legacy_apply(&core, Command::Undo);
-        }
-        let history = core.export_history().unwrap();
-        let expected = HistoryTransition::floor(history.clone(), 1)
-            .unwrap()
-            .after()
-            .clone();
-        let limits = StorageLimits {
-            branch_history_bytes: history_cost_probe(&expected, &StorageLimits::default()).unwrap(),
-            ..StorageLimits::default()
-        };
-        let actual = compare(&history, &limits).unwrap();
-        assert_eq!(
-            actual.floor_offset, 1,
-            "decimal boundary lost a valid first cut"
-        );
-        assert_eq!(actual.batches.len(), count - 1);
-    }
 }

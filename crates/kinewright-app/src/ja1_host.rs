@@ -916,7 +916,7 @@ impl HostAttachment {
             Action::PreviewRescue => HostCommand::PreviewRescue {
                 snapshot: snapshot()?,
             },
-            Action::ConsentTrim => HostCommand::ConsentTrim,
+
             Action::ConsentOmission => HostCommand::ConsentOmission,
             Action::RescueTo(destination) => HostCommand::RescueTo { destination },
             Action::Cancel => HostCommand::Cancel,
@@ -1265,19 +1265,12 @@ impl HostAttachment {
                 }
             }
             Some(HostChoiceKind::Rescue) => {
-                let trim = self.status.rescue_trim_accepted;
                 let omission = self.status.rescue_omission_accepted;
-                let needs_trim = self.status.rescue_trim_required;
                 let needs_omission = self.status.rescue_omission_required;
-                if needs_trim && !trim && ui.button("Remove this older Undo history in B").clicked()
-                {
-                    action = Some(Action::ConsentTrim);
-                }
                 for text in &self.status.rescue_omissions {
                     ui.label(text);
                 }
                 if needs_omission
-                    && (!needs_trim || trim)
                     && !omission
                     && ui
                         .button("Omit these unavailable recovery points")
@@ -1285,8 +1278,7 @@ impl HostAttachment {
                 {
                     action = Some(Action::ConsentOmission);
                 }
-                if (!needs_trim || trim)
-                    && (!needs_omission || omission)
+                if (!needs_omission || omission)
                     && ui.button("Save rescue copy to…").clicked()
                     && let Some(path) = rfd::FileDialog::new()
                         .add_filter("Kinewright project", &["kinewright"])

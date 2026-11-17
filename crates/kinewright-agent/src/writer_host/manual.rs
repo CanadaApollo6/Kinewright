@@ -2,7 +2,7 @@
 use super::{
     HostAuth, HostCommand, HostCommandOwner, HostError, HostRefusal, HostReply, SessionRoots,
 };
-use kinewright_project::operation_protocol::EncodedMessage as AcceptedHistory;
+use kinewright_project::operation_protocol::EncodedMessage;
 use kinewright_project::operation_protocol::Lease as ManualLease;
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -254,7 +254,7 @@ impl HostCommandOwner {
     pub(super) fn commit_history(
         &mut self,
         client: &str,
-        messages: &[AcceptedHistory],
+        messages: &[EncodedMessage],
         reply: &mut HostReply,
     ) -> Result<(), HostError> {
         if messages.len() > kinewright_project::operation_protocol::PENDING_COMMANDS

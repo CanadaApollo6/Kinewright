@@ -1,5 +1,11 @@
 # Settled-run release: recovery boundary
 
+Historical measurement: HX replaces the representation and replay/floor proofs
+described here. The independent settled-task release, corruption and cold-open
+protections remain. Current implementation and witnesses are listed in
+[the native retirement report](../undo-legacy-deletion.md); these numbers do not
+qualify the new representation.
+
 Inspected on `8d81d6f967bee3425ed8c39b6f0c8bc213ed3952`, after recovery commit `a1325ba77e110bd5937cbf6ff9da45c85eedf11d`. This records the original boundary investigation, before the lead authorized 2a. Stage 1 and its CI changes have since been pushed by the lead; fix 1 is local commit `910a3e8924602e77bc59f5022b0694e11a6fe90a`.
 
 ## Original ownership and boundary investigation
@@ -31,7 +37,7 @@ The required 2a failed-rehydration recovery is therefore unavailable today. The 
 
 `target/history-capacity/settled-recovery-probe.rs` and `settled-recovery-probe.log` retain the probe and its completed **1 passed, 0 failed** result. The temporary include was removed; `checkpoint_tests.rs` was restored byte-exact to SHA-256 `3fba03669488aa8c8c6bd69b7c47ac0836883bcf86480bd2e6225d68a37cfe1a`. The restored baseline recovery module then passed **4 tests, 0 failed** (`settled-recovery-baseline.log`). No build or test remains running.
 
-The full merged-tree gates remain as reported in `history-capacity-stage1.md`: Core 801, Project 467, Agent 1,722 and App 1,014 passed, with zero failures. Those gates precede this restored test-only probe. Those original probe gates did not exercise 2a release, heap residency, the full-run failed-rehydration UI, Windows or paid providers. After the baseline rerun drained, `target/` is **29,483,697,248 bytes**, with more than 169 GB free on the filesystem. The 568 MiB envelope remains **NOT QUALIFIED**. The raw-publication latch ruling and the non-latching fix required before 2c are unchanged.
+The historical stage-1 merged-tree gates were: Core 801, Project 467, Agent 1,722 and App 1,014 passed, with zero failures. Those gates precede this restored test-only probe. Those original probe gates did not exercise 2a release, heap residency, the full-run failed-rehydration UI, Windows or paid providers. After the baseline rerun drained, `target/` is **29,483,697,248 bytes**, with more than 169 GB free on the filesystem. The 568 MiB envelope remains **NOT QUALIFIED**. The raw-publication latch ruling and the non-latching fix required before 2c are unchanged.
 
 
 ## Ruled 2a implementation

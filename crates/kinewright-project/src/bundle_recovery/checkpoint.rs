@@ -171,7 +171,6 @@ impl VerifiedCheckpointRecovery {
             (manifest.objects.len() as u64)
                 .checked_mul(512)
                 .ok_or(BundleError::Capacity("recovery graph inspection"))?,
-            0,
             false,
             u64::MAX,
         )?;

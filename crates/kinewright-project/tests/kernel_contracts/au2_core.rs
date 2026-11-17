@@ -1,16 +1,14 @@
 //! AU2 EQ and dynamics — core contract tests (AU2 §7 items A1, A4, A7 and
 //! B2 to B6).
 
-#[path = "support/history_oracle.rs"]
-mod history_oracle;
-use history_oracle::ApplyHistoryOracle;
+use super::history_oracle::ApplyHistoryOracle;
 
 use std::collections::BTreeMap;
 
 use kinewright_core::{
     AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AudioBus,
     AudioBusId, AudioChain, AudioMaster, AudioMix, AutomationCurve, CHAIN_LOOKAHEAD_MILLISECONDS,
-    ChainLookahead, ColorContext, Command, Core, Document, Effect, EffectId, EffectUniform, Event,
+    ChainLookahead, ColorContext, Command, Document, Effect, EffectId, EffectUniform, Event,
     IncidentCode, IncidentFamily, IncidentLog, IncidentObservation, IncidentSubject, Keyframe,
     KeyframeInterpolation, MediaAsset, MediaCatalog, MediaKind, MediaSourceFingerprint, Observed,
     OpError, Operation, ParamValue, Rational, TimeCode, TimelineRevision, Track, TrackId,
@@ -1377,7 +1375,7 @@ fn a_coalesced_bus_fader_drag_is_one_undo_entry() {
     }
     .apply_with_history_oracle(&mut initial)
     .unwrap();
-    let core = Core::spawn(initial.clone()).unwrap();
+    let core = super::spawn_actor(initial.clone()).unwrap();
 
     let mut tenth = None;
     for step in 1..=10 {

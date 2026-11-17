@@ -1,12 +1,9 @@
 //! Pure project state, edit operations, history, and subsystem contracts.
 
-mod actor;
 mod attachment;
-pub use attachment::{
-    AcceptedCut, AcceptedHistory, ActorIdentity, AttachmentState, CoreAttachment,
-    CoreMutationRefusal, MANUAL_BYTES, MANUAL_COMMANDS, ManualHistoryCandidate,
-    ManualHistoryEncoder, ManualPermit,
-};
+mod command;
+mod operation_identity;
+pub use attachment::{ActorIdentity, AttachmentState, CoreMutationRefusal};
 mod agent;
 /// AU6 §2's scenario authority: the five audio workflows' documents,
 /// operations, budgets and pins.
@@ -32,10 +29,6 @@ mod creator;
 mod delivery;
 mod editorial;
 mod effect;
-mod history;
-mod history_journal;
-pub mod history_size;
-mod history_transition;
 mod incident;
 mod journal;
 mod media;
@@ -43,6 +36,7 @@ mod model;
 mod multicam;
 mod operation;
 mod qa;
+mod replay_budget;
 mod scopes;
 mod time;
 mod title;
@@ -50,16 +44,6 @@ mod transcript_edit;
 mod transition;
 pub mod undo;
 
-pub use history_transition::{
-    HistoryFloorBarrier, HistorySaveOwner, HistorySaveTag, HistoryTransition, PendingHistorySave,
-};
-
-pub use actor::{
-    Command, CommandToken, Core, CoreDisconnected, Event, HistoryChangeId, Query, QueryResult,
-    TimelineRevision,
-};
-#[cfg(any(test, feature = "test-util"))]
-pub use actor::{HistoryEntryObservation, HistoryObservation};
 pub use agent::{
     AgentDriver, AgentError, AgentEvent, AgentSession, AgentUsage, AuthenticationStatus, HarnessId,
     HarnessInfo, RuntimeRequest, RuntimeRequestBinding, RuntimeRequestKind, RuntimeResponse,
@@ -142,6 +126,9 @@ pub use color_qc::{
     attach_node_contributions, bt709_limited_ycbcr, encode_bt709_delivery, measure_color_qc, nodes,
     validate_node_budget,
 };
+pub use command::{
+    Command, CommandToken, CoreDisconnected, Event, Query, QueryResult, TimelineRevision,
+};
 pub use creator::{
     BeatMontageAnchorRepair, BeatMontageCadenceContract, BeatMontageCadenceSummary,
     BeatMontageCutAnchor, BeatMontagePlan, BeatMontageSelect, BeatMontageShot, BeatPacingPlan,
@@ -208,14 +195,6 @@ pub use effect::{
     managed_color_node_count, matte_capable, matte_parameter_names, matte_parameters,
     matte_window_parameter_names, matte_window_parameters, scale_to_frame_fit,
 };
-pub use history::{
-    GestureBoundary, HISTORY_COMMANDS, HistoryBatch, HistoryCursor, HistoryError,
-    HistoryReplayEvidence, HistorySnapshot, OperationIdentityEffect, ResolvedHistory,
-};
-pub use history_journal::{
-    HistoryJournal, HistoryTransport, JournalBatch, JournalCursor, JournalIdentityEffect,
-    history_document_hash,
-};
 pub use incident::{
     ColorQcIncident, DeliveryColorIncident, DeliveryVerificationIncident, INVESTIGATOR_ALLOWLIST,
     INVESTIGATOR_EXPLANATION_CEILING_BYTES, INVESTIGATOR_MAX_PROPOSAL_OPERATIONS, Incident,
@@ -229,6 +208,7 @@ pub use incident::{
     rec709_compatible, recovery_description, should_flush, truncate_to_serialized_bytes,
 };
 pub use journal::JournalCommand;
+pub use operation_identity::OperationIdentityEffect;
 mod media_access;
 #[cfg(feature = "test-util")]
 pub use media_access::LegacyMediaWorkHold;
@@ -273,10 +253,7 @@ pub use model::{
     envelope_coalesce_key, project_format_version, track_automation_coalesce_key,
     validate_lut_asset,
 };
-pub use model::{
-    clip_support_fields, document_support_fields, history_journal_support_fields,
-    history_support_fields, operation_support_fields,
-};
+pub use model::{clip_support_fields, document_support_fields, operation_support_fields};
 pub use multicam::{
     ReframeFocusBounds, SpeakerAngleAssignment, SpeakerMulticamCut, SpeakerMulticamError,
     SpeakerMulticamPlan, SpeakerMulticamSettings, SubjectCenterBasisPointSample,

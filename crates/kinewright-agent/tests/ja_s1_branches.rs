@@ -7,7 +7,7 @@ use kinewright_project::{
     bundle::{BundleError, BundleWriteAdmission, LoadedBundle, ProjectBundle},
     bundle_records::ObjectRef,
     io_observer,
-    receipts::{CommandEnvelope, CommandId, CommandReceipt, HistoryRequest, ReceiptLookup},
+    receipts::{CommandEnvelope, CommandId, CommandReceipt, ReceiptLookup},
 };
 use std::path::Path;
 
@@ -86,7 +86,6 @@ fn command(
     let issuer = bundle.issue_issuer(core, inputs, 1).unwrap();
     CommandEnvelope {
         switch: None,
-        manual: None,
         context: None,
         version: 1,
         action: "edit".into(),
@@ -104,7 +103,6 @@ fn command(
         comment_text: None,
         comment_strokes: None,
         evidence: vec![],
-        transition: None,
     }
 }
 fn prepare_merge(
@@ -448,15 +446,15 @@ fn merge_lost_reply_preserves_one_undo_entry() {
     drop(branch);
     drop(bundle);
     drop(core);
-    exercise_floor_and_close(&temp.path("floor.kinewright"));
+    exercise_native_gesture_close(&temp.path("close.kinewright"));
     let _ = inputs;
 }
 
 #[allow(
     clippy::too_many_lines,
-    reason = "one ordered floor, suffix, retry and closure witness"
+    reason = "one ordered gesture, receipt retry and closure witness"
 )]
-fn exercise_floor_and_close(path: &Path) {
+fn exercise_native_gesture_close(path: &Path) {
     let (core, mut bundle, inputs) = setup(path);
     let drag = |locked| JournalCommand::DoBatchCoalesced {
         operations: vec![lock(locked)],
@@ -469,30 +467,6 @@ fn exercise_floor_and_close(path: &Path) {
     let before = core.export_history().unwrap();
     assert_eq!(before.history().undo.len(), 3);
     assert_eq!(before.history().undo[2].commands().len(), 2);
-    let mut obsolete_floor = command(&mut bundle, &core, &inputs, JournalCommand::Undo);
-    obsolete_floor.action = "floor".into();
-    obsolete_floor.command = None;
-    obsolete_floor.transition = Some(HistoryRequest::Floor {
-        discard_batches: 4,
-        preceding_checkpoint_generation: 0,
-        preceding_floor_generation: 0,
-        command_cut: bundle
-            .checkpoint(bundle.manual_branch_id())
-            .unwrap()
-            .command_cut
-            .clone()
-            .unwrap(),
-    });
-    assert!(
-        bundle
-            .command(&obsolete_floor, &core, &inputs, &[])
-            .is_err()
-    );
-    assert_eq!(
-        core.export_history().unwrap(),
-        before,
-        "CALLER_CANNOT_CUT_THE_EXECUTORS_HISTORY"
-    );
     drop(before);
     core.close_gesture().unwrap();
     bundle.save(&core, &inputs).unwrap();
@@ -551,7 +525,6 @@ fn never_fold_specialist_reopens_original_full_delta_and_merges_once() {
     owner.save(&live, &inputs).unwrap();
     owner
         .restrict_limits_probe(kinewright_project::storage_budget::StorageLimits {
-            branch_history_bytes: 1 << 20,
             ..Default::default()
         })
         .unwrap();

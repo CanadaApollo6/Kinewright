@@ -1332,7 +1332,7 @@ pub struct IncidentProposal {
     /// One sentence a person can act on, at most
     /// [`INVESTIGATOR_EXPLANATION_CEILING_BYTES`] bytes of JSON.
     pub explanation: String,
-    /// The **live** revision the branch was seeded at by [`crate::Core::spawn_at`].
+    /// The **live** revision the branch was seeded at by the project actor.
     ///
     /// The field a reader needs is *what live looked like when this was
     /// proved*, which is comparable with the live revision at approval time.

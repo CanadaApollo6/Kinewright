@@ -2,6 +2,7 @@
 #![allow(clippy::missing_errors_doc)]
 #[cfg(any(test, feature = "test-util"))]
 use crate::bundle_rescue::RescueConsent;
+use crate::history_save::PublicationTag;
 use crate::operation_actor::Core;
 use crate::{
     ProjectAttachment,
@@ -19,7 +20,6 @@ use crate::{
     storage_budget::{StorageLimits, StorageReservation},
     store::{ProjectStore, RetainedReadAdmission},
 };
-use kinewright_core::HistorySaveTag;
 use std::path::{Path, PathBuf};
 mod durable;
 mod manual;
@@ -37,7 +37,7 @@ mod rescue;
 mod rescue_selection;
 pub use durable::{
     BranchBinding, DurableBranchRole, DurableBranchSessionGuard, FrozenTaskResult,
-    PersistedTaskCheckpoint, specialist_floor_delta_from_baseline,
+    PersistedTaskCheckpoint,
 };
 type RescueSource<'a> = (&'a ProjectStore, Vec<(ObjectRef, MissingOwnedUse)>);
 type HistoryDigestCache = Option<crate::operation_actor::ChangeId>;
@@ -102,7 +102,7 @@ impl RetainedDestination {
 /// An adopted attempt owns actual actor/source objects independently of its namespace owner.
 pub struct RetainedAttempt {
     state: PublicationState,
-    pub(crate) tag: HistorySaveTag,
+    pub(crate) tag: PublicationTag,
     pub(crate) core: Option<Core>,
     pub(crate) capture: std::sync::Arc<StorageReservation<FrozenRescueCapture>>,
     pub(crate) project_id: crate::bundle_records::ProjectId,
@@ -117,11 +117,11 @@ pub struct RescueSessionState {
 }
 #[derive(Default)]
 pub struct RescueSlots {
-    consumed: Vec<HistorySaveTag>,
+    consumed: Vec<PublicationTag>,
     reserved: bool,
 }
 pub struct RescueReservation {
-    source: HistorySaveTag,
+    source: PublicationTag,
 }
 impl RetainedAttempt {
     #[must_use]
@@ -133,7 +133,7 @@ impl RetainedAttempt {
         self.core.as_ref().map(Core::actor_identity)
     }
     #[must_use]
-    pub const fn tag(&self) -> &HistorySaveTag {
+    pub const fn tag(&self) -> &PublicationTag {
         &self.tag
     }
     #[must_use]
@@ -146,7 +146,7 @@ impl RetainedAttempt {
     }
 }
 impl RescueSessionState {
-    fn settle(&mut self, tag: &HistorySaveTag, state: PublicationState) {
+    fn settle(&mut self, tag: &PublicationTag, state: PublicationState) {
         if state != PublicationState::Unknown {
             for attempt in &mut self.attempts {
                 if &attempt.tag == tag && attempt.state == PublicationState::Unknown {
@@ -161,7 +161,7 @@ impl RescueSlots {
     pub fn consumed(&self) -> usize {
         self.consumed.len()
     }
-    pub fn check(&self, source: &HistorySaveTag) -> Result<(), BundleError> {
+    pub fn check(&self, source: &PublicationTag) -> Result<(), BundleError> {
         let needed = usize::from(!self.consumed.contains(source)) + 1;
         if self.reserved || self.consumed.len() + needed > 4 {
             return Err(BundleError::Capacity("four rescue attempts"));
@@ -169,7 +169,7 @@ impl RescueSlots {
         Ok(())
     }
     /// Called only when the owning lifecycle adopts actual source holds at first mutation.
-    pub fn begin(&mut self, source: HistorySaveTag) -> Result<RescueReservation, BundleError> {
+    pub fn begin(&mut self, source: PublicationTag) -> Result<RescueReservation, BundleError> {
         self.check(&source)?;
         if !self.consumed.contains(&source) {
             self.consumed.push(source.clone());
@@ -181,7 +181,7 @@ impl RescueSlots {
     pub fn finish(
         &mut self,
         reservation: RescueReservation,
-        unknown: Option<HistorySaveTag>,
+        unknown: Option<PublicationTag>,
     ) -> Result<(), BundleError> {
         if !self.reserved || !self.consumed.contains(&reservation.source) {
             return Err(BundleError::HistoryBarrierInvariant);
@@ -534,7 +534,6 @@ impl Ja1EditingSession {
             root_count
                 .checked_mul(512)
                 .ok_or(BundleError::Capacity("source roots"))?,
-            0,
             false,
         )?;
         let mut roots = capture
@@ -1879,7 +1878,7 @@ impl Ja1EditingSession {
             }
             // Retained in-memory capture metadata remains admissible while the
             // original publication is unresolved; this grants no write authority.
-            let charge = store.reserve_copy_read(0, 4096, 0, false, true)?;
+            let charge = store.reserve_copy_read(0, 4096, false, true)?;
             let binding =
                 serde_json::to_vec(&(cut.identity(), cut.change().position, &roots, &self.inputs))
                     .map_err(|e| BundleError::Corrupt(e.to_string()))?;
@@ -1935,7 +1934,7 @@ impl Ja1EditingSession {
         capture: std::sync::Arc<StorageReservation<FrozenRescueCapture>>,
         consent: &RescueConsent,
         destination: &DestinationInspection,
-        unknown: Option<HistorySaveTag>,
+        unknown: Option<PublicationTag>,
     ) -> Result<(), BundleError> {
         capture.check_consent(consent)?;
         let current = self

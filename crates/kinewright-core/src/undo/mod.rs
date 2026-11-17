@@ -1,7 +1,7 @@
 //! Operation-bearing Undo history. The actor continues to use its existing history.
 #![allow(clippy::missing_errors_doc)]
 
-use crate::history_size::ReplayBudget;
+use crate::replay_budget::ReplayBudget;
 use crate::{BatchError, Command, Document, Operation, OperationIdentityEffect};
 use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, sync::Arc};
@@ -1346,7 +1346,7 @@ fn operation_charge_iter<'a>(
                 encoded: encoded_bytes(operation)?,
                 decoded: (std::mem::size_of::<Operation>() as u64)
                     .checked_add(
-                        crate::history_size::operation_owned_bytes(operation)
+                        crate::replay_budget::operation_owned_bytes(operation)
                             .map_err(|_| Error::Capacity)?
                             .max(operation.heap()?),
                     )
@@ -1402,7 +1402,7 @@ pub fn clip_capacity_bytes(clip: &crate::Clip) -> Result<u64, Error> {
 }
 /// Allocation preflight for untrusted owner bodies before typed decoding.
 pub fn payload_memory_bound(bytes: &[u8]) -> Result<u64, Error> {
-    crate::history_size::payload_memory_bound(bytes).map_err(|_| Error::Capacity)
+    crate::replay_budget::payload_memory_bound(bytes).map_err(|_| Error::Capacity)
 }
 
 #[cfg(test)]
@@ -1422,7 +1422,7 @@ mod charge_tests {
         effect.parameters = (0..50)
             .map(|n| (format!("parameter_{n:02}"), crate::ParamValue::Integer(n)))
             .collect();
-        let structural = crate::history_size::operation_owned_bytes(&operation).unwrap();
+        let structural = crate::replay_budget::operation_owned_bytes(&operation).unwrap();
         let typed = operation.heap().unwrap();
         assert!(
             typed > structural,

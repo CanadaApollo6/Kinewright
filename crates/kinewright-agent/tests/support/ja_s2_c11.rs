@@ -877,7 +877,6 @@ pub(super) mod linux {
                         client: identity.clone(),
                         frozen: Some(HostSnapshot::capture(source.core()).unwrap()),
                         pending: vec![],
-                        discard_batches: None,
                     },
                 )
                 .recovery

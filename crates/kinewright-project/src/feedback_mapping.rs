@@ -88,7 +88,7 @@ impl ProjectBundle {
             .ok()
             .and_then(|n| n.checked_mul(512))
             .ok_or(BundleError::Capacity("feedback ancestor proof"))?;
-        let charge = self.store().reserve_read(0, bytes, 0, false)?;
+        let charge = self.store().reserve_read(0, bytes, false)?;
         let mut ancestors = Vec::with_capacity(slots);
         if let Some(mut next) = revision
             .anchor
@@ -369,38 +369,5 @@ mod tests {
             "C10_STUDIO_STROKES"
         );
         assert!(drawn_points(b"[0.25]").is_err(), "C10_NOT_POINTS");
-    }
-    #[test]
-    fn s3_incomplete_split_ancestry_cannot_prove_removal() {
-        let branch = crate::bundle_records::BranchId::fresh().unwrap();
-        let child = OccurrenceId {
-            branch_origin: branch.clone(),
-            creation_batch_id: crate::bundle_records::BatchId::fresh().unwrap(),
-            result_ordinal: 1,
-        };
-        let mut lineage = crate::bundle_records::LineageRecord {
-            branch_origin: branch,
-            baseline: std::collections::BTreeMap::default(),
-            current: std::collections::BTreeMap::default(),
-            undo: vec![],
-            redo: vec![[(ClipId(2), child.clone())].into()],
-            split_ancestry: vec![],
-        };
-        assert!(
-            lineage
-                .redo
-                .iter()
-                .flat_map(|map| map.values())
-                .any(|known| known == &child),
-            "S3_UNPROVEN_ANCESTRY_IS_NOT_REMOVAL"
-        );
-        lineage.redo.clear();
-        assert!(
-            !lineage
-                .redo
-                .iter()
-                .flat_map(|map| map.values())
-                .any(|known| known == &child)
-        );
     }
 }

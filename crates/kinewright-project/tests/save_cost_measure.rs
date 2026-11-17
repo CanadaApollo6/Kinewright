@@ -1,17 +1,9 @@
-//! On-demand measurement: what one save of a long session costs, and how much of it is
-//! the history support-field walk. Each timed save follows one more edit, so every save
-//! publishes a changed history through the commit path (the `ownership_w2_measure` shape).
-//!
+//! On-demand whole-save and fsync measurements for changed native owner records.
 //! Run with `cargo test -p kinewright-project --release --features test-util
-//! --test save_cost_measure -- --ignored --nocapture`. For each point it prints one
-//! `SAVE_COST` line: the median, minimum and maximum whole-save time, the fsync calls and
-//! time inside a save (from the `io_observer` sync profile), and the median time of one
-//! `history_support_fields` walk over that save's history (timed outside the save; a save
-//! runs it twice). `LOADAVG` lines bracket the run.
-//!
-//! `SAVE_COST_POINTS` sets the edit counts (default `100,400,1600,3000`; 3,000 edits holds
-//! the history at the 32 MiB cap, so every save there floors one batch) and `SAVE_COST_SAVES`
-//! the timed saves per point (default 12).
+//! --test save_cost_measure -- --ignored --nocapture`.
+//! `SAVE_COST_POINTS` selects edit counts (default `100,400,1600,3000`), and
+//! `SAVE_COST_SAVES` selects timed changed saves per point (default 12).
+//! The retired journal support-field walk and save-side floor are not measured.
 #![cfg(all(feature = "test-util", target_os = "linux"))]
 
 use std::{path::Path, time::Instant};
@@ -85,7 +77,7 @@ fn point(edits: u64, saves: u64) {
         next += 1;
         owner.save(&core, &inputs).unwrap();
     }
-    let (mut totals, mut sync_calls, mut sync_ms, mut walks) = (vec![], vec![], vec![], vec![]);
+    let (mut totals, mut sync_calls, mut sync_ms) = (vec![], vec![], vec![]);
     for _ in 0..saves {
         edit(&core, next);
         next += 1;
@@ -98,24 +90,16 @@ fn point(edits: u64, saves: u64) {
             sync_calls.push(sync.calls as f64);
             sync_ms.push(sync.nanoseconds as f64 / 1e6);
         }
-        // The walk alone, over the history as the save serialized it.
-        let history = serde_json::to_value(core.export_history().unwrap()).unwrap();
-        let started = Instant::now();
-        let fields = kinewright_core::history_support_fields(&history).unwrap();
-        walks.push(millis(started));
-        assert!(!fields.is_empty());
     }
     let batches = core.export_history().unwrap().history().undo.len();
     let low = totals.iter().copied().fold(f64::MAX, f64::min);
     let high = totals.iter().copied().fold(0.0, f64::max);
     println!(
         "SAVE_COST edits={edits} batches={batches} saves={saves} save_ms_median={:.1} \
-         save_ms_min={low:.1} save_ms_max={high:.1} fsync_calls={} fsync_ms={:.1} \
-         walk_ms_median={:.1}",
+         save_ms_min={low:.1} save_ms_max={high:.1} fsync_calls={} fsync_ms={:.1}",
         median(totals),
         median(sync_calls),
         median(sync_ms),
-        median(walks),
     );
 }
 

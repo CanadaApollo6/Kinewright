@@ -27,7 +27,6 @@ impl HostCommandOwner {
         client: String,
         frozen: Option<&HostSnapshot>,
         pending: &[EncodedMessage],
-        discard: Option<usize>,
         reply: &mut HostReply,
     ) -> Result<(), HostError> {
         if !(32..=128).contains(&client.len())
@@ -38,13 +37,6 @@ impl HostCommandOwner {
             return Err(
                 HostRefusal::new("manual_client", "private attachment identity required").into(),
             );
-        }
-        if discard.is_some() {
-            return Err(HostRefusal::new(
-                "history_policy",
-                "Only the history executor selects a fold",
-            )
-            .into());
         }
         let request =
             kinewright_media::sha256_bytes(&serde_json::to_vec(&(&client, frozen, pending))?);

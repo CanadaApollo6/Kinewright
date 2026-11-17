@@ -241,7 +241,7 @@ impl VoiceNoteState {
         let charge = owner
             .store()
             .person_publication_store()
-            .reserve(0, slot_bytes, 0, false)?;
+            .reserve(0, slot_bytes, false)?;
         Ok(Self {
             project: owner.project_id().clone(),
             owner_epoch: owner.store().owner_epoch(),

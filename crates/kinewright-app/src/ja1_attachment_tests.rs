@@ -631,33 +631,25 @@ impl AppSession {
         consent: &RescueConsent,
         destination: &DestinationInspection,
     ) -> Result<RescueOutcome, BundleError> {
-        let choices = selection.consent_choices_probe(consent);
+        let choices = selection.omission_consent_probe(consent);
         let fresh = if choices.is_ok() {
             selection.consent()
         } else {
             consent.clone()
         };
-        let (trim, omission) = choices.unwrap_or((false, false));
+        let omission = choices.unwrap_or(false);
         self.0.message = rescue_preview(&selection);
-        let removed = selection.removed_undo();
         let omitted = !selection.omissions().is_empty();
         self.0.choice = Some(Choice::Rescue {
             selection: Box::new(selection),
             consent: fresh,
-            trim: false,
             omission: false,
         });
-        if removed > 0 {
-            assert!(rendered(&self.0).contains("Undo before step"));
-        }
         if omitted {
             assert!(
                 rendered(&self.0)
                     .contains("Older recovery points from A are not in the rescue copy")
             );
-        }
-        if trim {
-            self.0.apply(Action::ConsentTrim)?;
         }
         if omission {
             self.0.apply(Action::ConsentOmission)?;
@@ -1059,8 +1051,8 @@ fn w03_native_rescue_keeps_all_undo_without_requesting_trim_consent() {
     let expected = serde_json::to_value(core.export_history().unwrap()).unwrap();
     let mut app = Ja1Attachment::new(owner).unwrap();
     assert!(
-        app.apply(Action::ConsentTrim).is_err(),
-        "UNSELECTED_TRIM_CONSENT_IS_REFUSED"
+        app.apply(Action::ConsentOmission).is_err(),
+        "UNSELECTED_OMISSION_CONSENT_IS_REFUSED"
     );
     app.apply(Action::PreviewRescue).unwrap();
     let text = rendered(&app);
@@ -1671,7 +1663,6 @@ fn c8_retention_loss_fences_every_action_and_keeps_actual_source_until_close() {
         Action::OpenRecovery,
         Action::Abandon,
         Action::PreviewRescue,
-        Action::ConsentTrim,
         Action::ConsentOmission,
         Action::RescueTo(destination.clone()),
         Action::Cancel,
@@ -2044,7 +2035,7 @@ fn c8_failed_host_launch_keeps_source_and_restores_local_editing() {
     assert!(!root.exists());
 }
 
-/// Completion adapter: exact publisher-written floors stay on the existing GUI actor;
+/// Completion adapter: exact publisher-written snapshots stay on the existing GUI actor;
 /// an explicit committed recovery activation creates a fresh actor even for equal content.
 #[cfg(target_os = "linux")]
 #[test]
@@ -2389,8 +2380,8 @@ fn g05l_w05_all_manual_producers_respect_the_actor_cut() {
 #[cfg(target_os = "linux")]
 #[test]
 fn g05l_every_producer_stays_frozen_until_equivalence() {
-    for floor in [false, true] {
-        observe_c10(floor);
+    for first_save in [false, true] {
+        observe_c10(first_save);
     }
 }
 
@@ -2413,7 +2404,7 @@ fn assert_recovery_install(
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn observe_c10(floor: bool) -> serde_json::Value {
+pub(crate) fn observe_c10(first_save: bool) -> serde_json::Value {
     use kinewright_agent::writer_host::{HostCommand, SessionRoots};
     let temp = temp();
     let core = Core::for_test(doc()).unwrap();
@@ -2424,7 +2415,7 @@ pub(crate) fn observe_c10(floor: bool) -> serde_json::Value {
     )
     .unwrap();
     let path = temp.path("c10.kinewright");
-    if !floor {
+    if !first_save {
         owner.first_save(&path, StorageLimits::default()).unwrap();
     }
     let mut app = Ja1Attachment::new(owner).unwrap();
@@ -2437,7 +2428,7 @@ pub(crate) fn observe_c10(floor: bool) -> serde_json::Value {
         },
     )
     .unwrap();
-    if floor {
+    if first_save {
         app.apply(Action::FirstSave(path.clone())).unwrap();
     }
     let source_usage = app.owner.source().map(|s| s.store().usage().unwrap());
@@ -2518,7 +2509,7 @@ pub(crate) fn observe_c10(floor: bool) -> serde_json::Value {
     app.host
         .as_mut()
         .unwrap()
-        .begin_manual_recovery_with_floor(&mut app.owner, None)
+        .begin_manual_recovery(&mut app.owner)
         .unwrap();
     assert!(app.apply(Action::Save).is_err());
     assert!(
@@ -2557,7 +2548,7 @@ pub(crate) fn observe_c10(floor: bool) -> serde_json::Value {
     assert_recovery_install(&before, &actual);
     let observed = serde_json::json!({"query": matches!(core.request(Command::Query(Query::Snapshot)).unwrap(), Event::QueryResult(_)), "recovery": {
         "exact": actual.identity().unwrap() == core.snapshot_identity().unwrap(), "frozen_producers": refused == producer_count,
-        "fresh_lease": !app.read_only(), "saved": !app.is_dirty(), "floor": actual.fold_frontier().map_or(0, |key| key.position + 1) == 0,
+        "fresh_lease": !app.read_only(), "saved": !app.is_dirty(), "stacks_preserved": serde_json::to_value(&actual.history().undo).unwrap() == before["history"]["undo"] && serde_json::to_value(&actual.history().redo).unwrap() == before["history"]["redo"],
     }});
     assert!(app.close());
     observed
@@ -3078,7 +3069,7 @@ fn s2h_fix3_wait(app: &mut Ja1Attachment) {
 }
 
 #[cfg(target_os = "linux")]
-fn s2h_fix3_barrier_reply(command: &'static str, floor: bool) {
+fn s2h_fix3_barrier_reply(command: &'static str, explicit_recovery: bool) {
     use kinewright_agent::writer_host::HostCommand;
     let (_temp, mut app, path) = s2h_fix3_app(false);
     app.send_manual(Command::Do(Operation::SetTrackSyncLock {
@@ -3099,11 +3090,11 @@ fn s2h_fix3_barrier_reply(command: &'static str, floor: bool) {
     assert!(app.apply(Action::Save).is_err());
     assert!(proxy.dropped.load(std::sync::atomic::Ordering::Acquire));
     let barrier_proxy = app.host.as_mut().unwrap().drop_http_reply(command, false);
-    if floor {
+    if explicit_recovery {
         app.host
             .as_mut()
             .unwrap()
-            .begin_manual_recovery_with_floor(&mut app.owner, None)
+            .begin_manual_recovery(&mut app.owner)
             .unwrap();
     } else {
         app.apply(Action::Retry).unwrap();
@@ -3367,8 +3358,8 @@ fn s2h_lost_save_floor_stays_frozen_until_exact_publisher_result() {
     )
     .unwrap();
     owner.first_save(&path, StorageLimits::default()).unwrap();
-    // Keep the original 12,000-edit cut: it must require a real Save floor
-    // while fitting the independently checked portable replay window.
+    // Keep the original 12,000-step cut. A lost Save must preserve it exactly
+    // while producers remain frozen until the recorded publisher result wins.
     for index in 0..12_000 {
         edit(&core, index % 2 == 0);
     }
@@ -3432,7 +3423,7 @@ fn s2h_lost_save_floor_stays_frozen_until_exact_publisher_result() {
         replies += usize::from(app.poll_host());
         assert!(
             app.read_only(),
-            "heartbeat must not thaw the old unfloored cut"
+            "heartbeat must not thaw the cut before publisher confirmation"
         );
         assert_eq!(core.snapshot_identity().unwrap(), before);
         std::thread::park_timeout(std::time::Duration::from_millis(5));

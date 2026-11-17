@@ -7,16 +7,14 @@
 //! follows from them. Expected values are transcribed from the document by
 //! hand rather than read back out of the descriptor tables.
 
-#[path = "support/history_oracle.rs"]
-mod history_oracle;
-use history_oracle::ApplyHistoryOracle;
+use super::history_oracle::ApplyHistoryOracle;
 
 use std::{collections::BTreeMap, path::PathBuf};
 
 use kinewright_core::{
     AssetId, AutomationCurve, COLOR_CURVE_PARAMETER_COUNT, COLOR_CURVES_PARAMETER_COUNT,
     COLOR_NODE_LIMIT_PER_LAYER, Clip, ClipContent, ClipId, ColorContext, ColorCurveChannel,
-    ColorDescription, ColorNodeInactiveReason, ColorNodeKind, ColorWheelsParams, Command, Core,
+    ColorDescription, ColorNodeInactiveReason, ColorNodeKind, ColorWheelsParams, Command,
     CurvePoints, DeliveryEncodeDepth, DeliveryProfile, Document, Effect, EffectId, EffectUniform,
     Event, JournalCommand, Keyframe, KeyframeInterpolation, MANAGED_COLOR_NODE_NAMES,
     MATTE_PARAMETER_COUNT, MediaAsset, MediaKind, OpError, Operation, ParamValue, QaSeverity,
@@ -894,7 +892,7 @@ fn a_sparse_curves_node_resolves_to_neutral_and_survives_history_byte_for_byte()
         serde_json::to_string(&applied.clip(ClipId(1)).expect("clip").effects).unwrap(),
     );
 
-    let core = Core::spawn(initial.clone()).expect("core should spawn");
+    let core = super::spawn_actor(initial.clone()).expect("core should spawn");
     let Event::DocumentChanged {
         doc: live,
         journal_command: Some(JournalCommand::Do(journaled)),
@@ -908,7 +906,7 @@ fn a_sparse_curves_node_resolves_to_neutral_and_survives_history_byte_for_byte()
 
     let encoded = serde_json::to_string(&JournalCommand::Do(operation)).unwrap();
     let parsed: JournalCommand = serde_json::from_str(&encoded).unwrap();
-    let replay = Core::spawn(initial.clone()).expect("core should spawn");
+    let replay = super::spawn_actor(initial.clone()).expect("core should spawn");
     let Event::DocumentChanged { doc: replayed, .. } = replay.request(parsed.into()).unwrap()
     else {
         panic!("the journaled node should replay");

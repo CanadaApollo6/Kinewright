@@ -84,7 +84,6 @@ mod linux {
     }
     fn small_limits() -> StorageLimits {
         StorageLimits {
-            branch_history_bytes: 1 << 20,
             ..StorageLimits::default()
         }
     }
@@ -297,7 +296,7 @@ mod linux {
         let path = temp.path("a.kinewright");
         let core = Core::for_test(document(2)).unwrap();
         let (mut owner, inputs) = start(&path, &core);
-        let held = owner.store().reserve_probe(1234, 0).unwrap();
+        let held = owner.store().reserve_probe(1234).unwrap();
         let unrelated_copy = owner.store().reserve_copy(1 << 20).unwrap();
         let before = owner.store().pending_control_bytes_probe().unwrap();
         assert_eq!(before, 0);
@@ -538,7 +537,6 @@ mod linux {
             };
             let envelope = CommandEnvelope {
                 switch: None,
-                manual: None,
                 context: None,
                 version: 1,
                 action: "edit".into(),
@@ -559,7 +557,6 @@ mod linux {
                 comment_text: None,
                 comment_strokes: None,
                 evidence: vec![],
-                transition: None,
             };
             let fault = if committed {
                 "root_parent_sync"
@@ -741,14 +738,6 @@ mod linux {
         )
         .unwrap();
         let actual = loaded.usage_probe().unwrap();
-        assert_eq!(
-            modeled.live_history_bytes, actual.live_history_bytes,
-            "memo presence decided current-branch membership"
-        );
-        assert_eq!(
-            modeled.peak_live_history_bytes, actual.peak_live_history_bytes,
-            "stale history identity supplied a charge"
-        );
         assert!(
             modeled.peak_decoded_bytes >= actual.peak_decoded_bytes,
             "PUBLICATION_PREFLIGHT_BOUNDS_REAL_COLD_METADATA_AND_DECODER_OVERLAP"

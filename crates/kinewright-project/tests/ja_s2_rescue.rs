@@ -152,7 +152,6 @@ mod linux {
     }
     fn limits() -> StorageLimits {
         StorageLimits {
-            branch_history_bytes: 1 << 20,
             ..StorageLimits::default()
         }
     }
@@ -443,7 +442,6 @@ mod linux {
                     .revision;
                 let command = CommandEnvelope {
                     switch: None,
-                    manual: None,
                     context: None,
                     version: 1,
                     action: "edit".into(),
@@ -466,7 +464,6 @@ mod linux {
                     comment_text: None,
                     comment_strokes: None,
                     evidence: vec![],
-                    transition: None,
                 };
                 assert!(matches!(
                     io_observer::fail_once(

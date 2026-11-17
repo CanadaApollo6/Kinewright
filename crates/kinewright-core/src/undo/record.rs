@@ -2,7 +2,7 @@ use super::{
     Cache, Charge, CommandKey, DocumentBound, Error, History, RetentionPolicy, RoleBounds, Step,
     digest_operations, operation_charge,
 };
-use crate::{Document, history_size::ReplayBudget};
+use crate::{Document, replay_budget::ReplayBudget};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -44,7 +44,7 @@ impl Record {
             return Err(Error::Capacity);
         }
         let input =
-            crate::history_size::payload_memory_bound(bytes).map_err(|_| Error::Capacity)?;
+            crate::replay_budget::payload_memory_bound(bytes).map_err(|_| Error::Capacity)?;
         if input > bounds.replay_workspace {
             return Err(Error::Capacity);
         }

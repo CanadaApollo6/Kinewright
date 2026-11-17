@@ -789,11 +789,11 @@ mod linux {
         let scratch = (
             owner
                 .store()
-                .reserve_probe(padding.min(record_cap), 0)
+                .reserve_probe(padding.min(record_cap))
                 .unwrap(),
             owner
                 .store()
-                .reserve_probe(padding.saturating_sub(record_cap), 0)
+                .reserve_probe(padding.saturating_sub(record_cap))
                 .unwrap(),
         );
         let refused_before = owner.store().usage().unwrap();

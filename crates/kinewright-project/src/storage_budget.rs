@@ -8,10 +8,7 @@ pub struct StorageLimits {
     pub control_bytes: u64,
     pub pending_commands: u64,
     pub command_bytes: u64,
-    pub branch_history_bytes: u64,
-    /// Ordinary and manual histories only. Native task and candidate histories
-    /// use their role bounds and still count under metadata plus decoded bytes.
-    pub live_history_bytes: u64,
+
     pub versions: u64,
     pub objects: u64,
     pub graph_depth: u64,
@@ -33,8 +30,7 @@ impl Default for StorageLimits {
             control_bytes: 64 << 20,
             pending_commands: 64,
             command_bytes: crate::operation_protocol::NATIVE_COMMAND_BYTES,
-            branch_history_bytes: 32 << 20,
-            live_history_bytes: 128 << 20,
+
             versions: 100,
             objects: 10_000,
             graph_depth: 32,
@@ -59,8 +55,6 @@ impl StorageLimits {
         if self.control_bytes > ceiling.control_bytes
             || self.pending_commands > ceiling.pending_commands
             || self.command_bytes > ceiling.command_bytes
-            || self.branch_history_bytes > ceiling.branch_history_bytes
-            || self.live_history_bytes > ceiling.live_history_bytes
             || self.versions > ceiling.versions
             || self.objects > ceiling.objects
             || self.graph_depth > ceiling.graph_depth
@@ -116,7 +110,7 @@ pub struct StorageUsage {
     pub decoded_bytes: u64,
     /// Subset of `decoded_bytes` retained by cursors, format probing, and codecs.
     pub decoder_bytes: u64,
-    pub live_history_bytes: u64,
+
     pub objects: u64,
     pub edges: u64,
     pub unclassified_bytes: u64,
@@ -126,7 +120,7 @@ pub struct StorageUsage {
     pub peak_reserved_bytes: u64,
     pub peak_decoded_bytes: u64,
     pub peak_decoder_bytes: u64,
-    pub peak_live_history_bytes: u64,
+
     pub damaged_accounting: bool,
     pub unsettled: bool,
 }
@@ -144,7 +138,7 @@ pub struct StorageReservation<T = ()> {
     bytes: u64,
     decoded: u64,
     decoder: u64,
-    history: u64,
+
     copy: bool,
     active: bool,
 }
@@ -157,7 +151,7 @@ impl StorageReservation {
         limits: &StorageLimits,
         free: u64,
     ) -> Result<Self, BundleError> {
-        if !self.active || !self.copy || self.decoded != 0 || self.history != 0 {
+        if !self.active || !self.copy || self.decoded != 0 {
             return Err(BundleError::Capacity(
                 "snapshot overlap reservation is not active",
             ));
@@ -166,7 +160,6 @@ impl StorageReservation {
             &self.usage,
             limits,
             target_bytes.saturating_sub(self.bytes),
-            0,
             0,
             true,
             free,
@@ -182,8 +175,6 @@ impl StorageReservation {
             || !extension.copy
             || self.decoded != 0
             || extension.decoded != 0
-            || self.history != 0
-            || extension.history != 0
             || !Arc::ptr_eq(&self.usage, &extension.usage)
         {
             return Err(BundleError::Capacity(
@@ -223,11 +214,11 @@ impl StorageReservation {
         limits: &StorageLimits,
         bytes: u64,
         decoded: u64,
-        history: u64,
+
         copy: bool,
         free: u64,
     ) -> Result<Self, BundleError> {
-        Self::reserve_for_retained_read(usage, limits, bytes, decoded, history, copy, free, false)
+        Self::reserve_for_retained_read(usage, limits, bytes, decoded, copy, free, false)
     }
     #[allow(
         clippy::too_many_arguments,
@@ -238,7 +229,7 @@ impl StorageReservation {
         limits: &StorageLimits,
         bytes: u64,
         decoded: u64,
-        history: u64,
+
         copy: bool,
         free: u64,
         cleanup_only: bool,
@@ -248,7 +239,6 @@ impl StorageReservation {
             limits,
             bytes,
             decoded,
-            history,
             copy,
             free,
             cleanup_only,
@@ -266,7 +256,6 @@ impl StorageReservation {
             limits,
             0,
             decoded,
-            0,
             false,
             free,
             true,
@@ -283,7 +272,7 @@ impl StorageReservation {
         limits: &StorageLimits,
         bytes: u64,
         decoded: u64,
-        history: u64,
+
         copy: bool,
         free: u64,
         cleanup_only: bool,
@@ -332,10 +321,6 @@ impl StorageReservation {
                 .ok_or(BundleError::Capacity(
                     "decoder subset exceeds decoded bytes",
                 ))?;
-        let history_total = state
-            .live_history_bytes
-            .checked_add(history)
-            .ok_or(BundleError::Capacity("history overflow"))?;
         if matches!(kind, ReservationKind::Record) && reserved > free {
             return Err(BundleError::Capacity("disk reserve"));
         }
@@ -354,9 +339,6 @@ impl StorageReservation {
         }
         if codec_total > limits.decoder_bytes {
             return Err(BundleError::Capacity("decoder bytes"));
-        }
-        if history_total > limits.live_history_bytes {
-            return Err(BundleError::Capacity("live history bytes"));
         }
         if !copy
             && state
@@ -392,8 +374,6 @@ impl StorageReservation {
         state.reserved_copy_bytes = reserved_copies;
         state.decoded_bytes = decoded_total;
         state.decoder_bytes = codec_total;
-        state.live_history_bytes = history_total;
-        state.peak_live_history_bytes = state.peak_live_history_bytes.max(history_total);
         state.peak_reserved_bytes = state.peak_reserved_bytes.max(reserved);
         state.peak_decoded_bytes = state.peak_decoded_bytes.max(decoded_total);
         state.peak_decoder_bytes = state.peak_decoder_bytes.max(codec_total);
@@ -404,7 +384,7 @@ impl StorageReservation {
             bytes,
             decoded,
             decoder: codec_charge,
-            history,
+
             copy,
             active: true,
         })
@@ -413,38 +393,6 @@ impl StorageReservation {
     #[cfg(any(test, feature = "test-util"))]
     pub(crate) const fn reserved_bytes_probe(&self) -> u64 {
         self.bytes
-    }
-    /// Release unused replay overlap without an uncharged gap for its result.
-    pub(crate) fn finish_history_replay(mut self, retained: u64) -> Result<Self, BundleError> {
-        if !self.active
-            || self.bytes != 0
-            || self.decoder != 0
-            || retained > self.decoded
-            || (self.history != 0 && self.history != self.decoded)
-        {
-            return Err(BundleError::Capacity("history replay accounting"));
-        }
-        let release = self.decoded - retained;
-        let mut state = self
-            .usage
-            .lock()
-            .map_err(|_| BundleError::Capacity("accounting poisoned"))?;
-        let decoded = state
-            .decoded_bytes
-            .checked_sub(release)
-            .ok_or(BundleError::Capacity("history replay accounting"))?;
-        let history = state
-            .live_history_bytes
-            .checked_sub(if self.history == 0 { 0 } else { release })
-            .ok_or(BundleError::Capacity("history replay accounting"))?;
-        state.decoded_bytes = decoded;
-        state.live_history_bytes = history;
-        self.decoded = retained;
-        if self.history != 0 {
-            self.history = retained;
-        }
-        drop(state);
-        Ok(self)
     }
 
     /// An uncertain on-disk stage stays charged after authority teardown.
@@ -459,7 +407,7 @@ impl StorageReservation {
             bytes: self.bytes,
             decoded: self.decoded,
             decoder: self.decoder,
-            history: self.history,
+
             copy: self.copy,
             active: self.active,
         };
@@ -468,7 +416,7 @@ impl StorageReservation {
     }
     /// Convert exactly one staging charge to an immutable physical charge.
     pub(crate) fn seal(mut self, measured: u64) -> Result<(), BundleError> {
-        if self.decoded != 0 || self.history != 0 {
+        if self.decoded != 0 {
             return Err(BundleError::Capacity(
                 "a live decode reservation cannot be sealed as physical storage",
             ));
@@ -500,16 +448,11 @@ impl StorageReservation {
             .decoded_bytes
             .checked_sub(self.decoded)
             .ok_or(BundleError::Capacity("decode underflow"))?;
-        let history = state
-            .live_history_bytes
-            .checked_sub(self.history)
-            .ok_or(BundleError::Capacity("history underflow"))?;
         state.physical_bytes = physical;
         state.reserved_bytes = reserved;
         state.copy_bytes = copies;
         state.reserved_copy_bytes = reserved_copies;
         state.decoded_bytes = decoded;
-        state.live_history_bytes = history;
         state.peak_physical_bytes = state.peak_physical_bytes.max(physical);
         self.active = false;
         Ok(())
@@ -519,12 +462,7 @@ impl StorageReservation {
     /// one ledger operation. Readers cannot consume its metadata headroom
     /// between releasing the reservation and installing the control file.
     pub(crate) fn seal_control(mut self, measured: u64, previous: u64) -> Result<(), BundleError> {
-        if self.copy
-            || self.history != 0
-            || self.decoder != 0
-            || self.decoded != self.bytes
-            || measured > self.bytes
-        {
+        if self.copy || self.decoder != 0 || self.decoded != self.bytes || measured > self.bytes {
             return Err(BundleError::Capacity("invalid control reservation"));
         }
         let mut state = self
@@ -565,11 +503,6 @@ impl<T> StorageReservation<T> {
         self.value.take().expect("reservation owns value")
     }
 
-    pub(crate) fn pin(mut self, pin: crate::store::StorePin) -> Self {
-        self.pin = Some(pin);
-        self
-    }
-
     pub(crate) fn map<U>(mut self, transform: impl FnOnce(T) -> U) -> StorageReservation<U> {
         let value = transform(self.value.take().expect("reservation owns value"));
         let mapped = StorageReservation {
@@ -579,7 +512,7 @@ impl<T> StorageReservation<T> {
             bytes: self.bytes,
             decoded: self.decoded,
             decoder: self.decoder,
-            history: self.history,
+
             copy: self.copy,
             active: self.active,
         };
@@ -606,11 +539,10 @@ impl<T> Drop for StorageReservation<T> {
             return;
         }
         if let Ok(mut state) = self.usage.lock() {
-            if let (Some(bytes), Some(decoded), Some(decoder), Some(history), Some(copies)) = (
+            if let (Some(bytes), Some(decoded), Some(decoder), Some(copies)) = (
                 state.reserved_bytes.checked_sub(self.bytes),
                 state.decoded_bytes.checked_sub(self.decoded),
                 state.decoder_bytes.checked_sub(self.decoder),
-                state.live_history_bytes.checked_sub(self.history),
                 state
                     .reserved_copy_bytes
                     .checked_sub(if self.copy { self.bytes } else { 0 }),
@@ -618,7 +550,6 @@ impl<T> Drop for StorageReservation<T> {
                 state.reserved_bytes = bytes;
                 state.decoded_bytes = decoded;
                 state.decoder_bytes = decoder;
-                state.live_history_bytes = history;
                 state.reserved_copy_bytes = copies;
             } else {
                 state.damaged_accounting = true;
@@ -656,7 +587,7 @@ mod tests {
         assert_eq!(*usage.lock().unwrap(), before, "C0_DECODER_REFUSAL_ATOMIC");
         assert!(
             matches!(
-                StorageReservation::reserve(&usage, &limits, 0, 1, 0, false, u64::MAX),
+                StorageReservation::reserve(&usage, &limits, 0, 1, false, u64::MAX),
                 Err(BundleError::Capacity("metadata and decoded bytes"))
             ),
             "C0_METADATA_LIMIT_PRESERVED"
@@ -668,7 +599,6 @@ mod tests {
                     &limits,
                     0,
                     limits.decoded_record_bytes + 1,
-                    0,
                     false,
                     u64::MAX
                 ),
@@ -700,7 +630,7 @@ mod tests {
         }
         let limits = StorageLimits::default();
         let usage = Arc::new(Mutex::new(StorageUsage::default()));
-        let disk = StorageReservation::reserve(&usage, &limits, 1024, 7, 0, false, 1024).unwrap();
+        let disk = StorageReservation::reserve(&usage, &limits, 1024, 7, false, 1024).unwrap();
         let decoder = StorageReservation::reserve_decoder(&usage, &limits, 123, 0).unwrap();
         let resource = decoder.hold(Resource {
             usage: Arc::clone(&usage),
@@ -731,10 +661,9 @@ mod tests {
             metadata_bytes: 70,
             ..StorageUsage::default()
         }));
-        let first =
-            StorageReservation::reserve(&usage, &limits, 100, 100, 0, false, 1 << 20).unwrap();
+        let first = StorageReservation::reserve(&usage, &limits, 100, 100, false, 1 << 20).unwrap();
         let second =
-            StorageReservation::reserve(&usage, &limits, 100, 100, 0, false, 1 << 20).unwrap();
+            StorageReservation::reserve(&usage, &limits, 100, 100, false, 1 << 20).unwrap();
         first.seal_control(100, 20).unwrap();
         {
             let state = usage.lock().unwrap();
@@ -760,9 +689,8 @@ mod tests {
             metadata_bytes: 70,
             ..StorageUsage::default()
         }));
-        let first =
-            StorageReservation::reserve(&usage, &limits, 100, 100, 0, false, 1 << 20).unwrap();
-        assert!(StorageReservation::reserve(&usage, &limits, 100, 100, 0, false, 1 << 20).is_err());
+        let first = StorageReservation::reserve(&usage, &limits, 100, 100, false, 1 << 20).unwrap();
+        assert!(StorageReservation::reserve(&usage, &limits, 100, 100, false, 1 << 20).is_err());
         drop(first);
         let state = usage.lock().unwrap();
         assert_eq!((state.physical_bytes, state.metadata_bytes), (70, 70));

@@ -265,53 +265,6 @@ fn manual_history_capacity_encoder_limit_rolls_back_the_staged_replay_proof() {
     );
     publish(&mut writer, &replica, &lease, &permit);
 }
-#[test]
-#[ignore = "on-demand: heavy-effect ordinary copy peak and largest accepted batch"]
-fn manual_history_heavy_copy_capacity_census() {
-    use kinewright_project::manual_history::OrdinaryHistoryLimits;
-    for total in [10_u64, 20] {
-        let mut largest = 0;
-        for targets in 1..total {
-            let core = kinewright_core::Core::spawn(heavy_document(i64::try_from(total).unwrap()))
-                .unwrap();
-            assert!(matches!(
-                core.request(copies(targets + 1)).unwrap(),
-                Event::DocumentChanged { .. }
-            ));
-            let history = core.export_history().unwrap();
-            let mut one = (*history.baseline).clone();
-            one.tracks[0].clips.truncate(1);
-            let mut empty = one.clone();
-            empty.tracks[0].clips.clear();
-            let empty_charge =
-                kinewright_core::history_size::replay_document_bytes(&empty).unwrap();
-            let source_charge =
-                kinewright_core::history_size::replay_document_bytes(&one).unwrap() - empty_charge;
-            one.tracks[0].clips[0] = history.baseline.tracks[0].clips[1].clone();
-            let destination_charge =
-                kinewright_core::history_size::replay_document_bytes(&one).unwrap() - empty_charge;
-            let operation_copy_allowance = 3 * source_charge + 2 * destination_charge;
-            let journal = HistoryJournal::capture(&history).unwrap();
-            let peak = kinewright_core::history_size::measure_replay_peak(
-                &journal,
-                &history.baseline,
-                &history.document,
-            )
-            .unwrap();
-            let retained =
-                kinewright_core::history_size::restored_history_live_bytes(&history).unwrap();
-            let admission = OrdinaryHistoryLimits::default().check(&history);
-            if admission.is_ok() {
-                largest = targets;
-            }
-            println!(
-                "HEAVY_COPY_CAPACITY={}",
-                serde_json::json!({"total_clips":total,"targets":targets,"operation_copy_allowance":operation_copy_allowance,"operation_allowance_sum_if_held":operation_copy_allowance*targets,"encoded":history.encoded_bytes().unwrap(),"retained":retained,"peak":peak,"ordinary_limit":32_u64<<20,"admission":format!("{admission:?}")})
-            );
-        }
-        println!("HEAVY_COPY_LARGEST={total}:{largest}");
-    }
-}
 
 #[test]
 fn manual_history_capacity_unsaved_import_refuses_before_installing_document_or_inputs() {

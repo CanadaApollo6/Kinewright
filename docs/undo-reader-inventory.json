@@ -53,9 +53,10 @@
       "read_contract": "Restore executes every batch and then installs its offset and checks all fields.",
       "h1_requirement": "Delete command-log rebuild. Validate stack replay against baseline/current at the input boundary.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "crates/kinewright-core/tests/undo.rs: open_refuses_wrong_saved_document, open_refuses_invalid_redo, open_refuses_wrong_digest_and_duplicate_command_identity; operation_history::stored::tests::stored_owner_metadata_malformations_are_typed_and_atomic",
+      "retirement": "old journal capture, replay, cursor hashes and cached transport removed; native record replay validates the input boundary"
     },
     {
       "id": "H1-006",
@@ -75,9 +76,10 @@
       "read_contract": "Begin/settle floor checks increasing offset, discarded command count and suffix replay.",
       "h1_requirement": "Delete. Executor folding replaces this entire protocol.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "crates/kinewright-core/tests/undo.rs: folding_releases_charge_at_the_exact_bound, literal_charge_and_redo_refusal_are_independent, admitted_redo_and_fold_reuse_their_validated_reservations; operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "retirement": "old save-side floor selection and pending-floor Undo barrier removed; executor alone folds under both caps"
     },
     {
       "id": "H1-008",
@@ -86,9 +88,10 @@
       "read_contract": "Bounded journal loading checks count, start/current hashes, exact prefix and each replayed batch, then both cursor document-hash lists.",
       "h1_requirement": "Delete cursor hashes and prefix proof. Stacks plus object verification and bounded validation serve loading.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "crates/kinewright-core/tests/undo.rs: open_refuses_wrong_saved_document, open_refuses_invalid_redo, open_refuses_wrong_digest_and_duplicate_command_identity; operation_history::stored::tests::stored_owner_metadata_malformations_are_typed_and_atomic",
+      "retirement": "old journal capture, replay, cursor hashes and cached transport removed; native record replay validates the input boundary"
     },
     {
       "id": "H1-009",
@@ -97,9 +100,10 @@
       "read_contract": "Floor selection and construction replay command prefixes/suffixes and adjust absolute offset.",
       "h1_requirement": "Delete.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "crates/kinewright-core/tests/undo.rs: folding_releases_charge_at_the_exact_bound, literal_charge_and_redo_refusal_are_independent, admitted_redo_and_fold_reuse_their_validated_reservations; operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "retirement": "old save-side floor selection and pending-floor Undo barrier removed; executor alone folds under both caps"
     },
     {
       "id": "H1-010",
@@ -108,9 +112,10 @@
       "read_contract": "Frozen transition install aligns the cut with a later floor.",
       "h1_requirement": "Delete floor alignment; retain expected-state attachment fencing.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts; history_door_audit::save_as_checkpoint_and_working_branch_preserve_the_complete_owner; history_door_audit::rescue_after_parent_loss_preserves_the_complete_owner_and_approval",
+      "retirement": "floor alignment removed; validated combined-identity installation preserves complete owner state"
     },
     {
       "id": "H1-011",
@@ -119,9 +124,10 @@
       "read_contract": "Pending floor blocks Undo; executor takes per-operation identity effects into accepted batches with post-command stack counts.",
       "h1_requirement": "Delete floor refusal and counts. Extra identity facts are used by lineage/audit below; command position still advances on empty Undo/Redo.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "crates/kinewright-core/tests/undo.rs: folding_releases_charge_at_the_exact_bound, literal_charge_and_redo_refusal_are_independent, admitted_redo_and_fold_reuse_their_validated_reservations; operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "retirement": "old save-side floor selection and pending-floor Undo barrier removed; executor alone folds under both caps"
     },
     {
       "id": "H1-012",
@@ -152,9 +158,10 @@
       "read_contract": "JSON cache checks command cap, serializes journal tail and rolls back patches.",
       "h1_requirement": "Delete old journal cache; replace with bounded message/record encoding.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "crates/kinewright-core/tests/undo.rs: open_refuses_wrong_saved_document, open_refuses_invalid_redo, open_refuses_wrong_digest_and_duplicate_command_identity; operation_history::stored::tests::stored_owner_metadata_malformations_are_typed_and_atomic",
+      "retirement": "old journal capture, replay, cursor hashes and cached transport removed; native record replay validates the input boundary"
     },
     {
       "id": "H1-015",
@@ -163,9 +170,10 @@
       "read_contract": "Emits/measures offset, journal start/current hashes, batches and cached cursor hash arrays.",
       "h1_requirement": "Delete cursor hashes and log encoding. Stacks serve persisted record; sequence/digest serves agreement.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "crates/kinewright-core/tests/undo.rs: open_refuses_wrong_saved_document, open_refuses_invalid_redo, open_refuses_wrong_digest_and_duplicate_command_identity; operation_history::stored::tests::stored_owner_metadata_malformations_are_typed_and_atomic",
+      "retirement": "old journal capture, replay, cursor hashes and cached transport removed; native record replay validates the input boundary"
     },
     {
       "id": "H1-016",
@@ -196,9 +204,10 @@
       "read_contract": "Copies batch order, identity effects and stack counts to journal.",
       "h1_requirement": "Delete journal wrapper. Extra lineage identities still require storage elsewhere.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "crates/kinewright-core/tests/undo.rs: open_refuses_wrong_saved_document, open_refuses_invalid_redo, open_refuses_wrong_digest_and_duplicate_command_identity; operation_history::stored::tests::stored_owner_metadata_malformations_are_typed_and_atomic",
+      "retirement": "old journal capture, replay, cursor hashes and cached transport removed; native record replay validates the input boundary"
     },
     {
       "id": "H1-019",
@@ -207,9 +216,10 @@
       "read_contract": "Capture limits batches, hashes every boundary document, carries offset and commands. Serialization/deserialization calls capture/resolve at `:217`, `:232`.",
       "h1_requirement": "Delete log and per-boundary hashes. Stacks plus baseline/current object refs serve record I/O.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "crates/kinewright-core/tests/undo.rs: open_refuses_wrong_saved_document, open_refuses_invalid_redo, open_refuses_wrong_digest_and_duplicate_command_identity; operation_history::stored::tests::stored_owner_metadata_malformations_are_typed_and_atomic",
+      "retirement": "old journal capture, replay, cursor hashes and cached transport removed; native record replay validates the input boundary"
     },
     {
       "id": "H1-020",
@@ -218,9 +228,10 @@
       "read_contract": "Charges retained batch payloads and identity-effect allocations.",
       "h1_requirement": "Delete batch charge; account operation payload and separately bounded metadata.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "crates/kinewright-core/tests/undo.rs: literal_charge_and_redo_refusal_are_independent, retained_payload_capacity_is_charged_without_copying, reserved_path_capacity_exceeds_the_literal_live_cap, every_growing_kind_reaches_the_document_limit",
+      "retirement": "batch/cursor-history allocation estimator removed; typed payload capacity, step metadata and role pool bound native storage"
     },
     {
       "id": "H1-021",
@@ -229,9 +240,10 @@
       "read_contract": "Calculates peak Undo/Redo capacity from historic stack counts and transport padding from all batches/effects.",
       "h1_requirement": "Delete command-history peak calculation. Stacks give current lengths; allocation bounds still needed.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "crates/kinewright-core/tests/undo.rs: literal_charge_and_redo_refusal_are_independent, retained_payload_capacity_is_charged_without_copying, reserved_path_capacity_exceeds_the_literal_live_cap, every_growing_kind_reaches_the_document_limit",
+      "retirement": "batch/cursor-history allocation estimator removed; typed payload capacity, step metadata and role pool bound native storage"
     },
     {
       "id": "H1-022",
@@ -240,9 +252,10 @@
       "read_contract": "Charges journal batches, hashes, effects and replay allocation based on accepted command count.",
       "h1_requirement": "Delete journal charge. Bounded loading still needs document/operation allocation accounting, including transient operation work.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "crates/kinewright-core/tests/undo.rs: literal_charge_and_redo_refusal_are_independent, retained_payload_capacity_is_charged_without_copying, reserved_path_capacity_exceeds_the_literal_live_cap, every_growing_kind_reaches_the_document_limit",
+      "retirement": "batch/cursor-history allocation estimator removed; typed payload capacity, step metadata and role pool bound native storage"
     },
     {
       "id": "H1-023",
@@ -262,9 +275,10 @@
       "read_contract": "`replay_prefix` reconstructs the state at an accepted command cut.",
       "h1_requirement": "Delete for floors. Log if arbitrary historical command-cut replay remains an API requirement; current uses are floor-prefix reconstruction.",
       "group": "fixed-base delta and private preview",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "Core::fork; Core::operations; Core::boundary; editing_session::prepare_reopened_branch; NeverFold role",
-      "proof": "TASK_REOPEN_PRESERVES_NEVER_FOLD; TASK_PREVIEW_USES_ITS_OWN_BASELINE; creation-sizing merge matrix"
+      "proof": "operation_actor::tests::delta_fork_preserves_the_current_occurrences_without_a_parent_capture; history_door_audit::task_reopen_installs_only_the_current_persisted_branch_with_its_fixed_policy",
+      "retirement": "floor-prefix scratch replay removed; NeverFold fork owns a fixed baseline and exposes its applied delta"
     },
     {
       "id": "H1-025",
@@ -284,9 +298,10 @@
       "read_contract": "Save aligns durable and selected floors, chooses another floor and builds the transition.",
       "h1_requirement": "Delete. Save must publish the executor's existing cut.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "operation_protocol::tests::sequence_chain_payload_and_accepted_key_conflicts_are_typed; operation_protocol::tests::install_seeds_a_new_chain_from_the_combined_snapshot_identity; history_door_audit::first_save_save_and_cold_open_preserve_the_complete_owner",
+      "retirement": "floor/prefix agreement removed; atomic owner publication carries ordered command receipts and combined install identity"
     },
     {
       "id": "H1-027",
@@ -295,9 +310,10 @@
       "read_contract": "Manual publication aligns floor, checks before digest, verifies last accepted batch.",
       "h1_requirement": "Delete floor and full-history agreement. Extra exact command/sequence/digest needed for unacknowledged-message replay.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "operation_protocol::tests::sequence_chain_payload_and_accepted_key_conflicts_are_typed; operation_protocol::tests::install_seeds_a_new_chain_from_the_combined_snapshot_identity; history_door_audit::first_save_save_and_cold_open_preserve_the_complete_owner",
+      "retirement": "floor/prefix agreement removed; atomic owner publication carries ordered command receipts and combined install identity"
     },
     {
       "id": "H1-028",
@@ -306,9 +322,10 @@
       "read_contract": "Aligns old/new floors and checks exact batch-prefix preservation.",
       "h1_requirement": "Delete.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "operation_protocol::tests::sequence_chain_payload_and_accepted_key_conflicts_are_typed; operation_protocol::tests::install_seeds_a_new_chain_from_the_combined_snapshot_identity; history_door_audit::first_save_save_and_cold_open_preserve_the_complete_owner",
+      "retirement": "floor/prefix agreement removed; atomic owner publication carries ordered command receipts and combined install identity"
     },
     {
       "id": "H1-029",
@@ -339,9 +356,10 @@
       "read_contract": "Save-side suffix-size estimator rewrites order/counts and finds legal floor candidates.",
       "h1_requirement": "Delete.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "crates/kinewright-core/tests/undo.rs: folding_releases_charge_at_the_exact_bound, literal_charge_and_redo_refusal_are_independent, admitted_redo_and_fold_reuse_their_validated_reservations; operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "retirement": "old save-side floor selection and pending-floor Undo barrier removed; executor alone folds under both caps"
     },
     {
       "id": "H1-032",
@@ -427,9 +445,10 @@
       "read_contract": "Exposes rescue floor offset.",
       "h1_requirement": "Delete floor field; expose lost Undo depth if disclosure remains necessary.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "history_door_audit::rescue_after_parent_loss_preserves_the_complete_owner_and_approval; history_door_audit::host_shadow_install_preserves_both_stacks_and_exact_approval",
+      "retirement": "obsolete save/rescue floor offsets, trim consent and removed-Undo wire fields removed; full owner retained through rescue"
     },
     {
       "id": "H1-040",
@@ -493,9 +512,10 @@
       "read_contract": "Aligns a checkpoint installation after a floor.",
       "h1_requirement": "Delete.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts; history_door_audit::save_as_checkpoint_and_working_branch_preserve_the_complete_owner; history_door_audit::rescue_after_parent_loss_preserves_the_complete_owner_and_approval",
+      "retirement": "floor alignment removed; validated combined-identity installation preserves complete owner state"
     },
     {
       "id": "H1-046",
@@ -559,9 +579,10 @@
       "read_contract": "Rescue reports/alignment use old and new floor offsets.",
       "h1_requirement": "Delete rescue cutting/alignment; retain explicit recovery outcomes.",
       "group": "validated installation",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "ProjectAttachment; operation_actor::State::install; operation_actor_prepare; operation_history::reconcile_snapshot",
-      "proof": "history_door_audit; AGENT_SNAPSHOT_DOOR_REFUSES_BEFORE_INSTALL; existing switch/rescue/recovery suites"
+      "proof": "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts; history_door_audit::save_as_checkpoint_and_working_branch_preserve_the_complete_owner; history_door_audit::rescue_after_parent_loss_preserves_the_complete_owner_and_approval",
+      "retirement": "floor alignment removed; validated combined-identity installation preserves complete owner state"
     },
     {
       "id": "H1-052",
@@ -669,9 +690,10 @@
       "read_contract": "Copy/switch reconciliation aligns floor and committed digest.",
       "h1_requirement": "Delete floor; Stacks value binding.",
       "group": "validated installation",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "ProjectAttachment; operation_actor::State::install; operation_actor_prepare; operation_history::reconcile_snapshot",
-      "proof": "history_door_audit; AGENT_SNAPSHOT_DOOR_REFUSES_BEFORE_INSTALL; existing switch/rescue/recovery suites"
+      "proof": "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts; history_door_audit::save_as_checkpoint_and_working_branch_preserve_the_complete_owner; history_door_audit::rescue_after_parent_loss_preserves_the_complete_owner_and_approval",
+      "retirement": "floor alignment removed; validated combined-identity installation preserves complete owner state"
     },
     {
       "id": "H1-062",
@@ -680,9 +702,10 @@
       "read_contract": "Pending manual/switch recovery aligns floor offsets and checks committed checkpoint history digest.",
       "h1_requirement": "Delete floor proof; Stacks checkpoint plus command chain for unacknowledged replay.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "operation_protocol::tests::sequence_chain_payload_and_accepted_key_conflicts_are_typed; operation_protocol::tests::install_seeds_a_new_chain_from_the_combined_snapshot_identity; history_door_audit::first_save_save_and_cold_open_preserve_the_complete_owner",
+      "retirement": "floor/prefix agreement removed; atomic owner publication carries ordered command receipts and combined install identity"
     },
     {
       "id": "H1-063",
@@ -702,9 +725,10 @@
       "read_contract": "Reports saved floor and removed Undo entries.",
       "h1_requirement": "Delete save-side flooring; report executor retention if useful.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "history_door_audit::rescue_after_parent_loss_preserves_the_complete_owner_and_approval; history_door_audit::host_shadow_install_preserves_both_stacks_and_exact_approval",
+      "retirement": "obsolete save/rescue floor offsets, trim consent and removed-Undo wire fields removed; full owner retained through rescue"
     },
     {
       "id": "H1-065",
@@ -790,9 +814,10 @@
       "read_contract": "Settled floor builds a Core from a later baseline, installs rebased history and replaces state.",
       "h1_requirement": "Delete; fold inside executor.",
       "group": "validated installation",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "ProjectAttachment; operation_actor::State::install; operation_actor_prepare; operation_history::reconcile_snapshot",
-      "proof": "history_door_audit; AGENT_SNAPSHOT_DOOR_REFUSES_BEFORE_INSTALL; existing switch/rescue/recovery suites"
+      "proof": "crates/kinewright-core/tests/undo.rs: folding_releases_charge_at_the_exact_bound, literal_charge_and_redo_refusal_are_independent, admitted_redo_and_fold_reuse_their_validated_reservations; operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "retirement": "old save-side floor selection and pending-floor Undo barrier removed; executor alone folds under both caps"
     },
     {
       "id": "H1-073",
@@ -867,9 +892,10 @@
       "read_contract": "Floor prefix scratch baseline; fork's current source document becomes new empty-history baseline.",
       "h1_requirement": "Delete prefix Core; preserve fork semantics and NeverFold role.",
       "group": "validated installation",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "ProjectAttachment; operation_actor::State::install; operation_actor_prepare; operation_history::reconcile_snapshot",
-      "proof": "history_door_audit; AGENT_SNAPSHOT_DOOR_REFUSES_BEFORE_INSTALL; existing switch/rescue/recovery suites"
+      "proof": "operation_actor::tests::delta_fork_preserves_the_current_occurrences_without_a_parent_capture; history_door_audit::task_reopen_installs_only_the_current_persisted_branch_with_its_fixed_policy",
+      "retirement": "floor-prefix scratch replay removed; NeverFold fork owns a fixed baseline and exposes its applied delta"
     },
     {
       "id": "H1-080",
@@ -1505,9 +1531,10 @@
       "read_contract": "Save-side capacity estimator charges each boundary document and selects floors.",
       "h1_requirement": "Delete floor selection. Per-role operation/document/metadata/replay bounds replace charging.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "crates/kinewright-core/tests/undo.rs: folding_releases_charge_at_the_exact_bound, literal_charge_and_redo_refusal_are_independent, admitted_redo_and_fold_reuse_their_validated_reservations; operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "retirement": "old save-side floor selection and pending-floor Undo barrier removed; executor alone folds under both caps"
     },
     {
       "id": "H1-138",
@@ -2253,9 +2280,10 @@
       "read_contract": "`history_floor_offset` in the publication report (wire form of the `mod.rs:1801` row).",
       "h1_requirement": "Delete with the floor.",
       "group": "history, publication and position",
-      "status": "replacement active; obsolete proof retirement at checkpoint 3",
+      "status": "retired",
       "replacement": "kinewright-core::undo; operation_actor; operation_protocol; operation_checkpoint; StoredOwnerRecord",
-      "proof": "history_door_audit; operation_actor::tests; operation_protocol::tests; stored::session_model"
+      "proof": "history_door_audit::rescue_after_parent_loss_preserves_the_complete_owner_and_approval; history_door_audit::host_shadow_install_preserves_both_stacks_and_exact_approval",
+      "retirement": "obsolete save/rescue floor offsets, trim consent and removed-Undo wire fields removed; full owner retained through rescue"
     },
     {
       "id": "H1-206",

@@ -633,7 +633,6 @@ fn s3_viewer_capabilities() {
             client: "e".repeat(64),
             frozen: None,
             pending: vec![],
-            discard_batches: None,
         })
         .unwrap();
     assert!(
@@ -960,7 +959,6 @@ fn recovery_confirmation_cache_releases_its_preceding_line() {
                     client: "e".repeat(64),
                     frozen: None,
                     pending: vec![],
-                    discard_batches: None,
                 },
                 Some(base),
             )

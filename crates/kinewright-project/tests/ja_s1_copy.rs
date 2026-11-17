@@ -415,7 +415,6 @@ fn save_as_copies_every_retained_asset_including_luts_before_root() {
     let strokes_ref = reference(strokes, RecordKind::OwnedEvidence);
     let request = CommandEnvelope {
         switch: None,
-        manual: None,
         context: None,
         version: 1,
         action: "comment".into(),
@@ -433,7 +432,6 @@ fn save_as_copies_every_retained_asset_including_luts_before_root() {
         comment_text: Some(text_ref.clone()),
         comment_strokes: Some(strokes_ref.clone()),
         evidence: vec![],
-        transition: None,
     };
     let ReceiptLookup::Committed(comment) = bundle
         .command(

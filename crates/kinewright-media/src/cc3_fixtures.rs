@@ -34,9 +34,9 @@ use half::f16;
 use kinewright_core::{
     Analysis, AssetId, AutomationCurve, COLOR_CURVE_COORDINATE_MAX, COLOR_CURVE_COORDINATE_MIN,
     COLOR_CURVE_MAX_POINTS, COLOR_NODE_LIMIT_PER_LAYER, ClipId, ColorCurveChannel,
-    ColorNodeInactiveReason, ColorNodeKind, ColorSourceProfile, Command, Core, Document, Effect,
-    EffectId, Event, JournalCommand, Keyframe, KeyframeInterpolation, MediaError, OpError,
-    Operation, ParamValue, ResolvedCurves, TimeCode, active_color_nodes, classify_color_node,
+    ColorNodeInactiveReason, ColorNodeKind, ColorSourceProfile, Command, Document, Effect,
+    EffectId, JournalCommand, Keyframe, KeyframeInterpolation, MediaError, OpError, Operation,
+    ParamValue, ResolvedCurves, TimeCode, active_color_nodes, classify_color_node,
     color_node_inactive_reason, effect_descriptor,
 };
 use serde_json::{Value, json};
@@ -2573,13 +2573,6 @@ fn sixteen_point_curve(offset: i64) -> Vec<(i64, i64)> {
         .collect()
 }
 
-fn document_from(event: Event, label: &str) -> Arc<Document> {
-    match event {
-        Event::DocumentChanged { doc, .. } => doc,
-        other => panic!("{label} was not an accepted document state: {other:?}"),
-    }
-}
-
 /// CC3 §10.3.10. Save/reopen, journal replay, undo, and redo preserve both
 /// nodes, their values, and their vector position exactly.
 #[test]
@@ -2604,9 +2597,15 @@ fn cc3_serialization_and_history_preserve_both_nodes() {
     );
     let wheels = representative_wheels(21);
 
-    let core = Core::spawn(cc3_document()).expect("cc3 history core");
-    let added = document_from(
-        core.request(Command::DoBatch(vec![
+    let mut core = kinewright_core::undo::History::new(
+        cc3_document(),
+        kinewright_core::undo::RetentionPolicy::NeverFold,
+        kinewright_core::undo::RoleBounds::TASK,
+    )
+    .expect("cc3 history core");
+    let added = document_after(
+        &mut core,
+        Command::DoBatch(vec![
             Operation::AddEffect {
                 clip: ClipId(1),
                 effect: wheels.clone(),
@@ -2615,8 +2614,7 @@ fn cc3_serialization_and_history_preserve_both_nodes() {
                 clip: ClipId(1),
                 effect: curves.clone(),
             },
-        ]))
-        .expect("both CC3 nodes must be accepted"),
+        ]),
         "AddEffect batch",
     );
     assert_eq!(
@@ -2636,7 +2634,12 @@ fn cc3_serialization_and_history_preserve_both_nodes() {
     assert_eq!(clip_effects(&reopened)[1].parameters, curves.parameters);
 
     // Journal replay through the public actor boundary.
-    let replay_core = Core::spawn(cc3_document()).expect("cc3 replay core");
+    let mut replay_core = kinewright_core::undo::History::new(
+        cc3_document(),
+        kinewright_core::undo::RetentionPolicy::NeverFold,
+        kinewright_core::undo::RoleBounds::TASK,
+    )
+    .expect("cc3 replay core");
     let journal = JournalCommand::DoBatch(vec![
         Operation::AddEffect {
             clip: ClipId(1),
@@ -2650,17 +2653,13 @@ fn cc3_serialization_and_history_preserve_both_nodes() {
     let wire = serde_json::to_value(&journal).expect("journal command must serialize");
     let decoded: JournalCommand =
         serde_json::from_value(wire).expect("journal command must deserialize");
-    let replayed = document_from(
-        replay_core
-            .request(decoded.into())
-            .expect("journal replay must apply"),
-        "journal replay",
-    );
+    let replayed = document_after(&mut replay_core, decoded.into(), "journal replay");
     assert_eq!(clip_effects(&replayed), clip_effects(&added));
 
     // A second batch: SetEffectParam, SetEffectKeyframes, ClearEffectKeyframes.
-    let edited = document_from(
-        core.request(Command::DoBatch(vec![
+    let edited = document_after(
+        &mut core,
+        Command::DoBatch(vec![
             Operation::SetEffectParam {
                 clip: ClipId(1),
                 effect: EffectId(21),
@@ -2704,8 +2703,7 @@ fn cc3_serialization_and_history_preserve_both_nodes() {
                     }],
                 },
             },
-        ]))
-        .expect("CC3 parameter and keyframe edits must be accepted"),
+        ]),
         "edit batch",
     );
     assert_eq!(
@@ -2724,13 +2722,13 @@ fn cc3_serialization_and_history_preserve_both_nodes() {
         Some(ColorNodeInactiveReason::Bypassed)
     );
 
-    let cleared = document_from(
-        core.request(Command::Do(Operation::ClearEffectKeyframes {
+    let cleared = document_after(
+        &mut core,
+        Command::Do(Operation::ClearEffectKeyframes {
             clip: ClipId(1),
             effect: EffectId(22),
             name: "master_y3".to_owned(),
-        }))
-        .expect("ClearEffectKeyframes must be accepted"),
+        }),
         "clear keyframes",
     );
     assert!(
@@ -2740,26 +2738,20 @@ fn cc3_serialization_and_history_preserve_both_nodes() {
     );
 
     // Undo unwinds one history entry at a time and redo restores it exactly.
-    let undone_clear = document_from(
-        core.request(Command::Undo).expect("undo clear"),
-        "undo clear",
-    );
+    let undone_clear = document_after(&mut core, Command::Undo, "undo clear");
     assert_eq!(clip_effects(&undone_clear), clip_effects(&edited));
-    let undone_edit = document_from(core.request(Command::Undo).expect("undo edit"), "undo edit");
+    let undone_edit = document_after(&mut core, Command::Undo, "undo edit");
     assert_eq!(clip_effects(&undone_edit), clip_effects(&added));
-    let undone_add = document_from(core.request(Command::Undo).expect("undo add"), "undo add");
+    let undone_add = document_after(&mut core, Command::Undo, "undo add");
     assert!(
         clip_effects(&undone_add).is_empty(),
         "undoing the add batch must remove both nodes atomically"
     );
-    let redone_add = document_from(core.request(Command::Redo).expect("redo add"), "redo add");
+    let redone_add = document_after(&mut core, Command::Redo, "redo add");
     assert_eq!(clip_effects(&redone_add), clip_effects(&added));
-    let redone_edit = document_from(core.request(Command::Redo).expect("redo edit"), "redo edit");
+    let redone_edit = document_after(&mut core, Command::Redo, "redo edit");
     assert_eq!(clip_effects(&redone_edit), clip_effects(&edited));
-    let redone_clear = document_from(
-        core.request(Command::Redo).expect("redo clear"),
-        "redo clear",
-    );
+    let redone_clear = document_after(&mut core, Command::Redo, "redo clear");
     assert_eq!(clip_effects(&redone_clear), clip_effects(&cleared));
 
     let metrics = json!({
@@ -3361,4 +3353,15 @@ fn cc3_manifest_declares_every_required_fixture_and_tolerance() {
             "the manifest must describe the {lane} GPU lane"
         );
     }
+}
+
+fn document_after(
+    history: &mut kinewright_core::undo::History,
+    command: Command,
+    label: &str,
+) -> Arc<Document> {
+    history
+        .execute(command)
+        .unwrap_or_else(|error| panic!("{label} was refused: {error:?}"));
+    Arc::clone(history.document())
 }

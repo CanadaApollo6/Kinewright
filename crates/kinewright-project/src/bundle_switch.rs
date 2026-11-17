@@ -262,7 +262,6 @@ impl ProjectBundle {
             (closure.len() as u64)
                 .checked_mul(128)
                 .ok_or(BundleError::Capacity("selection pin metadata"))?,
-            0,
             false,
         )?;
         for object in &closure {

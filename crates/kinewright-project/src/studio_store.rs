@@ -524,7 +524,6 @@ impl MetadataEnvelope {
         let bytes = serde_json::to_vec(update).map_err(|e| BundleError::Corrupt(e.to_string()))?;
         Ok(CommandEnvelope {
             switch: None,
-            manual: None,
             context: None,
             version: 1,
             action: "metadata".into(),
@@ -543,7 +542,6 @@ impl MetadataEnvelope {
                 byte_length: bytes.len() as u64,
                 record_kind: RecordKind::OwnedEvidence,
             }],
-            transition: None,
         })
     }
 }
@@ -553,7 +551,7 @@ impl ProjectBundle {
         reference: Option<&ObjectRef>,
     ) -> Result<StorageReservation<T>, BundleError> {
         reference.map_or_else(
-            || Ok(self.store.reserve(0, 256, 0, false)?.hold(T::default())),
+            || Ok(self.store.reserve(0, 256, false)?.hold(T::default())),
             |r| self.store.read_record(r),
         )
     }
@@ -833,7 +831,7 @@ impl ProjectBundle {
         struct Header<'a> {
             bundle: &'a mut ProjectBundle,
             state: crate::bundle::PublicationState,
-            tag: Option<kinewright_core::HistorySaveTag>,
+            tag: Option<crate::history_save::PublicationTag>,
         }
         impl Drop for Header<'_> {
             fn drop(&mut self) {
@@ -1056,7 +1054,7 @@ impl ProjectBundle {
         {
             return Err(BundleError::Capacity("metadata receipts/pending"));
         }
-        let reservation = self.store.reserve(0, command.encoded_bytes()?, 0, false)?;
+        let reservation = self.store.reserve(0, command.encoded_bytes()?, false)?;
         let (validated, result) = match admitted {
             Some(admitted) => admitted,
             None => self.validate_metadata(envelope, update)?,
@@ -1982,10 +1980,10 @@ fn charge_value<T: serde::Serialize>(
     value: &T,
 ) -> Result<StorageReservation, BundleError> {
     bounded(value, store.limits().decoded_record_bytes)?;
-    let _scratch = store.reserve(0, store.limits().decoded_record_bytes, 0, false)?;
+    let _scratch = store.reserve(0, store.limits().decoded_record_bytes, false)?;
     let bytes = serde_json::to_vec(value).map_err(|e| BundleError::Corrupt(e.to_string()))?;
     let decoded = crate::store::preflight_record(&bytes, store.limits())?;
-    store.reserve(0, decoded, 0, false)
+    store.reserve(0, decoded, false)
 }
 
 impl crate::editing_session::Ja1EditingSession {
@@ -2015,7 +2013,7 @@ impl FrozenContext {
         let bytes = crate::voice_ingress::AUDIO_BYTES + crate::voice_ingress::LOG_BYTES;
         store
             .person_publication_store()
-            .reserve(bytes, 3 * bytes, 0, true)
+            .reserve(bytes, 3 * bytes, true)
     }
 
     /// Recheck certified descriptors without rereading the footage.

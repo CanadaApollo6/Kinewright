@@ -72,7 +72,7 @@ fn native_release_waits_for_dirty_work_handles_and_capacity_then_rehydrates_exac
     let mut held = Vec::new();
     while available != 0 {
         let bytes = available.min(store.limits().decoded_record_bytes);
-        held.push(store.reserve_copy_read(0, bytes, 0, false, true).unwrap());
+        held.push(store.reserve_copy_read(0, bytes, false, true).unwrap());
         available -= bytes;
     }
     assert!(

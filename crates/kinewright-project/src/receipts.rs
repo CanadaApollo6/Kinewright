@@ -41,23 +41,6 @@ fn hex(value: &str, length: usize) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// A transition is admitted only at its original acknowledged checkpoint and cut.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum HistoryRequest {
-    Floor {
-        discard_batches: usize,
-        preceding_checkpoint_generation: u64,
-        preceding_floor_generation: u64,
-        command_cut: CommandId,
-    },
-    RecoveryClose {
-        preceding_checkpoint_generation: u64,
-        reconciled_cut: Option<CommandId>,
-        suffix_digest: String,
-    },
-}
-
 /// An absent manual command reauthorized only inside the shared recovery barrier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -72,8 +55,6 @@ pub struct OriginalCommand {
 pub struct CommandEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub switch: Option<Box<crate::bundle_switch::SwitchRequest>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub manual: Option<crate::manual_history::ManualHistoryIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<crate::operation_actor::CommandContext>,
     pub version: u32,
@@ -89,8 +70,6 @@ pub struct CommandEnvelope {
     pub comment_text: Option<ObjectRef>,
     pub comment_strokes: Option<ObjectRef>,
     pub evidence: Vec<ObjectRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transition: Option<HistoryRequest>,
 }
 impl CommandEnvelope {
     pub fn encoded_bytes(&self) -> Result<u64, BundleError> {
@@ -103,11 +82,6 @@ impl CommandEnvelope {
                 "command envelope version/identity".into(),
             ));
         }
-        if self.action != "manual" && self.manual.is_some() {
-            return Err(BundleError::Unsupported(
-                "manual identity on ordinary command".into(),
-            ));
-        }
         if self.action != "switch" && self.switch.is_some() {
             return Err(BundleError::Unsupported(
                 "switch payload on ordinary command".into(),
@@ -116,9 +90,7 @@ impl CommandEnvelope {
         match self.action.as_str() {
             "metadata"
                 if self.switch.is_none()
-                    && self.manual.is_none()
                     && self.lease.is_none()
-                    && self.transition.is_none()
                     && self.command.is_none()
                     && self.comment_text.is_none()
                     && self.comment_strokes.is_none()
@@ -130,7 +102,6 @@ impl CommandEnvelope {
             "switch"
                 if self.switch.is_some()
                     && self.lease.is_some()
-                    && self.transition.is_none()
                     && self.command.is_none()
                     && self.comment_text.is_none()
                     && self.comment_strokes.is_none()
@@ -150,36 +121,14 @@ impl CommandEnvelope {
                 }
             }
             "edit"
-                if self.transition.is_none()
-                    && self.command.is_some()
-                    && self.comment_text.is_none()
-                    && self.comment_strokes.is_none()
-                    && self.evidence.is_empty() => {}
-            "manual"
-                if self.manual.is_some()
-                    && self.lease.is_some()
-                    && self.transition.is_none()
-                    && self.command.is_some()
+                if self.command.is_some()
                     && self.comment_text.is_none()
                     && self.comment_strokes.is_none()
                     && self.evidence.is_empty() => {}
             "comment"
-                if self.transition.is_none()
-                    && self.command.is_none()
+                if self.command.is_none()
                     && self.comment_text.is_some()
                     && self.comment_strokes.is_some() => {}
-            "floor"
-                if matches!(self.transition, Some(HistoryRequest::Floor { .. }))
-                    && self.command.is_none()
-                    && self.comment_text.is_none()
-                    && self.comment_strokes.is_none()
-                    && self.evidence.is_empty() => {}
-            "recovery_close"
-                if matches!(self.transition, Some(HistoryRequest::RecoveryClose { .. }))
-                    && self.command.is_none()
-                    && self.comment_text.is_none()
-                    && self.comment_strokes.is_none()
-                    && self.evidence.is_empty() => {}
             _ => {
                 return Err(BundleError::Unsupported(
                     "command action/payload, including branch switch".into(),
@@ -560,9 +509,7 @@ impl ProjectBundle {
         let mut recovery = self.recovery.predecessors.clone();
         recovery.extend(records.iter().filter_map(|r| r.acknowledged_root.clone()));
         for reference in &recovery {
-            let _encoded = self
-                .store
-                .reserve_read(0, reference.byte_length, 0, false)?;
+            let _encoded = self.store.reserve_read(0, reference.byte_length, false)?;
             let mut file = self.store.open_verified(reference)?;
             let bytes = crate::bundle_recovery::bounded_bytes(&mut file, reference.byte_length)?;
             let prior = crate::bundle::BundleWriteAdmission::from_bytes_using(

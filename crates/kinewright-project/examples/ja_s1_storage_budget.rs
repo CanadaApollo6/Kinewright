@@ -38,7 +38,7 @@ fn reference(bytes: &[u8], kind: RecordKind) -> ObjectRef {
     }
 }
 fn usage(s: &StorageUsage) -> Value {
-    json!({"physical_bytes":s.physical_bytes,"owned_bytes":s.owned_bytes,"metadata_reservation_bytes":s.metadata_bytes,"objects":s.objects,"edges":s.edges,"verified_calls":s.verified_calls,"verified_bytes":s.verified_bytes,"peak_physical_bytes":s.peak_physical_bytes,"peak_reserved_bytes":s.peak_reserved_bytes,"peak_decoded_reservation_bytes":s.peak_decoded_bytes,"live_history_reservation_bytes":s.live_history_bytes,"unclassified_bytes":s.unclassified_bytes})
+    json!({"physical_bytes":s.physical_bytes,"owned_bytes":s.owned_bytes,"metadata_reservation_bytes":s.metadata_bytes,"objects":s.objects,"edges":s.edges,"verified_calls":s.verified_calls,"verified_bytes":s.verified_bytes,"peak_physical_bytes":s.peak_physical_bytes,"peak_reserved_bytes":s.peak_reserved_bytes,"peak_decoded_reservation_bytes":s.peak_decoded_bytes,"unclassified_bytes":s.unclassified_bytes})
 }
 fn rss() -> Value {
     let text = fs::read_to_string("/proc/self/status").unwrap();
@@ -114,7 +114,6 @@ fn request(
     };
     CommandEnvelope {
         switch: None,
-        manual: None,
         context: None,
         version: 1,
         action: "edit".into(),
@@ -132,7 +131,6 @@ fn request(
         comment_text: None,
         comment_strokes: None,
         evidence: vec![],
-        transition: None,
     }
 }
 fn main() {
@@ -216,28 +214,6 @@ fn run() {
     let inputs = bundle.empty_inputs().unwrap();
     let input_ref = inputs.reference.clone();
     bundle.save(&core, &input_ref).unwrap();
-    let decode_before_heap = heap();
-    let decode_before_history = bundle.store().usage().unwrap().live_history_bytes;
-    let decoded_history = bundle
-        .store()
-        .resolve_history(
-            &bundle
-                .checkpoint(bundle.manual_branch_id())
-                .unwrap()
-                .owner_ref,
-        )
-        .unwrap();
-    let history_decoded_reservation_bytes =
-        bundle.store().usage().unwrap().live_history_bytes - decode_before_history;
-    let decode_after_heap = heap();
-    #[cfg(feature = "storage-heap-profile")]
-    assert!(
-        decode_after_heap["current_bytes"].as_u64().unwrap()
-            - decode_before_heap["current_bytes"].as_u64().unwrap()
-            <= history_decoded_reservation_bytes,
-        "measured live decode exceeds its format-defined reservation"
-    );
-    drop(decoded_history);
     drop(inputs);
     drop((sealed, duplicate));
     let mut saves = vec![];
@@ -320,11 +296,13 @@ fn run() {
     for _ in 0..3 {
         floors.save(&floor_core, &floor_inputs).unwrap();
     }
-    assert!(
-        !floors
-            .evidence_refs()
-            .iter()
-            .any(|r| r.record_kind == RecordKind::HistoryFloor)
+    assert_eq!(
+        floors
+            .checkpoint(floors.manual_branch_id())
+            .unwrap()
+            .identity,
+        floor_core.snapshot_identity().unwrap(),
+        "EXECUTOR_FOLD_PUBLISHES_THE_COMPLETE_OWNER"
     );
     let floor_usage = usage(&floors.store().usage().unwrap());
     drop(floors);
@@ -431,6 +409,6 @@ fn run() {
     drop(destination);
     println!(
         "{}",
-        json!({"schema":1,"profiled":cfg!(feature="storage-heap-profile"),"errors":0,"expected_failed_copies":failed,"baseline_rss":baseline_rss,"final_rss":rss(),"baseline_heap":baseline_heap,"history_heap":history_heap,"restore_heap":restore_heap,"metadata_heap":metadata_heap,"final_heap":heap(),"elapsed_ms":started.elapsed().as_secs_f64()*1000.,"history":{"encoded_bytes":encoded,"decoded_reservation_bytes":history_decoded_reservation_bytes,"decode_before_heap":decode_before_heap,"decode_after_heap":decode_after_heap,"tracks":32,"accepted_commands":120,"undo_entries":history.history().undo.len(),"redo_entries":history.history().redo.len(),"restore":latencies(&restore_times)},"metadata":{"saves":latencies(&saves),"comments":latencies(&comment_times),"comment_syncs":comment_syncs,"verified_bytes_delta":after_metadata.verified_bytes-before_metadata.verified_bytes},"duplicate":{"before":usage(&before_duplicate),"first":usage(&first),"second":usage(&second)},"floor":{"latencies":latencies(&floor_times),"usage":floor_usage},"source":source_usage,"source_physical":source_physical,"copied":copied_usage,"recovery":{"latencies":latencies(&recover_times),"usage":recovery_usage},"first_save":{"source_overlap":first_overlap,"destination":destination_first,"source_after_last_reader":usage(&monitor().unwrap())}})
+        json!({"schema":1,"profiled":cfg!(feature="storage-heap-profile"),"errors":0,"expected_failed_copies":failed,"baseline_rss":baseline_rss,"final_rss":rss(),"baseline_heap":baseline_heap,"history_heap":history_heap,"restore_heap":restore_heap,"metadata_heap":metadata_heap,"final_heap":heap(),"elapsed_ms":started.elapsed().as_secs_f64()*1000.,"history":{"encoded_bytes":encoded,"tracks":32,"accepted_commands":120,"undo_entries":history.history().undo.len(),"redo_entries":history.history().redo.len(),"restore":latencies(&restore_times)},"metadata":{"saves":latencies(&saves),"comments":latencies(&comment_times),"comment_syncs":comment_syncs,"verified_bytes_delta":after_metadata.verified_bytes-before_metadata.verified_bytes},"duplicate":{"before":usage(&before_duplicate),"first":usage(&first),"second":usage(&second)},"floor":{"latencies":latencies(&floor_times),"usage":floor_usage},"source":source_usage,"source_physical":source_physical,"copied":copied_usage,"recovery":{"latencies":latencies(&recover_times),"usage":recovery_usage},"first_save":{"source_overlap":first_overlap,"destination":destination_first,"source_after_last_reader":usage(&monitor().unwrap())}})
     );
 }

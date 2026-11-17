@@ -10,7 +10,15 @@ use crate::{
     operation_inputs::ManualInputs,
     operation_protocol::{Action, Lease, Receipt},
 };
-use kinewright_core::HistorySaveTag;
+/// Namespace and exact root bytes of one attempted publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicationTag {
+    pub destination: std::path::PathBuf,
+    pub parent_device: u64,
+    pub parent_inode: u64,
+    pub root_sha256: String,
+    pub previous_root_sha256: Option<String>,
+}
 use std::sync::{Arc, atomic::AtomicBool};
 
 struct ProjectHistoryProof;
@@ -25,13 +33,13 @@ pub(crate) fn bind(core: &Core) -> Result<(), Error> {
 pub struct AttemptBinding {
     change: ChangeId,
     identity: SnapshotIdentity,
-    tag: HistorySaveTag,
+    tag: PublicationTag,
 }
 impl AttemptBinding {
     pub(crate) const fn new(
         change: ChangeId,
         identity: SnapshotIdentity,
-        tag: HistorySaveTag,
+        tag: PublicationTag,
     ) -> Self {
         Self {
             change,
@@ -52,7 +60,7 @@ impl AttemptBinding {
         self.identity
     }
     #[must_use]
-    pub const fn tag(&self) -> &HistorySaveTag {
+    pub const fn tag(&self) -> &PublicationTag {
         &self.tag
     }
 }

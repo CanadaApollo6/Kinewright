@@ -69,9 +69,6 @@ fn rescue_reopen_recopy_retention_stress() {
             .preview_rescue(capture, StorageLimits::default())
             .unwrap();
         let mut consent = selection.consent();
-        if selection.removed_undo() > 0 {
-            selection.consent_trim(&mut consent).unwrap();
-        }
         if !selection.omissions().is_empty() {
             selection.consent_omission(&mut consent).unwrap();
         }

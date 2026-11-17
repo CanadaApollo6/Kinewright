@@ -382,7 +382,6 @@ impl BundleWriteAdmission {
                 limits,
                 0,
                 bytes.len() as u64,
-                0,
                 false,
                 u64::MAX,
             )?;
@@ -391,14 +390,13 @@ impl BundleWriteAdmission {
                 limits,
                 0,
                 limits.decoded_record_bytes,
-                0,
                 false,
                 u64::MAX,
             )?;
             let decoded_charge = crate::store::preflight_document_value(&bytes, limits)?;
             drop(preflight);
             let value_charge =
-                StorageReservation::reserve(&usage, limits, 0, decoded_charge, 0, false, u64::MAX)?;
+                StorageReservation::reserve(&usage, limits, 0, decoded_charge, false, u64::MAX)?;
             vec![encoded, value_charge]
         };
         let _parser = if legacy {
@@ -409,7 +407,6 @@ impl BundleWriteAdmission {
                 limits,
                 0,
                 2 * bytes.len() as u64,
-                0,
                 false,
                 u64::MAX,
             )?)
@@ -859,7 +856,7 @@ pub enum PublicationState {
 /// One synchronous named-bundle owner. It accepts frozen Core exports, never live snapshots assembled piecemeal.
 pub struct ProjectBundle {
     pub(crate) publication_state: PublicationState,
-    pub(crate) publication_tag: Option<kinewright_core::HistorySaveTag>,
+    pub(crate) publication_tag: Option<crate::history_save::PublicationTag>,
     pub(crate) pending_publication: Option<PendingPublication>,
     pub(crate) pending_copy_source: Option<crate::bundle_copy::PendingCopySource>,
     pub(crate) last_collection_error: Option<String>,
@@ -1797,28 +1794,6 @@ impl From<crate::operation_history::Error> for BundleError {
         }
     }
 }
-pub(crate) fn history_error(error: kinewright_core::HistoryError) -> BundleError {
-    match error {
-        kinewright_core::HistoryError::MutationRefused(reason) => {
-            BundleError::CoreMutationRefused(reason)
-        }
-        kinewright_core::HistoryError::CaptureChanged
-        | kinewright_core::HistoryError::StaleExpectation => BundleError::HistoryChanged,
-        kinewright_core::HistoryError::BarrierInvariant => BundleError::HistoryBarrierInvariant,
-        kinewright_core::HistoryError::SaveInProgress => BundleError::SaveInProgress,
-        kinewright_core::HistoryError::CommitInvariant => BundleError::HistoryCommitInvariant,
-        kinewright_core::HistoryError::Capacity => BundleError::Capacity("history memory"),
-        failure @ kinewright_core::HistoryError::Encoding => {
-            BundleError::Io(io::Error::new(io::ErrorKind::InvalidData, failure))
-        }
-        kinewright_core::HistoryError::Corrupt => {
-            BundleError::Corrupt(kinewright_core::HistoryError::Corrupt.to_string())
-        }
-        failure @ kinewright_core::HistoryError::Disconnected => {
-            BundleError::Io(io::Error::new(io::ErrorKind::BrokenPipe, failure))
-        }
-    }
-}
 
 /// Reconcile an orphan independently of the old store's object reservation ledger.
 pub(crate) fn reconcile_core_save(core: &Core) -> Result<(), BundleError> {
@@ -1832,13 +1807,13 @@ pub(crate) fn reconcile_core_save(core: &Core) -> Result<(), BundleError> {
 }
 
 pub(crate) fn reconcile_save_tag(
-    tag: &kinewright_core::HistorySaveTag,
+    tag: &crate::history_save::PublicationTag,
     pool: &crate::operation_history::HistoryPool,
 ) -> Result<bool, BundleError> {
     reconcile_save_tag_policy(tag, false, pool)
 }
 fn reconcile_save_tag_policy(
-    tag: &kinewright_core::HistorySaveTag,
+    tag: &crate::history_save::PublicationTag,
     continuous: bool,
     pool: &crate::operation_history::HistoryPool,
 ) -> Result<bool, BundleError> {
@@ -1888,7 +1863,7 @@ fn reconcile_save_tag_policy(
 
 /// Retained attempt release requires continuity; a changed parent is still unknown.
 pub(crate) fn reconcile_save_tag_continuous(
-    tag: &kinewright_core::HistorySaveTag,
+    tag: &crate::history_save::PublicationTag,
     pool: &crate::operation_history::HistoryPool,
 ) -> Result<bool, BundleError> {
     reconcile_save_tag_policy(tag, true, pool)

@@ -39,6 +39,7 @@ rustix.workspace = true
 winapi-util = "=0.1.11"
 
 [dev-dependencies]
+proptest.workspace = true
 schemars.workspace = true
 flate2.workspace = true
 dhat = "=0.3.3"

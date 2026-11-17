@@ -136,3 +136,7 @@ mod sizing_tests;
 
 #[cfg(test)]
 mod metadata_replay_tests;
+
+/// Remedy shared by native task admission and its callers.
+pub const TASK_LIMIT_REASON: &str =
+    "Task history limit reached. Finish or freeze this task before making more edits.";

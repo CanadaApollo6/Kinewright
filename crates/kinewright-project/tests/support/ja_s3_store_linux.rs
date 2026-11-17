@@ -488,7 +488,6 @@ fn s3_indexes_survive_all_root_producers() {
     let issuer = b.issue_issuer(&core, &inputs, 1).unwrap();
     let edit = kinewright_project::receipts::CommandEnvelope {
         switch: None,
-        manual: None,
         context: None,
         version: 1,
         action: "edit".into(),
@@ -511,7 +510,6 @@ fn s3_indexes_survive_all_root_producers() {
         comment_text: None,
         comment_strokes: None,
         evidence: vec![],
-        transition: None,
     };
     committed(b.command(&edit, &core, &inputs, &[]).unwrap());
     let ephemeral = blob(&mut b, b"reader-only run evidence");

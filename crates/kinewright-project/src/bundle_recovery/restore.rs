@@ -270,7 +270,7 @@ impl crate::store::ProjectStore {
         {
             return Err(BundleError::Corrupt("checkpoint kind/length".into()));
         }
-        let _charge = self.reserve(0, reference.byte_length, 0, false)?;
+        let _charge = self.reserve(0, reference.byte_length, false)?;
         let bytes = super::bounded_bytes(self.open_verified(reference)?, reference.byte_length)?;
         let admission = BundleWriteAdmission::from_bytes_with_limits(
             None,

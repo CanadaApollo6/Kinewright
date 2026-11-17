@@ -187,7 +187,6 @@ fn comment_rescue(landed: bool) {
     let strokes = object(b"[]");
     let envelope = CommandEnvelope {
         switch: None,
-        manual: None,
         context: None,
         version: 1,
         action: "comment".into(),
@@ -211,7 +210,6 @@ fn comment_rescue(landed: bool) {
         comment_text: Some(text.clone()),
         comment_strokes: Some(strokes.clone()),
         evidence: vec![],
-        transition: None,
     };
     let old = bundle.evidence_refs().to_vec();
     let result = io_observer::fail_once(
@@ -633,7 +631,6 @@ fn r1_ordinary_floor_committed_identity_excludes_suffix() {
         edit(&core, n % 2 == 0);
     }
     let limits = StorageLimits {
-        branch_history_bytes: 1 << 20,
         ..StorageLimits::default()
     };
     owner.restrict_limits_probe(limits.clone()).unwrap();

@@ -426,7 +426,7 @@ mod tests {
         serde_json::json!({"root": host.owner().unwrap().root_sha256().unwrap(), "history": host.core().export_history().unwrap(), "manual": host.manual.as_ref().map(kinewright_project::editing_session::ManualAuthority::lease),
         "foreground": host.foreground_owner, "sessions": host.sessions.len(), "attachments": host.attachments.iter().map(|a| (a.id, &a.subject, a.role, a.read_pins.len())).collect::<Vec<_>>(),
         "runs": host.hooks.runs.keys().collect::<Vec<_>>(), "pending": host.hooks.pending,
-        "ledger": [usage.physical_bytes, usage.owned_bytes, usage.metadata_bytes, usage.copy_bytes, usage.reserved_bytes, usage.reserved_copy_bytes, usage.decoded_bytes, usage.decoder_bytes, usage.live_history_bytes, usage.objects, usage.edges, usage.unclassified_bytes], "damaged": usage.damaged_accounting, "unsettled": usage.unsettled})
+        "ledger": [usage.physical_bytes, usage.owned_bytes, usage.metadata_bytes, usage.copy_bytes, usage.reserved_bytes, usage.reserved_copy_bytes, usage.decoded_bytes, usage.decoder_bytes, usage.objects, usage.edges, usage.unclassified_bytes], "damaged": usage.damaged_accounting, "unsettled": usage.unsettled})
     }
     #[expect(
         clippy::needless_pass_by_value,
@@ -994,7 +994,6 @@ mod tests {
             usage.peak_reserved_bytes = 0;
             usage.peak_decoded_bytes = 0;
             usage.peak_decoder_bytes = 0;
-            usage.peak_live_history_bytes = 0;
         }
         assert_eq!(after_usage, retained, "H4_PINS_CHARGES");
         let reattached = f.issuer.reattach_editor().unwrap();

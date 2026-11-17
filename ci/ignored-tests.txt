@@ -42,10 +42,6 @@ kinewright_app ja_harness::tests::run_fixture_from_env crates/kinewright-app/src
 kinewright_app project::tests::is_dirty_memoized_poll_release_perf crates/kinewright-app/src/project.rs any on-demand  # manual release performance measurement
 kinewright_app recovery::tests::crash_child_process crates/kinewright-app/src/recovery.rs any on-demand  # invoked as the deliberately crashing subprocess
 
-# kinewright_core
-kinewright_core actor::tests::performance_batch_workloads crates/kinewright-core/src/actor.rs any on-demand  # manual release performance measurement
-ownership_measure h1_coalesced_drag_edit_cost crates/kinewright-core/tests/ownership_measure.rs any on-demand  # on-demand measurement
-
 # kinewright_eval
 kinewright_eval tests::cc7_every_color_fixture_builds_a_valid_document crates/kinewright-agent/src/bin/kinewright-eval.rs any inherited-gap  # INHERITED GAP: a regression guard skipped because the media engine it builds raises a SIGSEGV at process-exit teardown; unskip once teardown is fixed
 kinewright_eval tests::v3_fixture_builds_with_authored_and_recognized_truth crates/kinewright-agent/src/bin/kinewright-eval.rs any on-demand  # requires local speech synthesis and Whisper analysis
@@ -224,7 +220,6 @@ kinewright_agent writer_host::hooks_tests::tests::history_capacity_1200_lifecycl
 
 history_fix2_cost history_fix2_startup_sample crates/kinewright-agent/tests/history_fix2_cost.rs linux on-demand # Alternating debug host startup probe at 4000 and 12000 edits; actual five-second launch limit and exact history comparison
 history_fix2_cost history_fix2_edit_and_save_sample crates/kinewright-agent/tests/history_fix2_cost.rs linux on-demand # Debug manual admission and changed publication timing at 1000 and 12000 edits
-manual_history_capacity manual_history_heavy_copy_capacity_census crates/kinewright-project/tests/manual_history_capacity.rs linux on-demand # Exact ordinary heavy-copy peak and largest accepted fanout measurement
 kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_medium_run_keeps_approvals_stop_and_recovery_bounded crates/kinewright-agent/src/writer_host/c5e_tests.rs linux on-demand # 128-approval full-tail qualification exceeds the 600-second slow process deadline
 
 kinewright_project operation_history::sizing_tests::two_thousand_four_track_removals_fit_one_task_and_its_merges crates/kinewright-project/src/operation_history/sizing_tests.rs any on-demand  # release qualification of the fixed 2000-removal task and both merge legs

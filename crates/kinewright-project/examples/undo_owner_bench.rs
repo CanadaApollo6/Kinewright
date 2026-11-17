@@ -2,11 +2,11 @@
     clippy::cast_precision_loss,
     reason = "measurement JSON reports byte counts and durations as f64"
 )]
-//! Paired raw-Core / operation-history measurements. No media files or GUI are opened.
+//! Native operation-history measurements. No media files or GUI are opened.
 #[path = "../../kinewright-core/tests/support/undo_fixture.rs"]
 mod fixture;
 use kinewright_core::undo::{PhaseCounters, RetentionPolicy, RoleBounds};
-use kinewright_core::{Command, Core, Document, Event, Operation, Query, QueryResult, TrackId};
+use kinewright_core::{Command, Document, Operation, TrackId};
 use kinewright_project::{
     bundle_records::{ObjectRef, RecordKind},
     operation_history::{
@@ -41,64 +41,41 @@ impl std::ops::Deref for Attached {
     }
 }
 
-#[allow(
-    clippy::large_enum_variant,
-    reason = "the benchmark owns exactly one executor"
-)]
-enum Engine {
-    Old(Core),
-    New(Attached),
-}
+struct Engine(Attached);
 impl Engine {
     fn new(side: &str, document: Document, limits: RoleBounds) -> Self {
-        match side {
-            "old" => Self::Old(Core::spawn(document).unwrap()),
-            "new" => {
-                let pool = HistoryPool::new(PoolLimits::default());
-                let owner = OwnerHistory::measured(
-                    &pool,
-                    Role::Ordinary,
-                    RetentionPolicy::Fold,
-                    &origin(0, u64::MAX),
-                    limits,
-                    || Ok(document),
-                )
-                .unwrap();
-                Self::New(Attached { owner, pool })
-            }
-            _ => panic!("old or new"),
+        assert_eq!(side, "new");
+        {
+            let pool = HistoryPool::new(PoolLimits::default());
+            let owner = OwnerHistory::measured(
+                &pool,
+                Role::Ordinary,
+                RetentionPolicy::Fold,
+                &origin(0, u64::MAX),
+                limits,
+                || Ok(document),
+            )
+            .unwrap();
+            Self(Attached { owner, pool })
         }
     }
     fn execute(&mut self, command: Command) {
-        match self {
-            Self::Old(core) => assert!(matches!(
-                core.request(command).unwrap(),
-                Event::DocumentChanged { .. }
-            )),
-            Self::New(history) => {
-                let key = history.owner.history().position();
-                std::hint::black_box(
-                    history
-                        .owner
-                        .execute(command, origin(key.epoch, key.position), vec![], None)
-                        .unwrap(),
-                );
-            }
-        }
+        let Self(history) = self;
+        let key = history.owner.history().position();
+        std::hint::black_box(
+            history
+                .owner
+                .execute(command, origin(key.epoch, key.position), vec![], None)
+                .unwrap(),
+        );
     }
     fn attach_approval(&mut self) {
         let command = Command::DoBatch(vec![Operation::DeleteClip {
             clip: kinewright_core::ClipId(400),
         }]);
-        match self {
-            Self::Old(core) => {
-                assert!(matches!(
-                    core.request(command).unwrap(),
-                    Event::DocumentChanged { .. }
-                ));
-                core.request(Command::Undo).unwrap();
-            }
-            Self::New(attached) => {
+        {
+            let Self(attached) = self;
+            {
                 attached
                     .owner
                     .execute(
@@ -120,48 +97,20 @@ impl Engine {
         }
     }
     fn document(&self) -> Arc<Document> {
-        match self {
-            Self::Old(core) => {
-                let Event::QueryResult(QueryResult::Document(document)) =
-                    core.request(Command::Query(Query::Document)).unwrap()
-                else {
-                    panic!("document")
-                };
-                document
-            }
-            Self::New(history) => Arc::clone(history.document()),
-        }
+        let Self(history) = self;
+        Arc::clone(history.document())
     }
     fn depth(&self) -> usize {
-        match self {
-            Self::Old(core) => core.export_history().unwrap().cursor.undo.len(),
-            Self::New(history) => history.undo().len(),
-        }
+        let Self(history) = self;
+        history.undo().len()
     }
     fn top_operation_count(&self) -> usize {
-        match self {
-            Self::Old(core) => core
-                .export_history()
-                .unwrap()
-                .cursor
-                .undo
-                .last()
-                .unwrap()
-                .operations
-                .len(),
-            Self::New(history) => history.undo().back().unwrap().operations().count(),
-        }
+        let Self(history) = self;
+        history.undo().back().unwrap().operations().count()
     }
     fn memory(&self) -> u64 {
-        match self {
-            Self::Old(core) => {
-                kinewright_core::history_size::history_live_bytes(&core.export_history().unwrap())
-                    .unwrap()
-            }
-            Self::New(history) => {
-                history.retained_live_bound().unwrap() + history.owner.owner_bytes()
-            }
-        }
+        let Self(history) = self;
+        history.retained_live_bound().unwrap() + history.owner.owner_bytes()
     }
 }
 fn limits(checkpoints: usize) -> RoleBounds {
@@ -295,9 +244,7 @@ fn fold_counters(checkpoints: usize) {
         "{}",
         serde_json::json!({"fixture_json_bytes":245_233,"plain_fold":{"core":PhaseCounters::read().since(before),"owner":OwnerCounters::read().since(owner_before)}})
     );
-    let Engine::New(attached) = &mut engine else {
-        unreachable!()
-    };
+    let Engine(attached) = &mut engine;
     for index in 0..32 {
         let mut id = approval_ref();
         id.sha256 = format!("{index:064x}");
@@ -339,9 +286,7 @@ fn identity_measurements(checkpoints: usize) {
     for index in 0..2000 {
         engine.execute(edit(index));
     }
-    let Engine::New(attached) = engine else {
-        unreachable!()
-    };
+    let Engine(attached) = engine;
     let captured = attached.owner.capture().unwrap();
     let expected = captured.identity().unwrap();
     let mut samples = BTreeMap::<&str, Vec<f64>>::new();
@@ -387,7 +332,7 @@ fn identity_measurements(checkpoints: usize) {
 )]
 fn main() {
     let args: Vec<_> = std::env::args().collect();
-    let side = args.get(1).expect("old or new");
+    let side = args.get(1).expect("new");
     let checkpoints = args.get(2).map_or(4, |s| s.parse().unwrap());
     if side == "fold-counters" {
         fold_counters(checkpoints);
@@ -402,7 +347,7 @@ fn main() {
         return;
     }
     let document = fixture::heavy();
-    let document_live = kinewright_core::history_size::document_live_bytes(&document).unwrap();
+    let document_live = kinewright_core::undo::document_capacity_bytes(&document).unwrap();
     let fixture_json = serde_json::to_vec(&document).unwrap().len();
     if side == "fixture" {
         println!(
@@ -437,24 +382,9 @@ fn main() {
     }
     rows.insert("single_undo_ms".into(), quantile(&single, 50));
     samples.insert("single_undo_ms".into(), single);
-    let mut open_refused = false;
-    match &engine {
-        Engine::Old(core) => {
-            let captured = core.export_history().unwrap();
-            let transport = kinewright_core::HistoryTransport::capture(&captured).unwrap();
-            let counters = PhaseCounters::read();
-            let owner_counters = OwnerCounters::read();
-            let start = Instant::now();
-            let opened = transport.resolve_verified();
-            rows.insert("open_ms".into(), start.elapsed().as_secs_f64() * 1000.0);
-            phase("open", counters, owner_counters, 1);
-            assert!(
-                matches!(opened, Err(kinewright_core::HistoryError::Capacity)),
-                "old bounded transport at 2000 heavy steps"
-            );
-            open_refused = true;
-        }
-        Engine::New(history) => {
+    {
+        let Engine(history) = &engine;
+        {
             let temp = kinewright_media::test_support::TempDirectory::new_in(
                 &kinewright_media::test_support::workspace_target_dir(),
                 "hx-owner-bench",
@@ -626,14 +556,16 @@ fn main() {
     for index in 0..32 {
         folded.execute(edit(index));
     }
-    if let Engine::New(history) = &folded {
+    {
+        let Engine(history) = &folded;
         assert_eq!(history.undo().len(), 10, "FOLDING_HAS_STARTED");
         assert_eq!(history.undo().front().unwrap().commands()[0].position, 24);
     }
     let mut fold = vec![];
     for index in 32..64 {
         fold.push(timed(&mut folded, edit(index), "fold"));
-        if let Engine::New(history) = &folded {
+        {
+            let Engine(history) = &folded;
             assert_eq!(
                 history.baseline().tracks[0].sync_lock,
                 index % 2 == 1,
@@ -641,7 +573,8 @@ fn main() {
             );
         }
     }
-    if let Engine::New(history) = &folded {
+    {
+        let Engine(history) = &folded;
         assert_eq!(history.undo().len(), 10, "STEADY_FOLD_DEPTH");
         assert_eq!(history.charge().encoded, 465, "STEADY_FOLD_LITERAL_CHARGE");
         assert_eq!(history.undo().front().unwrap().commands()[0].position, 56);
@@ -673,6 +606,6 @@ fn main() {
     }
     println!(
         "{}",
-        serde_json::json!({"history_counters_available":side=="new","phases":phases,"side":side,"checkpoints":checkpoints,"metrics":rows,"samples":samples,"expected_old_open_refusal":open_refused,"errors":0})
+        serde_json::json!({"history_counters_available":side=="new","phases":phases,"side":side,"checkpoints":checkpoints,"metrics":rows,"samples":samples,"errors":0})
     );
 }

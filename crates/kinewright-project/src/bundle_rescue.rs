@@ -1,12 +1,12 @@
 //! A1 read-only observations and bounded admission; rescue publication lands separately.
 #![allow(clippy::missing_errors_doc)]
+use crate::history_save::PublicationTag;
 use crate::operation_actor::AcceptedCut;
 use crate::{
     AttemptBinding,
     bundle::{BundleError, PublicationState},
     bundle_records::ObjectRef,
 };
-use kinewright_core::HistorySaveTag;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReconcilePhase {
@@ -38,7 +38,7 @@ pub enum RescueEligibility {
 /// The original error is retained, including its native errno, rather than a synthesized path error.
 #[derive(Debug)]
 pub struct RescueProbe {
-    pub tag: HistorySaveTag,
+    pub tag: PublicationTag,
     pub ticket: Option<AttemptBinding>,
     pub phase: ReconcilePhase,
     pub operation: &'static str,
@@ -48,7 +48,7 @@ pub struct RescueProbe {
 }
 impl RescueProbe {
     pub(crate) fn failed(
-        tag: HistorySaveTag,
+        tag: PublicationTag,
         ticket: Option<AttemptBinding>,
         phase: ReconcilePhase,
         state: PublicationState,
@@ -91,7 +91,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn w03_cause_table_preserves_native_errors_and_exclusions() {
-        let tag = HistorySaveTag {
+        let tag = PublicationTag {
             destination: "a.kinewright".into(),
             parent_device: 1,
             parent_inode: 1,
@@ -281,7 +281,7 @@ pub struct FrozenRescueCapture {
     pub(crate) archive: std::sync::Mutex<Option<ObjectRef>>,
     pub(crate) archive_store: std::sync::Mutex<Option<crate::store::ProjectStore>>,
     pub(crate) archive_pin: std::sync::Mutex<Option<crate::store::StorePin>>,
-    pub(crate) tag: HistorySaveTag,
+    pub(crate) tag: PublicationTag,
     pub(crate) digest: String,
     pub(crate) reads: crate::store::RetainedReadAdmission,
     pub(crate) was_frozen: bool,
@@ -334,10 +334,10 @@ impl FrozenRescueCapture {
 /// An explicit local choice, bound to one exact capture. Background probes cannot create it.
 #[derive(Clone)]
 pub struct RescueConsent {
-    pub(crate) tag: HistorySaveTag,
+    pub(crate) tag: PublicationTag,
     pub(crate) digest: String,
     pub(crate) selected: Option<String>,
-    pub(crate) trim: bool,
+
     pub(crate) omission: bool,
 }
 impl FrozenRescueCapture {
@@ -347,7 +347,7 @@ impl FrozenRescueCapture {
             tag: self.tag.clone(),
             digest: self.digest.clone(),
             selected: None,
-            trim: false,
+
             omission: false,
         }
     }
@@ -365,27 +365,16 @@ pub struct RescueSelection {
         std::sync::Arc<crate::storage_budget::StorageReservation<FrozenRescueCapture>>,
     pub(crate) limits: crate::storage_budget::StorageLimits,
     pub(crate) selected_digest: String,
-    pub(crate) removed_undo: u64,
+
     pub(crate) omissions: Vec<crate::rescue_record::RecoveryOmission>,
     pub(crate) roots: Vec<ObjectRef>,
     pub(crate) reads: crate::store::RetainedReadAdmission,
 }
 impl RescueSelection {
     #[cfg(any(test, feature = "test-util"))]
-    pub fn consent_choices_probe(
-        &self,
-        consent: &RescueConsent,
-    ) -> Result<(bool, bool), BundleError> {
+    pub fn omission_consent_probe(&self, consent: &RescueConsent) -> Result<bool, BundleError> {
         self.check_identity(consent)?;
-        Ok((consent.trim, consent.omission))
-    }
-    #[must_use]
-    pub fn undo_floor(&self) -> u64 {
-        0
-    }
-    #[must_use]
-    pub fn removed_undo(&self) -> u64 {
-        self.removed_undo
+        Ok(consent.omission)
     }
     #[must_use]
     pub fn omissions(&self) -> &[crate::rescue_record::RecoveryOmission] {
@@ -397,16 +386,8 @@ impl RescueSelection {
         consent.selected = Some(self.selected_digest.clone());
         consent
     }
-    pub fn consent_trim(&self, consent: &mut RescueConsent) -> Result<(), BundleError> {
-        self.check_identity(consent)?;
-        consent.trim = true;
-        Ok(())
-    }
     pub fn consent_omission(&self, consent: &mut RescueConsent) -> Result<(), BundleError> {
         self.check_identity(consent)?;
-        if self.removed_undo > 0 && !consent.trim {
-            return Err(BundleError::HistoryChanged);
-        }
         consent.omission = true;
         Ok(())
     }
@@ -419,11 +400,9 @@ impl RescueSelection {
     }
     pub(crate) fn check_consent(&self, consent: &RescueConsent) -> Result<(), BundleError> {
         self.check_identity(consent)?;
-        if (self.removed_undo > 0 && !consent.trim)
-            || (!self.omissions.is_empty() && !consent.omission)
-        {
+        if !self.omissions.is_empty() && !consent.omission {
             return Err(BundleError::Identity(
-                "separate consent required for Undo loss and unavailable recovery omissions".into(),
+                "consent required for unavailable recovery omissions".into(),
             ));
         }
         Ok(())

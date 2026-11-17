@@ -277,10 +277,10 @@ pub struct RetainedRunProfile {
     pub peak_physical_bytes: u64,
     pub peak_reserved_bytes: u64,
     pub peak_decoded_bytes: u64,
-    pub peak_live_history_bytes: u64,
+
     pub metadata_bytes: u64,
     pub owned_bytes: u64,
-    pub live_history_bytes: u64,
+
     pub graph_depth: u64,
     pub receipts: usize,
     pub issuers: usize,
@@ -424,10 +424,10 @@ impl crate::editing_session::Ja1EditingSession {
             peak_physical_bytes: usage.peak_physical_bytes,
             peak_reserved_bytes: usage.peak_reserved_bytes,
             peak_decoded_bytes: usage.peak_decoded_bytes,
-            peak_live_history_bytes: usage.peak_live_history_bytes,
+
             metadata_bytes: usage.metadata_bytes,
             owned_bytes: usage.owned_bytes,
-            live_history_bytes: usage.live_history_bytes,
+
             graph_depth: store.maximum_committed_depth()?,
             receipts: bundle.receipts.detailed.len() + bundle.receipts.retired.len(),
             issuers: bundle.issuers.len(),

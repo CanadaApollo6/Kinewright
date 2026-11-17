@@ -71,7 +71,6 @@ impl ProjectStore {
                 kind,
                 RecordKind::Document
                     | RecordKind::OperationHistory
-                    | RecordKind::Lineage
                     | RecordKind::BranchCheckpoint
                     | RecordKind::BranchIndex
                     | RecordKind::SpecialistBase

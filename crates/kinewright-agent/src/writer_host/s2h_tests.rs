@@ -129,7 +129,6 @@ fn s3_fix1_admitted_extension_recovers_after_host_restart() {
                 client,
                 frozen: Some(frozen.clone()),
                 pending,
-                discard_batches: None,
             },
         );
         assert!(
@@ -665,7 +664,6 @@ fn s2h_recovery_plan_retries_bind_original_client_cut_and_chain() {
         client: "r".repeat(64),
         frozen: Some(frozen.clone()),
         pending: vec![],
-        discard_batches: None,
     };
     let original = checked(&mut host, begin.clone()).recovery.unwrap();
     let retry = checked(&mut host, begin).recovery.unwrap();
@@ -675,19 +673,11 @@ fn s2h_recovery_plan_retries_bind_original_client_cut_and_chain() {
             client: "x".repeat(64),
             frozen: Some(frozen),
             pending: vec![],
-            discard_batches: None,
         },
         HostCommand::BeginRecovery {
             client: "r".repeat(64),
             frozen: None,
             pending: vec![],
-            discard_batches: None,
-        },
-        HostCommand::BeginRecovery {
-            client: "r".repeat(64),
-            frozen: None,
-            pending: vec![],
-            discard_batches: Some(1),
         },
     ] {
         assert!(run(&mut host, changed).error.is_some());
@@ -701,7 +691,6 @@ fn s2h_recovery_plan_retries_bind_original_client_cut_and_chain() {
             ))
             .unwrap(),
         ],
-        discard_batches: None,
     };
     assert!(run(&mut host, changed_chain).error.is_some());
     assert_eq!(host.recovery, Some(original));

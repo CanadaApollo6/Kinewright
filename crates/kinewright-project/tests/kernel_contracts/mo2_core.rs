@@ -2,15 +2,13 @@
 //! content, the 12 geometric transition descriptors, span integrity,
 //! survival, the adjustment support table, and the four operations).
 
-#[path = "support/history_oracle.rs"]
-mod history_oracle;
-use history_oracle::ApplyHistoryOracle;
+use super::history_oracle::ApplyHistoryOracle;
 
 use std::collections::BTreeMap;
 
 use kinewright_core::{
     AssetId, AudioMix, AutomationCurve, BlendMode, Clip, ClipContent, ClipId, ColorContext,
-    Command, Core, Document, Effect, EffectId, Event, Keyframe, KeyframeInterpolation, MediaAsset,
+    Command, Document, Effect, EffectId, Event, Keyframe, KeyframeInterpolation, MediaAsset,
     MediaCatalog, MediaKind, MediaSourceFingerprint, OpError, Operation, ParamValue, Query,
     QueryResult, Rational, SolidColor, TRANSITION_DESCRIPTORS, TimeCode, Track, TrackId, TrackKind,
     Transition, TransitionAxis, TransitionShading, transition_descriptor,
@@ -525,7 +523,7 @@ fn r8_neutral_audio_setters_refuse_generated_clips() {
 
     // One undo and one redo entry, so a refusal that touched either history
     // shows up when both are walked afterwards.
-    let core = Core::spawn(initial.clone()).unwrap();
+    let core = super::spawn_actor(initial.clone()).unwrap();
     let mut done = Vec::new();
     for blend_mode in [BlendMode::Screen, BlendMode::Overlay] {
         let Event::DocumentChanged { doc, .. } = core
@@ -841,7 +839,7 @@ fn r18_adjustment_accepts_its_supported_rows() {
 #[test]
 fn r8_refused_ops_leave_revision_and_history_unchanged() {
     let initial = stack();
-    let core = Core::spawn(initial.clone()).unwrap();
+    let core = super::spawn_actor(initial.clone()).unwrap();
     let Event::DocumentChanged { doc: after, .. } = core
         .request(Command::Do(Operation::AddEffect {
             clip: ClipId(2),
@@ -1174,7 +1172,7 @@ fn r8_setters() {
 #[test]
 fn r8_operations_are_revision_gated_single_undo_steps() {
     let initial = stack();
-    let core = Core::spawn(initial.clone()).unwrap();
+    let core = super::spawn_actor(initial.clone()).unwrap();
     let revision = || match core.request(Command::Query(Query::Snapshot)).unwrap() {
         Event::QueryResult(QueryResult::Snapshot { revision, .. }) => revision,
         other => panic!("{other:?}"),

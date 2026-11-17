@@ -3228,10 +3228,8 @@ impl KinewrightApp {
             {
                 self.drop_router_send(project_index, *token);
             }
-            Event::MutationRefused { .. }
-            | Event::UndoBlockedBySave { .. }
-            | Event::BatchRejected { .. }
-            | Event::QueryResult(_) => {}
+            Event::MutationRefused { .. } | Event::BatchRejected { .. } | Event::QueryResult(_) => {
+            }
         }
     }
 
@@ -3869,9 +3867,6 @@ impl KinewrightApp {
                             || reason.to_string(),
                             |attachment| attachment.manual_refusal_reason().into(),
                         );
-                }
-                Event::UndoBlockedBySave { .. } => {
-                    self.status = "Undo is waiting for the save to finish. Retry after the destination is reconciled.".into();
                 }
                 Event::RevisionConflict { .. } | Event::QueryResult(_) => {}
             }

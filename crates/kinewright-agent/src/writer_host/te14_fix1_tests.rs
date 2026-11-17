@@ -439,6 +439,18 @@ fn te14_fix1_media_control(cold: bool, switch: bool, timeout: bool) {
                     })
                     .unwrap();
                 if confirmed.error.is_some() {
+                    let retained = f.host.owner.upgrade().unwrap();
+                    let host = retained.lock().unwrap();
+                    let expected = installed.switch_attachment.as_ref().unwrap().identity().unwrap();
+                    eprintln!(
+                        "TE14_SWITCH_CONFIRM_DIAGNOSTIC cold={cold} frozen={} manual={} recovering={} unresolved={} current={:?} expected={expected:?} actual_history={:?}",
+                        host.switch_frozen,
+                        host.manual.is_some(),
+                        host.recovering,
+                        host.owner().unwrap().has_unresolved_publication(),
+                        host.owner().unwrap().current_switch_identity(),
+                        host.core().snapshot_identity(),
+                    );
                     return Some(confirmed);
                 }
                 assert!(

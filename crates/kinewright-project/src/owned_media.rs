@@ -510,7 +510,6 @@ impl ProjectStore {
                 .decoded_charge()
                 .checked_add(16_384)
                 .ok_or(BundleError::Capacity("interpretation manifest charge"))?,
-            0,
             false,
         )?;
         if (prior.project_id.clone(), prior.session_id.clone()) != self.input_owner() {

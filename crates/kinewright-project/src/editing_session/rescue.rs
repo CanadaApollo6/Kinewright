@@ -157,9 +157,7 @@ impl Ja1EditingSession {
             full_capture_sha256: selection.capture.digest.clone(),
             capture_checkpoints: vec![],
             selected_capture_sha256: selection.selected_digest,
-            old_floor: 0,
-            new_floor: 0,
-            removed_undo: selection.removed_undo,
+
             redo_preserved: true,
             gesture_preserved: true,
             acknowledged_root: None,

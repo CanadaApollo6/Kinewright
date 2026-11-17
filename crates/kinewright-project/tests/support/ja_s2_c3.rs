@@ -1,6 +1,7 @@
 use super::{Ja1EditingSession, apply, document, edit};
-use kinewright_core::{Command, HistorySaveTag, Operation, TrackId};
+use kinewright_core::{Command, Operation, TrackId};
 use kinewright_media::test_support::TempDirectory;
+use kinewright_project::PublicationTag;
 use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{BundleError, BundleWriteAdmission, LoadedBundle, ProjectBundle},
@@ -26,7 +27,6 @@ fn temp(label: &str) -> TempDirectory {
 }
 fn limits() -> StorageLimits {
     StorageLimits {
-        branch_history_bytes: 1 << 20,
         ..StorageLimits::default()
     }
 }
@@ -762,8 +762,8 @@ fn w06_native_path_identity_and_missing_mount_separation() {
     );
 }
 
-fn tag(path: &Path, n: u64) -> HistorySaveTag {
-    HistorySaveTag {
+fn tag(path: &Path, n: u64) -> PublicationTag {
+    PublicationTag {
         destination: path.to_path_buf(),
         parent_device: 1,
         parent_inode: 1,
@@ -1097,7 +1097,6 @@ fn w10_lifecycle_no_ticket_destination_settlement_keeps_live_history() {
             let attachment = bundle.attach_core(&core).unwrap();
             let command = CommandEnvelope {
                 switch: None,
-                manual: None,
                 context: None,
                 version: 1,
                 action: "edit".into(),
@@ -1120,7 +1119,6 @@ fn w10_lifecycle_no_ticket_destination_settlement_keeps_live_history() {
                 comment_text: None,
                 comment_strokes: None,
                 evidence: vec![],
-                transition: None,
             };
             assert!(matches!(
                 io_observer::fail_once(

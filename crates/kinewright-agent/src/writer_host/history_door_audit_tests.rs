@@ -122,7 +122,6 @@ fn snapshot_selection_doors_refuse_every_agent_attachment_before_install() {
                 client: "a".repeat(64),
                 frozen: None,
                 pending: vec![],
-                discard_batches: None,
             },
         ),
         (

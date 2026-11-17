@@ -336,7 +336,7 @@ impl TaskEndpoint {
         }
         core.check_batch_capacity(operations).map_err(|error| {
             if error.is_capacity() {
-                kinewright_project::task_history_admission::LIMIT_REASON.to_owned()
+                kinewright_project::operation_history::TASK_LIMIT_REASON.to_owned()
             } else {
                 error.to_string()
             }

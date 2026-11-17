@@ -2603,7 +2603,7 @@ pub(crate) mod feedback_capture {
                         - (1 << 19);
                     while remaining > 0 {
                         let bytes = remaining.min(owner.store().limits().decoded_record_bytes);
-                        pressure.push(owner.store().reserve_probe(bytes, 0).unwrap());
+                        pressure.push(owner.store().reserve_probe(bytes).unwrap());
                         remaining -= bytes;
                     }
                 } else {

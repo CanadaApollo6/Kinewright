@@ -7,9 +7,7 @@
 //! follow from them. Every expected value is transcribed from the document by
 //! hand rather than read back out of the descriptor tables.
 
-#[path = "support/history_oracle.rs"]
-mod history_oracle;
-use history_oracle::ApplyHistoryOracle;
+use super::history_oracle::ApplyHistoryOracle;
 
 use std::{collections::BTreeMap, path::PathBuf};
 
@@ -17,7 +15,7 @@ use kinewright_core::{
     AssetId, AutomationCurve, COLOR_CURVES_DESCRIPTOR_PARAMETER_COUNT,
     COLOR_WHEELS_DESCRIPTOR_PARAMETER_COUNT, CREATIVE_LOOK_DESCRIPTOR_PARAMETER_COUNT, Clip,
     ClipContent, ClipId, ColorContext, ColorDescription, ColorNodeInactiveReason, ColorNodeKind,
-    Command, Core, Document, Effect, EffectId, EffectUniform, Event, JournalCommand, Keyframe,
+    Command, Document, Effect, EffectId, EffectUniform, Event, JournalCommand, Keyframe,
     KeyframeInterpolation, LutAsset, LutAssetId, LutAssetKind, LutAssetSource,
     MATTE_HUE_WIDTH_DISABLE_CENTIDEGREES, MATTE_LUMA_BAND, MATTE_MIX_BASIS_POINTS_MAX,
     MATTE_PARAMETER_COUNT, MATTE_SATURATION_BAND, MATTE_WINDOW_LIMIT, MATTE_WINDOW_PARAMETER_COUNT,
@@ -1277,7 +1275,7 @@ fn a_two_window_matte_survives_save_reopen_replay_and_undo() {
         },
     ];
 
-    let core = Core::spawn(initial.clone()).expect("core should spawn");
+    let core = super::spawn_actor(initial.clone()).expect("core should spawn");
     let mut journaled = Vec::new();
     let mut live = None;
     for operation in &operations {
@@ -1323,7 +1321,7 @@ fn a_two_window_matte_survives_save_reopen_replay_and_undo() {
     );
 
     // Journal replay reproduces the same document from the same commands.
-    let replay = Core::spawn(initial.clone()).expect("core should spawn");
+    let replay = super::spawn_actor(initial.clone()).expect("core should spawn");
     let mut replayed = None;
     for command in &journaled {
         let encoded = serde_json::to_string(command).expect("journal command serializes");

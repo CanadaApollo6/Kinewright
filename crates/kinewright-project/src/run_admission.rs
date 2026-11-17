@@ -13,15 +13,16 @@ pub const MINIMAL_CUTS: u64 = 16;
 pub const TRANSITION_BYTES: usize = 192 << 10;
 pub const TERMINAL_RECEIPT_BYTES: usize = 6 << 10;
 pub const TERMINAL_TRANSITION_BYTES: usize = 512 << 10;
-pub const HISTORY_BYTES: u64 = crate::history_record::TASK_BYTES;
+// Fixed terminal-publication escrow; native history uses creation sizing.
+pub const TERMINAL_OBJECT_BYTES: u64 = 1_111_040;
 pub const RECORD_BYTES: u64 = 8 << 20;
 pub const DECODED_BYTES: u64 = 32 << 20;
 pub const OBJECTS: u64 = 256;
 pub const SPECIALIST_BASES: u64 = TASKS as u64 * 2;
 pub const METADATA: u64 = 256 << 20;
 pub const OWNED: u64 = 8 << 20;
-// Task and candidate histories have independent live role limits. The raw
-// ordinary/manual pool is unchanged; the simultaneous envelope is reported separately.
+// Every history role owns its creation-sized pool lease, independently of this
+// store-wide escrow for terminal record publication.
 pub const GRAPH_LEVELS: u64 = 8;
 pub const REASON: &str = "Run limit reached. Stop this run to finish cleanup.";
 thread_local! { static READ_HEADROOM: RefCell<BTreeMap<usize,usize>> = const { RefCell::new(BTreeMap::new()) }; }
@@ -167,9 +168,6 @@ pub(crate) fn ordinary(raw: &StorageLimits) -> StorageLimits {
     limits.issuers = limits.issuers.saturating_sub(4);
     limits.versions = limits.versions.saturating_sub(1);
     limits.control_bytes = limits.control_bytes.min(RECORD_BYTES);
-    limits.branch_history_bytes = limits
-        .branch_history_bytes
-        .min(crate::history_record::CANDIDATE_BYTES);
     limits
 }
 impl ProjectStore {
@@ -454,7 +452,6 @@ impl crate::bundle::ProjectBundle {
         if raw.control_bytes < RECORD_BYTES + (1 << 20)
             || raw.decoded_record_bytes < DECODED_BYTES + (8 << 20)
             || raw.command_bytes < 256 << 10
-            || raw.branch_history_bytes < HISTORY_BYTES
             || raw.graph_depth < 2 * GRAPH_LEVELS
             || limits.pending_commands == 0
             || self
@@ -477,8 +474,7 @@ impl crate::bundle::ProjectBundle {
                 + usage.decoded_bytes.saturating_sub(usage.decoder_bytes)
                 + (96 << 20)
                 > limits.metadata_bytes
-            || usage.owned_bytes + HISTORY_BYTES > limits.owned_bytes
-            || usage.live_history_bytes > limits.live_history_bytes
+            || usage.owned_bytes + TERMINAL_OBJECT_BYTES > limits.owned_bytes
         {
             return Err(BundleError::RunAdmission(
                 "Project storage is too full to start a run safely.",
@@ -742,8 +738,7 @@ impl crate::bundle::ProjectBundle {
                 >= limits.receipts
                 || usage.objects > limits.objects
                 || usage.metadata_bytes > limits.metadata_bytes
-                || usage.owned_bytes > limits.owned_bytes
-                || usage.live_history_bytes > limits.live_history_bytes)
+                || usage.owned_bytes > limits.owned_bytes)
         {
             self.store.note_run_limit();
         }

@@ -52,7 +52,6 @@ fn bindings_inner(
             .checked_mul(1024)
             .and_then(|n| n.checked_add(4096))
             .ok_or(BundleError::Capacity("resource certificates"))?,
-        0,
         false,
         retained,
     )?;

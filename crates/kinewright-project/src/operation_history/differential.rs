@@ -1,12 +1,12 @@
-//! Independent H1 model, old audit, old lineage and old resource-retention oracles.
+//! Independent H1 state/fate model and direct-operation lineage/resource replay.
 use super::tests::{document, origin};
 use super::*;
-use crate::bundle_records::{BatchId, LineageRecord, ObjectRef, OccurrenceId, RecordKind};
+use crate::bundle_records::{ObjectRef, OccurrenceId, RecordKind};
 use kinewright_core::{
-    Command, Core, Document, Event, HistorySnapshot, Operation, TrackId,
+    Command, Document, Operation, TrackId,
     undo::{CommandKey, History, RetentionPolicy, RoleBounds, StepEvidence},
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 #[path = "../../../kinewright-core/tests/support/history_commands.rs"]
 mod commands;
 #[path = "../../../kinewright-core/tests/support/history_model.rs"]
@@ -55,351 +55,26 @@ fn removed(before: &Document, after: &Document) -> Vec<RemovedTarget> {
         )
         .collect()
 }
-fn targets_present(targets: &[RemovedTarget], document: &Document) -> bool {
-    targets.iter().any(|target| match target {
-        RemovedTarget::Clip(id) => document.clip(*id).is_some(),
-        RemovedTarget::Track(id) => document.tracks.iter().any(|track| track.id == *id),
-    })
-}
 #[derive(Clone)]
 struct Fact {
     creation: CreationOrigin,
     operations: Option<Vec<Operation>>,
-    removed: Vec<RemovedTarget>,
-    created: Vec<RemovedTarget>,
-    old_position: usize,
-    control: Option<(Direction, StepEvidence)>,
     approved_do: bool,
     prefix: Option<StepEvidence>,
 }
 #[derive(Default, Debug)]
 struct Totals {
     save_open_checks: usize,
-    old_uncertain_recreation: usize,
-    old_uncertain_other: usize,
     transitions: usize,
     approvals: usize,
-    shortcut_exemptions: usize,
     conditional_do: usize,
     conditional_batch: usize,
     uncertain: usize,
     provenance_probes: usize,
     sibling_do_missing_fold_provenance: usize,
-    control_certain_differences: BTreeMap<String, Vec<String>>,
-    control_difference_observations: usize,
 }
-fn seed(document: &Document) -> LineageRecord {
-    let base = origin(1);
-    let map = document
-        .tracks
-        .iter()
-        .flat_map(|track| &track.clips)
-        .enumerate()
-        .map(|(ordinal, clip)| {
-            (
-                clip.id,
-                OccurrenceId {
-                    branch_origin: base.branch.clone(),
-                    creation_batch_id: base.batch.clone(),
-                    result_ordinal: ordinal as u64,
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    LineageRecord {
-        branch_origin: base.branch,
-        baseline: map.clone(),
-        current: map,
-        undo: vec![],
-        redo: vec![],
-        split_ancestry: vec![],
-    }
-}
-fn origin_record(facts: &BTreeMap<CommandKey, Fact>) -> LineageRecord {
-    let mut record = seed(&Document::default());
-    record.current = facts
-        .values()
-        .enumerate()
-        .map(|(index, fact)| {
-            (
-                kinewright_core::ClipId(index as u64 + 1),
-                OccurrenceId {
-                    branch_origin: fact.creation.branch.clone(),
-                    creation_batch_id: fact.creation.batch.clone(),
-                    result_ordinal: 0,
-                },
-            )
-        })
-        .collect();
-    record
-}
-// A separate old Core rebuilds every reachable state. Its payloads are copies
-// for the oracle actor; none is shared with the owner/model under test.
-fn reference(
-    baseline: &Document,
-    steps: &[&model::Step],
-    depth: usize,
-    seeds: &LineageRecord,
-    facts: &BTreeMap<CommandKey, Fact>,
-) -> (HistorySnapshot, LineageRecord) {
-    let core = Core::spawn(baseline.clone()).unwrap();
-    let mut batches = Vec::<BatchId>::new();
-    for (index, step) in steps.iter().enumerate() {
-        for command in &step.commands {
-            let edit = if step.commands.len() > 1 || step.coalesce_key.is_some() {
-                Command::DoBatchCoalesced {
-                    operations: command.operations.clone(),
-                    coalesce_key: format!("oracle-{index}"),
-                }
-            } else {
-                Command::DoBatch(command.operations.clone())
-            };
-            assert!(
-                matches!(core.request(edit).unwrap(), Event::DocumentChanged { .. }),
-                "OLD_REFERENCE_EDIT"
-            );
-            batches.push(facts[&key(command.id)].creation.batch.clone());
-        }
-    }
-    for _ in depth..steps.len() {
-        core.request(Command::Undo).unwrap();
-        batches.push(origin(900_000).batch);
-    }
-    let history = core.export_history().unwrap();
-    let lineage = crate::bundle_commit::lineage(
-        &origin(1).branch,
-        &history,
-        &batches,
-        Some(seeds),
-        Some(&origin_record(facts)),
-    )
-    .unwrap();
-    (history, lineage)
-}
-fn advance_baseline(
-    before: &model::Model,
-    count: usize,
-    seeds: &mut LineageRecord,
-    facts: &BTreeMap<CommandKey, Fact>,
-) {
-    if count == 0 {
-        return;
-    }
-    let steps = before.undo[..count].iter().collect::<Vec<_>>();
-    let (_, lineage) = reference(&before.baseline, &steps, count, seeds, facts);
-    seeds.baseline = lineage.current.clone();
-    seeds.current = lineage.current;
-    seeds.split_ancestry = lineage.split_ancestry;
-    seeds.undo.clear();
-    seeds.redo.clear();
-}
-fn reached(
-    model: &model::Model,
-    history: &OwnerHistory,
-    seeds: &LineageRecord,
-    facts: &BTreeMap<CommandKey, Fact>,
-    context: &str,
-) {
-    let steps = model
-        .undo
-        .iter()
-        .chain(model.redo.iter().rev())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        **history.history().document(),
-        model.document(),
-        "OWNER_MODEL_DOCUMENT {context}"
-    );
-    assert_eq!(
-        **history.history().baseline(),
-        model.baseline,
-        "OWNER_MODEL_BASELINE {context}"
-    );
-    assert_eq!(
-        history.history().position(),
-        key((model.epoch, model.position)),
-        "OWNER_MODEL_COUNTER {context}"
-    );
-    assert_eq!(
-        history.seeds().occurrences,
-        seeds.baseline,
-        "FOLD_SEEDS_EQUAL_OLD_LINEAGE {context}"
-    );
-    for depth in 0..=steps.len() {
-        let (old, lineage) = reference(&model.baseline, &steps, depth, seeds, facts);
-        let actual = history.boundary(depth).unwrap();
-        assert_eq!(
-            actual.document(),
-            &*old.document,
-            "EVERY_REACHABLE_OLD_DOCUMENT {context} depth={depth}"
-        );
-        assert_eq!(
-            actual.lineage().occurrences,
-            lineage.current,
-            "EVERY_REACHABLE_OLD_LINEAGE {context} depth={depth}"
-        );
-        assert_eq!(
-            actual.lineage().split_ancestry,
-            lineage.split_ancestry,
-            "EVERY_REACHABLE_OLD_ANCESTRY {context} depth={depth}"
-        );
-        for resource in Resources::document(&old.document) {
-            assert!(
-                history.resources().contains(&resource),
-                "EVERY_REACHABLE_RESOURCE_SUPERSET {context} {resource:?}"
-            );
-        }
-        let mut inputs = old_inputs(&old);
-        crate::bundle_commit::retain_history_inputs(&old, &mut inputs);
-        for entry in inputs.entries {
-            let required = match entry.object.record_kind {
-                RecordKind::OwnedLut => Resource::Lut {
-                    sha256: entry.object.sha256,
-                    byte_len: entry.object.byte_length,
-                },
-                RecordKind::OwnedFont => Resource::TitleFont,
-                RecordKind::OwnedMedia => Resource::Media {
-                    asset: entry.entry_id.split(':').nth(1).unwrap().parse().unwrap(),
-                    sha256: Some(entry.object.sha256),
-                    byte_len: Some(entry.object.byte_length),
-                },
-                _ => continue,
-            };
-            assert!(
-                history.resources().contains(&required),
-                "OLD_RETENTION_RESOURCE_SUPERSET {context}"
-            );
-        }
-    }
-}
-#[expect(
-    clippy::too_many_lines,
-    reason = "build genuine candidate manifest entries for every resource category before calling old retention"
-)]
-fn old_inputs(history: &HistorySnapshot) -> crate::owned_inputs::OwnedInputManifest {
-    let mut entries = vec![];
-    for doc in std::iter::once(&history.baseline)
-        .chain(std::iter::once(&history.document))
-        .chain(
-            history
-                .cursor
-                .undo
-                .iter()
-                .chain(&history.cursor.redo)
-                .map(|entry| &entry.document),
-        )
-    {
-        for asset in &doc.media_pool {
-            let (Some(sha256), Some(byte_length)) = (
-                &asset.source_fingerprint.content_sha256,
-                asset.source_fingerprint.byte_len,
-            ) else {
-                continue;
-            };
-            let video = matches!(
-                asset.kind,
-                kinewright_core::MediaKind::Video
-                    | kinewright_core::MediaKind::AudioVideo
-                    | kinewright_core::MediaKind::Image
-            );
-            let audio = matches!(
-                asset.kind,
-                kinewright_core::MediaKind::Audio | kinewright_core::MediaKind::AudioVideo
-            );
-            let stream = |index| crate::owned_media::StreamInterpretation {
-                index,
-                time_base: (1, 48000),
-                timestamp_origin: 0,
-            };
-            let interpretation = crate::owned_media::MediaInterpretation {
-                version: 1,
-                video: video.then(|| stream(0)),
-                audio: audio.then(|| stream(1)),
-                fps: asset.fps,
-                duration: asset.duration,
-                kind: asset.kind,
-                resolution: asset.resolution,
-                effective_color: asset.color_description.clone(),
-                probed_color: asset.color_description.clone(),
-                source_profile_assumption: if video {
-                    kinewright_media::source_profile_assumption(&asset.color_description)
-                } else {
-                    None
-                },
-            };
-            let profile = interpretation.canonical().unwrap();
-            let entry = crate::owned_inputs::OwnedInputEntry {
-                entry_id: format!(
-                    "media:{}:{sha256}:{byte_length}:{}",
-                    asset.id.0,
-                    kinewright_media::sha256_bytes(profile.as_bytes())
-                ),
-                object: ObjectRef {
-                    sha256: sha256.clone(),
-                    byte_length,
-                    record_kind: RecordKind::OwnedMedia,
-                },
-                dependencies: vec![ObjectRef {
-                    sha256: "d".repeat(64),
-                    byte_length: 1,
-                    record_kind: RecordKind::InputChunkTable,
-                }],
-                selected_stream: None,
-                time_base: None,
-                origin: None,
-                profile: Some(profile),
-            };
-            assert!(
-                entry.matches_media_asset(asset),
-                "OLD_MEDIA_RETENTION_CANDIDATE_IS_EXACT"
-            );
-            entries.push(entry);
-        }
-        for asset in &doc.lut_assets {
-            entries.push(crate::owned_inputs::OwnedInputEntry {
-                entry_id: format!("lut:{}:{}:{}", asset.id.0, asset.sha256, asset.byte_len),
-                object: ObjectRef {
-                    sha256: asset.sha256.clone(),
-                    byte_length: asset.byte_len,
-                    record_kind: RecordKind::OwnedLut,
-                },
-                dependencies: vec![],
-                selected_stream: None,
-                time_base: None,
-                origin: None,
-                profile: None,
-            });
-        }
-        if doc
-            .tracks
-            .iter()
-            .flat_map(|track| &track.clips)
-            .any(|clip| matches!(clip.content, kinewright_core::ClipContent::Title(_)))
-        {
-            entries.push(crate::owned_inputs::OwnedInputEntry {
-                entry_id: "font:Inter".into(),
-                object: ObjectRef {
-                    sha256: kinewright_media::sha256_bytes(kinewright_core::title_font_bytes()),
-                    byte_length: kinewright_core::title_font_bytes().len() as u64,
-                    record_kind: RecordKind::OwnedFont,
-                },
-                dependencies: vec![],
-                selected_stream: None,
-                time_base: None,
-                origin: None,
-                profile: None,
-            });
-        }
-    }
-    entries.sort_by(|a, b| a.entry_id.cmp(&b.entry_id));
-    entries.dedup();
-    crate::owned_inputs::OwnedInputManifest {
-        project_id: None,
-        session_id: None,
-        owner_epoch: 0,
-        entries,
-    }
-}
+// The H1 model supplies command state; direct-operation replay below supplies
+// reachable documents and lineage independently of the owner implementation.
 #[derive(Clone, Copy)]
 enum Subject {
     Applied,
@@ -482,14 +157,12 @@ fn control_fate(direction: Direction, subject: Subject) -> TransitionFate {
     }
 }
 #[expect(
-    clippy::too_many_lines,
     clippy::too_many_arguments,
-    reason = "compare the three independent actors and explicit evidence, retaining each permitted discrepancy witness"
+    reason = "compare model state and explicit approval evidence at each accepted transition"
 )]
 fn check_audit(
     owner: &OwnerHistory,
     model: &model::Model,
-    old: &Core,
     line: &BTreeMap<CommandKey, Fact>,
     all: &BTreeMap<CommandKey, Fact>,
     controls: &BTreeMap<ObjectRef, (Direction, StepEvidence, Vec<RemovedTarget>, CommandKey)>,
@@ -498,7 +171,6 @@ fn check_audit(
     frontier: Option<CommandKey>,
     totals: &mut Totals,
 ) {
-    let old = old.export_history().unwrap();
     for entry in owner.ledger().entries() {
         let expected = model.fates.get(&(entry.key.epoch, entry.key.position));
         assert!(
@@ -516,14 +188,6 @@ fn check_audit(
             digest(all[&entry.key].operations.as_ref().unwrap()),
             "ORIGINAL_APPROVAL_PAYLOAD_DIGEST"
         );
-        let recreated = line.iter().any(|(key, fact)| {
-            *key > entry.key
-                && entry
-                    .approval
-                    .targets
-                    .iter()
-                    .any(|target| fact.created.contains(target))
-        });
         assert_eq!(
             entry.answer(),
             if matches!(expected, Some(model::Fate::Undo | model::Fate::Folded)) {
@@ -533,68 +197,8 @@ fn check_audit(
             },
             "EVERY_APPROVED_COMMAND_ANSWER_IS_ITS_FATE"
         );
-        let fact = line.get(&entry.key);
-        let answer = crate::edit_audit::owner_differential_proof(
-            &old,
-            fact.map(|fact| fact.old_position),
-            fact.and_then(|fact| fact.operations.as_deref()),
-            &entry.approval.targets,
-            fact.is_some(),
-        );
-        if answer == ApprovalAnswer::Uncertain {
-            if recreated && fact.is_some() {
-                totals.old_uncertain_recreation += 1;
-            } else {
-                totals.old_uncertain_other += 1;
-            }
-        }
-        if answer != ApprovalAnswer::Uncertain && answer != entry.answer() {
-            assert!(
-                !targets_present(&entry.approval.targets, &old.document),
-                "EXEMPTION_IS_TARGET_ABSENCE_SHORTCUT"
-            );
-            assert_eq!(
-                answer,
-                ApprovalAnswer::Kept,
-                "ONLY_OLD_TARGET_SHORTCUT_IS_EXEMPT"
-            );
-            assert!(
-                !matches!(expected, Some(model::Fate::Undo | model::Fate::Folded)),
-                "EXEMPT_APPROVAL_IS_NOT_APPLIED"
-            );
-            let other = entry.approval.targets.iter().all(|target| {
-                line.iter().any(|(key, fact)| {
-                    *key != entry.key
-                        && fact.removed.contains(target)
-                        && match fact.control {
-                            None => matches!(
-                                model.fates.get(&(key.epoch, key.position)),
-                                Some(model::Fate::Undo | model::Fate::Folded)
-                            ),
-                            Some((Direction::Undo, subject)) => matches!(
-                                model
-                                    .fates
-                                    .get(&(subject.first_key.epoch, subject.first_key.position)),
-                                Some(model::Fate::Redo | model::Fate::Discarded)
-                            ),
-                            Some((Direction::Redo, subject)) => matches!(
-                                model
-                                    .fates
-                                    .get(&(subject.first_key.epoch, subject.first_key.position)),
-                                Some(model::Fate::Undo | model::Fate::Folded)
-                            ),
-                        }
-                })
-            });
-            assert!(
-                other,
-                "EXEMPTION_REQUIRES_DIFFERENT_REMOVING_COMMAND {:?} {trace:?}",
-                entry.key
-            );
-            totals.shortcut_exemptions += 1;
-        }
     }
-    for (id, (direction, subject, targets, accepted)) in controls {
+    for (id, (direction, subject, _, _)) in controls {
         let fate = owner.transition_fate(id).unwrap().unwrap();
         assert_eq!(
             fate,
@@ -607,48 +211,21 @@ fn check_audit(
         if matches!(fate, TransitionFate::Uncertain(_)) {
             totals.uncertain += 1;
         }
-        let fact = line.get(accepted);
-        let answer = crate::edit_audit::owner_differential_proof(
-            &old,
-            fact.map(|fact| fact.old_position),
-            None,
-            targets,
-            fact.is_some(),
-        );
-        if answer != ApprovalAnswer::Uncertain && answer != fate.answer() {
-            // These contract differences are collected and reported, never
-            // treated as Do-command differential exemptions.
-            assert!(
-                (answer == ApprovalAnswer::Kept
-                    && fact.is_some()
-                    && !targets_present(targets, &old.document))
-                    || (answer == ApprovalAnswer::Missing && fact.is_none()),
-                "CONTROL_DIFFERENCE_HAS_EXPLICIT_OLD_CAUSE"
-            );
-            totals.control_difference_observations += 1;
-            let reason = format!("{direction:?}/{fate:?}/old={answer:?}");
-            totals
-                .control_certain_differences
-                .entry(reason)
-                .or_insert_with(|| trace.to_vec());
-        }
-        let _ = subject;
     }
 }
 
 struct Capture {
     model: model::Snapshot,
     owner: OwnerSnapshot,
-    old: HistorySnapshot,
     line: BTreeMap<CommandKey, Fact>,
-    seeds: LineageRecord,
+    seeds: OracleLineage,
     bounds: RoleBounds,
     terminal: BTreeMap<StepEvidence, Subject>,
     frontier: Option<CommandKey>,
 }
 #[expect(
     clippy::too_many_lines,
-    reason = "one chronological stream keeps model, old actor, approvals and snapshot cuts aligned"
+    reason = "one chronological stream keeps the independent model, approvals and snapshot cuts aligned"
 )]
 fn stream(
     kind: &str,
@@ -683,7 +260,6 @@ fn stream(
     let mut owner =
         OwnerHistory::new(&pool, role, retention, &origin(1), || Ok(document.clone())).unwrap();
     owner.core = History::new(document.clone(), retention, bounds).unwrap();
-    let old = Core::spawn(document.clone()).unwrap();
     let mut model = model::Model::new(document.clone(), budget, policy);
     model.step_cap = 3;
     model.document_limit = usize::try_from(role.bounds().document_bytes).unwrap();
@@ -743,7 +319,6 @@ fn stream(
             captured = Some(Capture {
                 model: model.snapshot(),
                 owner: owner.capture().unwrap(),
-                old: old.export_history().unwrap(),
                 line: line.clone(),
                 seeds: seeds.clone(),
                 bounds: owner.history().bounds(),
@@ -758,7 +333,6 @@ fn stream(
                 owner
                     .install_snapshot(cut.owner.validate_bounded(cut.bounds).unwrap())
                     .unwrap();
-                old.restore_history(cut.old).unwrap();
                 line = cut.line;
                 seeds = cut.seeds;
                 terminal = cut.terminal;
@@ -767,17 +341,6 @@ fn stream(
                 installed = true;
             }
         } else if index % 11 == 10 {
-            let current = old.export_history().unwrap();
-            if current
-                .cursor
-                .undo
-                .last()
-                .is_some_and(|step| step.coalesce_key.is_some())
-                && !model.undo.is_empty()
-            {
-                old.request(Command::Undo).unwrap();
-                old.request(Command::Redo).unwrap();
-            }
             model.close_gesture();
             owner.close_gesture().unwrap();
             trace.push("close gesture".into());
@@ -788,7 +351,6 @@ fn stream(
                 .unwrap_or_else(|| commands::command(&mut random, &all_ops, index));
             let plain = commands::plain_command(&generated);
             let before = model.clone();
-            let old_before = old.export_history().unwrap();
             let expected = model.execute(&plain);
             let target = match plain {
                 Command::Undo => before
@@ -851,82 +413,10 @@ fn stream(
                         "OWNER_EVERY_OPERATION_KIND_ACCEPTED {context}"
                     );
                 }
-                // Old Core keeps the folded prefix for the audit oracle. A
-                // modeled empty Undo must not pop that immutable prefix.
-                let effective = !matches!(plain, Command::Undo) || !before.undo.is_empty();
-                let effective =
-                    effective && (!matches!(plain, Command::Redo) || !before.redo.is_empty());
-                let mut old_command = generated.clone();
-                if matches!(
-                    generated,
-                    Command::DoIfRevision { .. } | Command::DoBatchIfRevision { .. }
-                ) {
-                    let Event::QueryResult(kinewright_core::QueryResult::Snapshot {
-                        revision, ..
-                    }) = old
-                        .request(Command::Query(kinewright_core::Query::Snapshot))
-                        .unwrap()
-                    else {
-                        unreachable!()
-                    };
-                    match &mut old_command {
-                        Command::DoIfRevision { expected, .. } => {
-                            *expected = revision;
-                            totals.conditional_do += 1;
-                        }
-                        Command::DoBatchIfRevision { expected, .. } => {
-                            *expected = revision;
-                            totals.conditional_batch += 1;
-                        }
-                        _ => unreachable!(),
-                    }
-                }
-                if effective {
-                    assert!(
-                        matches!(
-                            old.request(old_command).unwrap(),
-                            Event::DocumentChanged { .. }
-                        ),
-                        "OLD_ACCEPTED_STREAM {context}"
-                    );
-                }
-                let old_after = old.export_history().unwrap();
-                assert_eq!(
-                    *old_after.document,
-                    model.document(),
-                    "OLD_CURRENT_MATCHES_MODEL {context}"
-                );
-                let mut deleted = targets.clone();
-                let mut created = vec![];
-                if let Some(ops) = operations(&plain) {
-                    let identities = &old_after.batches.last().unwrap().identity_effects;
-                    deleted.extend(
-                        identities
-                            .iter()
-                            .flat_map(|effect| effect.deleted.iter())
-                            .copied()
-                            .map(RemovedTarget::Clip),
-                    );
-                    created.extend(
-                        identities
-                            .iter()
-                            .flat_map(|effect| {
-                                effect
-                                    .created
-                                    .iter()
-                                    .copied()
-                                    .chain(effect.split_results.iter().map(|clip| clip.id))
-                            })
-                            .map(RemovedTarget::Clip),
-                    );
-                    created.extend(ops.iter().filter_map(|op| {
-                        if let Operation::AddTrack { track } = op {
-                            Some(RemovedTarget::Track(track.id))
-                        } else {
-                            None
-                        }
-                    }));
-                }
+                totals.conditional_do +=
+                    usize::from(matches!(generated, Command::DoIfRevision { .. }));
+                totals.conditional_batch +=
+                    usize::from(matches!(generated, Command::DoBatchIfRevision { .. }));
                 let prefix = operations(&plain).map(|ops| {
                     let prior = if let Command::DoBatchCoalesced { coalesce_key, .. } = &plain {
                         before
@@ -949,10 +439,6 @@ fn stream(
                     creation,
                     prefix,
                     operations: operations(&plain).map(<[Operation]>::to_vec),
-                    removed: deleted,
-                    created,
-                    old_position: old_before.batches.len(),
-                    control: target,
                     approved_do: do_approval,
                 };
                 line.insert(accepted, fact.clone());
@@ -1041,7 +527,7 @@ fn stream(
         );
         reached(&model, &owner, &seeds, &line, &context);
         check_audit(
-            &owner, &model, &old, &line, &all, &controls, &trace, &terminal, frontier, totals,
+            &owner, &model, &line, &all, &controls, &trace, &terminal, frontier, totals,
         );
         if installed {
             assert!(
@@ -1074,7 +560,6 @@ fn preapproval_folded_snapshot_differential(totals: &mut Totals) {
         || Ok(document()),
     )
     .unwrap();
-    let old = Core::spawn(document()).unwrap();
     let c = Command::DoBatch(vec![Operation::AddTrack {
         track: kinewright_core::Track {
             id: TrackId(82),
@@ -1084,21 +569,16 @@ fn preapproval_folded_snapshot_differential(totals: &mut Totals) {
         },
     }]);
     owner.execute(c.clone(), origin(2), vec![], None).unwrap();
-    old.request(c).unwrap();
     let t = owner.capture().unwrap();
-    let old_t = old.export_history().unwrap();
     owner
         .execute(Command::Do(commands::marker(300)), origin(3), vec![], None)
         .unwrap();
-    old.request(Command::Do(commands::marker(300))).unwrap();
     let s = owner.capture().unwrap();
-    let old_s = old.export_history().unwrap();
     owner
         .install_snapshot(t.validate_bounded(bounds).unwrap())
         .unwrap();
     super::roundtrip_tests::saved_open(&owner);
     totals.save_open_checks += 1;
-    old.restore_history(old_t).unwrap();
     let target = owner.transition_target(Direction::Undo).unwrap();
     let id = ObjectRef {
         sha256: "f".repeat(64),
@@ -1108,30 +588,16 @@ fn preapproval_folded_snapshot_differential(totals: &mut Totals) {
     owner
         .approve_transition(id.clone(), Direction::Undo, target)
         .unwrap();
-    old.request(Command::Undo).unwrap();
     owner
         .install_snapshot(s.validate_bounded(bounds).unwrap())
         .unwrap();
     super::roundtrip_tests::saved_open(&owner);
     totals.save_open_checks += 1;
-    old.restore_history(old_s).unwrap();
     let fate = owner.transition_fate(&id).unwrap().unwrap();
     assert_eq!(
         fate,
         TransitionFate::Uncertain(Uncertainty::MissingFoldProvenance),
         "DIFFERENTIAL_PREAPPROVAL_FOLD_IS_UNCERTAIN"
-    );
-    let answer = crate::edit_audit::owner_differential_proof(
-        &old.export_history().unwrap(),
-        None,
-        None,
-        &[RemovedTarget::Track(TrackId(82))],
-        false,
-    );
-    assert_eq!(
-        answer,
-        ApprovalAnswer::Missing,
-        "OLD_UNSELECTED_APPROVAL_CUT_IS_MISSING"
     );
     assert_eq!(
         fate.answer(),
@@ -1141,20 +607,6 @@ fn preapproval_folded_snapshot_differential(totals: &mut Totals) {
     totals.uncertain += 1;
     totals.approvals += 1;
     totals.provenance_probes += 1;
-    totals.control_difference_observations += 1;
-    totals.control_certain_differences.insert(
-        "Undo/Uncertain(MissingFoldProvenance)/old=Missing".into(),
-        [
-            "Do C=AddTrack82",
-            "capture T",
-            "Do marker folds C; capture S before approval",
-            "install T",
-            "approve Undo C",
-            "install S",
-        ]
-        .map(str::to_owned)
-        .into(),
-    );
 }
 fn preapproval_do_folded_snapshot_differential(totals: &mut Totals) {
     let pool = HistoryPool::new(PoolLimits::default());
@@ -1171,7 +623,6 @@ fn preapproval_do_folded_snapshot_differential(totals: &mut Totals) {
         || Ok(document()),
     )
     .unwrap();
-    let old = Core::spawn(document()).unwrap();
     owner
         .execute(
             super::tests::remove(),
@@ -1180,29 +631,22 @@ fn preapproval_do_folded_snapshot_differential(totals: &mut Totals) {
             Some(super::tests::approval()),
         )
         .unwrap();
-    old.request(super::tests::remove()).unwrap();
     owner
         .execute(Command::Undo, origin(3), vec![], None)
         .unwrap();
-    old.request(Command::Undo).unwrap();
     let t = owner.capture().unwrap();
-    let old_t = old.export_history().unwrap();
     owner
         .execute(Command::Redo, origin(4), vec![], None)
         .unwrap();
-    old.request(Command::Redo).unwrap();
     owner
         .execute(Command::Do(commands::marker(350)), origin(5), vec![], None)
         .unwrap();
-    old.request(Command::Do(commands::marker(350))).unwrap();
     let s = owner.capture().unwrap();
-    let old_s = old.export_history().unwrap();
     owner
         .install_snapshot(t.validate_bounded(bounds).unwrap())
         .unwrap();
     super::roundtrip_tests::saved_open(&owner);
     totals.save_open_checks += 1;
-    old.restore_history(old_t).unwrap();
     let id = ObjectRef {
         sha256: "e".repeat(64),
         byte_length: 1,
@@ -1215,48 +659,19 @@ fn preapproval_do_folded_snapshot_differential(totals: &mut Totals) {
             owner.transition_target(Direction::Redo).unwrap(),
         )
         .unwrap();
-    old.request(Command::Redo).unwrap();
     owner
         .install_snapshot(s.validate_bounded(bounds).unwrap())
         .unwrap();
     super::roundtrip_tests::saved_open(&owner);
     totals.save_open_checks += 1;
-    old.restore_history(old_s).unwrap();
     let fate = owner.transition_fate(&id).unwrap().unwrap();
     assert_eq!(
         fate,
         TransitionFate::Holds,
         "DIFFERENTIAL_MATCHING_DO_FOLD_PREFIX_IS_EXACT"
     );
-    let answer = crate::edit_audit::owner_differential_proof(
-        &old.export_history().unwrap(),
-        None,
-        None,
-        &[RemovedTarget::Track(TrackId(81))],
-        false,
-    );
-    assert_eq!(
-        answer,
-        ApprovalAnswer::Missing,
-        "OLD_PREAPPROVAL_REDO_CUT_IS_MISSING"
-    );
     totals.approvals += 2;
     totals.provenance_probes += 1;
-    totals.control_difference_observations += 1;
-    totals.control_certain_differences.insert(
-        "Redo/Holds/old=Missing".into(),
-        [
-            "approve Do C=RemoveTrack81",
-            "Undo C; capture T",
-            "Redo C",
-            "Do marker folds C; capture S before Redo approval",
-            "install T",
-            "approve Redo C",
-            "install S; matching Do prefix proof survives",
-        ]
-        .map(str::to_owned)
-        .into(),
-    );
 }
 
 fn sibling_do_snapshot_differential(totals: &mut Totals) {
@@ -1306,22 +721,6 @@ fn sibling_do_snapshot_differential(totals: &mut Totals) {
         ApprovalAnswer::Uncertain,
         "DIFFERENTIAL_SIBLING_DO_MISSING_FOLD_PROVENANCE"
     );
-    // Today's audit has no selected cut for this approval. Count this precise
-    // contract difference independently of the different-command shortcut.
-    let old = Core::spawn(document()).unwrap();
-    old.request(super::tests::remove()).unwrap();
-    old.request(Command::Do(commands::marker(399))).unwrap();
-    assert_eq!(
-        crate::edit_audit::owner_differential_proof(
-            &old.export_history().unwrap(),
-            None,
-            None,
-            &[RemovedTarget::Track(TrackId(81))],
-            false
-        ),
-        ApprovalAnswer::Missing,
-        "OLD_SIBLING_UNSELECTED_DO_CUT_IS_MISSING"
-    );
     super::roundtrip_tests::saved_open(&owner);
     totals.save_open_checks += 1;
     totals.sibling_do_missing_fold_provenance += 1;
@@ -1330,7 +729,7 @@ fn sibling_do_snapshot_differential(totals: &mut Totals) {
 }
 
 #[test]
-fn seeded_h1_streams_match_old_audit_lineage_and_retention() {
+fn seeded_h1_streams_match_fates_lineage_and_retention() {
     let mut totals = Totals::default();
     for (kind, case) in oracle::operation_cases() {
         for policy in [model::Policy::Fold, model::Policy::NeverFold] {
@@ -1372,10 +771,6 @@ fn seeded_h1_streams_match_old_audit_lineage_and_retention() {
             &mut totals,
         );
     }
-    assert!(
-        totals.old_uncertain_recreation > 0,
-        "OLD_UNCERTAIN_RECREATION_CLASS_EXERCISED"
-    );
     sibling_do_snapshot_differential(&mut totals);
     assert!(
         totals.sibling_do_missing_fold_provenance > 0,
@@ -1392,14 +787,10 @@ fn seeded_h1_streams_match_old_audit_lineage_and_retention() {
         "DIFFERENTIAL_SAVE_OPEN_INVARIANT_EXERCISED"
     );
     assert!(
-        totals.shortcut_exemptions > 0,
-        "TARGET_SHORTCUT_EXEMPTION_IS_EXERCISED"
-    );
-    assert!(
         totals.conditional_do > 0 && totals.conditional_batch > 0,
         "GENERATED_ACCEPTED_CONDITIONAL_COMMANDS"
     );
-    let artifact = serde_json::json!({"sibling_do_missing_fold_provenance":totals.sibling_do_missing_fold_provenance,"old_uncertain_recreation_observations":totals.old_uncertain_recreation,"old_uncertain_other_observations":totals.old_uncertain_other,"save_open_checks":totals.save_open_checks,"transitions":totals.transitions,"approvals":totals.approvals,"shortcut_exemptions":totals.shortcut_exemptions,"accepted_do_if_revision":totals.conditional_do,"accepted_batch_if_revision":totals.conditional_batch,"uncertain_observations":totals.uncertain,"folded_provenance_probes":totals.provenance_probes,"control_difference_observations":totals.control_difference_observations,"control_difference_witnesses":totals.control_certain_differences});
+    let artifact = serde_json::json!({"sibling_do_missing_fold_provenance":totals.sibling_do_missing_fold_provenance,"save_open_checks":totals.save_open_checks,"transitions":totals.transitions,"approvals":totals.approvals,"accepted_do_if_revision":totals.conditional_do,"accepted_batch_if_revision":totals.conditional_batch,"uncertain_observations":totals.uncertain,"folded_provenance_probes":totals.provenance_probes});
     let directory = kinewright_media::test_support::workspace_target_dir().join("hx-part2");
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(
@@ -1408,4 +799,224 @@ fn seeded_h1_streams_match_old_audit_lineage_and_retention() {
     )
     .unwrap();
     println!("HX_OWNER_DIFFERENTIAL={artifact}");
+}
+
+#[derive(Clone)]
+struct OracleLineage {
+    baseline: BTreeMap<kinewright_core::ClipId, OccurrenceId>,
+    current: BTreeMap<kinewright_core::ClipId, OccurrenceId>,
+    split_ancestry: Vec<(OccurrenceId, OccurrenceId, kinewright_core::Clip)>,
+}
+fn seed(document: &Document) -> OracleLineage {
+    let origin = origin(1);
+    let current = document
+        .tracks
+        .iter()
+        .flat_map(|t| &t.clips)
+        .enumerate()
+        .map(|(ordinal, clip)| {
+            (
+                clip.id,
+                OccurrenceId {
+                    branch_origin: origin.branch.clone(),
+                    creation_batch_id: origin.batch.clone(),
+                    result_ordinal: ordinal as u64,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    OracleLineage {
+        baseline: current.clone(),
+        current,
+        split_ancestry: vec![],
+    }
+}
+fn reference(
+    baseline: &Document,
+    steps: &[&model::Step],
+    depth: usize,
+    seeds: &OracleLineage,
+    facts: &BTreeMap<CommandKey, Fact>,
+) -> (Document, OracleLineage) {
+    let mut document = baseline.clone();
+    let mut lineage = seeds.clone();
+    lineage.current = lineage.baseline.clone();
+    for step in steps.iter().take(depth) {
+        for command in &step.commands {
+            let origin = &facts[&key(command.id)].creation;
+            let mut ordinal = 0;
+            for operation in &command.operations {
+                let before = document
+                    .tracks
+                    .iter()
+                    .flat_map(|t| &t.clips)
+                    .map(|c| c.id)
+                    .collect::<BTreeSet<_>>();
+                let parent = if let Operation::SplitClip { clip, .. } = operation {
+                    Some((*clip, lineage.current[clip].clone()))
+                } else {
+                    None
+                };
+                operation.apply(&mut document).unwrap();
+                lineage.current.retain(|id, _| document.clip(*id).is_some());
+                let children = document
+                    .tracks
+                    .iter()
+                    .flat_map(|t| &t.clips)
+                    .filter(|c| {
+                        parent.as_ref().is_some_and(|(id, _)| c.id == *id)
+                            || !before.contains(&c.id)
+                    })
+                    .collect::<Vec<_>>();
+                // Ordinary created IDs have sorted kernel order; split children
+                // have timeline traversal order, including the reused parent ID.
+                let mut ordinary = children
+                    .iter()
+                    .filter(|c| parent.is_none() && !before.contains(&c.id))
+                    .map(|c| c.id)
+                    .collect::<Vec<_>>();
+                ordinary.sort_unstable();
+                for id in ordinary {
+                    lineage.current.insert(
+                        id,
+                        OccurrenceId {
+                            branch_origin: origin.branch.clone(),
+                            creation_batch_id: origin.batch.clone(),
+                            result_ordinal: ordinal,
+                        },
+                    );
+                    ordinal += 1;
+                }
+                if let Some((_, parent)) = &parent {
+                    for child in children {
+                        let occurrence = OccurrenceId {
+                            branch_origin: origin.branch.clone(),
+                            creation_batch_id: origin.batch.clone(),
+                            result_ordinal: ordinal,
+                        };
+                        ordinal += 1;
+                        lineage.split_ancestry.push((
+                            occurrence.clone(),
+                            parent.clone(),
+                            child.clone(),
+                        ));
+                        lineage.current.insert(child.id, occurrence);
+                    }
+                }
+            }
+        }
+    }
+    let mut live = lineage.current.values().cloned().collect::<BTreeSet<_>>();
+    loop {
+        let n = live.len();
+        for (child, parent, _) in &lineage.split_ancestry {
+            if live.contains(child) {
+                live.insert(parent.clone());
+            }
+        }
+        if live.len() == n {
+            break;
+        }
+    }
+    lineage
+        .split_ancestry
+        .retain(|(child, _, _)| live.contains(child));
+    (document, lineage)
+}
+fn advance_baseline(
+    before: &model::Model,
+    count: usize,
+    seeds: &mut OracleLineage,
+    facts: &BTreeMap<CommandKey, Fact>,
+) {
+    if count == 0 {
+        return;
+    }
+    let steps = before.undo[..count].iter().collect::<Vec<_>>();
+    let (_, mut lineage) = reference(&before.baseline, &steps, count, seeds, facts);
+    lineage.baseline = lineage.current.clone();
+    *seeds = lineage;
+}
+fn reached(
+    model: &model::Model,
+    history: &OwnerHistory,
+    seeds: &OracleLineage,
+    facts: &BTreeMap<CommandKey, Fact>,
+    context: &str,
+) {
+    let steps = model
+        .undo
+        .iter()
+        .chain(model.redo.iter().rev())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        **history.history().document(),
+        model.document(),
+        "OWNER_MODEL_DOCUMENT {context}"
+    );
+    assert_eq!(
+        **history.history().baseline(),
+        model.baseline,
+        "OWNER_MODEL_BASELINE {context}"
+    );
+    assert_eq!(
+        history.history().position(),
+        key((model.epoch, model.position)),
+        "OWNER_MODEL_COUNTER {context}"
+    );
+    assert_eq!(
+        history.seeds().occurrences,
+        seeds.baseline,
+        "FOLD_SEEDS_EQUAL_INDEPENDENT_LINEAGE {context}"
+    );
+    for depth in 0..=steps.len() {
+        let (document, lineage) = reference(&model.baseline, &steps, depth, seeds, facts);
+        let actual = history.boundary(depth).unwrap();
+        assert_eq!(
+            actual.document(),
+            &document,
+            "EVERY_REACHABLE_MODEL_DOCUMENT {context} depth={depth}"
+        );
+        assert_eq!(
+            actual.lineage().occurrences,
+            lineage.current,
+            "EVERY_REACHABLE_MODEL_LINEAGE {context} depth={depth}"
+        );
+        assert_eq!(
+            actual.lineage().split_ancestry,
+            lineage.split_ancestry,
+            "EVERY_REACHABLE_MODEL_ANCESTRY {context} depth={depth}"
+        );
+        // Inspect actual model documents rather than the production Resources scanner.
+        for asset in &document.media_pool {
+            assert!(
+                history.resources().contains(&Resource::Media {
+                    asset: asset.id.0,
+                    sha256: asset.source_fingerprint.content_sha256.clone(),
+                    byte_len: asset.source_fingerprint.byte_len
+                }),
+                "EVERY_REACHABLE_MEDIA_RESOURCE {context}"
+            );
+        }
+        for asset in &document.lut_assets {
+            assert!(
+                history.resources().contains(&Resource::Lut {
+                    sha256: asset.sha256.clone(),
+                    byte_len: asset.byte_len
+                }),
+                "EVERY_REACHABLE_LUT_RESOURCE {context}"
+            );
+        }
+        if document
+            .tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .any(|c| matches!(c.content, kinewright_core::ClipContent::Title(_)))
+        {
+            assert!(
+                history.resources().contains(&Resource::TitleFont),
+                "EVERY_REACHABLE_FONT_RESOURCE {context}"
+            );
+        }
+    }
 }

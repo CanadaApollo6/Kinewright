@@ -492,16 +492,15 @@ mod bounded_store {
         );
         let limits = StorageLimits {
             decoded_record_bytes: 4096,
-            branch_history_bytes: 4096,
-            live_history_bytes: 6000,
+            metadata_bytes: 6000,
             ..StorageLimits::default()
         };
         let mut store = named(&temp.path("edit.kinewright"), limits);
-        let first = store.reserve_history_shadow(4000).unwrap();
-        assert!(store.reserve_history_shadow(4000).is_err());
+        let first = store.reserve_probe(4000).unwrap();
+        assert!(store.reserve_probe(4000).is_err());
         assert!(store.reserve_copy(u64::MAX).is_err());
         drop(first);
-        assert_eq!(store.usage().unwrap().live_history_bytes, 0);
+        assert_eq!(store.usage().unwrap().decoded_bytes, 0);
         // The native Document contains many values even though its encoded envelope is small.
         assert!(matches!(
             store.admit_document(&kinewright_core::Document::default()),
@@ -511,23 +510,12 @@ mod bounded_store {
         assert_eq!(store.usage().unwrap().decoded_bytes, 0);
         assert!(!store.usage().unwrap().damaged_accounting);
         let limits = StorageLimits {
-            branch_history_bytes: 16_384,
             decoded_record_bytes: 4096,
             ..StorageLimits::default()
         };
         let decoded_store = named(&temp.path("decode-limit.kinewright"), limits);
         assert!(matches!(
-            decoded_store.reserve_history_shadow(4097),
-            Err(BundleError::Capacity(_))
-        ));
-        let limits = StorageLimits {
-            branch_history_bytes: 4096,
-            decoded_record_bytes: 16_384,
-            ..StorageLimits::default()
-        };
-        let branch_store = named(&temp.path("branch-limit.kinewright"), limits);
-        assert!(matches!(
-            branch_store.reserve_history_shadow(4097),
+            decoded_store.reserve_probe(4097),
             Err(BundleError::Capacity(_))
         ));
     }

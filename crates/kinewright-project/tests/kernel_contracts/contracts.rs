@@ -1,6 +1,4 @@
-#[path = "support/history_oracle.rs"]
-mod history_oracle;
-use history_oracle::ApplyHistoryOracle;
+use super::history_oracle::ApplyHistoryOracle;
 
 use std::{
     collections::BTreeMap,
@@ -12,7 +10,7 @@ use std::{
 use kinewright_core::{
     AssetId, AudioBus, AudioBusId, AudioMaster, AutomationCurve, BinId, Clip, ClipContent, ClipId,
     ColorBitDepth, ColorContext, ColorDescription, ColorMatrix, ColorPipelineState, ColorPrimaries,
-    ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, Command, Core, Document,
+    ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, Command, Document,
     EFFECT_DESCRIPTORS, Effect, EffectCompatibilityStage, EffectId, EffectUniform, Event,
     FreezeFrame, JournalCommand, Keyframe, KeyframeInterpolation, LEGACY_DISPLAY_EFFECT_NAMES,
     LinkId, LutAsset, LutAssetId, LutAssetKind, LutAssetSource, Marker, MarkerId, MediaAsset,
@@ -1055,7 +1053,7 @@ fn relink_operation_journals_replays_and_undoes_redoes_without_filesystem_access
         candidate: relink_candidate(&current, "/never/needs/to/exist.mp4"),
         allow_unverified_source: false,
     };
-    let core = Core::spawn(initial.clone()).unwrap();
+    let core = super::spawn_actor(initial.clone()).unwrap();
     let Event::DocumentChanged {
         doc: relinked,
         journal_command: Some(JournalCommand::Do(actual)),
@@ -1068,7 +1066,7 @@ fn relink_operation_journals_replays_and_undoes_redoes_without_filesystem_access
 
     let encoded = serde_json::to_string(&JournalCommand::Do(operation.clone())).unwrap();
     let parsed: JournalCommand = serde_json::from_str(&encoded).unwrap();
-    let replay_core = Core::spawn(initial.clone()).unwrap();
+    let replay_core = super::spawn_actor(initial.clone()).unwrap();
     let Event::DocumentChanged {
         doc: replayed,
         journal_command: Some(replayed_command),
@@ -1157,7 +1155,7 @@ fn coalesced_gesture_replays_to_the_same_document_and_history_depth() {
     script.push(Command::Undo);
     script.push(Command::Redo);
 
-    let live = Core::spawn(initial.clone()).unwrap();
+    let live = super::spawn_actor(initial.clone()).unwrap();
     let mut live_documents = Vec::new();
     let mut journal = Vec::new();
     for command in script {
@@ -1184,7 +1182,7 @@ fn coalesced_gesture_replays_to_the_same_document_and_history_depth() {
         .count();
     assert_eq!(coalesced_records, 5);
 
-    let replayed = Core::spawn(initial.clone()).unwrap();
+    let replayed = super::spawn_actor(initial.clone()).unwrap();
     for (index, command) in journal.into_iter().enumerate() {
         let Event::DocumentChanged { doc, .. } = replayed.request(command.into()).unwrap() else {
             panic!("journaled command {index} should replay");
@@ -1314,7 +1312,7 @@ fn project_colour_context_reset_is_typed_journaled_undoable_and_redoable() {
     operation
         .apply_with_history_oracle(&mut initial.clone())
         .unwrap();
-    let core = Core::spawn(initial.clone()).unwrap();
+    let core = super::spawn_actor(initial.clone()).unwrap();
 
     let Event::DocumentChanged {
         doc: changed,
@@ -1565,7 +1563,7 @@ fn title_clips_reuse_move_trim_split_ripple_link_and_undo_contracts() {
     }
     .apply_with_history_oracle(&mut document.clone())
     .unwrap();
-    let core = Core::spawn(document.clone()).unwrap();
+    let core = super::spawn_actor(document.clone()).unwrap();
     core.request(Command::Do(Operation::SetTitleParam {
         clip: ClipId(2),
         name: "text".to_owned(),
@@ -1790,7 +1788,7 @@ fn freeze_clips_reuse_move_trim_split_ripple_link_and_undo_contracts() {
         TimeCode(105)
     );
 
-    let core = Core::spawn(document.clone()).unwrap();
+    let core = super::spawn_actor(document.clone()).unwrap();
     core.request(Command::Do(Operation::MoveClip {
         clip: ClipId(2),
         to_track: TrackId(2),
@@ -2733,7 +2731,7 @@ fn primary_correction_operations_validate_bounds_and_keyframes() {
 #[test]
 fn primary_correction_batch_is_undoable_and_redoable() {
     let initial = document_with_one_clip();
-    let core = Core::spawn(initial.clone()).unwrap();
+    let core = super::spawn_actor(initial.clone()).unwrap();
     let add = Operation::AddEffect {
         clip: ClipId(1),
         effect: Effect {
@@ -3980,7 +3978,7 @@ fn hand_edited_clip_audio_values_are_rejected_during_document_validation() {
 #[test]
 fn clip_audio_uses_exact_snapshot_undo() {
     let initial = document_with_one_clip();
-    let core = Core::spawn(initial.clone()).unwrap();
+    let core = super::spawn_actor(initial.clone()).unwrap();
     let Event::DocumentChanged { doc, .. } = core
         .request(Command::Do(Operation::SetClipAudio {
             clip: ClipId(1),
@@ -4107,7 +4105,7 @@ fn project_json_round_trip_preserves_exact_document_equality() {
 
 #[test]
 fn track_sync_lock_uses_snapshot_undo_and_redo() {
-    let core = Core::spawn(empty_timeline(Rational::new(30, 1).unwrap())).unwrap();
+    let core = super::spawn_actor(empty_timeline(Rational::new(30, 1).unwrap())).unwrap();
     let Event::DocumentChanged { doc, .. } = core
         .request(Command::Do(Operation::SetTrackSyncLock {
             track: TrackId(1),
@@ -4145,7 +4143,7 @@ fn ripple_marker_shifts_restore_exact_positions_on_snapshot_undo() {
         .apply_with_history_oracle(&mut initial)
         .unwrap();
     }
-    let core = Core::spawn(initial.clone()).unwrap();
+    let core = super::spawn_actor(initial.clone()).unwrap();
 
     let Event::DocumentChanged { doc, .. } = core
         .request(Command::Do(Operation::RippleDeleteClip { clip: ClipId(2) }))
@@ -4180,9 +4178,12 @@ fn ripple_marker_shifts_restore_exact_positions_on_snapshot_undo() {
 
 #[test]
 fn public_actor_builds_undoes_redoes_saves_and_reopens_a_rough_cut() {
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = super::spawn_actor(Document::default()).unwrap();
     let events = core.subscribe().unwrap();
-    let _initial = events.recv_timeout(Duration::from_secs(1)).unwrap();
+    let _initial = events
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
     let fps = Rational::new(30, 1).unwrap();
     let operations = [
         Operation::AddTrack {
@@ -4230,23 +4231,29 @@ fn public_actor_builds_undoes_redoes_saves_and_reopens_a_rough_cut() {
     let mut latest = None;
     for operation in operations {
         core.send(Command::Do(operation)).unwrap();
-        let Event::DocumentChanged { doc, .. } =
-            events.recv_timeout(Duration::from_secs(1)).unwrap()
+        let Event::DocumentChanged { doc, .. } = events
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap()
         else {
             panic!("expected accepted edit");
         };
         latest = Some(doc);
     }
     core.send(Command::Undo).unwrap();
-    let Event::DocumentChanged { doc: restored, .. } =
-        events.recv_timeout(Duration::from_secs(1)).unwrap()
+    let Event::DocumentChanged { doc: restored, .. } = events
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap()
     else {
         panic!("expected undo snapshot");
     };
     assert!(restored.clip(ClipId(3)).is_some());
     core.send(Command::Redo).unwrap();
-    let Event::DocumentChanged { doc: redone, .. } =
-        events.recv_timeout(Duration::from_secs(1)).unwrap()
+    let Event::DocumentChanged { doc: redone, .. } = events
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap()
     else {
         panic!("expected redo snapshot");
     };
@@ -5030,7 +5037,7 @@ fn patched_three_point_journals_as_one_undoable_revision_and_replays() {
         video_track: Some(TrackId(1)),
         audio_track: Some(TrackId(2)),
     };
-    let core = Core::spawn(initial.clone()).unwrap();
+    let core = super::spawn_actor(initial.clone()).unwrap();
     let Event::DocumentChanged {
         doc: changed,
         revision,
@@ -5047,7 +5054,7 @@ fn patched_three_point_journals_as_one_undoable_revision_and_replays() {
 
     let encoded = serde_json::to_string(&JournalCommand::Do(operation.clone())).unwrap();
     let parsed: JournalCommand = serde_json::from_str(&encoded).unwrap();
-    let replay_core = Core::spawn(initial.clone()).unwrap();
+    let replay_core = super::spawn_actor(initial.clone()).unwrap();
     let Event::DocumentChanged { doc: replayed, .. } = replay_core.request(parsed.into()).unwrap()
     else {
         panic!("patched three-point journal should replay");
@@ -5186,7 +5193,7 @@ fn bins_string_outs_and_sync_groups_are_validated_undoable_catalog_data() {
             .apply_with_history_oracle(&mut doc.clone())
             .unwrap();
     }
-    let core = Core::spawn(doc.clone()).unwrap();
+    let core = super::spawn_actor(doc.clone()).unwrap();
     assert!(matches!(
         core.request(Command::Do(Operation::RemoveStringOut {
             string_out: StringOutId(1),
@@ -5539,7 +5546,7 @@ fn clip_speed_serde_defaults_skips_and_round_trips() {
 #[test]
 fn clip_speed_change_is_one_undo_step() {
     let original = document_with_one_clip();
-    let core = Core::spawn(original.clone()).unwrap();
+    let core = super::spawn_actor(original.clone()).unwrap();
     assert!(matches!(
         core.request(Command::Do(Operation::SetClipSpeed {
             clip: ClipId(1),
@@ -6635,3 +6642,5 @@ fn effect_alias_is_an_unknown_effect_and_does_not_edit_the_document() {
     );
     assert_eq!(document, original);
 }
+
+use kinewright_project::operation_actor::Core;

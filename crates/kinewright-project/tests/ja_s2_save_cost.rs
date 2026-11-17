@@ -129,7 +129,6 @@ fn repeated_small_saves_with_six_populated_branches() {
     for sequence in 1..=12 {
         let envelope = CommandEnvelope {
             switch: None,
-            manual: None,
             context: None,
             version: 1,
             action: "comment".into(),
@@ -147,7 +146,6 @@ fn repeated_small_saves_with_six_populated_branches() {
             comment_text: Some(reference(text)),
             comment_strokes: Some(reference(strokes)),
             evidence: vec![],
-            transition: None,
         };
         owner.store().reset_decode_peaks_probe().unwrap();
         let usage = owner.store().usage().unwrap();
@@ -184,11 +182,6 @@ fn repeated_small_saves_with_six_populated_branches() {
         ),
     )
     .unwrap();
-    assert_eq!(
-        loaded.usage_probe().unwrap().live_history_bytes,
-        0,
-        "COLD_VALIDATION_RETAINS_NO_UNLEASED_HISTORY"
-    );
     assert!(loaded.usage_probe().unwrap().peak_decoded_bytes > 0);
     let report = serde_json::json!({
         "branches": 6, "tracks_per_branch": 12, "clips_per_branch": 120,

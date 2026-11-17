@@ -63,9 +63,7 @@ fn record(project: ProjectId) -> RescueCopyV1 {
         originating_session: SessionId::fresh().unwrap(),
         full_capture_sha256: "a".repeat(64),
         selected_capture_sha256: "b".repeat(64),
-        old_floor: 0,
-        new_floor: 0,
-        removed_undo: 0,
+
         redo_preserved: true,
         gesture_preserved: true,
         acknowledged_root: None,
@@ -726,7 +724,6 @@ mod durable {
         let issuer = bundle.issue_issuer(&core, &input, 1).unwrap();
         let envelope = CommandEnvelope {
             switch: None,
-            manual: None,
             context: None,
             version: 1,
             action: "edit".into(),
@@ -749,7 +746,6 @@ mod durable {
             comment_text: None,
             comment_strokes: None,
             evidence: vec![],
-            transition: None,
         };
         let mut r = record(bundle.project_id().clone());
         r.attempts.push(RescueAttemptProvenance {

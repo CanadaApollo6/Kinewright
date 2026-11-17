@@ -1,9 +1,7 @@
 //! AU4 clip envelopes and automation — core contract tests (AU4 §7 items A1 to
 //! A8 plus the core halves of A13, A16 and A20).
 
-#[path = "support/history_oracle.rs"]
-mod history_oracle;
-use history_oracle::ApplyHistoryOracle;
+use super::history_oracle::ApplyHistoryOracle;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -12,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crossbeam_channel::Receiver;
 use kinewright_core::{
     AssetId, AudioBus, AudioBusId, AudioMaster, AudioMix, AutomationCurve, BatchError, Clip,
-    ClipId, ColorContext, Command, Core, Document, ENVELOPE_DISPLAY_MIN_TENTH_DB, Effect, EffectId,
+    ClipId, ColorContext, Command, Document, ENVELOPE_DISPLAY_MIN_TENTH_DB, Effect, EffectId,
     Event, Keyframe, KeyframeInterpolation, MediaAsset, MediaCatalog, MediaEvent, MediaKind,
     MediaSourceFingerprint, OpError, Operation, ParamValue, Playback, Query, QueryResult, Rational,
     RelinkCandidate, TRACK_AUTOMATION_PARAMETERS, TimeCode, TimelineRevision, Track, TrackId,
@@ -3434,7 +3432,7 @@ fn gated_batch(core: &Core, operations: Vec<Operation>) -> std::sync::Arc<Docume
 /// last-key-to-static — with a stale revision refused.
 #[test]
 fn single_key_upsert_remove_round_trip() {
-    let core = Core::spawn(clip_with_envelope_and_colour_curve()).unwrap();
+    let core = super::spawn_actor(clip_with_envelope_and_colour_curve()).unwrap();
     let upsert_at = |at: i64, value: i64| Operation::UpsertEffectKeyframe {
         clip: ClipId(1),
         effect: EffectId(1),
@@ -3500,3 +3498,5 @@ fn single_key_upsert_remove_round_trip() {
 // through the real `params_for` fold in `kinewright-media`'s
 // `push_in_step_sub_pixel` (this file's hand-rolled fold mirror is deleted),
 // beside the lavapipe pixel-diff half.
+
+use kinewright_project::operation_actor::Core;

@@ -200,13 +200,7 @@ fn no_op_close_advances_position_and_default_recorder_is_disabled() {
         "ACTOR_NOOP_CLOSE_LEAVES_STACKS_EMPTY"
     );
     assert!(
-        matches!(
-            core.request(Command::Query(Query::OpLog)),
-            Err(Refusal {
-                error: Error::RecorderDisabled,
-                ..
-            })
-        ),
+        matches!(core.operations(true), Err(Error::RecorderDisabled)),
         "PRODUCT_ACTOR_HAS_NO_IMPLICIT_RECORDER"
     );
 }
@@ -1486,11 +1480,11 @@ fn delta_fork_preserves_the_current_occurrences_without_a_parent_capture() {
 fn attachment_capture_is_a_fixed_cut_and_shares_the_actor_identity_domain() {
     let pool = HistoryPool::new(PoolLimits::default());
     let parent = Core::spawn(&pool, Role::Ordinary, origin(), document()).unwrap();
-    let old_proof_actor = kinewright_core::Core::spawn(document()).unwrap();
+    let replacement = Core::for_test(document()).unwrap();
     assert_ne!(
         parent.actor_identity(),
-        old_proof_actor.actor_identity(),
-        "ACTOR_IDENTITIES_CANNOT_COLLIDE_DURING_THE_CUTOVER"
+        replacement.actor_identity(),
+        "ACTOR_IDENTITIES_CANNOT_COLLIDE"
     );
     let owner = parent.attach(&Proof).unwrap();
     let cut = owner.capture(&Proof).unwrap();

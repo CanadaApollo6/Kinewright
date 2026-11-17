@@ -58,7 +58,6 @@ fn grow(core: &Core) {
 }
 fn floor_limits() -> StorageLimits {
     StorageLimits {
-        branch_history_bytes: 1 << 20,
         ..StorageLimits::default()
     }
 }
@@ -79,9 +78,6 @@ fn rescue_profile(
     let capture = session.prepare_rescue(&offer).unwrap().unwrap();
     let selection = session.preview_rescue(capture, profile).unwrap();
     let mut consent = selection.consent();
-    if selection.removed_undo() > 0 {
-        selection.consent_trim(&mut consent).unwrap();
-    }
     if !selection.omissions().is_empty() {
         selection.consent_omission(&mut consent).unwrap();
     }
@@ -392,7 +388,6 @@ pub(super) fn w10_pending_command_exclusion_and_original_id_lookup() {
         };
         let envelope = CommandEnvelope {
             switch: None,
-            manual: None,
             context: None,
             version: 1,
             action: "edit".into(),
@@ -415,7 +410,6 @@ pub(super) fn w10_pending_command_exclusion_and_original_id_lookup() {
             comment_text: None,
             comment_strokes: None,
             evidence: vec![],
-            transition: None,
         };
         assert!(
             io_observer::fail_once(
@@ -737,7 +731,6 @@ pub(super) fn w13_omission_only_precedes_trim() {
             .unwrap()
     };
     let selection = prepare(&mut session);
-    assert_eq!(selection.removed_undo(), 0);
     assert_eq!(selection.omissions().len(), 1);
     assert_eq!(selection.omissions()[0].root, missing);
     let consent = selection.consent();
@@ -955,11 +948,6 @@ pub(super) fn w04_oldest_first_trim_preserves_redo_gesture_and_inputs() {
         let missing = capture.consent();
         let profile = floor_limits();
         let selection = session.preview_rescue(capture, profile.clone()).unwrap();
-        assert_eq!(
-            selection.removed_undo(),
-            0,
-            "STORAGE_PROFILE_NEVER_TRIMS_EXECUTOR_UNDO"
-        );
         assert!(selection.omissions().is_empty());
         let inspection = session.inspect_rescue_destination(&b).unwrap();
         assert!(
@@ -1147,11 +1135,6 @@ pub(super) fn w13_available_recovery_roots_cannot_be_omitted_for_quota() {
     let capture = session.prepare_rescue(&offer).unwrap().unwrap();
     let before = full_owner_value(&core);
     let selection = session.preview_rescue(capture, floor_limits()).unwrap();
-    assert_eq!(
-        selection.removed_undo(),
-        0,
-        "STORAGE_LIMIT_NEVER_TRIMS_AVAILABLE_EXECUTOR_HISTORY"
-    );
     assert!(
         selection.omissions().is_empty(),
         "AVAILABLE_RECOVERY_ROOTS_ARE_NOT_QUOTA_OMISSIONS"

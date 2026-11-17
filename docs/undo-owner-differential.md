@@ -1,5 +1,21 @@
 # Owner differential and audit contract differences
 
+The permanent switch differential uses the independent H1 model for documents,
+command identity and fates. A separate direct-operation replay reconstructs
+occurrence creation, split ancestry and every reachable boundary from the
+baseline seeds. Resource assertions inspect those model documents directly.
+Neither oracle uses the deleted boundary-document Core, lineage journal or
+old audit shortcut. The 67-kind matrix, both policies, conditional command
+normalisation, both stacks, coalescing, fold seeds, sibling uncertainty and
+save/encode/open identity checks remain.
+
+The same-line certainty property also runs in the session model. The historical
+H2a comparisons below explain the intentionally changed reader contract; their
+old implementation and shortcut adapter have been deleted. The new suite tests
+the selected command's fate directly and carries no mismatch exemption.
+
+## Historical H2a comparison
+
 The seeded H1 streams use all 67 operation kinds, Fold and NeverFold, two seeds, approvals, conditional-command acceptance, gesture closes and snapshot installs. The independent H1 model supplies documents and command fates. Fresh old Core actors and the actual `bundle_commit::lineage` journal rebuild every reachable boundary. Candidate input manifests pass through the actual old `retain_history_inputs`; direct document reference checks additionally cover unknown media fingerprints. The test adapter in `edit_audit.rs` calls the existing target-presence shortcut and `retained_batch_proof`; it does not implement another version of that walk.
 
 The run observed 6,512 generated transitions plus two folded-provenance probes and one sibling Do probe, 32 accepted approvals, 272 accepted DoIfRevision commands, 284 accepted DoBatchIfRevision commands, 48 explicitly recognized Do target-shortcut exemptions and two uncertain answers. The exemption requires an old certain Kept answer, an unapplied approved command, absent targets, and a different currently effective command which removed each target. A positive count assertion prevents it becoming vacuous. Every other old certain Do answer in these same-line streams must match; the separate sibling probe below records its specified uncertainty difference. Every transition approval also matches a separate model of subject location, prefix shape, terminal evidence and installed fold frontier.

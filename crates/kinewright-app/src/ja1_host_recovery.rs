@@ -69,7 +69,6 @@ fn run_barrier(
     pending: Vec<kinewright_project::operation_protocol::EncodedMessage>,
     live: std::sync::Arc<std::sync::atomic::AtomicBool>,
     saved_plan: &std::sync::Mutex<Option<RecoveryPlan>>,
-    discard: Option<usize>,
 ) -> Result<
     (
         kinewright_project::operation_actor::ManualPermit,
@@ -95,7 +94,6 @@ fn run_barrier(
                     client,
                     frozen: Some(frozen),
                     pending,
-                    discard_batches: discard,
                 })
                 .map_err(host_error)?,
         )?;
@@ -150,20 +148,13 @@ fn run_barrier(
     }
 }
 impl HostAttachment {
-    pub fn begin_manual_recovery(
-        &mut self,
-        owner: &mut Ja1EditingSession,
-    ) -> Result<(), BundleError> {
-        self.begin_manual_recovery_with_floor(owner, None)
-    }
     #[allow(
         clippy::too_many_lines,
         reason = "one GUI-owned freeze, source proof and background process handoff"
     )]
-    pub fn begin_manual_recovery_with_floor(
+    pub fn begin_manual_recovery(
         &mut self,
         owner: &mut Ja1EditingSession,
-        discard: Option<usize>,
     ) -> Result<(), BundleError> {
         if self.recovery.is_some() {
             return Ok(());
@@ -356,7 +347,6 @@ impl HostAttachment {
                 pending,
                 live,
                 &saved_plan,
-                discard,
             )
             .map(|(permit, reply, digest)| CompletedRecovery {
                 permit,

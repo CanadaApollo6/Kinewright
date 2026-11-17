@@ -1,4 +1,4 @@
-//! Paired shipping actor/owner measurements. No GUI or provider is launched.
+//! Shipping actor/owner measurements. No GUI or provider is launched.
 #![allow(
     clippy::cast_precision_loss,
     reason = "measurement JSON reports integer counts as f64"
@@ -6,9 +6,7 @@
 #[path = "../../kinewright-core/tests/support/undo_fixture.rs"]
 mod fixture;
 use kinewright_core::undo::{PhaseCounters, RoleBounds};
-use kinewright_core::{
-    Command, Core as OldCore, Document, Event, Operation, Query, QueryResult, TrackId,
-};
+use kinewright_core::{Command, Document, Event, Operation, Query, QueryResult, TrackId};
 use kinewright_project::{
     bundle::BundleSaveReport,
     bundle_records::{BatchId, ObjectRef, RecordKind},
@@ -28,35 +26,29 @@ fn evidence() -> ObjectRef {
         record_kind: RecordKind::OwnedEvidence,
     }
 }
-enum Engine {
-    Old(OldCore),
-    Product(Core),
-}
+struct Engine(Core);
 impl Engine {
     fn new(side: &str, document: Document, folding: bool) -> Self {
-        match side {
-            "old" => Self::Old(OldCore::spawn(document).unwrap()),
-            "product" => Self::Product(
-                Core::for_test_with_bounds(
-                    document,
-                    RoleBounds {
-                        operation_bytes: if folding {
-                            500
-                        } else {
-                            RoleBounds::ORDINARY.operation_bytes
-                        },
-                        ..RoleBounds::ORDINARY
+        assert_eq!(side, "product");
+        Self(
+            Core::for_test_with_bounds(
+                document,
+                RoleBounds {
+                    operation_bytes: if folding {
+                        500
+                    } else {
+                        RoleBounds::ORDINARY.operation_bytes
                     },
-                )
-                .unwrap(),
-            ),
-            _ => panic!("old or product"),
-        }
+                    ..RoleBounds::ORDINARY
+                },
+            )
+            .unwrap(),
+        )
     }
     fn execute(&self, command: Command) {
-        let event = match self {
-            Self::Old(core) => core.request(command).unwrap(),
-            Self::Product(core) => core.request(command).unwrap(),
+        let event = {
+            let Self(core) = self;
+            core.request(command).unwrap()
         };
         assert!(
             matches!(event, Event::DocumentChanged { .. }),
@@ -67,9 +59,9 @@ impl Engine {
         let command = Command::DoBatch(vec![Operation::DeleteClip {
             clip: kinewright_core::ClipId(400),
         }]);
-        match self {
-            Self::Old(_) => self.execute(command),
-            Self::Product(core) => {
+        {
+            let Self(core) = self;
+            {
                 let event = core
                     .request_with_context(
                         command,
@@ -93,9 +85,9 @@ impl Engine {
         self.execute(Command::Undo);
     }
     fn document(&self) -> Arc<Document> {
-        let event = match self {
-            Self::Old(core) => core.request(Command::Query(Query::Document)).unwrap(),
-            Self::Product(core) => core.request(Command::Query(Query::Document)).unwrap(),
+        let event = {
+            let Self(core) = self;
+            core.request(Command::Query(Query::Document)).unwrap()
         };
         let Event::QueryResult(QueryResult::Document(document)) = event else {
             panic!("document")
@@ -103,16 +95,12 @@ impl Engine {
         document
     }
     fn depth(&self) -> usize {
-        match self {
-            Self::Old(core) => core.export_history().unwrap().cursor.undo.len(),
-            Self::Product(core) => core.export_history().unwrap().history().undo.len(),
-        }
+        let Self(core) = self;
+        core.export_history().unwrap().history().undo.len()
     }
-    fn counters(&self) -> Option<(PhaseCounters, OwnerCounters)> {
-        match self {
-            Self::Old(_) => None,
-            Self::Product(core) => Some(core.counters().unwrap()),
-        }
+    fn counters(&self) -> (PhaseCounters, OwnerCounters) {
+        let Self(core) = self;
+        core.counters().unwrap()
     }
     fn timed(
         &self,
@@ -124,8 +112,9 @@ impl Engine {
         let start = Instant::now();
         self.execute(command);
         let elapsed = start.elapsed().as_secs_f64() * 1000.;
-        if let Some((history, owner)) = before {
-            let after = self.counters().unwrap();
+        {
+            let (history, owner) = before;
+            let after = self.counters();
             let row = phases
                 .entry(lane.into())
                 .or_insert_with(|| serde_json::json!({"commands":0}));
@@ -239,7 +228,7 @@ fn cold_product(core: &Core) -> (f64, f64, serde_json::Value) {
     reason = "one fixed paired protocol keeps the historical fixture and sample counts visible"
 )]
 fn main() {
-    let side = std::env::args().nth(1).expect("old or product");
+    let side = std::env::args().nth(1).expect("product");
     let mut metrics = BTreeMap::new();
     let mut samples = BTreeMap::new();
     let mut phases = BTreeMap::new();
@@ -249,7 +238,8 @@ fn main() {
         engine.execute(edit(index));
     }
     assert_eq!(engine.depth(), 2000);
-    if let Engine::Product(core) = &engine {
+    {
+        let Engine(core) = &engine;
         let (open, undo, phase) = cold_product(core);
         metrics.insert("open_ms".to_owned(), open);
         metrics.insert("cold_undo_ms".to_owned(), undo);
@@ -276,8 +266,9 @@ fn main() {
         "gesture_apply_ms".into(),
         start.elapsed().as_secs_f64() * 1000.,
     );
-    if let Some((history, owner)) = before {
-        let after = engine.counters().unwrap();
+    {
+        let (history, owner) = before;
+        let after = engine.counters();
         phases.insert("gesture_apply".into(), serde_json::json!({"commands":120, "history":after.0.since(history), "owner":after.1.since(owner)}));
     }
     assert_eq!(engine.depth(), 2001);
@@ -331,7 +322,8 @@ fn main() {
     for index in 32..64 {
         times.push(folded.timed(edit(index), "fold", &mut phases));
     }
-    if let Engine::Product(core) = &folded {
+    {
+        let Engine(core) = &folded;
         let snapshot = core.export_history().unwrap();
         assert_eq!(
             snapshot.history().undo.len(),

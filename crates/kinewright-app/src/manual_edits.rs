@@ -355,7 +355,6 @@ impl ManualEdits {
                         Ok(Ok(Event::OpRejected { error, .. })) => error.to_string(),
                         Ok(Ok(Event::BatchRejected { error, .. })) => error.to_string(),
                         Ok(Ok(Event::RevisionConflict { .. })) => "The document changed before this edit could be applied. Check its current value and try again.".into(),
-                        Ok(Ok(Event::UndoBlockedBySave { .. })) => "Undo is waiting for the save to finish. Retry after the destination is reconciled.".into(),
                         Ok(Err(error)) => error.to_string(),
                         Err(_) => "The edit worker panicked. Check the document; this edit's outcome could not be confirmed.".into(),
                         _ => "The Core actor returned an unexpected reply. Check the document before trying this edit again.".into(),

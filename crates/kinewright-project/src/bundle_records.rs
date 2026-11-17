@@ -1,9 +1,8 @@
 //! Frozen S0 record identities and S1 payloads. Later producers stay unsupported.
 #![allow(clippy::missing_errors_doc)]
 use crate::{bundle::BundleError, receipts::CommandId};
-use kinewright_core::{Clip, ClipId, Operation};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fmt::Write as _};
+use std::fmt::Write as _;
 
 macro_rules! identity {
     ($name:ident) => {
@@ -64,15 +63,11 @@ impl BatchId {
 #[serde(rename_all = "snake_case")]
 pub enum RecordKind {
     Document,
-    History,
     OperationHistory,
     BranchCheckpoint,
     BranchIndex,
     RootCheckpoint,
     SpecialistBase,
-    HistoryFloor,
-    RecoveryClose,
-    Lineage,
     StoreManifest,
     InputManifest,
     InputChunkTable,
@@ -113,15 +108,11 @@ impl RecordKind {
         matches!(
             self,
             Self::Document
-                | Self::History
                 | Self::OperationHistory
                 | Self::BranchCheckpoint
                 | Self::BranchIndex
                 | Self::RootCheckpoint
-                | Self::Lineage
                 | Self::SpecialistBase
-                | Self::HistoryFloor
-                | Self::RecoveryClose
                 | Self::StoreManifest
                 | Self::InputManifest
                 | Self::InputChunkTable
@@ -203,44 +194,6 @@ pub use crate::operation_checkpoint::Checkpoint as BranchCheckpoint;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LegacyBranchCheckpoint {
-    pub branch_id: BranchId,
-    pub head_id: HeadId,
-    pub document_ref: ObjectRef,
-    pub document_hash: String,
-    pub baseline_ref: ObjectRef,
-    pub history_ref: ObjectRef,
-    /// Portable capture identity, distinct from the referenced on-disk record.
-    pub history_digest: String,
-    pub history_role: crate::history_record::HistoryRole,
-    pub lineage_ref: ObjectRef,
-    pub input_manifest_ref: ObjectRef,
-    /// Input context at each accepted command, including undone/recoverable heads.
-    pub history_input_manifest_refs: Vec<ObjectRef>,
-    pub batch_ids: Vec<BatchId>,
-    pub applied_operations_digest: String,
-    pub checkpoint_generation: u64,
-    pub floor_generation: u64,
-    pub command_cut: Option<CommandId>,
-    pub predecessor: Option<HeadId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub take_map_revision_ref: Option<ObjectRef>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LegacySpecialistBaseRecord {
-    pub history_role: crate::history_record::HistoryRole,
-    pub target_branch: BranchId,
-    pub base_head: HeadId,
-    pub base_document_hash: String,
-    pub original_baseline_ref: ObjectRef,
-    pub frozen_checkpoint_ref: ObjectRef,
-    pub full_applied_delta: Vec<Operation>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SpecialistBaseRecord {
     pub history_role: crate::operation_history::Role,
     pub target_branch: BranchId,
@@ -250,43 +203,10 @@ pub struct SpecialistBaseRecord {
     pub frozen_checkpoint_ref: ObjectRef,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HistoryFloorCheckpoint {
-    pub preceding_checkpoint_generation: u64,
-    pub preceding_floor_generation: u64,
-    pub floor_generation: u64,
-    pub command_cut: Option<CommandId>,
-    pub old_baseline_ref: ObjectRef,
-    pub new_baseline_ref: ObjectRef,
-    pub checkpoint_ref: ObjectRef,
-    pub equivalence_digest: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RecoveryCloseCheckpoint {
-    pub preceding_checkpoint_ref: ObjectRef,
-    pub reconciled_cut: Option<CommandId>,
-    pub suffix_digest: String,
-    pub closed_checkpoint_ref: ObjectRef,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OccurrenceId {
     pub branch_origin: BranchId,
     pub creation_batch_id: BatchId,
     pub result_ordinal: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LineageRecord {
-    pub branch_origin: BranchId,
-    pub baseline: BTreeMap<ClipId, OccurrenceId>,
-    pub current: BTreeMap<ClipId, OccurrenceId>,
-    pub undo: Vec<BTreeMap<ClipId, OccurrenceId>>,
-    pub redo: Vec<BTreeMap<ClipId, OccurrenceId>>,
-    /// Child occurrence, parent occurrence, exact child range from Core application.
-    pub split_ancestry: Vec<(OccurrenceId, OccurrenceId, Clip)>,
 }

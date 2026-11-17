@@ -97,7 +97,7 @@ fn observe_rescue_owners(root: &Path, revised: bool, slots: bool) -> Result<Valu
     if slots {
         let mut ledger = RescueSlots::default();
         for attempt in 1..=3 {
-            let tag = kinewright_core::HistorySaveTag {
+            let tag = kinewright_project::PublicationTag {
                 destination: path.clone(),
                 parent_device: 1,
                 parent_inode: 1,
@@ -105,7 +105,7 @@ fn observe_rescue_owners(root: &Path, revised: bool, slots: bool) -> Result<Valu
                 previous_root_sha256: None,
             };
             let reservation = ledger.begin(tag)?;
-            let unknown = (attempt == 3).then(|| kinewright_core::HistorySaveTag {
+            let unknown = (attempt == 3).then(|| kinewright_project::PublicationTag {
                 destination: root.join("modeled-unknown.kinewright"),
                 parent_device: 1,
                 parent_inode: 1,
@@ -163,7 +163,6 @@ fn observe(root: &Path) -> Result<Value, BundleError> {
     owner.save(&initial, &inputs)?;
     drop(owner);
     let limits = StorageLimits {
-        branch_history_bytes: 1 << 20,
         ..StorageLimits::default()
     };
     let mut owner = LoadedBundle::read_with_limits_probe(&path, limits, initial.history_pool())?

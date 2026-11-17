@@ -72,12 +72,7 @@ impl Ja1EditingSession {
         self.active_bundle()?
             .store()
             .person_publication_store()
-            .reserve(
-                AUDIO_BYTES + LOG_BYTES,
-                3 * (AUDIO_BYTES + LOG_BYTES),
-                0,
-                true,
-            )
+            .reserve(AUDIO_BYTES + LOG_BYTES, 3 * (AUDIO_BYTES + LOG_BYTES), true)
     }
     pub fn voice_note(&self, note: &NoteId) -> Result<VoiceNoteHandle, BundleError> {
         self.active_bundle()?.voice_note(note)

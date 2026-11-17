@@ -1439,7 +1439,7 @@ pub struct HostCommandOwner {
     choice: Option<Choice>,
     recovery_choice: bool,
     foreground_history: Option<kinewright_project::operation_history::SnapshotIdentity>,
-    floor_disclosure: String,
+
     admitted: BTreeMap<std::path::PathBuf, PinnedPath>,
     message: String,
     sessions: BTreeMap<u64, HostOwnedSession>,
@@ -1456,7 +1456,7 @@ enum Choice {
     Rescue {
         selection: Box<RescueSelection>,
         consent: RescueConsent,
-        trim: bool,
+
         omission: bool,
     },
     Remove {
@@ -1634,7 +1634,7 @@ impl HostCommandOwner {
             choice: None,
             recovery_choice: false,
             foreground_history: None,
-            floor_disclosure: String::new(),
+
             admitted: BTreeMap::new(),
             message: "Authenticated writer attachment. Saved means a verified durable save.".into(),
             sessions: BTreeMap::new(),
@@ -1837,12 +1837,6 @@ impl HostCommandOwner {
             self.message = error.to_string();
             reply.error = Some(error.refusal());
         }
-        if let Some(saved) = &reply.saved
-            && !saved.floor_disclosure.is_empty()
-        {
-            self.message.push(' ');
-            self.message.push_str(&saved.floor_disclosure);
-        }
         let current_snapshot_owner = self.snapshot_read_owner();
         #[cfg(target_os = "linux")]
         self.revoke_native_owner(current_snapshot_owner.as_ref());
@@ -1881,7 +1875,7 @@ impl HostCommandOwner {
         {
             self.manual = None;
         }
-        let mut published: HostSaveReport = report.into();
+        let published: HostSaveReport = report.into();
         if foreground {
             // Exact publisher history, never a post-IO live Core read.
             let history = self.owner()?.published_history(report)?;
@@ -1892,8 +1886,6 @@ impl HostCommandOwner {
                 // Save is a state-agreement boundary. Core alone owns folding.
                 self.foreground_history = Some(history.identity());
             }
-            published.removed_undo = 0;
-            published.floor_disclosure.clear();
             reply.history = Some(history);
         }
         reply.saved = Some(published);
@@ -2125,9 +2117,8 @@ impl HostCommandOwner {
                 client,
                 frozen,
                 pending,
-                discard_batches,
             } => {
-                self.begin_recovery(client, frozen.as_ref(), &pending, discard_batches, reply)?;
+                self.begin_recovery(client, frozen.as_ref(), &pending, reply)?;
             }
             HostCommand::PublishBarrier { barrier } => self.publish_barrier(&barrier, reply)?,
             HostCommand::ConfirmBarrier { barrier, installed } => {
@@ -2314,8 +2305,7 @@ impl HostCommandOwner {
                     .ok_or(BundleError::HistoryChanged)?;
                 let selection = owner.preview_rescue(capture, owner.store()?.limits().clone())?;
                 self.message = format!(
-                    "Save rescue copy: {} Undo entries removed, {} unavailable recovery points omitted. {}",
-                    selection.removed_undo(),
+                    "Save rescue copy with all Undo and Redo kept: {} unavailable recovery points omitted. {}",
                     selection.omissions().len(),
                     owner.rescue_handoff_disclosure(&selection)?
                 );
@@ -2330,22 +2320,11 @@ impl HostCommandOwner {
                 self.choice = Some(Choice::Rescue {
                     selection: Box::new(selection),
                     consent,
-                    trim: false,
+
                     omission: false,
                 });
             }
-            HostCommand::ConsentTrim => {
-                let Some(Choice::Rescue {
-                    selection, consent, ..
-                }) = &mut self.choice
-                else {
-                    return Err(BundleError::HistoryChanged.into());
-                };
-                selection.consent_trim(consent)?;
-                if let Some(Choice::Rescue { trim, .. }) = &mut self.choice {
-                    *trim = true;
-                }
-            }
+
             HostCommand::ConsentOmission => {
                 let Some(Choice::Rescue {
                     selection, consent, ..
@@ -2796,11 +2775,7 @@ impl HostCommandOwner {
                 .err()
                 .map(|e| e.to_string());
             status.selection_availability = owner.selection_availability().unwrap_or_default();
-            status.save_disclosure = if self.floor_disclosure.is_empty() {
-                owner.recovery_save_disclosure().unwrap_or_default()
-            } else {
-                self.floor_disclosure.clone()
-            };
+            status.save_disclosure = owner.recovery_save_disclosure().unwrap_or_default();
         }
         if !self.retention_proven {
             status.frozen = true;
@@ -2816,16 +2791,12 @@ impl HostCommandOwner {
         };
         if let Some(Choice::Rescue {
             selection,
-            trim,
             omission,
             ..
         }) = &self.choice
         {
-            status.rescue_trim_required = selection.removed_undo() > 0;
-            status.rescue_trim_accepted = *trim;
             status.rescue_omission_required = !selection.omissions().is_empty();
             status.rescue_omission_accepted = *omission;
-            status.rescue_removed_undo = selection.removed_undo();
             status.rescue_omissions = selection
                 .omissions()
                 .iter()
@@ -3025,12 +2996,6 @@ impl HostCommandOwner {
         let worker_core = core.clone();
         let project = self.config.project.clone();
         let roots = self.config.roots.clone();
-        let history_limits = match &self.owner {
-            Some(owner) => kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(
-                owner.store()?.limits(),
-            )?,
-            None => kinewright_project::manual_history::OrdinaryHistoryLimits::default(),
-        };
         let thread = thread::Builder::new()
             .name(format!("kinewright-host-session-{id}"))
             .spawn(move || {
@@ -3045,7 +3010,6 @@ impl HostCommandOwner {
                         media,
                         &project,
                         roots,
-                        history_limits,
                     )?;
                     let cfg = SessionConfig {
                         model: cfg.model,

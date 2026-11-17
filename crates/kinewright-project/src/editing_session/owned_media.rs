@@ -110,9 +110,7 @@ impl Ja1EditingSession {
         let issuer = bundle.issue_issuer(&core, &self.inputs, 1)?;
         let envelope = crate::receipts::CommandEnvelope {
             switch: None,
-            manual: None,
             context: None,
-            transition: None,
             version: 1,
             action: "edit".into(),
             id: crate::receipts::CommandId {
@@ -284,9 +282,7 @@ impl Ja1EditingSession {
             let issuer = bundle.issue_issuer(&core, &self.inputs, 1)?;
             let envelope = crate::receipts::CommandEnvelope {
                 switch: None,
-                manual: None,
                 context: None,
-                transition: None,
                 version: 1,
                 action: "edit".into(),
                 id: crate::receipts::CommandId {
@@ -470,7 +466,6 @@ fn prepare(
             .decoded_charge()
             .checked_add(8192)
             .ok_or(BundleError::Capacity("staged manifest charge"))?,
-        0,
         false,
     )?;
     let mut manifest: OwnedInputManifest = (*prior).clone();

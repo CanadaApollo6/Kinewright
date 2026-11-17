@@ -14,10 +14,8 @@ pub mod edit_audit;
 pub mod editing_session;
 // JA-1 S3 C4
 pub mod feedback_mapping;
-pub mod history_record;
 mod history_save;
-mod history_size;
-mod lineage_journal;
+pub use history_save::PublicationTag;
 pub mod operation_actor;
 pub mod operation_checkpoint;
 pub mod operation_history;
@@ -115,8 +113,6 @@ pub(crate) fn test_hook(point: &str) {
     }
 }
 
-pub mod manual_history;
-
 mod copy_publication;
 mod task_checkpoint;
 
@@ -129,11 +125,7 @@ pub mod run_admission;
 #[cfg(all(test, target_os = "linux"))]
 mod person_admission_tests;
 
-#[cfg(all(test, feature = "test-util"))]
-mod cleanup_measurement_tests;
-
 pub mod cleanup_admission;
-pub mod task_history_admission;
 
 #[cfg(all(test, target_os = "linux"))]
 mod cleanup_quota_tests;

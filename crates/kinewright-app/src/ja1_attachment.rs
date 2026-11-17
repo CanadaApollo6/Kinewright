@@ -85,7 +85,7 @@ pub(crate) enum Action {
     OpenRecovery,
     Abandon,
     PreviewRescue,
-    ConsentTrim,
+
     ConsentOmission,
     RescueTo(PathBuf),
     Cancel,
@@ -123,7 +123,6 @@ impl Action {
             | Self::OpenRecovery
             | Self::Abandon
             | Self::PreviewRescue
-            | Self::ConsentTrim
             | Self::ConsentOmission
             | Self::RescueTo(_)
             | Self::Cancel
@@ -154,7 +153,6 @@ impl Action {
                 | Self::PreviewRetirement(_)
                 | Self::PreviewForget
                 | Self::PreviewRelease(_)
-                | Self::ConsentTrim
                 | Self::ConsentOmission
                 | Self::Cancel
         )
@@ -166,7 +164,7 @@ enum Choice {
     Rescue {
         selection: Box<RescueSelection>,
         consent: RescueConsent,
-        trim: bool,
+
         omission: bool,
     },
     Remove {
@@ -1174,12 +1172,6 @@ impl Ja1Attachment {
             || reply.status.message.clone(),
             |error| error.message.clone(),
         );
-        if let Some(saved) = &reply.saved
-            && !saved.floor_disclosure.is_empty()
-        {
-            self.message.push(' ');
-            self.message.push_str(&saved.floor_disclosure);
-        }
         let manual_failed = reply
             .error
             .as_ref()
@@ -1599,23 +1591,11 @@ impl Ja1Attachment {
                 self.choice = Some(Choice::Rescue {
                     selection: Box::new(selection),
                     consent,
-                    trim: false,
+
                     omission: false,
                 });
             }
-            Action::ConsentTrim => {
-                let Some(Choice::Rescue {
-                    selection,
-                    consent,
-                    trim,
-                    ..
-                }) = &mut self.choice
-                else {
-                    return Err(BundleError::HistoryChanged);
-                };
-                selection.consent_trim(consent)?;
-                *trim = true;
-            }
+
             Action::ConsentOmission => {
                 let Some(Choice::Rescue {
                     selection,
@@ -1856,18 +1836,10 @@ impl Ja1Attachment {
             }
             Some(Choice::Rescue {
                 selection,
-                trim,
                 omission,
                 ..
             }) => {
-                if selection.removed_undo() > 0
-                    && !trim
-                    && ui.button("Remove this older Undo history in B").clicked()
-                {
-                    action = Some(Action::ConsentTrim);
-                }
                 if !selection.omissions().is_empty()
-                    && (selection.removed_undo() == 0 || *trim)
                     && !omission
                     && ui
                         .button("Omit these unavailable recovery points")
@@ -1875,8 +1847,7 @@ impl Ja1Attachment {
                 {
                     action = Some(Action::ConsentOmission);
                 }
-                if (selection.removed_undo() == 0 || *trim)
-                    && (selection.omissions().is_empty() || *omission)
+                if (selection.omissions().is_empty() || *omission)
                     && ui.button("Save rescue copy to…").clicked()
                     && let Some(path) = rfd::FileDialog::new()
                         .add_filter("Kinewright project", &["kinewright"])
@@ -2053,15 +2024,7 @@ fn copy_text(status: &CopyStatus) -> String {
     }
 }
 fn rescue_preview(selection: &RescueSelection) -> String {
-    let mut text = if selection.removed_undo() > 0 {
-        format!(
-            "Save a rescue copy with older Undo history removed in B. Undo before step {} will be unavailable there; {} oldest Undo entries are removed. Current edits, Redo, and the open gesture are kept. A is unchanged. ",
-            selection.undo_floor(),
-            selection.removed_undo()
-        )
-    } else {
-        "Save a rescue copy with all Undo and Redo kept. ".into()
-    };
+    let mut text = String::from("Save a rescue copy with all Undo and Redo kept. ");
     if !selection.omissions().is_empty() {
         text.push_str("Older recovery points from A are not in the rescue copy. ");
         for omission in selection.omissions() {

@@ -1,6 +1,6 @@
 //! Fixed heavy-fixture copy/ripple/split lanes and allocation-phase counters.
 use kinewright_core::{
-    ClipId, Command, Core, Document, Event, Operation, Query, QueryResult, TimeCode,
+    ClipId, Command, Document, Operation, TimeCode,
     undo::{History, PhaseCounters, RetentionPolicy, RoleBounds},
 };
 #[path = "../tests/support/undo_fixture.rs"]
@@ -11,16 +11,11 @@ use std::{collections::BTreeMap, sync::Arc, time::Instant};
     reason = "one fixed benchmark engine; no extra indirection in either timed lane"
 )]
 enum Engine {
-    Old(Core),
     New(History),
 }
 impl Engine {
     fn execute(&mut self, command: Command) {
         match self {
-            Self::Old(core) => assert!(matches!(
-                core.request(command).unwrap(),
-                Event::DocumentChanged { .. }
-            )),
             Self::New(history) => {
                 std::hint::black_box(history.execute(command).unwrap());
             }
@@ -28,20 +23,12 @@ impl Engine {
     }
     fn document(&self) -> Arc<Document> {
         match self {
-            Self::Old(core) => {
-                let Event::QueryResult(QueryResult::Document(document)) =
-                    core.request(Command::Query(Query::Document)).unwrap()
-                else {
-                    panic!("document query")
-                };
-                document
-            }
             Self::New(history) => Arc::clone(history.document()),
         }
     }
 }
 fn main() {
-    let side = std::env::args().nth(1).expect("old or new");
+    let side = std::env::args().nth(1).expect("new");
     let layout = serde_json::json!({"step":std::mem::size_of::<kinewright_core::undo::Step>(),"operation":std::mem::size_of::<Operation>(),"clip":std::mem::size_of::<kinewright_core::Clip>(),"identity":std::mem::size_of::<kinewright_core::OperationIdentityEffect>(),"command_effects":std::mem::size_of::<kinewright_core::undo::CommandEffects>()});
     if side == "layout" {
         println!("{layout}");
@@ -49,11 +36,10 @@ fn main() {
     }
     let document = fixture::heavy();
     let mut engine = match side.as_str() {
-        "old" => Engine::Old(Core::spawn(document).unwrap()),
         "new" => Engine::New(
             History::new(document, RetentionPolicy::Fold, RoleBounds::ORDINARY).unwrap(),
         ),
-        _ => panic!("old or new"),
+        _ => panic!("new"),
     };
     for index in 0..2000 {
         engine.execute(Command::Do(Operation::SetTrackSyncLock {

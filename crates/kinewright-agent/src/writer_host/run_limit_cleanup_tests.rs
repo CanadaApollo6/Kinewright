@@ -1,4 +1,8 @@
-fn cleanup_history(f: &Fixture, run: &RunId, child: &TaskId) -> kinewright_project::operation_history::OwnerSnapshot {
+fn cleanup_history(
+    f: &Fixture,
+    run: &RunId,
+    child: &TaskId,
+) -> kinewright_project::operation_history::OwnerSnapshot {
     let host = f.host.owner.upgrade().unwrap();
     let owner = host.lock().unwrap();
     let state = owner
@@ -17,13 +21,19 @@ fn cleanup_history(f: &Fixture, run: &RunId, child: &TaskId) -> kinewright_proje
             &history.source.checkpoint,
         )
         .unwrap();
-        checkpoint.open(owner
-        .owner()
+    checkpoint
+        .open(
+            owner.owner().unwrap().store().unwrap(),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
         .unwrap()
-        .store()
-        .unwrap(), &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap().into_reader().unwrap().into_capture().unwrap()
+        .into_reader()
+        .unwrap()
+        .into_capture()
+        .unwrap()
 }
-
 
 fn cleanup_accounting(
     f: &Fixture,
@@ -364,14 +374,9 @@ fn run_limit_cleanup_dirty_stop_reopens_and_releases_every_latch() {
                 .unwrap();
                 f.brief.inputs = owner.current_inputs_ref().clone();
                 println!(
-                    "C3_CLEANUP_CASE latch={latch:?} staged_manual_overlap={overlap} terminal_cuts={} peak_history={} objects={}",
+                    "C3_CLEANUP_CASE latch={latch:?} staged_manual_overlap={overlap} terminal_cuts={} peak_decoded={} objects={}",
                     budget.terminal,
-                    owner
-                        .store()
-                        .unwrap()
-                        .usage()
-                        .unwrap()
-                        .peak_live_history_bytes,
+                    owner.store().unwrap().usage().unwrap().peak_decoded_bytes,
                     owner.store().unwrap().usage().unwrap().objects
                 );
             }
@@ -472,7 +477,7 @@ fn run_limit_cleanup_history_bound_refuses_before_any_live_mutation() {
         assert_eq!(refused.is_error, Some(true), "C3_BOUND_REFUSED {refused:?}");
         assert!(
             format!("{refused:?}")
-                .contains(kinewright_project::task_history_admission::LIMIT_REASON),
+                .contains(kinewright_project::operation_history::TASK_LIMIT_REASON),
             "C3_ACTIONABLE_REFUSAL {refused:?}"
         );
         assert_eq!(
@@ -555,21 +560,67 @@ fn run_limit_cleanup_history_bound_refuses_before_any_live_mutation() {
 
 #[test]
 fn run_limit_cleanup_undo_and_redo_are_bounded_before_mutation() {
-    let pool = kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default());
-    let core = Core::spawn(&pool, kinewright_project::operation_history::Role::Task, kinewright_project::operation_history::CreationOrigin { branch: identity(), batch: identity() }, kinewright_core::Document {
-        tracks: vec![kinewright_core::Track { id: kinewright_core::TrackId(1), kind: kinewright_core::TrackKind::Video, sync_lock: true, clips: vec![] }], ..Default::default()
-    }).unwrap();
+    let pool = kinewright_project::operation_history::HistoryPool::new(
+        kinewright_project::operation_history::PoolLimits::default(),
+    );
+    let core = Core::spawn(
+        &pool,
+        kinewright_project::operation_history::Role::Task,
+        kinewright_project::operation_history::CreationOrigin {
+            branch: identity(),
+            batch: identity(),
+        },
+        kinewright_core::Document {
+            tracks: vec![kinewright_core::Track {
+                id: kinewright_core::TrackId(1),
+                kind: kinewright_core::TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let mut count = 0;
     loop {
-        match core.request(kinewright_core::Command::Do(kinewright_core::Operation::SetTrackSyncLock { track: kinewright_core::TrackId(1), locked: count % 2 == 0 })) {
+        match core.request(kinewright_core::Command::Do(
+            kinewright_core::Operation::SetTrackSyncLock {
+                track: kinewright_core::TrackId(1),
+                locked: count % 2 == 0,
+            },
+        )) {
             Ok(kinewright_core::Event::DocumentChanged { .. }) => count += 1,
-            Err(kinewright_project::operation_actor::Refusal { error: kinewright_project::operation_actor::Error::History(kinewright_project::operation_history::Error::History(kinewright_core::undo::Error::HistoryFull)), .. }) => break,
+            Err(kinewright_project::operation_actor::Refusal {
+                error:
+                    kinewright_project::operation_actor::Error::History(
+                        kinewright_project::operation_history::Error::History(
+                            kinewright_core::undo::Error::HistoryFull,
+                        ),
+                    ),
+                ..
+            }) => break,
             other => panic!("C3_FIXED_TASK_BOUND {count}: {other:?}"),
         }
     }
     let before = core.export_history().unwrap();
-    for _ in 0..count { assert!(matches!(core.request(kinewright_core::Command::Undo).unwrap(), kinewright_core::Event::DocumentChanged { .. }), "C3_UNDO_NEVER_REFUSES_HISTORY_CAPACITY"); }
-    for _ in 0..count { assert!(matches!(core.request(kinewright_core::Command::Redo).unwrap(), kinewright_core::Event::DocumentChanged { .. }), "C3_REDO_NEVER_REFUSES_HISTORY_CAPACITY"); }
+    for _ in 0..count {
+        assert!(
+            matches!(
+                core.request(kinewright_core::Command::Undo).unwrap(),
+                kinewright_core::Event::DocumentChanged { .. }
+            ),
+            "C3_UNDO_NEVER_REFUSES_HISTORY_CAPACITY"
+        );
+    }
+    for _ in 0..count {
+        assert!(
+            matches!(
+                core.request(kinewright_core::Command::Redo).unwrap(),
+                kinewright_core::Event::DocumentChanged { .. }
+            ),
+            "C3_REDO_NEVER_REFUSES_HISTORY_CAPACITY"
+        );
+    }
     let after = core.export_history().unwrap();
     assert_eq!(after.history().undo, before.history().undo);
     assert_eq!(after.history().redo, before.history().redo);

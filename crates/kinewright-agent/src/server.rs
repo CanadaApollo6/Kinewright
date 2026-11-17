@@ -558,7 +558,7 @@ pub struct McpServer {
 }
 
 enum HostHistoryPolicy {
-    Ordinary(kinewright_project::manual_history::OrdinaryHistoryLimits),
+    Ordinary,
     Task(
         crate::orchestration::tasks::TaskEndpoint,
         Option<crate::writer_host::task_mcp::TaskMcp>,
@@ -573,7 +573,6 @@ impl McpServer {
         analysis: Arc<dyn Analysis>,
         project: &str,
         roots: crate::writer_host::SessionRoots,
-        history_limits: kinewright_project::manual_history::OrdinaryHistoryLimits,
     ) -> Result<Self, crate::writer_host::HostError> {
         Self::start_host_endpoint(
             core,
@@ -581,7 +580,7 @@ impl McpServer {
             analysis,
             project,
             roots,
-            HostHistoryPolicy::Ordinary(history_limits),
+            HostHistoryPolicy::Ordinary,
         )
     }
     pub(crate) fn start_task_isolated(
@@ -639,11 +638,7 @@ impl McpServer {
         );
         handler.host_scoped = true;
         match history_policy {
-            HostHistoryPolicy::Ordinary(limits) => {
-                handler.ordinary_history_limits = Arc::new(
-                    kinewright_project::manual_history::OrdinaryHistoryAdmission::new(limits),
-                );
-            }
+            HostHistoryPolicy::Ordinary => {}
             HostHistoryPolicy::Task(endpoint, control) => {
                 handler.task_control = control.map(|c| c.with_confirmations(confirmations.clone()));
                 handler = handler.with_task_endpoint(endpoint);
@@ -1423,7 +1418,6 @@ fn host_scoped_tool_admitted(request: &CallToolRequestParams) -> bool {
 #[derive(Clone)]
 struct KinewrightMcp {
     // Handler clones address the same Core; they share its proven-prefix cache.
-    ordinary_history_limits: Arc<kinewright_project::manual_history::OrdinaryHistoryAdmission>,
     result_sizes: Arc<Mutex<crate::runtime::ResultSizeMetrics>>,
     #[cfg(feature = "eval-harness")]
     ja_request_counts: Arc<[std::sync::atomic::AtomicU64; 2]>,
@@ -1501,11 +1495,6 @@ impl KinewrightMcp {
         incidents: IncidentLogHandle,
     ) -> Self {
         Self {
-            ordinary_history_limits: Arc::new(
-                kinewright_project::manual_history::OrdinaryHistoryAdmission::new(
-                    kinewright_project::manual_history::OrdinaryHistoryLimits::default(),
-                ),
-            ),
             core,
             result_sizes: Arc::default(),
             #[cfg(feature = "eval-harness")]

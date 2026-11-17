@@ -381,7 +381,7 @@ impl crate::editing_session::Ja1EditingSession {
 
 impl crate::editing_session::Ja1EditingSession {
     pub fn reserve_snapshot_lease(&self, bytes: u64) -> Result<StorageReservation, BundleError> {
-        self.active_bundle()?.store.reserve(0, bytes, 0, false)
+        self.active_bundle()?.store.reserve(0, bytes, false)
     }
 }
 

@@ -29,7 +29,7 @@ fn s3_confirm_host_death_enters_l2_before_replacement() {
             app.host
                 .as_mut()
                 .unwrap()
-                .begin_manual_recovery_with_floor(&mut app.owner, None)
+                .begin_manual_recovery(&mut app.owner)
                 .unwrap();
         } else {
             app.apply(Action::Retry).unwrap();
@@ -84,7 +84,6 @@ fn s3_known_manual_refusal_stays_known() {
                 kinewright_agent::writer_host::HostSnapshot::capture(app.owner.core()).unwrap(),
             ),
             pending: vec![],
-            discard_batches: None,
         })
         .unwrap();
     assert!(reply.error.is_none(), "{:?}", reply.error);

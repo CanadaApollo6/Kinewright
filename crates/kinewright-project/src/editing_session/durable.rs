@@ -177,7 +177,7 @@ impl Ja1EditingSession {
         self.durable_sessions
             .try_reserve(1)
             .map_err(|_| BundleError::Capacity("durable session registrations"))?;
-        self.store()?.reserve(0, name.len() as u64 + 512, 0, false)
+        self.store()?.reserve(0, name.len() as u64 + 512, false)
     }
     pub fn candidate_binding(&self, branch: &BranchId) -> Result<BranchBinding, BundleError> {
         let bundle = self.active_bundle()?;
@@ -462,13 +462,11 @@ impl Ja1EditingSession {
                 frozen.delta(self)?.iter().cloned().collect(),
             )),
             switch: None,
-            manual: None,
             context: Some(context),
             lease: None,
             comment_text: None,
             comment_strokes: None,
             evidence: vec![],
-            transition: None,
         })
     }
     fn candidate_merge_context(
@@ -1006,52 +1004,6 @@ impl Ja1EditingSession {
         self.durable_sessions.remove(index);
         Ok(())
     }
-}
-
-pub fn specialist_floor_delta_from_baseline(
-    base: &crate::bundle_records::LegacySpecialistBaseRecord,
-    history: &kinewright_core::HistorySnapshot,
-    baseline: &Document,
-) -> Result<Vec<kinewright_core::Operation>, BundleError> {
-    let retained = history.applied_operations();
-    let split = base
-        .full_applied_delta
-        .len()
-        .checked_sub(retained.len())
-        .filter(|split| base.full_applied_delta[*split..] == retained)
-        .ok_or_else(|| {
-            BundleError::Corrupt("frozen specialist delta differs from checkpoint".into())
-        })?;
-    let check = kinewright_core::Core::spawn(baseline.clone())
-        .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-    for (ops, expected) in [
-        (&base.full_applied_delta[..split], &history.baseline),
-        (&retained[..], &history.document),
-    ] {
-        if !ops.is_empty()
-            && !matches!(
-                check
-                    .request(Command::DoBatch(ops.to_vec()))
-                    .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-                Event::DocumentChanged { .. }
-            )
-        {
-            return Err(BundleError::Corrupt(
-                "specialist proposal replay refused".into(),
-            ));
-        }
-        if check
-            .export_history()
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?
-            .document
-            != *expected
-        {
-            return Err(BundleError::Corrupt(
-                "specialist proposal differs from checkpoint".into(),
-            ));
-        }
-    }
-    Ok(base.full_applied_delta[..split].to_vec())
 }
 
 #[cfg(all(test, target_os = "linux"))]

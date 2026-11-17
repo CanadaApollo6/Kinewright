@@ -7,15 +7,13 @@
 //! keyframing policy. Every expected value is transcribed from the document by
 //! hand rather than read back out of the descriptor tables.
 
-#[path = "support/history_oracle.rs"]
-mod history_oracle;
-use history_oracle::ApplyHistoryOracle;
+use super::history_oracle::ApplyHistoryOracle;
 
 use std::{collections::BTreeMap, path::PathBuf};
 
 use kinewright_core::{
     AssetId, AutomationCurve, Clip, ClipContent, ClipId, ColorContext, ColorDescription,
-    ColorNodeInactiveReason, ColorNodeKind, ColorStage, Command, Core, Document, Effect, EffectId,
+    ColorNodeInactiveReason, ColorNodeKind, ColorStage, Command, Document, Effect, EffectId,
     EffectUniform, Event, JournalCommand, Keyframe, KeyframeInterpolation, LUT_ASSET_ID_MAX,
     LUT_NODE_LIMIT_PER_LAYER, LUT_SIZE_MAX, LUT_SIZE_MIN, LutAsset, LutAssetId, LutAssetKind,
     LutAssetSource, LutAvailabilityKind, LutAvailabilityStatus, LutNodeParams, MediaAsset,
@@ -1448,7 +1446,7 @@ fn the_new_operations_survive_save_reopen_replay_and_undo() {
         },
     ];
 
-    let core = Core::spawn(initial.clone()).expect("core should spawn");
+    let core = super::spawn_actor(initial.clone()).expect("core should spawn");
     let mut journaled = Vec::new();
     for operation in &operations {
         let Event::DocumentChanged {
@@ -1495,7 +1493,7 @@ fn the_new_operations_survive_save_reopen_replay_and_undo() {
     );
 
     // Journal replay reproduces the same document from the same commands.
-    let replay = Core::spawn(initial.clone()).expect("core should spawn");
+    let replay = super::spawn_actor(initial.clone()).expect("core should spawn");
     for command in &journaled {
         let encoded = serde_json::to_string(command).expect("journal command serializes");
         let parsed: JournalCommand = serde_json::from_str(&encoded).expect("and parses back");
@@ -1551,7 +1549,7 @@ fn the_new_operations_survive_save_reopen_replay_and_undo() {
 #[test]
 fn removing_and_undoing_an_asset_restores_the_record() {
     let document = document_with_assets();
-    let core = Core::spawn(document.clone()).expect("core should spawn");
+    let core = super::spawn_actor(document.clone()).expect("core should spawn");
     let Event::DocumentChanged { doc: removed, .. } = core
         .request(Command::Do(Operation::RemoveLutAsset {
             lut_asset: LutAssetId(1),

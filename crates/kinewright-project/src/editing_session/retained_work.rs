@@ -520,7 +520,6 @@ mod tests {
         let task: TaskId = envelope.identity("task").unwrap();
         let merge = CommandEnvelope {
             switch: None,
-            manual: None,
             context: None,
             version: 1,
             action: "edit".into(),
@@ -538,7 +537,6 @@ mod tests {
             comment_text: None,
             comment_strokes: None,
             evidence: vec![],
-            transition: None,
         };
         let history = TaskHistoryRecord {
             edit_coverage: crate::edit_audit::KeptEditCoverage::default(),

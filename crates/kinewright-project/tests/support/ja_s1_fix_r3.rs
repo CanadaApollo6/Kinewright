@@ -59,11 +59,7 @@ fn first_save_over_limit(batch_limit: bool) {
         },
     )
     .unwrap();
-    let count = if batch_limit {
-        HISTORY_COMMANDS + 1
-    } else {
-        500
-    };
+    let count = if batch_limit { 9 } else { 500 };
     for i in 0..count {
         apply(&core, lock(i % 2 == 0));
     }
@@ -83,15 +79,9 @@ fn first_save_over_limit(batch_limit: bool) {
         .unwrap();
     let path = temp.path("first.kinewright");
     // A definite failure must preserve the original unsaved stream, including below its future floor.
-    let cold_before = io_observer::history_bound_profile();
     let failed = io_observer::fail_once("copy_verify", || {
         session.first_save(&path, &core, &inputs.reference)
     });
-    let cold = io_observer::history_bound_profile().nanoseconds - cold_before.nanoseconds;
-    eprintln!(
-        "R4_COLD batch_limit={batch_limit} bound_ms={:.3}",
-        std::time::Duration::from_nanos(cold.try_into().unwrap()).as_secs_f64() * 1000.0
-    );
     assert!(failed.is_err());
     assert_eq!(core.export_history().unwrap(), original);
     assert!(!path.exists());
@@ -99,12 +89,10 @@ fn first_save_over_limit(batch_limit: bool) {
     let original_position = original.history().position;
     drop(original);
     let started = Instant::now();
-    let bounds_before = io_observer::history_bound_profile();
     let copy = session
         .first_save(&path, &core, &inputs.reference)
         .expect("history growth must not refuse first save");
     let elapsed = started.elapsed();
-    let bound_ns = io_observer::history_bound_profile().nanoseconds - bounds_before.nanoseconds;
     let owner = copy
         .into_destination()
         .unwrap_or_else(|_| panic!("first-save handoff pending"));
@@ -120,12 +108,11 @@ fn first_save_over_limit(batch_limit: bool) {
             .unwrap(),
     );
     eprintln!(
-        "R3_FIRST_SAVE batch_limit={batch_limit} original_batches={} retained_batches={} floor={} elapsed_ms={:.3} bound_ms={:.3}",
+        "R3_FIRST_SAVE batch_limit={batch_limit} original_position={} retained_steps={} fold_frontier={} elapsed_ms={:.3}",
         original_position,
         saved.history().undo.len(),
         saved.fold_frontier().map_or(0, |key| key.position + 1),
-        elapsed.as_secs_f64() * 1000.0,
-        std::time::Duration::from_nanos(bound_ns.try_into().unwrap()).as_secs_f64() * 1000.0
+        elapsed.as_secs_f64() * 1000.0
     );
     drop(owner);
     let mut loaded = LoadedBundle::read(
@@ -181,7 +168,6 @@ fn first_save_unknown_floor_handoff_reconciles_once() {
             &core,
             &inputs.reference,
             StorageLimits {
-                branch_history_bytes: 1 << 20,
                 ..StorageLimits::default()
             },
         )
@@ -399,7 +385,6 @@ fn reconcile_floor(landed: bool, branch_save: bool) {
     };
     owner
         .restrict_limits_probe(StorageLimits {
-            branch_history_bytes: 1 << 20,
             ..StorageLimits::default()
         })
         .unwrap();

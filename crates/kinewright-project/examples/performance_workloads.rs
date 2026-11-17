@@ -35,12 +35,16 @@ use std::{
 };
 
 use kinewright_core::{
-    Analysis, AssetTranscript, Clip, ClipContent, ClipId, Core, Document, Event,
+    Analysis, AssetTranscript, Clip, ClipContent, ClipId, Document, Event,
     MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, Operation, Playback, Rational,
     TimeCode, Track, TrackId, TrackKind, TranscriptWord,
 };
 use kinewright_media::FfmpegMediaEngine;
 use kinewright_project::{load_document, write_project_document};
+use kinewright_project::{
+    operation_actor::Core,
+    operation_history::{CreationOrigin, HistoryPool, PoolLimits, Role},
+};
 
 /// Per-frame receive timeout. A seek that never produces its frame is invalid
 /// evidence, so the run fails instead of recording a timeout sample.
@@ -565,7 +569,6 @@ fn expect_document_changed(event: Event, what: &str) -> Result<Arc<Document>, Bo
         } => Err(
             format!("{what} hit a revision conflict: expected {expected}, actual {actual}").into(),
         ),
-        Event::UndoBlockedBySave { .. } => Err(format!("{what} is blocked by a save").into()),
         Event::MutationRefused { reason, .. } => Err(format!("{what} refused: {reason}").into()),
         Event::QueryResult(_) => Err(format!("{what} returned a query result").into()),
     }
@@ -606,7 +609,16 @@ fn run_agent_lane(
         .collect();
 
     write_fixture(&document, &lane_dir.join("project.kinewright"))?;
-    let core = Core::spawn(document)?;
+    let pool = HistoryPool::new(PoolLimits::default());
+    let core = Core::spawn(
+        &pool,
+        Role::Ordinary,
+        CreationOrigin {
+            branch: serde_json::from_str("\"11111111111111111111111111111111\"")?,
+            batch: serde_json::from_str("\"22222222222222222222222222222222\"")?,
+        },
+        document,
+    )?;
     let mut do_batch = Vec::with_capacity(plans);
     let mut undo = Vec::with_capacity(plans);
     let mut redo = Vec::with_capacity(plans);

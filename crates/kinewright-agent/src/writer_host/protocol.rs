@@ -1,7 +1,7 @@
 //! Bounded foreground commands and the C9 accepted manual-history stream.
 #![allow(clippy::missing_errors_doc)]
 use super::HostAuth;
-use kinewright_project::operation_actor::PortableHistory as HistorySnapshot;
+use kinewright_project::operation_actor::PortableHistory;
 use kinewright_project::{
     bundle::{BundleError, BundleSaveReport, PublicationState},
     bundle_records::{BranchId, HeadId, ObjectRef, ProjectId},
@@ -100,7 +100,7 @@ pub struct HostBootstrap {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostSnapshot {
-    pub history: HistorySnapshot,
+    pub history: PortableHistory,
     pub history_sha256: String,
 }
 impl HostSnapshot {
@@ -112,7 +112,7 @@ impl HostSnapshot {
                 .map_err(|e| super::HostError::Protocol(e.to_string()))?,
         )
     }
-    pub fn from_history(history: HistorySnapshot) -> Result<Self, super::HostError> {
+    pub fn from_history(history: PortableHistory) -> Result<Self, super::HostError> {
         let history_sha256 = history.identity().to_string();
         Ok(Self {
             history,
@@ -332,7 +332,6 @@ pub enum HostCommand {
         client: String,
         frozen: Option<HostSnapshot>,
         pending: Vec<kinewright_project::operation_protocol::EncodedMessage>,
-        discard_batches: Option<usize>,
     },
     PublishBarrier {
         barrier: Box<RecoveryBarrier>,
@@ -387,7 +386,7 @@ pub enum HostCommand {
     PreviewRescue {
         snapshot: HostSnapshot,
     },
-    ConsentTrim,
+
     ConsentOmission,
     RescueTo {
         destination: PathBuf,
@@ -552,9 +551,6 @@ impl From<BundleError> for HostRefusal {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostSaveReport {
-    pub history_floor_offset: Option<u64>,
-    pub removed_undo: u64,
-    pub floor_disclosure: String,
     pub path: PathBuf,
     pub history_sha256: String,
     pub root_sha256: String,
@@ -564,9 +560,6 @@ pub struct HostSaveReport {
 impl From<&BundleSaveReport> for HostSaveReport {
     fn from(r: &BundleSaveReport) -> Self {
         Self {
-            history_floor_offset: None,
-            removed_undo: 0,
-            floor_disclosure: String::new(),
             path: r.path.clone(),
             history_sha256: r.history_sha256.clone(),
             root_sha256: r.root_sha256.clone(),
@@ -624,8 +617,7 @@ pub struct HostStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_checkpoint: Option<ObjectRef>,
     pub choice: Option<HostChoiceKind>,
-    pub rescue_trim_required: bool,
-    pub rescue_trim_accepted: bool,
+
     pub rescue_omission_required: bool,
     pub rescue_omission_accepted: bool,
     pub admitted_roots: SessionRoots,
@@ -651,7 +643,7 @@ pub struct HostStatus {
     pub selection_availability: String,
     pub save_disclosure: String,
     pub message: String,
-    pub rescue_removed_undo: u64,
+
     pub rescue_omissions: Vec<String>,
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -664,7 +656,7 @@ pub struct HostSessionStatus {
     pub events: Vec<HostAgentEvent>,
     pub overflowed: bool,
     pub stop: Option<String>,
-    pub history: Option<HistorySnapshot>,
+    pub history: Option<PortableHistory>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostAgentEvent {
@@ -754,7 +746,7 @@ pub struct HostReply {
     pub activation: Option<HostActivation>,
     pub status: HostStatus,
     pub saved: Option<HostSaveReport>,
-    pub history: Option<HistorySnapshot>,
+    pub history: Option<PortableHistory>,
     pub session: Option<HostSessionStatus>,
     pub error: Option<HostRefusal>,
 }

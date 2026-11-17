@@ -40,47 +40,6 @@ pub enum RemovedObject {
     Track { track: TrackId },
 }
 impl RemovedObject {
-    #[allow(
-        dead_code,
-        reason = "legacy oracle retained until the final H2b deletion checkpoint"
-    )]
-    fn created_by(&self, batch: &kinewright_core::HistoryBatch) -> bool {
-        use kinewright_core::{JournalCommand, Operation};
-        match self {
-            Self::Clip { clip, .. } => batch.identity_effects.iter().any(|effect| {
-                effect.created.contains(clip)
-                    || effect.split_results.iter().any(|child| child.id == *clip)
-            }),
-            Self::Track { track } => {
-                let creates = |operation: &Operation| matches!(operation, Operation::AddTrack { track: added } if added.id == *track);
-                match &batch.command {
-                    JournalCommand::Do(operation) => creates(operation),
-                    JournalCommand::DoBatch(operations)
-                    | JournalCommand::DoBatchCoalesced { operations, .. } => {
-                        operations.iter().any(creates)
-                    }
-                    JournalCommand::Undo | JournalCommand::Redo => false,
-                }
-            }
-        }
-    }
-    #[allow(
-        dead_code,
-        reason = "legacy oracle retained until the final H2b deletion checkpoint"
-    )]
-    fn present_in(&self, document: &kinewright_core::Document) -> bool {
-        match self {
-            Self::Clip { clip, .. } => document
-                .tracks
-                .iter()
-                .flat_map(|track| &track.clips)
-                .any(|candidate| candidate.id == *clip),
-            Self::Track { track } => document
-                .tracks
-                .iter()
-                .any(|candidate| candidate.id == *track),
-        }
-    }
     #[must_use]
     pub fn label(&self) -> String {
         match self {
@@ -278,100 +237,6 @@ enum RemovalProof {
     Kept,
     Missing,
     Uncertain,
-}
-
-#[derive(PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "legacy oracle retained until the final H2b deletion checkpoint"
-)]
-enum BatchLocation {
-    Undo(usize),
-    Redo(usize),
-    Discarded,
-}
-
-/// Inspect borrowed, already verified stack metadata. No history replay or document copy.
-#[allow(
-    dead_code,
-    reason = "legacy oracle retained until the final H2b deletion checkpoint"
-)]
-fn retained_batch_proof(
-    history: &kinewright_core::HistorySnapshot,
-    record: &ApprovalRecord,
-) -> RemovalProof {
-    use kinewright_core::JournalCommand;
-    let proof = (|| {
-        let index = usize::try_from(
-            record
-                .binding
-                .history_position
-                .checked_sub(history.floor_offset)?,
-        )
-        .ok()?;
-        let (approved, later) = history.batches.get(index..)?.split_first()?;
-        let JournalCommand::DoBatch(operations) = &approved.command else {
-            // History-step approvals bind before/after snapshots, not just an operation list.
-            return None;
-        };
-        let bytes = serde_json::to_vec(&serde_json::json!({"Batch": operations})).ok()?;
-        if kinewright_media::sha256_bytes(&bytes) != record.binding.batch_sha256
-            || approved.order != index as u64
-            || approved.redo_entries != 0
-        {
-            return None;
-        }
-        let mut undo = approved.undo_entries;
-        let mut redo = 0_usize;
-        let mut location = BatchLocation::Undo(undo.checked_sub(1)?);
-        let mut recreated = false;
-        for batch in later {
-            let (next_undo, next_redo) = match &batch.command {
-                JournalCommand::Undo if undo > 0 => {
-                    if location == BatchLocation::Undo(undo - 1) {
-                        location = BatchLocation::Redo(redo);
-                    }
-                    (undo - 1, redo.checked_add(1)?)
-                }
-                JournalCommand::Redo if redo > 0 => {
-                    if location == BatchLocation::Redo(redo - 1) {
-                        location = BatchLocation::Undo(undo);
-                    }
-                    (undo.checked_add(1)?, redo - 1)
-                }
-                JournalCommand::Undo | JournalCommand::Redo => (undo, redo),
-                _ => {
-                    recreated |= record.targets.iter().any(|target| target.created_by(batch));
-                    if matches!(location, BatchLocation::Redo(_)) {
-                        location = BatchLocation::Discarded;
-                    }
-                    let pushed = undo.checked_add(1)?;
-                    if batch.undo_entries != pushed
-                        && !(matches!(batch.command, JournalCommand::DoBatchCoalesced { .. })
-                            && batch.undo_entries == undo)
-                    {
-                        return None;
-                    }
-                    (batch.undo_entries, 0)
-                }
-            };
-            if (batch.undo_entries, batch.redo_entries) != (next_undo, next_redo) {
-                return None;
-            }
-            (undo, redo) = (next_undo, next_redo);
-        }
-        if (undo, redo) != (history.cursor.undo.len(), history.cursor.redo.len()) {
-            return None;
-        }
-        Some(match location {
-            BatchLocation::Undo(_) => RemovalProof::Kept,
-            BatchLocation::Redo(_) | BatchLocation::Discarded if !recreated => {
-                RemovalProof::Missing
-            }
-            BatchLocation::Redo(_) | BatchLocation::Discarded => RemovalProof::Uncertain,
-        })
-    })();
-    proof.unwrap_or(RemovalProof::Uncertain)
 }
 
 impl KeptTaskAudit {
@@ -711,54 +576,6 @@ mod tests {
         assert!(words.contains("clip 1") && words.contains("clip 2") && words.contains("track 81"));
         assert!(words.contains("Re-run") && words.contains("continue the task"));
         assert!(missing_edits_disclosure(&[]).is_empty());
-    }
-}
-
-/// Test adapter calls the actual old target test and retained-batch walk.
-/// The generator supplies complete kept-cut coverage for its selected line.
-#[cfg(test)]
-pub(crate) fn owner_differential_proof(
-    history: &kinewright_core::HistorySnapshot,
-    position: Option<usize>,
-    operations: Option<&[kinewright_core::Operation]>,
-    targets: &[crate::operation_history::RemovedTarget],
-    covered: bool,
-) -> crate::operation_history::ApprovalAnswer {
-    use crate::operation_history::{ApprovalAnswer, RemovedTarget};
-    if !covered {
-        return ApprovalAnswer::Missing;
-    }
-    let targets = targets
-        .iter()
-        .map(|target| match target {
-            RemovedTarget::Clip(clip) => RemovedObject::Clip {
-                clip: *clip,
-                track: TrackId(0),
-            },
-            RemovedTarget::Track(track) => RemovedObject::Track { track: *track },
-        })
-        .collect::<Vec<_>>();
-    if !targets
-        .iter()
-        .any(|target| target.present_in(&history.document))
-    {
-        return ApprovalAnswer::Kept;
-    }
-    let Some(position) = position else {
-        return ApprovalAnswer::Uncertain;
-    };
-    let identity = serde_json::json!("1".repeat(32));
-    let mut record:ApprovalRecord=serde_json::from_value(serde_json::json!({"kind":"approval","binding":{"project":identity,"run":identity,"task":identity,"attempt":identity,"endpoint":identity,"owner_epoch":0,"history_epoch":identity,"history_position":position,"turn":{"task":identity,"attempt":identity,"session":identity,"ordinal":0,"owner_epoch":0,"expected_head":identity,"purpose":"Work"},"revision":0,"batch_sha256":"0".repeat(64),"description":"oracle"},"consent":{"sha256":"1".repeat(64),"byte_length":1,"record_kind":"owned_evidence"},"digest":"2".repeat(64),"removed_clips":0,"removed_tracks":0,"targets":[]})).unwrap();
-    record.targets = targets;
-    if let Some(operations) = operations {
-        record.binding.batch_sha256 = kinewright_media::sha256_bytes(
-            &serde_json::to_vec(&serde_json::json!({"Batch":operations})).unwrap(),
-        );
-    }
-    match retained_batch_proof(history, &record) {
-        RemovalProof::Kept => ApprovalAnswer::Kept,
-        RemovalProof::Missing => ApprovalAnswer::Missing,
-        RemovalProof::Uncertain => ApprovalAnswer::Uncertain,
     }
 }
 

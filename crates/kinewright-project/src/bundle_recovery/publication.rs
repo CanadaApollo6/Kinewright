@@ -4,7 +4,6 @@ use super::{
     decoded_reservations, inspect_checkpoints, read_record, validate_archived_root,
     validate_evidence, validate_manifest_apis, walk,
 };
-use crate::history_record::HistoryRole;
 use crate::{
     bundle::{BundleError, BundleWriteAdmission},
     bundle_records::{BranchCheckpoint, BranchId, ObjectRef, RecordKind},
@@ -58,7 +57,6 @@ impl ProjectionRef {
     }
 }
 struct RecordCost {
-    resolved_history: Option<(u64, HistoryRole)>,
     decoded: u64,
     fields: Option<BTreeSet<String>>,
     dependencies: Vec<ObjectRef>,
@@ -139,7 +137,6 @@ impl VerifiedIdentityMemo {
                 limits,
                 0,
                 1 << 20,
-                0,
                 false,
                 u64::MAX,
             )?);
@@ -151,7 +148,6 @@ impl VerifiedIdentityMemo {
                 self.records.insert(
                     reference.clone(),
                     RecordCost {
-                        resolved_history: None,
                         decoded: 0,
                         fields: Some(BTreeSet::new()),
                         dependencies: vec![],
@@ -162,36 +158,6 @@ impl VerifiedIdentityMemo {
             }
         }
         Ok(())
-    }
-    #[allow(
-        dead_code,
-        reason = "legacy oracle retained until the final H2b deletion checkpoint"
-    )]
-    pub(crate) fn remember_resolved_history(
-        &mut self,
-        reference: &ObjectRef,
-        bytes: u64,
-        role: HistoryRole,
-        limits: &StorageLimits,
-    ) {
-        self.bind(limits);
-        if let Some(cost) = self.records.get_mut(reference) {
-            cost.resolved_history = Some((bytes, role));
-        }
-    }
-    #[allow(
-        dead_code,
-        reason = "legacy oracle retained until the final H2b deletion checkpoint"
-    )]
-    fn resolved_history(
-        &mut self,
-        reference: &ObjectRef,
-        limits: &StorageLimits,
-    ) -> Option<(u64, HistoryRole)> {
-        self.bind(limits);
-        self.records
-            .get(reference)
-            .and_then(|cost| cost.resolved_history)
     }
     pub(crate) fn clear(&mut self) {
         self.records.clear();
@@ -251,17 +217,12 @@ impl VerifiedIdentityMemo {
         }
         let needs_fields = matches!(
             reference.record_kind,
-            RecordKind::Document
-                | RecordKind::History
-                | RecordKind::Lineage
-                | RecordKind::SpecialistBase
+            RecordKind::Document | RecordKind::SpecialistBase
         );
         let mut prior = self.records.remove(reference);
-        let resolved_history = prior.as_ref().and_then(|cost| cost.resolved_history);
         self.records.insert(
             reference.clone(),
             RecordCost {
-                resolved_history,
                 decoded,
                 fields: fields
                     .or_else(|| prior.as_mut().and_then(|prior| prior.fields.take()))
@@ -284,12 +245,10 @@ impl VerifiedIdentityMemo {
         self.bind(limits);
         if self.records.contains_key(reference) || (self.records.len() as u64) < limits.objects {
             let prior = self.records.remove(reference);
-            let resolved_history = prior.as_ref().and_then(|cost| cost.resolved_history);
             let run_ownership = prior.and_then(|cost| cost.run_ownership);
             self.records.insert(
                 reference.clone(),
                 RecordCost {
-                    resolved_history,
                     decoded,
                     fields: Some(fields),
                     dependencies,
@@ -365,13 +324,12 @@ fn model_record_read(
 ) -> Result<StorageReservation, BundleError> {
     check_encoded_record(reference, limits)?;
     let _encoded =
-        StorageReservation::reserve(usage, limits, 0, reference.byte_length, 0, false, u64::MAX)?;
+        StorageReservation::reserve(usage, limits, 0, reference.byte_length, false, u64::MAX)?;
     drop(StorageReservation::reserve(
         usage,
         limits,
         0,
         1 << 20,
-        0,
         false,
         u64::MAX,
     )?);
@@ -380,7 +338,6 @@ fn model_record_read(
         limits,
         0,
         limits.decoded_record_bytes,
-        0,
         false,
         u64::MAX,
     )?);
@@ -623,12 +580,6 @@ pub(super) fn validate(
             RecordKind::Document => {
                 payload!(Document);
             }
-            RecordKind::History
-            | RecordKind::Lineage
-            | RecordKind::HistoryFloor
-            | RecordKind::RecoveryClose => {
-                return Err(BundleError::Unsupported("retired history record".into()));
-            }
             RecordKind::OperationHistory => {
                 payload!(crate::operation_history::StoredOwnerRecord);
             }
@@ -668,7 +619,6 @@ pub(super) fn validate(
                     limits,
                     0,
                     reference.byte_length,
-                    0,
                     false,
                     u64::MAX,
                 )?;
@@ -899,7 +849,7 @@ mod tests {
                 // Earlier records in a larger candidate retain metadata. Leave
                 // one byte less than the overlapping ownership read needs.
                 let pressure =
-                    StorageReservation::reserve(&usage, &tight, 0, 4097, 0, false, u64::MAX)?;
+                    StorageReservation::reserve(&usage, &tight, 0, 4097,  false, u64::MAX)?;
                 // Each individual record fits: it is the ownership overlap that refuses.
                 drop(read_record::<RegisteredRunIndex>(
                     namespace,
@@ -918,7 +868,7 @@ mod tests {
                 let cost = &memo.records[&current.reference];
                 let usage = Arc::new(Mutex::new(StorageUsage::default()));
                 let pressure =
-                    StorageReservation::reserve(&usage, &tight, 0, 4097, 0, false, u64::MAX)?;
+                    StorageReservation::reserve(&usage, &tight, 0, 4097,  false, u64::MAX)?;
                 drop(model_record_read(
                     &base.reference,
                     memo.records[&base.reference].decoded,

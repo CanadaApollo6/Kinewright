@@ -132,27 +132,12 @@ pub(super) fn restart_case(
     host = ProcessHost::start(config(root.root(), Some(path.clone())));
     let successor = "a".repeat(64);
     let client = host.client.with_manual_editor(successor.clone());
-    if pressure {
-        let refused = client
-            .request(HostCommand::BeginRecovery {
-                client: successor.clone(),
-                frozen: Some(accepted.clone()),
-                pending: pending.clone(),
-                discard_batches: Some(1),
-            })
-            .unwrap();
-        assert!(
-            refused.error.is_some(),
-            "C10_ONLY_EXECUTOR_CAN_SELECT_A_FOLD"
-        );
-    }
     let prepared = successful(
         &client,
         HostCommand::BeginRecovery {
             client: successor.clone(),
             frozen: Some(accepted.clone()),
             pending: pending.clone(),
-            discard_batches: None,
         },
     );
     let barrier = prepared.recovery.unwrap();
@@ -327,7 +312,6 @@ fn protocol_refusal() {
             client: "e".repeat(64),
             frozen: None,
             pending: vec![],
-            discard_batches: None,
         })
         .unwrap();
     assert!(reply.error.is_some());
@@ -454,7 +438,6 @@ pub(super) fn prefix_and_pause_cases(case_filter: Option<usize>) {
                 } else {
                     transmitted.clone()
                 },
-                discard_batches: None,
             })
             .unwrap();
         if case == 0 {
@@ -535,7 +518,6 @@ pub(super) fn empty_acknowledged_prefix() {
             client: identity.clone(),
             frozen: None,
             pending: vec![],
-            discard_batches: None,
         },
     );
     let barrier = reply.recovery.unwrap();

@@ -279,7 +279,6 @@ impl DurableTimelineBranch {
         let delta = bundle.branch_history(&self.branch_id)?.into_operations()?;
         Ok(CommandEnvelope {
             switch: None,
-            manual: None,
             context: None,
             version: 1,
             action: "edit".into(),
@@ -294,7 +293,6 @@ impl DurableTimelineBranch {
             comment_text: None,
             comment_strokes: None,
             evidence: vec![],
-            transition: None,
         })
     }
     /// Lookup the original result before rebinding; a completed merge has already changed its base head.

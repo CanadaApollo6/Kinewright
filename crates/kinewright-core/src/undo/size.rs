@@ -1,6 +1,6 @@
 use super::{Error, RoleBounds, capacity, capacity::Heap, encoded_bytes, metrics};
 use crate::Operation as O;
-use crate::{Document, Operation, history_size::ReplayBudget};
+use crate::{Document, Operation, replay_budget::ReplayBudget};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DocumentBound {
@@ -84,12 +84,10 @@ pub(super) fn reservation(
     budget: &mut ReplayBudget,
 ) -> Result<DocumentBound, Error> {
     metrics::reservation();
-    let copied =
-        crate::history_size::operation_copy_bytes_with(document, operation, Some(size.live))
-            .map_err(|_| Error::Capacity)?;
-    let copied_encoded =
-        crate::history_size::operation_copy_bytes_with(document, operation, Some(size.encoded))
-            .map_err(|_| Error::Capacity)?;
+    let copied = crate::replay_budget::operation_workspace_bytes(operation, size.live)
+        .map_err(|_| Error::Capacity)?;
+    let copied_encoded = crate::replay_budget::operation_workspace_bytes(operation, size.encoded)
+        .map_err(|_| Error::Capacity)?;
     let payload = operation.heap()?;
     let encoded = encoded_bytes(operation)?;
     let growth = match operation {

@@ -262,16 +262,11 @@ fn decode_for_read<T: DeserializeOwned>(
     limits: &StorageLimits,
     retained: bool,
 ) -> Result<StorageReservation<T>, BundleError> {
-    #[cfg(any(test, feature = "test-util"))]
-    if kind == RecordKind::History {
-        crate::io_observer::note_history_decode();
-    }
     let scratch = StorageReservation::reserve_for_retained_read(
         usage,
         limits,
         0,
         limits.decoded_record_bytes,
-        0,
         false,
         u64::MAX,
         retained,
@@ -289,13 +284,7 @@ fn decode_for_read<T: DeserializeOwned>(
     } else {
         crate::store::preflight_record(bytes, limits)?
     };
-    let charge = if kind == RecordKind::Lineage {
-        wire_charge
-            .checked_add(crate::lineage_journal::decode_live_bound(bytes)?)
-            .ok_or(BundleError::Capacity("lineage decode overflow"))?
-    } else {
-        wire_charge
-    };
+    let charge = wire_charge;
     drop(scratch);
     let (value, shadow) = decoded_reservations_for_read(charge, usage, limits, retained)?;
     let _parser = if kind == RecordKind::Document {
@@ -304,7 +293,6 @@ fn decode_for_read<T: DeserializeOwned>(
             limits,
             0,
             2 * bytes.len() as u64,
-            0,
             false,
             u64::MAX,
             retained,
@@ -317,41 +305,6 @@ fn decode_for_read<T: DeserializeOwned>(
     support_semantics(&raw)?;
     let observed = match kind {
         RecordKind::Document => kinewright_core::document_support_fields(&raw),
-        RecordKind::History => kinewright_core::history_journal_support_fields(
-            raw.get("journal")
-                .ok_or_else(|| BundleError::Corrupt("missing history journal".into()))?,
-        ),
-        RecordKind::SpecialistBase => {
-            if let Some(operations) = raw
-                .get("full_applied_delta")
-                .and_then(serde_json::Value::as_array)
-            {
-                for operation in operations {
-                    fields.extend(
-                        kinewright_core::operation_support_fields(operation)
-                            .map_err(BundleError::Unsupported)?,
-                    );
-                }
-            }
-            Ok(BTreeSet::new())
-        }
-        RecordKind::Lineage => {
-            if let Some(ancestry) = raw
-                .get("split_ancestry")
-                .and_then(serde_json::Value::as_array)
-            {
-                for entry in ancestry {
-                    let clip = entry
-                        .get(2)
-                        .ok_or_else(|| BundleError::Corrupt("split ancestry tuple".into()))?;
-                    fields.extend(
-                        kinewright_core::clip_support_fields(clip)
-                            .map_err(BundleError::Unsupported)?,
-                    );
-                }
-            }
-            Ok(BTreeSet::new())
-        }
         _ => Ok(BTreeSet::new()),
     }
     .map_err(BundleError::Unsupported)?;
@@ -398,7 +351,6 @@ fn validate_switch_receipts(
 }
 fn check_encoded_record(reference: &ObjectRef, limits: &StorageLimits) -> Result<(), BundleError> {
     let cap = match reference.record_kind {
-        RecordKind::History => limits.branch_history_bytes,
         RecordKind::RootCheckpoint => limits.control_bytes,
         _ => limits.decoded_record_bytes,
     };
@@ -418,7 +370,6 @@ fn decoded_reservations_for_read(
         limits,
         0,
         charge,
-        0,
         false,
         u64::MAX,
         retained,
@@ -428,7 +379,6 @@ fn decoded_reservations_for_read(
         limits,
         0,
         charge,
-        0,
         false,
         u64::MAX,
         retained,
@@ -464,7 +414,6 @@ fn read_bytes_for_read(
         limits,
         0,
         reference.byte_length,
-        0,
         false,
         u64::MAX,
         retained,
@@ -1056,12 +1005,6 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
             RecordKind::Document => {
                 let _value = admit!(Document);
             }
-            RecordKind::History
-            | RecordKind::HistoryFloor
-            | RecordKind::RecoveryClose
-            | RecordKind::Lineage => {
-                return Err(BundleError::Unsupported("legacy history record".into()));
-            }
             RecordKind::OperationHistory => {
                 let _value = admit!(crate::operation_history::StoredOwnerRecord);
             }
@@ -1088,7 +1031,6 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
                     limits,
                     0,
                     reference.byte_length,
-                    0,
                     false,
                     u64::MAX,
                 )?;

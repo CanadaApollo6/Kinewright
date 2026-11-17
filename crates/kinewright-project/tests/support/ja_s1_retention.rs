@@ -108,7 +108,6 @@ fn request(
     let issuer = bundle.issue_issuer(core, inputs, 1).unwrap();
     CommandEnvelope {
         switch: None,
-        manual: None,
         context: None,
         version: 1,
         action: "edit".into(),
@@ -126,7 +125,6 @@ fn request(
         comment_text: None,
         comment_strokes: None,
         evidence: vec![],
-        transition: None,
     }
 }
 fn committed(result: ReceiptLookup) {
@@ -408,7 +406,7 @@ fn inventory_retirement_crash_preserves_required_predecessors() {
 }
 
 #[test]
-fn old_floor_collection_keeps_independent_branch_version_and_receipt_pins() {
+fn collection_keeps_independent_branch_version_and_receipt_pins() {
     let temp = TempDirectory::new_in(
         std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
         "ja-s1-floor-retention",
@@ -455,12 +453,10 @@ fn old_floor_collection_keeps_independent_branch_version_and_receipt_pins() {
         bundle.save(&core, &inputs).unwrap();
         bundle.collect_after_ack().unwrap();
     }
-    assert!(
-        !bundle
-            .evidence_refs()
-            .iter()
-            .any(|r| r.record_kind == RecordKind::HistoryFloor),
-        "PERSISTENCE_CREATES_NO_HISTORY_FLOOR_RECORDS"
+    assert_eq!(
+        bundle.checkpoint(&manual).unwrap().identity,
+        core.snapshot_identity().unwrap(),
+        "COLLECTION_PRESERVES_THE_PUBLISHED_COMPLETE_OWNER"
     );
     assert!(object_path(&path, &base_ref).exists());
     assert!(object_path(&path, &old_checkpoint).exists());
@@ -619,31 +615,20 @@ fn every_storage_cap_backpressures_without_data_loss() {
     );
     assert_eq!(s.usage().unwrap().objects, 2);
     drop((parent_pin, b_pin));
-    for field in ["decoded", "live_history", "metadata"] {
+    for field in ["decoded", "metadata"] {
         let mut limits = StorageLimits::default();
         match field {
             "decoded" => limits.decoded_record_bytes = 4,
-            "live_history" => limits.live_history_bytes = 4,
             _ => limits.metadata_bytes = 4,
         }
         let s = store(&temp, &format!("{field}.kinewright"), limits);
-        let reservation = if field == "live_history" {
-            s.reserve_probe(0, 4)
-        } else {
-            s.reserve_probe(4, 0)
-        }
-        .unwrap();
+        let reservation = s.reserve_probe(4).unwrap();
         assert!(
-            if field == "live_history" {
-                s.reserve_probe(0, 1)
-            } else {
-                s.reserve_probe(if field == "decoded" { 5 } else { 1 }, 0)
-            }
-            .is_err()
+            s.reserve_probe(if field == "decoded" { 5 } else { 1 })
+                .is_err()
         );
         drop(reservation);
         assert_eq!(s.usage().unwrap().decoded_bytes, 0);
-        assert_eq!(s.usage().unwrap().live_history_bytes, 0);
     }
     let mut limits = StorageLimits::default();
     limits.copy_overlap_bytes = 4;
@@ -653,40 +638,6 @@ fn every_storage_cap_backpressures_without_data_loss() {
     assert!(s.reserve_copy(1).is_err());
     drop(hold);
     assert_eq!(s.usage().unwrap().reserved_copy_bytes, 0);
-    let core = kinewright_core::Core::spawn(Document::default()).unwrap();
-    let history = core.export_history().unwrap();
-    let mut control = store(
-        &temp,
-        "history-control.kinewright",
-        StorageLimits::default(),
-    );
-    let control_pin = control.admit_history(&history).unwrap();
-    let decoded = control.resolve_history(&control_pin.reference).unwrap();
-    let live = control.usage().unwrap().live_history_bytes;
-    drop(decoded);
-    let mut limits = StorageLimits::default();
-    assert!(
-        live > 0,
-        "resolved ordinary history is charged independently of its wire record"
-    );
-    limits.branch_history_bytes =
-        live.max(kinewright_project::bundle_commit::history_cost_probe(&history, &limits).unwrap());
-    let mut s = store(&temp, "history.kinewright", limits);
-    let pin = s.admit_history(&history).unwrap();
-    assert!(matches!(
-        core.request(Command::Do(Operation::AddTrack {
-            track: Track {
-                id: TrackId(1),
-                kind: TrackKind::Video,
-                sync_lock: true,
-                clips: vec![],
-            },
-        }))
-        .unwrap(),
-        Event::DocumentChanged { .. }
-    ));
-    assert!(s.admit_history(&core.export_history().unwrap()).is_err());
-    drop(pin);
     command_caps(&temp);
     version_and_control_caps(&temp);
 }
@@ -704,7 +655,7 @@ fn combined_metadata_cap(temp: &TempDirectory) {
             &format!("combined-metadata-{beyond}.kinewright"),
             limits,
         );
-        let decode = owner.reserve_probe(20, 0).unwrap();
+        let decode = owner.reserve_probe(20).unwrap();
         let bytes = b"four";
         let reference = reference(bytes);
         let result = owner.admit_blob(&mut Cursor::new(bytes), &reference, &[]);

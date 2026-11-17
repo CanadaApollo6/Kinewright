@@ -69,7 +69,7 @@ fn checkpoint_codec_requires_the_new_owner_and_combined_install_identity() {
         "FRESH_STREAM_ROOT_IS_ITS_COMBINED_INSTALLED_SNAPSHOT"
     );
     wrong = value.clone();
-    wrong.owner_ref.record_kind = RecordKind::History;
+    wrong.owner_ref.record_kind = RecordKind::Document;
     assert!(
         wrong.validate(&StorageLimits::default()).is_err(),
         "CHECKPOINT_REQUIRES_THE_OPERATION_OWNER_RECORD_KIND"

@@ -35,10 +35,10 @@ use half::f16;
 use kinewright_core::{
     Analysis, AssetId, Clip, ClipContent, ClipId, ColorBitDepth, ColorContext, ColorDescription,
     ColorMatrix, ColorPrimaries, ColorProvenance, ColorRange, ColorSourceProfile,
-    ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, Command, Core,
-    DeliveryEncodeDepth, DeliveryProfile, Document, Effect, EffectId, Event, ExportCancellation,
-    ExportSettings, MediaAsset, MediaError, Operation, ParamValue, Rational, TimeCode, Track,
-    TrackId, TrackKind, delivery_conformance,
+    ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, DeliveryEncodeDepth,
+    DeliveryProfile, Document, Effect, EffectId, ExportCancellation, ExportSettings, MediaAsset,
+    MediaError, Operation, ParamValue, Rational, TimeCode, Track, TrackId, TrackKind,
+    delivery_conformance,
 };
 use serde_json::{Value, json};
 
@@ -3124,7 +3124,6 @@ fn cc1_unsupported_source_blocks_managed_proof_and_export() {
         (32, 16),
     );
     override_document.color_context = ColorContext::sdr_rec709();
-    let core = Core::spawn(override_document).expect("override core");
     let bt2020_override = ColorDescription {
         primaries: ColorPrimaries::Bt2020,
         transfer: ColorTransfer::Bt709,
@@ -3135,16 +3134,13 @@ fn cc1_unsupported_source_blocks_managed_proof_and_export() {
         confidence_basis_points: 10_000,
         provenance: ColorProvenance::UserOverride,
     };
-    let overridden = match core
-        .request(Command::Do(Operation::SetAssetColorDescription {
-            asset: AssetId(9),
-            color_description: bt2020_override.clone(),
-        }))
-        .expect("the override operation itself must be accepted")
-    {
-        Event::DocumentChanged { doc, .. } => doc,
-        other => panic!("override was not applied: {other:?}"),
-    };
+    Operation::SetAssetColorDescription {
+        asset: AssetId(9),
+        color_description: bt2020_override.clone(),
+    }
+    .apply(&mut override_document)
+    .expect("the override operation must be accepted");
+    let overridden = Arc::new(override_document);
     assert_eq!(
         overridden
             .asset(AssetId(9))

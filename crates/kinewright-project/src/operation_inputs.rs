@@ -74,7 +74,7 @@ impl ManualInputs {
             }
         }
         let limits = crate::storage_budget::StorageLimits::default();
-        let charge = StorageReservation::reserve(usage, &limits, 0, bytes, 0, false, u64::MAX)?;
+        let charge = StorageReservation::reserve(usage, &limits, 0, bytes, false, u64::MAX)?;
         Self::from_reserved(reference, charge.hold(manifest))
     }
     fn from_reserved(
@@ -256,7 +256,6 @@ impl ManualInputs {
             &crate::storage_budget::StorageLimits::default(),
             0,
             4096,
-            0,
             false,
             u64::MAX,
         )
@@ -314,7 +313,6 @@ mod tests {
             &crate::storage_budget::StorageLimits::default(),
             0,
             16384,
-            0,
             false,
             u64::MAX,
         )

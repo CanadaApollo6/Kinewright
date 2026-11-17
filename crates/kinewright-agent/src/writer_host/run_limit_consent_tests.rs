@@ -30,7 +30,10 @@ mod tests {
     }
     fn cut(
         b: &B21,
-    ) -> Result<Result<kinewright_core::Event, kinewright_project::operation_actor::Refusal>, HostError> {
+    ) -> Result<
+        Result<kinewright_core::Event, kinewright_project::operation_actor::Refusal>,
+        HostError,
+    > {
         cut_operations(
             b,
             &[
@@ -46,7 +49,10 @@ mod tests {
     fn cut_operations(
         b: &B21,
         operations: &[kinewright_core::Operation],
-    ) -> Result<Result<kinewright_core::Event, kinewright_project::operation_actor::Refusal>, HostError> {
+    ) -> Result<
+        Result<kinewright_core::Event, kinewright_project::operation_actor::Refusal>,
+        HostError,
+    > {
         let kinewright_core::Event::QueryResult(kinewright_core::QueryResult::Snapshot {
             revision,
             document,
@@ -83,7 +89,7 @@ mod tests {
         let mut readers = Vec::new();
         while occupied > 0 {
             let chunk = occupied.min(64 << 20);
-            readers.push(store.reserve_probe(chunk, 0).unwrap());
+            readers.push(store.reserve_probe(chunk).unwrap());
             occupied -= chunk;
         }
         readers
@@ -571,7 +577,10 @@ mod tests {
             decode_owner_fixture(handoff["kept"].take());
         let mut reopened = kinewright_project::editing_session::Ja1EditingSession::open(
             &root.join("project.kinewright"),
-         &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default()))
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
         .unwrap();
         let state = reopened.orchestration_projection(&run).unwrap().unwrap();
         assert_eq!(state.edit_approvals.len(), 1);
@@ -595,7 +604,18 @@ mod tests {
                 &binding.checkpoint,
             )
             .unwrap();
-        let history = checkpoint.open(store, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap().into_reader().unwrap().into_capture().unwrap();
+        let history = checkpoint
+            .open(
+                store,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap()
+            .into_reader()
+            .unwrap()
+            .into_capture()
+            .unwrap();
         assert_eq!(&history, &kept, "C4_REOPEN_EXACT_PREVIOUS_CHECKPOINT");
         drop(history);
         drop(checkpoint);

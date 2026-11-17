@@ -1,11 +1,9 @@
 //! AU1 manual mix — core contract tests (AU1 §7 items 2–7).
 
-#[path = "support/history_oracle.rs"]
-mod history_oracle;
-use history_oracle::ApplyHistoryOracle;
+use super::history_oracle::ApplyHistoryOracle;
 
 use kinewright_core::{
-    AudioMix, Command, Core, Document, Event, MixLevelRequest, OpError, Operation, Rational,
+    AudioMix, Command, Document, Event, MixLevelRequest, OpError, Operation, Rational,
     TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, TimeCode, Track,
     TrackId, TrackKind, TrackMix, effect_descriptor,
 };
@@ -328,7 +326,7 @@ fn remove_track_drops_the_track_mix_entry() {
 #[test]
 fn coalesced_track_mix_drag_is_one_undo_entry() {
     let initial = two_track_document();
-    let core = Core::spawn(initial.clone()).unwrap();
+    let core = super::spawn_actor(initial.clone()).unwrap();
 
     let mut tenth = None;
     for step in 1..=10 {

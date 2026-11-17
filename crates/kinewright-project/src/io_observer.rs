@@ -42,17 +42,6 @@ pub struct SyncProfile {
     pub calls: u64,
     pub nanoseconds: u128,
 }
-thread_local! { static HISTORY_BOUND: RefCell<SyncProfile> = const { RefCell::new(SyncProfile { calls: 0, nanoseconds: 0 }) }; }
-pub(crate) fn note_history_bound(duration: std::time::Duration) {
-    HISTORY_BOUND.with_borrow_mut(|p| {
-        p.calls += 1;
-        p.nanoseconds += duration.as_nanos();
-    });
-}
-#[must_use]
-pub fn history_bound_profile() -> SyncProfile {
-    HISTORY_BOUND.with_borrow(Clone::clone)
-}
 thread_local! { static HISTORY_DECODES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
 pub(crate) fn note_history_decode() {
     HISTORY_DECODES.with(|count| {
@@ -68,25 +57,6 @@ pub(crate) fn note_history_decode() {
 #[must_use]
 pub fn history_decode_count() -> u64 {
     HISTORY_DECODES.with(std::cell::Cell::get)
-}
-thread_local! { static SAVE_REUSE_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-/// Run `run` with a save's reuse of its commit check turned off: the replay shadow and
-/// the sealing preflight the checked bytes again instead of taking the check's charge, and
-/// the support inventory decodes the just-sealed history again instead of taking the
-/// check's fields. This is the path before reuse.
-pub fn without_save_reuse<T>(run: impl FnOnce() -> T) -> T {
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            SAVE_REUSE_OFF.with(|off| off.set(false));
-        }
-    }
-    SAVE_REUSE_OFF.with(|off| off.set(true));
-    let _reset = Reset;
-    run()
-}
-pub(crate) fn save_reuse_disabled() -> bool {
-    SAVE_REUSE_OFF.with(std::cell::Cell::get)
 }
 thread_local! { static PREFLIGHTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
 pub(crate) fn note_preflight() {

@@ -413,7 +413,6 @@ fn realistic_history_saves_every_edit_and_advances_durable_floor() {
     drop(inputs);
     // Lower the real ingress bound so this witness crosses it repeatedly without filling 32 MiB.
     let limits = StorageLimits {
-        branch_history_bytes: 8 << 20,
         ..StorageLimits::default()
     };
     bundle.restrict_limits_probe(limits).unwrap();
@@ -426,7 +425,6 @@ fn realistic_history_saves_every_edit_and_advances_durable_floor() {
         };
         let envelope = kinewright_project::receipts::CommandEnvelope {
             switch: None,
-            manual: None,
             context: None,
             version: 1,
             action: "edit".into(),
@@ -447,7 +445,6 @@ fn realistic_history_saves_every_edit_and_advances_durable_floor() {
             comment_text: None,
             comment_strokes: None,
             evidence: vec![],
-            transition: None,
         };
         assert!(
             matches!(

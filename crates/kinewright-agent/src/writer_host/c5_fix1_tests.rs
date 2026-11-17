@@ -20,7 +20,13 @@ fn c5_fix1_apply_limits(
     let identity = old.core().snapshot_identity().unwrap();
     let inputs = old.current_inputs_ref().clone();
     drop(old);
-    let mut loaded = LoadedBundle::read(&f.temp.path("project.kinewright"), &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
+    let mut loaded = LoadedBundle::read(
+        &f.temp.path("project.kinewright"),
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     let core = loaded.open_manual().unwrap();
     assert_eq!(core.snapshot_identity().unwrap(), identity);
     let bundle = loaded.into_writer_with_limits_probe(limits).unwrap();
@@ -334,7 +340,7 @@ fn s4b_c5_fix1_objects_and_decoded_pressure_leave_terminal_capacity() {
                 .unwrap()
                 .store()
                 .unwrap()
-                .reserve_probe(64 << 20, 0)
+                .reserve_probe(64 << 20)
                 .unwrap()
         });
         let mut refused = false;

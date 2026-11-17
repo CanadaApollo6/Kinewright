@@ -251,7 +251,6 @@ impl Ja1EditingSession {
             ),
         };
         // Capacity is a typed refusal. Only Core folds; rescue never trims the selected history.
-        let removed_undo = 0;
         let selected_digest = kinewright_media::sha256_bytes(
             &serde_json::to_vec(&(
                 capture.cut.identity(),
@@ -272,7 +271,7 @@ impl Ja1EditingSession {
             capture,
             limits,
             selected_digest,
-            removed_undo,
+
             omissions,
             roots,
             reads,

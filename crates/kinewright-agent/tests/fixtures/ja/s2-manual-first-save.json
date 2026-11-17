@@ -1,7 +1,7 @@
 {
   "protocol": "kinewright.ja-harness",
   "protocol_version": 1,
-  "fixture_id": "s2-manual-floor",
+  "fixture_id": "s2-manual-first-save",
   "gate_ids": [
     "JA1.G5-L"
   ],
@@ -9,9 +9,9 @@
   "requirements": [],
   "inputs": {
     "control": {
-      "relative_file": "s2-manual-floor-control.json",
-      "sha256": "06e9b46f3054c0f22b712821d8a650934cd61127af732b562a0358ec69deb393",
-      "byte_length": 61,
+      "relative_file": "s2-manual-first-save-control.json",
+      "sha256": "42a0fdf9d63af23750cd198e2cb39b93520b96c0697aa33bc631be9dba3cfbf9",
+      "byte_length": 66,
       "kind": "input"
     }
   },
@@ -102,9 +102,9 @@
       "participant": "main",
       "action": "assert_observed",
       "args": {
-        "id": "floor",
+        "id": "stacks-preserved",
         "observation": 1,
-        "pointer": "/recovery/floor",
+        "pointer": "/recovery/stacks_preserved",
         "oracle": "true",
         "evidence_class": "revised_property",
         "positive_control": "query-ran",

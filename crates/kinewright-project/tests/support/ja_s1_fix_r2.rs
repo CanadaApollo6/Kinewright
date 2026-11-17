@@ -224,7 +224,6 @@ fn first_save_installs_the_same_floor_before_handoff() {
             &core,
             &inputs.reference,
             StorageLimits {
-                branch_history_bytes: 1 << 20,
                 ..StorageLimits::default()
             },
         )
@@ -684,7 +683,6 @@ fn no_edit_comment_preserves_the_unsaved_actor_cut_and_the_published_snapshot() 
     let strokes_ref = reference(strokes);
     let request = CommandEnvelope {
         switch: None,
-        manual: None,
         context: None,
         version: 1,
         action: "comment".into(),
@@ -702,7 +700,6 @@ fn no_edit_comment_preserves_the_unsaved_actor_cut_and_the_published_snapshot() 
         comment_text: Some(text_ref.clone()),
         comment_strokes: Some(strokes_ref.clone()),
         evidence: vec![],
-        transition: None,
     };
     assert!(matches!(
         owner

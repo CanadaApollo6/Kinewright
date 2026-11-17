@@ -36,7 +36,6 @@ fn main() {
     }
     let inventory = bundle.store().manifest().unwrap();
     refused(bundle.store_mut().unwrap().admit_manifest_probe(&inventory), "admit_manifest_probe");
-    refused(bundle.store().reserve_history_shadow(1), "reserve_history_shadow");
     let object = ObjectRef { sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(), byte_length: 0, record_kind: RecordKind::OwnedEvidence };
     refused(bundle.store_mut().unwrap().admit_blob(&mut &b""[..],&object,&[]), "admit_blob");
     let (project_id,session_id) = bundle.store().input_owner();

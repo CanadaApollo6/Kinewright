@@ -435,7 +435,7 @@ mod tests {
             let mut blockers = Vec::new();
             while left > 0 {
                 let bytes = left.min(store.limits().decoded_record_bytes);
-                blockers.push(store.reserve_probe(bytes, 0).unwrap());
+                blockers.push(store.reserve_probe(bytes).unwrap());
                 left -= bytes;
             }
             let before_root = host.owner().unwrap().root_sha256().unwrap();

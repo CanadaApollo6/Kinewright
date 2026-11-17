@@ -11,7 +11,7 @@ use crate::{
 use kinewright_core::{Command, Document, Event, Operation, TimelineRevision};
 use kinewright_project::bundle_records::{BranchId, ProjectId};
 use kinewright_project::operation_actor::Core;
-use kinewright_project::operation_history::OwnerSnapshot as HistorySnapshot;
+use kinewright_project::operation_history::OwnerSnapshot;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -326,8 +326,8 @@ impl HostCommandOwner {
 enum ConsentEdit<'a> {
     Batch(&'a [Operation]),
     History {
-        before: Box<HistorySnapshot>,
-        after: Box<HistorySnapshot>,
+        before: Box<OwnerSnapshot>,
+        after: Box<OwnerSnapshot>,
         operations: Vec<Operation>,
         redo: bool,
     },
@@ -456,7 +456,7 @@ fn consent_context(
 )]
 enum EditOutcome {
     Batch(Box<Result<Event, kinewright_project::operation_actor::Refusal>>),
-    History(HistorySnapshot),
+    History(OwnerSnapshot),
 }
 impl EditOutcome {
     fn applied(&self) -> bool {
@@ -696,7 +696,7 @@ impl TaskMcp {
         core: &Core,
         revision: TimelineRevision,
         redo: bool,
-    ) -> Result<HistorySnapshot, HostError> {
+    ) -> Result<OwnerSnapshot, HostError> {
         {
             let owner = self.consent_host()?;
             let host = lock_host(&owner, &self.endpoint)?;
