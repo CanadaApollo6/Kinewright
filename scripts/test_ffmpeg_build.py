@@ -307,10 +307,14 @@ class BuildIdentity(unittest.TestCase):
         self.assertIn('-NoBinaryCache', release)
         self.assertIn('--no-binary-cache', release)
         package = builder.ROOT/'scripts/package-linux.sh'
-        result = builder.subprocess.run(['bash', package.as_posix(), '--version', '0.1.0', '--stage-only'],
-                                        capture_output=True, text=True, check=False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('requires --no-binary-cache', result.stderr)
+        # The Linux packager runs only on Linux; on Windows `bash` can resolve to the WSL launcher.
+        if builder.platform.system() == 'Linux':
+            result = builder.subprocess.run(['bash', package.as_posix(), '--version', '0.1.0', '--stage-only'],
+                                            capture_output=True, text=True, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('requires --no-binary-cache', result.stderr)
+        else:
+            self.assertIn('requires --no-binary-cache', package.read_text())
         windows = (builder.ROOT/'scripts/package-windows.ps1').read_text()
         self.assertIn('if (-not $NoBinaryCache)', windows)
         self.assertIn('-NoBinaryCache -SkipBuildCachePrune', windows)
