@@ -1,11 +1,13 @@
 # IX1 — Opening OTIO and FCPXML timelines
 
-Status: design, revision 2, 2026-11-17. Revision 1 is `48f6d0e3`. Revision 2 folds in the lead's
+Status: design, revision 3, 2026-11-17. Revision 1 is `48f6d0e3`. Revision 2 folds in the lead's
 rulings on revision 1's open questions, the lead's two corrections and the critic's fourteen
-findings; §0.1 maps each item to its section. This is the first slice of the interchange programme
-(IX), which Riel approved on 2026-11-16. Later slices are IX-T1 (native two-sided transitions),
-IX2 (`.prproj` import with a loss report) and IX3 (Lightroom presets and `.cube` LUTs as looks).
-After Effects comes after the motion work.
+findings; §0.1 maps each item to its section. Revision 3 adds rulings 6–10 (§14).
+
+This is the first slice of the interchange programme (IX), which Riel approved on 2026-11-16.
+Later slices are IX-T1 (native two-sided transitions), IX2 (`.prproj` import with a loss
+report) and IX3 (Lightroom presets and `.cube` LUTs as looks). After Effects comes after the
+motion work.
 
 IX1 opens an OpenTimelineIO (`.otio`, `.otiod`) or FCPXML (`.fcpxml`, `.fcpxmld`) timeline from
 Resolve, Final Cut or Avid as a Kinewright project, with a small typed loss report. Nothing is ever
@@ -21,8 +23,8 @@ imported partially.
 3. Both formats parse into **one IR with exact rational time** (§2). One lowering builds the
    `Document`. IX2 adds a `.prproj` parser and reuses the lowering and the report unchanged.
 4. **Lowering is total.** Every IR within the caps yields a `Document` that passes
-   `Document::validate` (`model.rs:1643`). A media clip's source end is derived from its timeline
-   span, never mapped separately (§4.2). `lowering_failed` therefore means a bug.
+   `Document::validate` (`model.rs:1643`). A media clip's end snaps to an achievable cut on its
+   source grid (§4.2). `lowering_failed` therefore means a bug.
 5. Nests, compounds, multicam and connected clips **flatten onto lane tracks** allocated in nested
    blocks. A same-track dissolve becomes a head clip on the lane above, through one function
    (§5.3). A transition at a flattened container's edge becomes a cut.
@@ -118,6 +120,12 @@ grid (§4.2).
 An absolute `at` fits FCPXML lanes and Premiere starts. The OTIO parser sums trimmed durations and
 skips transitions, as OTIO's `range_of_child_at_index` does.
 
+**OTIO composition windows (ruling 7).** One parser-side function applies `source_range` on
+every OTIO composition, including tracks, stacks and nested timelines. It trims children,
+transitions and markers to the window and rebases the retained placements to its start.
+An item wholly outside the window is dropped and counts `outside_window`. A transition hit
+by a window edge becomes a hard cut.
+
 Exact rationals hold Premiere ticks (`crates/premiere_file/src/schema/timing.rs:7@cdea27e`)
 without Mirage's 0.5 ms rounding (`crates/fx_schema/src/time.rs:5@cdea27e`).
 
@@ -132,12 +140,12 @@ N = faithful, A = approximated (bound stated), Ø = dropped.
 | Resolution | none standard | `format@width/height` | `Document.resolution` (`model.rs:1477`) | N FCPXML; A OTIO: modal probed size, else 1920×1080 (`resolution_inferred`) |
 | Start, drop frame | `global_start_time`; DF only in timecode strings | `sequence@tcStart`; `@tcFormat` | rebased to 0; frames exact, NDF display (`timeline_ui.rs:3998`) | A: offset in report; DF labels only |
 | Tracks | `Track.1` kind, stack order, `name` | spine, lanes ±n, clip roles | `Track{kind}` in z order (`model.rs:574`, `:1440`), new `Track.name` (§5.1) | N; A name truncated past 64 B; Ø mixed roles |
-| Clip range | `source_range` − `available_range.start_time` | `@start` − `asset@start` (or `timeMap(@start)`), `@offset`, `@duration` | `Clip.source_range`, `timeline_start` (`model.rs:429-443`); source end derived (§4.2) | N on grid; A: positions ≤ ½ frame, source end ≤ 1 + r source frames |
+| Clip range | `source_range` − `available_range.start_time` | `@start` − `asset@start` (or `timeMap(@start)`), `@offset`, `@duration` | `Clip.source_range`, `timeline_start` (`model.rs:429-443`); cuts snap to the outgoing clip (§4.2) | N on grid; A: snapped cuts and source ends bounded by §4.2 |
 | A/V clip, split edit | paired only by §5.4 | `asset-clip`, `audioStart`/`audioDuration` | linked pair (`model.rs:446-450`), as `media_bin.rs:617` builds | N; A unpaired OTIO split edit (`av_link_unpaired`) |
 | Dual-mono, channel maps, pan | same file, same range on two audio tracks | `audio-channel-source`, `adjust-panner` | one clip kept (§5.4); no clip pan | A `channel_map_dropped`; Ø pan |
-| Gap; disabled | `Gap.1`; `enabled` | `gap`; `@enabled="0"` | empty span; `Clip.enabled` (`model.rs:484-489`) | N |
-| Constant speed | `LinearTimeWarp.1` (§4.3, unverified reading) | two-point `timeMap`; `conform-rate` | `speed_percent` 10..=1000 (`model.rs:473-483`) | A: ≤ 0.5 points, duration exact; Ø audio (muted, `model.rs:477-478`) |
-| Reverse, variable | negative scalar; other `TimeEffect` | falling or multi-point `timeMap` | none | Ø reverse (plays forward); A variable: average speed, ends exact, drift in frames |
+| Gap; disabled | `Gap.1`; `enabled` | `gap`; `@enabled="0"` | empty span; `Clip.enabled` (`model.rs:484-489`) | N for retained space and enabled state; A for the timeline tail (§6.2) |
+| Constant speed | `LinearTimeWarp.1` (§4.3, unverified reading) | two-point `timeMap`; `conform-rate` | `speed_percent` 10..=1000 (`model.rs:473-483`) | A: speed rounded or clamped, cut snap and source-end drift (§4.2–4.3); Ø audio (muted, `model.rs:477-478`) |
+| Reverse, variable | negative scalar; other `TimeEffect` | falling or multi-point `timeMap` | none | Ø reverse (plays forward); A variable: average speed, drift in frames |
 | Freeze | `FreezeFrame.1`, scalar 0 | constant-value `timeMap` segment (unverified reading) | `ClipContent::Freeze` (`model.rs:341`, `:393-398`) | N |
 | Dissolve; fade from/to empty | `Transition.1` `SMPTE_Dissolve`; beside a `Gap` | `transition` "Cross Dissolve"; at a storyline end | lane head clip with `crossfade` `transition_in` (`model.rs:316-322`, `transition.rs:38`); `opacity` keys out (`effect.rs:1581`) | A: structure, ramp (§5.3) |
 | Transition at a container edge | beside a nested `Stack` | beside `ref-clip`, `mc-clip`, `sync-clip` | hard cut at the cut point (§5.2) | A (`transition_at_nest_cut`), window frames as bound |
@@ -166,31 +174,39 @@ carry rates such as 23.976024627685547 (OTIO issue #1822). Rates snap as follows
 A value within 1e-6 of an integer is exact at its snapped rate; any other value counts
 `subframe_rounded`. `NaN` and `Infinity` never reach this step (§11).
 
-**4.2 Lowering to frames.** Positions come first. Each item's start and end map once with
-`frame = ⌊t × fps + ½⌋` in `i128`, so a clip's project span is `end − start` and neighbours share a
-boundary: the M0 rule (`docs/BUILDING.md:209-214`).
+**4.2 Lowering to frames (ruling 6).** Round each IR boundary to its initial project frame
+with `frame = ⌊t × fps + ½⌋` in `i128`. Core derives a media clip's project length from its
+source range as `map(source.end) − map(source.start)` at the effective rate
+(`model.rs:1652-1666`, `time.rs:276-290`). Cuts snap to the outgoing clip's source grid.
 
-A media clip's source range is never mapped independently of that span. Kinewright derives a
-clip's length as `map(source.end) − map(source.start)` at the effective rate (`model.rs:1652-1666`,
-`time.rs:276-290`), and this can differ from the span by a frame. Example: in a 24 fps project with
-a 25 fps asset, a clip of 0.52 s starting at 0 spans project frames 0..12. Its source 13..26 maps to
-13 frames, so it would overlap the next clip (`operation.rs:5306`) and fail the import.
+Lower each track from left to right:
+1. Start a first clip or a clip after a gap at its rounded IR start. Start an abutting
+   successor at the previous clip's decided end.
+2. At the decided start, evaluate the IR source time by shifting the IR in-point for the
+   change from the IR start. Subtract the media origin and map once at the asset rate to
+   get `source.start`.
+3. Choose the achievable project end nearest the IR end, allowing a shorter or longer
+   span and breaking ties toward the shorter end. An achievable end has an exact
+   `map_project_duration_to_source(source.start, span, effective, fps)` (`time.rs:365`),
+   fits the media's end, and never passes the next item's IR end. An abutting successor
+   inherits the decided end. A following gap absorbs the difference. Every end targets its
+   own IR end, independently of the previous cut's displacement.
+4. If no positive achievable end fits, give the clip one source frame if it fits before the
+   next item's IR end. Otherwise drop it with `clip_too_short` (Ø) and start the successor
+   at the dropped clip's decided start.
+5. Use the decided cuts for transitions, link groups and A/V pairing. Linked video and audio
+   cuts can differ by the snap. Clamp transition durations and fade sums to the derived length
+   (`transition_fade_clamped`), and keep gain keys inside that length (`gain_keys_mapped`).
 
-The lowering therefore does this for every media clip, not only retimed ones:
-1. It maps only `source.start`, at the asset rate, after subtracting the media start.
-2. It derives `source.end = map_project_duration_to_source(source.start, span, effective, fps)`
-   (`time.rs:365`).
-3. When no exact end exists (`InexactDuration`), it takes the nearest shorter end and counts
-   `subframe_rounded`. Example: a 30 fps audio-only asset in a 60 fps project with an odd span.
-4. Only then does it clamp lengths that must fit the derived length, counting each clamp:
-   - transition durations (`operation.rs:4936`) → `transition_fade_clamped`;
-   - fade sums (`:4996`) → `transition_fade_clamped`;
-   - gain keys → `gain_keys_mapped`.
+`cut_snapped` counts each cut moved off its rounded position and reports the largest move in
+project frames. `subframe_rounded` records the input value rounding in §4.1.
 
-**Bounds**, with `r = asset fps ÷ project fps`; the reported bound is the measured maximum:
-- Clip starts are within ½ project frame of the IR.
-- Clip ends are within ½ frame, or within 1½ frames where an inexact span was shortened.
-- Source ends are within 1 + r source frames of the interchange's.
+**Bounds.** Report each measured maximum. Let `P` be project frames per source frame of the
+outgoing clip at its effective rate, and `r = asset fps ÷ project fps`.
+- The first start and each start after a gap are within ½ project frame of the IR.
+- A snapped cut is within ½ + P/2 project frames of the IR.
+- At 100% speed, the source end is within 1 + r source frames of the IR.
+- For a retimed clip, report the source-end drift from speed quantization separately (§4.3).
 
 **Audio-only assets** probe at 30 fps (`crates/kinewright-media/src/au6_sources.rs:1012`). A
 sample-accurate FCPXML or dual-system audio in-point therefore rounds twice: once to the 30 fps
@@ -203,12 +219,14 @@ ignores effects. IX1 reads `source_range.duration` as the duration in the parent
 against an editor until a corpus sample settles it (§7.4). FCPXML speed is `Δvalue / Δtime` over
 the `timeMap` ends, and a retimed clip's media in-point is `timeMap(@start)`.
 
-Kinewright gets `p = round(100 × |s|)`, clamped to 10..=1000 (`speed_clamped`). The clip keeps its
-exact span through the §4.2 derivation, which already runs through M23's effective rate
-(`model.rs:531-536`). The reported bound is `max |s − p/100|` in tenths of a percent.
+Kinewright gets `p = round(100 × |s|)`, clamped to 10..=1000 (`speed_clamped`). Cuts snap
+through §4.2 at M23's effective rate (`model.rs:531-536`). Report `max |s − p/100|` in tenths
+of a percent and, separately, the maximum source-end drift from speed quantization. For each
+retimed clip the drift is `|s − p/100|` times the clip's duration expressed in asset-rate
+frames. The `1 + r` bound applies to clips at 100% IR speed.
 
-A variable map becomes a constant average speed with exact ends. Its bound is the largest drift,
-in source frames, between the true map and the average, taken over the map's points.
+A variable map becomes a constant average speed. Its bound is the largest drift, in source
+frames, between the true map and the unquantized average, taken over the map's points.
 
 **4.4 Project rate, start, drop frame.**
 - FCPXML takes the sequence format.
@@ -291,8 +309,8 @@ topmost item per frame is unchanged; §12 checks this.
 layers below (`docs/M20-TRANSITIONS.md`). Every same-track transition lowers through one function,
 `lower_same_track_transition`, so IX-T1 can replace it in one place (ruling 2).
 
-Both formats keep the cut fixed and draw on handles. OTIO's `in_offset` shows B before the cut and
-`out_offset` shows A after it. FCPXML exports centre `transition` on the cut, so
+Both formats draw on handles around the cut decided in §4.2. OTIO's `in_offset` shows B before
+the cut and `out_offset` shows A after it. FCPXML exports centre `transition` on the cut, so
 `before = cut − offset` and `after = offset + duration − cut`. A dissolve at cut `T` lowers to:
 
 ```text
@@ -347,7 +365,9 @@ checks (`operation.rs:5144`), by construction:
   in −600..=120;
 - titles are ≤ 512 characters and on video tracks;
 - markers are ≥ 0 and sorted;
-- `Document.duration` is the maximum clip end;
+- `Document.duration` is the maximum clip end (`operation.rs:5337`). Report any trailing gap
+  removed from the timeline with `trailing_gap_trimmed` and its removed project-frame count
+  (ruling 8);
 - `audio_mix` is empty and the colour context is the default (`color_space_default`);
 - the record and track counts are within their caps.
 
@@ -410,9 +430,10 @@ is `exact + approximated + dropped = items`.
 *Timeline and media rows* describe the timeline or its media, not an item, and sit outside the
 identity: `start_rebased`, `rate_snapped`, `resolution_inferred`, `drop_frame_labels`,
 `color_space_default`, `track_names_dropped`, `clip_names_dropped`, `metadata_dropped`,
-`media_offline`, `media_timeout`, `remote_url`, `relinked_by_name`, and the three `*_reading`
-rows. Resolve names every clip and attaches metadata, so a named Resolve clip with nothing else
-lost is exact; a golden fixture proves it.
+`trailing_gap_trimmed`, `media_offline`, `media_timeout`, `remote_url`, `relinked_by_name`, and
+the three `*_reading` rows. Treat the removed part of a trailing gap as timeline loss outside
+the item totals. Resolve names every clip and attaches metadata, so a named Resolve clip
+with nothing else lost is exact; a golden fixture proves it.
 
 **7.3 Marker colour switch (ruling 4).** One constant in the lowering, `MARKER_COLOR_POLICY`,
 chooses between two values:
@@ -446,9 +467,12 @@ code beyond them. A dropped code is therefore never hidden, and the dialog lists
 the rows (finding 9). The media counts are in the header, so offline media is visible even when its
 row is cut.
 
-The worst case is about 320 B of header, plus 8 rows × about 300 B, plus about 45 omitted codes × 24
-B: roughly 3.8 KB. `ImportRecord::validate` enforces the 4 KiB cap on the serialized record itself,
-so this arithmetic is a check, not the guard. A typical import (6–8 rows) is about 1.5 KiB:
+The serialized record is capped at 4 KiB (ruling 10). JSON escaping counts toward the cap.
+Eight rows with two 24-byte control-character names and two sites each can serialize to 4,150
+bytes. If the record exceeds the cap, trim the name and site samples first. Then remove rows
+from the end of the ordered list as needed and add their codes to `omitted_codes`. Preserve
+all totals and all omitted codes. `ImportRecord::validate` checks the serialized size.
+A typical import (6–8 rows) is about 1.5 KiB:
 
 ```json
 {"format":"otio","format_version":"Timeline.1","source_name":"reel2.otio","items":1840,"exact":1702,
@@ -460,8 +484,9 @@ so this arithmetic is a check, not the guard. A typical import (6–8 rows) is a
 **7.6 Codes.** `LossCode` is a closed snake_case enum. A slice that needs a new code adds it.
 
 *Item scope:*
-- Timing and structure: `subframe_rounded`, `before_start_trimmed`, `nest_flattened`,
-  `transition_lane`, `lane_added`, `multicam_active_angle`, `audition_active_pick`.
+- Timing and structure: `subframe_rounded`, `cut_snapped` (A), `clip_too_short` (Ø),
+  `outside_window` (Ø), `before_start_trimmed`, `nest_flattened`, `transition_lane`,
+  `lane_added`, `multicam_active_angle`, `audition_active_pick`.
 - Speed: `speed_rounded`, `speed_clamped`, `reverse_dropped`, `variable_speed_averaged`,
   `nest_retime_unsupported`, `retimed_audio_muted`.
 - Transitions: `transition_type_mapped`, `transition_at_nest_cut`, `audio_crossfade_linear`,
@@ -474,7 +499,8 @@ so this arithmetic is a check, not the guard. A typical import (6–8 rows) is a
   `generator_dropped`, `image_sequence_dropped`, `unknown_item`, `source_clamped`,
   `source_origin_assumed`.
 
-*Timeline and media scope:* the codes listed in §7.2.
+*Timeline and media scope:* the codes listed in §7.2. `trailing_gap_trimmed` is a timeline row
+bounded in removed project frames.
 
 ## 8. Media
 
@@ -497,6 +523,11 @@ references, the agent's `path` and each `media_roots` entry.
   - `\\host\share`, `\\?\UNC\…`, `\\.\…`, and every other `\\?\` form;
   - `//host/…` on every platform;
   - any scheme other than `file`.
+
+For a `file:` URL, apply the host rule first, percent-decode the path and classify the final
+decoded native path before any filesystem call (ruling 9). A URL with encoded separators
+(`%2F` or `%5C`, case-insensitive) is remote. A decoded path beginning with `//` or two
+backslashes is remote, including `file://localhost//host/share/a.mov`.
 
 *Why remote locators are never statted or probed.* Statting `\\evil.example\s\a.mov`, or a `file:`
 URL naming that host, makes Windows authenticate to the host over SMB and send the user's NTLM
@@ -690,7 +721,15 @@ Named cases:
   in-point (finding 6);
 - OTIO A/V pairing, a split edit and dual-mono (finding 10);
 - more than 8 codes, with dropped codes hidden past the cap (finding 9);
-- `NaN`/`Infinity` (finding 11).
+- `NaN`/`Infinity` (finding 11);
+- cut snap at 23.976 → 60 fps with a seven-frame IR span and a zero asset in-point;
+- cut snap at 23.976 → 60 fps with a two-frame IR span, a zero asset in-point and no
+  positive shorter representation;
+- cut snap at 10% speed with a 30 fps asset, a 60 fps project and a 39-frame IR span;
+- retimed source-end drift over 100 seconds of 1.004× playback at 30 fps;
+- an OTIO track with red frames 0–24 and blue frames 24–48, windowed to 24–48, importing
+  blue alone at frame zero;
+- one 24-frame clip followed by a 24-frame gap, reporting a 24-frame trimmed tail.
 
 **Media-dependent rows.** Probing, `source_clamped`, `source_origin_assumed`, A/V sync and
 `media_timeout` are proven by the lavfi fixtures, never by the corpus, whose files come without
@@ -710,23 +749,29 @@ repository's sample data.
 - **Mixed rate (finding 1).**
   - Assets at 23.976, 25, 30 and 60 fps, plus 30 fps audio-only assets, in 24, 50 and 60 fps
     projects, with random starts, spans and dissolves.
-  - The lowered document always validates, and no clip overlaps another.
-  - Every start lies within ½ project frame of the IR. Every end lies within ½ frame, or within 1½
-    frames where `subframe_rounded` counted a shortened inexact span.
+  - The lowered document always validates. Clips on the same track never overlap, and clips
+    that abut in the IR never acquire a gap at the cut.
+  - Check the first and post-gap starts, snapped cuts, 100% source ends and retimed
+    source-end drift against their separate §4.2–4.3 bounds.
 - **Round trip.** An IR in the N subset, written by a test-only OTIO or FCPXML writer and imported,
   equals the generated document.
 - **Determinism and safety.** The same bytes give the same document bytes, and no input panics.
   Every successful import validates, and the accounting identity holds.
+- **Report size.** Generate worst-case names and sites, including control characters at the
+  maximum name length. Every record the importer writes fits in 4 KiB of serialized JSON
+  and passes `ImportRecord::validate`.
 - **Topmost opaque item (finding 14).** A pure check over the IR and the `Document`: at each frame,
   the topmost opaque item in the IR is the topmost clip in the `Document`, with the same media and
-  the same source frame (±½). It runs on every fixture and on generated nests.
+  the same source frame (±½). It runs on every fixture and on generated nests. Compare topology at
+  the decided cuts when a cut snaps. The mixed-rate property measures the snap against the IR.
 - **Nest order (finding 14).** Inner nest layers keep their order when lane 1 is busy at the same
   time (nested nests, spill lanes).
 
 **Locator safety (finding 2).** Hostile fixtures cover `file://evil.example/s/a.mov`,
-`\\host\share\a.mov`, `\\?\UNC\…`, `\\.\…`, `//host/a.mov`, and a remote agent `path` and root. A
-recording `LocatorFs` asserts that each one is never statted, opened or probed. Each ends as an
-offline asset or a `remote_path` refusal.
+`\\host\share\a.mov`, `\\?\UNC\…`, `\\.\…`, `//host/a.mov`, `file://localhost//host/share/a.mov`,
+file URLs with encoded slashes and backslashes, and a remote agent `path` and root.
+A recording `LocatorFs` asserts that each one is never statted, opened or probed. Each ends as
+an offline asset or a `remote_path` refusal.
 
 **Fuzzing.**
 - Proptest mutates fixture bytes and generates structure: 256 cases per parser in the fast tier,
@@ -776,6 +821,9 @@ indexed first if it takes over 200 ms.
 - **IX-T1: a native two-sided same-track transition.** It replaces `lower_same_track_transition`
   and the head/body split, and it lands before IX2, because `.prproj` has a dissolve on nearly every
   cut.
+- **CORE-T1: a clip's timeline span is authoritative, with a sub-frame source end.** It removes
+  the snap and lets a person cut 30 fps footage on any frame of a 60 fps timeline. It lands
+  with IX-T1, before IX2.
 - **Export**, seeded by the §12 test writer.
 - **IX2 `.prproj`:** exact ticks into this IR, the same lowering and report, and a cap on
   decompressed size, which Mirage lacks (`crates/premiere_file/src/format/reader.rs:70-88@cdea27e`).
@@ -787,7 +835,7 @@ indexed first if it takes over 200 ms.
 
 ## 14. Rulings and open questions
 
-Lead rulings on revision 1 (2026-11-17):
+Lead rulings (2026-11-17):
 1. **Agent opening:** inspect-only in IX1. There is no `request_open_interchange`; AW1's
    `open_project` is the only way in.
 2. **Transition lanes:** accepted for IX1, behind one function. IX-T1 lands before IX2.
@@ -796,6 +844,11 @@ Lead rulings on revision 1 (2026-11-17):
    measured in the M36 ledger.
 4. **Marker colours:** Riel's call, pending. The design writes a label prefix behind one switch.
 5. **`.otioz`:** out of IX1.
+6. **Cut snap.** Cuts snap to the outgoing clip's source grid (§4.2).
+7. **Composition windows.** The OTIO parser applies every composition's window (§2).
+8. **Trailing gaps.** Report the timeline tail removed beyond the last clip (§6.2).
+9. **Locators.** Classify file URLs on the final decoded native path (§8.1).
+10. **Report size.** Bound the serialized record and trim samples before rows (§7.5).
 
 Open questions:
 1. **Marker colour switch.** Should `MARKER_COLOR_POLICY` ship as `LabelPrefix` or `Drop`? This is
