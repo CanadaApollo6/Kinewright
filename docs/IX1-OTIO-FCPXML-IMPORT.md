@@ -185,12 +185,12 @@ Lower each track from left to right:
 2. At the decided start, evaluate the IR source time by shifting the IR in-point for the
    change from the IR start. Subtract the media origin and map once at the asset rate to
    get `source.start`.
-3. Choose the achievable project end nearest the IR end, allowing a shorter or longer
-   span and breaking ties toward the shorter end. An achievable end has an exact
-   `map_project_duration_to_source(source.start, span, effective, fps)` (`time.rs:365`),
-   fits the media's end, and never passes the next item's IR end. An abutting successor
-   inherits the decided end. A following gap absorbs the difference. Every end targets its
-   own IR end, independently of the previous cut's displacement.
+3. Apply the next item's IR end and the media's end as limits. Among the achievable
+   ends those limits admit, choose the one nearest the IR end, breaking ties toward
+   the shorter end. An achievable end has an exact
+   `map_project_duration_to_source(source.start, span, effective, fps)` (`time.rs:365`).
+   An abutting successor inherits the decided end. A following gap absorbs the difference.
+   Every end targets its own IR end, independently of the previous cut's displacement.
 4. If no positive achievable end fits, give the clip one source frame if it fits before the
    next item's IR end. Otherwise drop it with `clip_too_short` (Ø) and start the successor
    at the dropped clip's decided start.
@@ -204,7 +204,9 @@ project frames. `subframe_rounded` records the input value rounding in §4.1.
 **Bounds.** Report each measured maximum. Let `P` be project frames per source frame of the
 outgoing clip at its effective rate, and `r = asset fps ÷ project fps`.
 - The first start and each start after a gap are within ½ project frame of the IR.
-- A snapped cut is within ½ + P/2 project frames of the IR.
+- When the nearest achievable cut is admissible, its error is at most ½ + P/2 project frames.
+- If the limits exclude the nearest cut, the shorter admissible cut is within one source
+  frame when one exists. The cut error is at most ½ + P project frames.
 - At 100% speed, the source end is within 1 + r source frames of the IR.
 - For a retimed clip, report the source-end drift from speed quantization separately (§4.3).
 
@@ -726,6 +728,9 @@ Named cases:
 - cut snap at 23.976 → 60 fps with a two-frame IR span, a zero asset in-point and no
   positive shorter representation;
 - cut snap at 10% speed with a 30 fps asset, a 60 fps project and a 39-frame IR span;
+- constrained cut snap at 10% speed with a 30 fps asset in a 60 fps project. Two clips
+  abut at frame 38 and the second ends at 39. The first clip's achievable ends are 20 and
+  40, so the limit at 39 decides the cut at 20 and the report records 18 frames;
 - retimed source-end drift over 100 seconds of 1.004× playback at 30 fps;
 - an OTIO track with red frames 0–24 and blue frames 24–48, windowed to 24–48, importing
   blue alone at frame zero;
@@ -753,6 +758,8 @@ repository's sample data.
     that abut in the IR never acquire a gap at the cut.
   - Check the first and post-gap starts, snapped cuts, 100% source ends and retimed
     source-end drift against their separate §4.2–4.3 bounds.
+  - Check both tiers of the snapped-cut bound, using the tighter tier when the
+    nearest achievable cut is admissible.
 - **Round trip.** An IR in the N subset, written by a test-only OTIO or FCPXML writer and imported,
   equals the generated document.
 - **Determinism and safety.** The same bytes give the same document bytes, and no input panics.
@@ -844,7 +851,8 @@ Lead rulings (2026-11-17):
    measured in the M36 ledger.
 4. **Marker colours:** Riel's call, pending. The design writes a label prefix behind one switch.
 5. **`.otioz`:** out of IX1.
-6. **Cut snap.** Cuts snap to the outgoing clip's source grid (§4.2).
+6. **Cut snap.** Apply the limits first and snap to the nearest admissible cut on the
+   outgoing clip's source grid (§4.2).
 7. **Composition windows.** The OTIO parser applies every composition's window (§2).
 8. **Trailing gaps.** Report the timeline tail removed beyond the last clip (§6.2).
 9. **Locators.** Classify file URLs on the final decoded native path (§8.1).
