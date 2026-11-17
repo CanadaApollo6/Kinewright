@@ -10,8 +10,8 @@ on:
         value: ${{ jobs.windows.outputs.key }}
 jobs:
   linux:
-    name: Minimal FFmpeg (ubuntu-latest)
-    runs-on: ubuntu-latest
+    name: Minimal FFmpeg (ubuntu-24.04)
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     outputs:
       key: ${{ steps.profiles.outputs.key }}

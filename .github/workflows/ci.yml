@@ -35,7 +35,7 @@ jobs:
 
   pf1-wrapper:
     name: Linux PF1 wrapper witnesses
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       PYTHONDONTWRITEBYTECODE: '1'
@@ -212,7 +212,7 @@ jobs:
     needs: minimal-ffmpeg
     name: Linux workspace
     timeout-minutes: 60
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Check out repository
@@ -320,7 +320,7 @@ jobs:
   linux-slow:
     needs: minimal-ffmpeg
     name: Linux slow tier
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     if: >-
       github.event_name == 'workflow_dispatch' ||
