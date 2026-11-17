@@ -1742,6 +1742,7 @@ fn cc6_per_node_contribution_order_matches_production_z_order() {
         .map(|track| Track {
             id: TrackId(track + 1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,

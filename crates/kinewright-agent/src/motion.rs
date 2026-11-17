@@ -649,11 +649,13 @@ mod tests {
     fn motion_fixture(track_kind: TrackKind, duration: i64, effects: Vec<Effect>) -> Document {
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: MediaCatalog::default(),
             audio_mix: AudioMix::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: track_kind,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,

@@ -629,6 +629,7 @@ fn edit_gui_history_with_redo(core: &Core) {
             track: kinewright_core::Track {
                 id: kinewright_core::TrackId(1),
                 kind: kinewright_core::TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             },
@@ -1342,6 +1343,7 @@ fn g05l_two_clients_one_editor_ordered_history() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],
@@ -1719,6 +1721,7 @@ fn g05l_disk_barrier_keeps_acceptance_local_and_saved_exact() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],
@@ -1847,6 +1850,7 @@ fn g05l_ack_prefix_is_the_independently_reopened_history() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],

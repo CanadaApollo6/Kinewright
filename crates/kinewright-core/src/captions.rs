@@ -158,6 +158,7 @@ pub fn animated_caption_operations_at(
         track: Track {
             id: track_id,
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         },

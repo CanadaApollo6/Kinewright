@@ -14,6 +14,7 @@ fn fixture() -> (
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],
@@ -734,6 +735,7 @@ fn s2h_lost_rescue_result_returns_original_activation_without_second_copy() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],
@@ -813,6 +815,7 @@ fn c7_fix1_rescue_status_names_the_rescue_copy() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],

@@ -790,6 +790,10 @@ pub enum OpError {
     DuplicateTrack(TrackId),
     #[error("new track {0} must be empty")]
     NewTrackNotEmpty(TrackId),
+    #[error("track {0} has a name longer than 64 bytes")]
+    TrackNameTooLong(TrackId),
+    #[error("invalid import records: {0}")]
+    InvalidImportRecord(&'static str),
     #[error("clip {0} occurs more than once")]
     DuplicateClip(ClipId),
     #[error("asset {0} does not exist")]
@@ -5148,6 +5152,12 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
     if doc.resolution.0 == 0 || doc.resolution.1 == 0 {
         return Err(OpError::InvalidResolution);
     }
+    if doc.imported_from.len() > crate::DOCUMENT_MAX_IMPORT_RECORDS {
+        return Err(OpError::InvalidImportRecord("too many records"));
+    }
+    for record in &doc.imported_from {
+        record.validate().map_err(OpError::InvalidImportRecord)?;
+    }
     for color_description in [
         &doc.color_context.working,
         &doc.color_context.monitoring,
@@ -5180,6 +5190,13 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
     for track in &doc.tracks {
         if !track_ids.insert(track.id) {
             return Err(OpError::DuplicateTrack(track.id));
+        }
+        if track
+            .name
+            .as_ref()
+            .is_some_and(|name| name.len() > crate::TRACK_NAME_MAX_BYTES)
+        {
+            return Err(OpError::TrackNameTooLong(track.id));
         }
         let mut previous: Option<(&Clip, TimeCode)> = None;
         for clip in &track.clips {
@@ -5873,6 +5890,8 @@ impl OpError {
             | Self::InvalidThreePointSource { .. }
             | Self::InvalidThreePointTimeline { .. }
             | Self::InvalidProjectRate { .. }
+            | Self::InvalidImportRecord { .. }
+            | Self::TrackNameTooLong { .. }
             | Self::InvalidAssetRate { .. }
             | Self::InvalidAssetDuration { .. }
             | Self::InvalidResolution { .. }
@@ -6240,14 +6259,14 @@ mod tests {
         grouped
     }
 
-    /// Appendix A, normative, **per variant**: all 162 `OpError` variant names
+    /// Appendix A, normative, **per variant**: all 164 `OpError` variant names
     /// with the family the contract assigns each one.
     ///
     /// Written out rather than counted, so a variant moved from one family to
     /// another fails here instead of cancelling out against another move
     /// (review-2 S4, review-1 N2). It is transcribed from
     /// `docs/IN1B-ERROR-MIGRATION.md`'s Appendix A, not from the accessor.
-    const APPENDIX_A: [(&str, &str); 162] = [
+    const APPENDIX_A: [(&str, &str); 164] = [
         ("AudioBusLookaheadExceeded", "Bounds"),
         ("AudioBusKeyframeOutsideProject", "Bounds"),
         ("AudioBusGainOutOfRange", "Bounds"),
@@ -6297,6 +6316,8 @@ mod tests {
         ("InvalidThreePointSource", "Malformed"),
         ("InvalidThreePointTimeline", "Malformed"),
         ("InvalidProjectRate", "Malformed"),
+        ("InvalidImportRecord", "Malformed"),
+        ("TrackNameTooLong", "Malformed"),
         ("InvalidAssetRate", "Malformed"),
         ("InvalidAssetDuration", "Malformed"),
         ("InvalidResolution", "Malformed"),
@@ -6489,7 +6510,7 @@ mod tests {
         ("SetSolidColor", "Clip"),
     ];
 
-    /// `IN1b` §9 clause 1: the match is exhaustive over all **162** `OpError`
+    /// `IN1b` §9 clause 1: the match is exhaustive over all **164** `OpError`
     /// variants with no wildcard, every family is non-empty, and **every
     /// variant** is in the family Appendix A gives it.
     #[test]
@@ -6515,10 +6536,10 @@ mod tests {
             .collect();
         assert_eq!(
             declared.len(),
-            162,
-            "Appendix A names 162 distinct variants"
+            164,
+            "Appendix A names 164 distinct variants"
         );
-        assert_eq!(implemented.len(), 162, "the accessor names 162 variants");
+        assert_eq!(implemented.len(), 164, "the accessor names 164 variants");
         for (variant, family) in &declared {
             assert_eq!(
                 implemented.get(variant),
@@ -6797,6 +6818,7 @@ mod tests {
                 track: Track {
                     id: TrackId(3),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },

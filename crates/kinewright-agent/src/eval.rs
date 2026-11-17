@@ -2910,6 +2910,7 @@ fn audio_tail_document(
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -9410,11 +9411,13 @@ mod tests {
         };
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -9532,6 +9535,7 @@ mod tests {
         final_document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![clip_fixture(2, AssetId(2), 0, 0, 60, ClipContent::Media)],
         });
@@ -9730,6 +9734,7 @@ mod tests {
         final_document.tracks.push(Track {
             id: TrackId(3),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![clip_fixture(3, AssetId(2), 0, 60, 120, ClipContent::Media)],
         });
@@ -10022,6 +10027,7 @@ mod tests {
         exact_document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![clip_fixture(2, AssetId(2), 0, 0, 600, ClipContent::Media)],
         });
@@ -11237,6 +11243,7 @@ mod tests {
         final_document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -13232,6 +13239,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         });

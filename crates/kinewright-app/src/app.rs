@@ -4667,6 +4667,7 @@ fn default_project_document() -> Document {
         tracks: vec![Track {
             id: DEFAULT_TRACK_ID,
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         }],
@@ -6012,6 +6013,7 @@ mod tests {
             tracks: vec![super::Track {
                 id: super::TrackId(1),
                 kind: super::TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -6112,12 +6114,14 @@ mod tests {
                 Track {
                     id: super::TrackId(1),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
                 Track {
                     id: super::TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
@@ -6181,6 +6185,7 @@ mod tests {
             tracks: vec![kinewright_core::Track {
                 id: super::TrackId(1),
                 kind: kinewright_core::TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             }],
@@ -9452,6 +9457,7 @@ pub(crate) mod in1_tests {
             track: Track {
                 id: TrackId(id),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             },
@@ -11654,6 +11660,7 @@ mod in2b_tests {
                     track: Track {
                         id: TrackId(81),
                         kind: TrackKind::Video,
+                        name: None,
                         sync_lock: true,
                         clips: vec![],
                     },
@@ -12391,6 +12398,7 @@ mod in2b_tests {
                 track: kinewright_core::Track {
                     id: TrackId(1),
                     kind: kinewright_core::TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
@@ -16621,6 +16629,7 @@ pub(crate) mod s3a_tests {
                 track: kinewright_core::Track {
                     id: TrackId(1),
                     kind: kinewright_core::TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![],
                 },
@@ -17535,6 +17544,7 @@ pub(crate) fn ja_c9_bootstrap_save_witness(dirty_named: bool) {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],
@@ -17807,6 +17817,7 @@ pub(crate) fn ja_c9_manual_producer_gate_witness() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],
@@ -17938,6 +17949,7 @@ pub(crate) fn ja_s2h_legacy_activation_witness() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],

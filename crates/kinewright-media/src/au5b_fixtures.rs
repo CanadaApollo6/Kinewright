@@ -142,6 +142,7 @@ fn seam_document(fps: Rational, assets: &[MediaAsset], pieces: Vec<Piece>) -> Do
         .expect("the document carries clips");
     let document = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: ColorContext::default(),
@@ -149,6 +150,7 @@ fn seam_document(fps: Rational, assets: &[MediaAsset], pieces: Vec<Piece>) -> Do
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips,
         }],

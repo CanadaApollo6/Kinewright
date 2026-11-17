@@ -1674,6 +1674,7 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![Clip {
                         enabled: true,
@@ -1697,6 +1698,7 @@ mod tests {
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
@@ -5377,6 +5379,7 @@ mod tests {
         let track = Track {
             id: AU6_A_BED_TRACK,
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         };
@@ -5438,6 +5441,7 @@ mod tests {
             .map(|track| Track {
                 id: track.track,
                 kind: track.kind,
+                name: None,
                 sync_lock: track.sync_lock,
                 clips: spec
                     .clips

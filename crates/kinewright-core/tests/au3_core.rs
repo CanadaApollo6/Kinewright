@@ -64,6 +64,7 @@ fn codes(exceptions: &[AudioQcException]) -> Vec<&str> {
 fn empty_timeline(fps: Rational) -> Document {
     Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: ColorContext::default(),
@@ -71,6 +72,7 @@ fn empty_timeline(fps: Rational) -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         }],
@@ -106,6 +108,7 @@ fn document_with_one_audio_track() -> Document {
         track: Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         },

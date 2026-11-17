@@ -131,12 +131,14 @@ fn s4_role_scope_closure() {
             Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             },
             Track {
                 id: TrackId(2),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: false,
                 clips: vec![],
             },
@@ -344,6 +346,7 @@ fn s4_drain_and_durable_base() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],
@@ -606,12 +609,14 @@ fn s4_editor_result_to_candidate() {
             Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             },
             Track {
                 id: TrackId(2),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: false,
                 clips: vec![],
             },
@@ -711,6 +716,7 @@ fn s4_solo_removal_and_director_routing() {
                 track: Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: false,
                     clips: vec![],
                 },

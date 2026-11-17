@@ -361,6 +361,7 @@ fn c7_moved_head_is_conflict() {
                 track: Track {
                     id: TrackId(41),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![],
                 },

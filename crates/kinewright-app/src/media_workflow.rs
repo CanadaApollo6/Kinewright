@@ -3078,12 +3078,14 @@ mod tests {
                 kinewright_core::Track {
                     id: TrackId(1),
                     kind: kinewright_core::TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![solid],
                 },
                 kinewright_core::Track {
                     id: TrackId(2),
                     kind: kinewright_core::TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![],
                 },
@@ -3277,6 +3279,7 @@ mod tests {
             tracks: vec![kinewright_core::Track {
                 id: TrackId(1),
                 kind: kinewright_core::TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![kinewright_core::Clip {
                     enabled: true,

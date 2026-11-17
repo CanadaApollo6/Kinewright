@@ -627,6 +627,7 @@ fn end_to_end(live: bool) {
             track: Track {
                 id: TrackId(100),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             },

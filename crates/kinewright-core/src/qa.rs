@@ -996,6 +996,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![
                     Clip {
@@ -1094,12 +1095,14 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![media_clip(1)],
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![media_clip(2)],
                 },
@@ -1236,6 +1239,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(12),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -1650,6 +1654,7 @@ mod tests {
             tracks: vec![crate::Track {
                 id: crate::TrackId(1),
                 kind: crate::TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![crate::Clip {
                     enabled: true,

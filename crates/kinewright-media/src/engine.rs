@@ -4093,6 +4093,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -4696,6 +4697,7 @@ mod tests {
         covered_document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![covering],
         });
@@ -4832,6 +4834,7 @@ mod tests {
         let audio_track = |id: u64| Track {
             id: TrackId(id),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         };
@@ -5001,6 +5004,7 @@ mod tests {
                 tracks: vec![Track {
                     id: TrackId(1),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 }],
@@ -6984,6 +6988,7 @@ mod tests {
                 tracks: vec![Track {
                     id: TrackId(1),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 }],

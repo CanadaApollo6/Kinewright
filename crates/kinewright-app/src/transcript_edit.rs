@@ -473,6 +473,7 @@ mod tests {
         };
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
@@ -480,24 +481,28 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![clip(1, asset.id, Some(LinkId(7)))],
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![clip(2, asset.id, Some(LinkId(7)))],
                 },
                 Track {
                     id: TrackId(3),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![clip(3, asset.id, None)],
                 },
                 Track {
                     id: TrackId(4),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: false,
                     clips: vec![clip(4, asset.id, None)],
                 },

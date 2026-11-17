@@ -1140,6 +1140,7 @@ impl KinewrightApp {
                 track: kinewright_core::Track {
                     id: next_track,
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
@@ -4599,6 +4600,7 @@ mod tests {
         };
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
@@ -4606,12 +4608,14 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![clip(1, 0)],
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![clip(2, 0)],
                 },
@@ -4881,6 +4885,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![
                 Clip {
@@ -6666,6 +6671,7 @@ mod tests {
             .unwrap_or(TimeCode(30));
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
@@ -6673,12 +6679,14 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![
                         clip(1, 40, 0, second.0),
@@ -6944,6 +6952,7 @@ mod tests {
         };
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
@@ -6951,12 +6960,14 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![Clip {
                         enabled: true,
@@ -7531,6 +7542,7 @@ pub(crate) mod mo2_tests {
                 .map(|((kind, clips), id)| Track {
                     id: TrackId(id),
                     kind: *kind,
+                    name: None,
                     sync_lock: true,
                     clips: (clips.iter())
                         .map(|(clip, start, end)| solid(*clip, *start, *end))

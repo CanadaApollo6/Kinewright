@@ -2039,11 +2039,13 @@ fn edit_plan_document() -> Document {
     };
     Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -2886,6 +2888,7 @@ async fn au1_get_audio_levels_measures_the_real_mix() {
     document.tracks.push(Track {
         id: TrackId(2),
         kind: TrackKind::Audio,
+        name: None,
         sync_lock: true,
         clips: vec![Clip {
             enabled: true,
@@ -7609,6 +7612,7 @@ async fn au4_plan_audio_ducking_converges_through_the_real_engine() {
     document.tracks.push(Track {
         id: TrackId(2),
         kind: TrackKind::Audio,
+        name: None,
         sync_lock: false,
         clips: vec![Clip {
             enabled: true,
@@ -7944,6 +7948,7 @@ fn au5_audio_document(asset: MediaAsset) -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -8459,6 +8464,7 @@ async fn au5_capture_room_tone_and_fill_a_gap_through_the_real_store() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![clip(1, 0), clip(2, 60)],
         }],
@@ -8711,6 +8717,7 @@ async fn au5_plan_room_tone_fill_commits_a_covering_tile_at_25_fps() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![clip(1, 0), clip(2, 32)],
         }],
@@ -8862,6 +8869,7 @@ async fn au5_plan_room_tone_fill_commits_a_covering_tile_at_29_97_fps() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![clip(1, 0), clip(2, 40)],
         }],
@@ -9000,6 +9008,7 @@ async fn au5_plan_room_tone_fill_tiles_a_1200_frame_asset_at_29_97_fps() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![clip(1, 0), clip(2, 40)],
         }],
@@ -9094,6 +9103,7 @@ fn au6_agent_scene(
         .map(|track| Track {
             id: track.track,
             kind: track.kind,
+            name: None,
             sync_lock: track.sync_lock,
             clips: spec
                 .clips
@@ -10918,6 +10928,7 @@ fn mo2_solo_stack(mut document: Document, clips: Vec<Clip>) -> Document {
         document.tracks.push(Track {
             id,
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![clip],
         });
@@ -11552,6 +11563,7 @@ mod mo2_solo_review {
         document.tracks.push(Track {
             id: TrackId(3),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![mo2_solo_solid(3, [0, 255, 0], 12)],
         });

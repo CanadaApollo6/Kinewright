@@ -20,6 +20,7 @@ fn marked_document(mark: u64) -> Document {
         tracks: vec![kinewright_core::Track {
             id: kinewright_core::TrackId(mark),
             kind: kinewright_core::TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],

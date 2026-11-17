@@ -51,6 +51,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let blue = engine.probe(&blue_path)?;
     let mut document = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -59,6 +60,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -82,6 +84,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Track {
                 id: TrackId(2),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,

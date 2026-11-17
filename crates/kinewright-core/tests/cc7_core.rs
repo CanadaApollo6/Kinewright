@@ -1515,6 +1515,7 @@ fn cc7_initial_document(scenario: Cc7Scenario) -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips,
         }],

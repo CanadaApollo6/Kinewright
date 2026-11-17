@@ -3279,6 +3279,7 @@ fn relocatable_document(assets: &[LutAsset], effects: Vec<Effect>) -> Document {
         tracks: vec![kinewright_core::Track {
             id: kinewright_core::TrackId(1),
             kind: kinewright_core::TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![kinewright_core::Clip {
                 enabled: true,

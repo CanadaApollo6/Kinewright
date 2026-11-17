@@ -35,6 +35,7 @@ fn source(profile: StorageLimits) -> (TempDirectory, Ja1EditingSession, Vec<Bran
             .map(|id| Track {
                 id: TrackId(id),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             })
@@ -90,6 +91,7 @@ fn large_edit(core: &Core) {
             track: Track {
                 id: TrackId(id),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             },

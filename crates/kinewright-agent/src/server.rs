@@ -1254,6 +1254,7 @@ impl KinewrightMcp {
             incidents,
             capability_denylist: &[],
             investigator: None,
+            imported_from: Vec::new(),
             served_tool_allowlist: None,
             host_scoped: false,
             task_endpoint: None,
@@ -6818,6 +6819,7 @@ impl KinewrightMcp {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -7412,6 +7414,7 @@ impl KinewrightMcp {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -19015,11 +19018,13 @@ mod tests {
         };
         let document = Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -19077,6 +19082,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(9),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: false,
             clips: vec![
                 Clip {
@@ -19137,6 +19143,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         });
@@ -19272,12 +19279,14 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![Clip {
                         enabled: true,
@@ -19361,12 +19370,14 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![media_clip(1, 1, 0)],
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![media_clip(90, 9, 0)],
                 },
@@ -19403,6 +19414,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(2),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             }],
@@ -19796,6 +19808,7 @@ mod tests {
                 track: Track {
                     id: TrackId(2),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
@@ -20891,6 +20904,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![audio_clip],
         });
@@ -20964,6 +20978,7 @@ mod tests {
         overlay_document.tracks.push(Track {
             id: TrackId(3),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![overlay_clip],
         });
@@ -21066,6 +21081,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(9),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![overlay_clip],
         });
@@ -23541,11 +23557,13 @@ mod tests {
         };
         let document = Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -24700,6 +24718,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: vec![clip(1, 0), clip(2, 60)],
             }],
@@ -25455,6 +25474,7 @@ mod tests {
         wider.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         });
@@ -26582,6 +26602,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -29906,6 +29927,7 @@ mod tests {
             track: Track {
                 id: TrackId(2),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             },
@@ -32512,6 +32534,7 @@ mod tests {
             document.tracks.push(Track {
                 id,
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -32596,6 +32619,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(4),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         });
@@ -33062,6 +33086,7 @@ mod tests {
         };
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
@@ -33070,12 +33095,14 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: false,
                     clips: vec![clip(1)],
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: false,
                     clips: vec![clip(2)],
                 },
@@ -33884,6 +33911,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(3),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: false,
             clips: vec![Clip {
                 enabled: true,
@@ -34330,11 +34358,13 @@ mod tests {
     fn mo1_motion_document(duration: i64, effects: Vec<Effect>) -> Document {
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,

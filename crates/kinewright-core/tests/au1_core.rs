@@ -9,6 +9,7 @@ use kinewright_core::{
 fn empty_timeline(fps: Rational) -> Document {
     Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -16,6 +17,7 @@ fn empty_timeline(fps: Rational) -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         }],
@@ -34,6 +36,7 @@ fn two_track_document() -> Document {
         track: Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         },

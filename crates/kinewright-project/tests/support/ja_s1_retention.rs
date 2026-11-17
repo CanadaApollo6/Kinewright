@@ -34,6 +34,7 @@ fn setup(path: &Path) -> (Core, ProjectBundle, ObjectRef) {
     document.tracks.push(Track {
         id: TrackId(1),
         kind: TrackKind::Video,
+        name: None,
         sync_lock: true,
         clips: vec![],
     });
@@ -647,6 +648,7 @@ fn every_storage_cap_backpressures_without_data_loss() {
             track: Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             },

@@ -115,6 +115,7 @@ fn document(resolution: (u32, u32), media: &[Source], tracks: Vec<Vec<Clip>>) ->
         } else {
             TrackKind::Video
         },
+        name: None,
         sync_lock: true,
         clips,
     };
@@ -182,6 +183,7 @@ pub(crate) fn many_sources(resolution: (u32, u32), n: u64, len: i64) -> Workload
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips,
         }],
@@ -464,6 +466,7 @@ pub(crate) fn one_vfr_source(size: (u32, u32), frames: i64) -> Workload {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![clip],
         }],

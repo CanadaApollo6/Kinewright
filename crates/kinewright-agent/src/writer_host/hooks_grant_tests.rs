@@ -155,6 +155,7 @@ fn h3_retired_attempt_refuses_existing_mcp_prepared_edit_and_replay() {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             }],

@@ -34,6 +34,7 @@ mod editorial;
 mod effect;
 mod history;
 mod history_transition;
+mod import_record;
 mod incident;
 mod journal;
 mod media;
@@ -208,6 +209,11 @@ pub use effect::{
 pub use history::{
     GestureBoundary, HISTORY_COMMANDS, HistoryBatch, HistoryCursor, HistoryError, HistorySnapshot,
     OperationIdentityEffect,
+};
+pub use import_record::{
+    DOCUMENT_MAX_IMPORT_RECORDS, Fidelity, IMPORT_RECORD_MAX_BYTES,
+    IMPORT_RECORD_MAX_ESTIMATED_RANGES, IMPORT_RECORD_MAX_ROWS, ImportRecord, InterchangeFormat,
+    LossBound, LossCode, LossRow, LossSite, MediaCounts, TRACK_NAME_MAX_BYTES,
 };
 pub use incident::{
     ColorQcIncident, DeliveryColorIncident, DeliveryVerificationIncident, INVESTIGATOR_ALLOWLIST,

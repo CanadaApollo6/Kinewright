@@ -41,6 +41,7 @@ fn fixture() -> SaveCostFixture {
             .map(|track| Track {
                 id: TrackId(track),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: (0..10)
                     .map(|clip| {

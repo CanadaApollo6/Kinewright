@@ -2967,6 +2967,7 @@ mod tests {
             track: kinewright_core::Track {
                 id: kinewright_core::TrackId(42),
                 kind: kinewright_core::TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             },

@@ -4710,6 +4710,7 @@ pub(crate) mod tests {
                 .map(|(id, clip)| Track {
                     id: TrackId(id),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![clip],
                 })
@@ -6414,6 +6415,7 @@ pub(crate) mod tests {
             document.tracks.push(Track {
                 id: TrackId(10 + u64::from(index)),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![solid],
             });

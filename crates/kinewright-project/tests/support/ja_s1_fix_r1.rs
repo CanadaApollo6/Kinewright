@@ -36,6 +36,7 @@ fn setup(path: &Path) -> (Core, ProjectBundle, ObjectRef) {
     doc.tracks.push(Track {
         id: TrackId(1),
         kind: TrackKind::Video,
+        name: None,
         sync_lock: true,
         clips: vec![],
     });
@@ -346,6 +347,7 @@ fn realistic_history_saves_every_edit_and_advances_durable_floor() {
         doc.tracks.push(Track {
             id: TrackId(id),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         });
@@ -434,6 +436,7 @@ fn legacy_large_document_keeps_its_previous_open_size_contract() {
         doc.tracks.push(Track {
             id: TrackId(id),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         });

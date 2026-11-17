@@ -184,6 +184,7 @@ fn composed() {
         tracks: vec![kinewright_core::Track {
             id: TrackId(1),
             kind: kinewright_core::TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],

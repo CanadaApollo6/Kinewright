@@ -155,6 +155,7 @@ fn run() {
         document.tracks.push(Track {
             id: TrackId(id),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         });
@@ -268,6 +269,7 @@ fn run() {
     floor_doc.tracks.push(Track {
         id: TrackId(1),
         kind: TrackKind::Video,
+        name: None,
         sync_lock: true,
         clips: vec![],
     });

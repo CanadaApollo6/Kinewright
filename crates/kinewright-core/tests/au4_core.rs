@@ -39,6 +39,7 @@ fn asset(id: u64, name: &str, duration: i64, rate: Rational) -> MediaAsset {
 fn empty_document() -> Document {
     let mut doc = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: ColorContext::default(),
@@ -46,6 +47,7 @@ fn empty_document() -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         }],
@@ -460,6 +462,7 @@ fn set_track_automation_shares_the_track_mix_entry_lifecycle() {
         track: Track {
             id: TrackId(4),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: false,
             clips: Vec::new(),
         },
@@ -1384,6 +1387,7 @@ fn a_ripple_insert_that_does_not_lengthen_the_project_clamps_rather_than_failing
         track: Track {
             id: TrackId(2),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: false,
             clips: Vec::new(),
         },
@@ -1453,6 +1457,7 @@ fn deleting_an_owner_takes_its_curve_with_it() {
         track: Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: false,
             clips: Vec::new(),
         },

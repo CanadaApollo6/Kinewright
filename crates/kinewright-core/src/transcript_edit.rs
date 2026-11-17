@@ -227,6 +227,7 @@ mod tests {
         }
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: crate::MediaCatalog::default(),
             audio_mix: crate::AudioMix::default(),
             color_context: crate::ColorContext::default(),
@@ -234,6 +235,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips,
             }],

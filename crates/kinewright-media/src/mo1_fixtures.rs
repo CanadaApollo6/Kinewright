@@ -260,6 +260,7 @@ fn mo1_still_document(
     };
     let document = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: ColorContext::default(),
@@ -267,6 +268,7 @@ fn mo1_still_document(
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -1437,6 +1439,7 @@ fn still_alpha_composites_over_video() {
         Track {
             id: TrackId(2),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -1860,6 +1863,7 @@ fn disabled_clip_matches_removal_on_lavapipe() {
         Track {
             id: TrackId(2),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -1938,6 +1942,7 @@ fn disabled_clip_is_silent_in_the_mix() {
     };
     let document = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: ColorContext::default(),
@@ -1945,6 +1950,7 @@ fn disabled_clip_is_silent_in_the_mix() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![clip(1, 0), clip(2, 5)],
         }],
@@ -2059,6 +2065,7 @@ fn mo1_export_document(video: &GeneratedMedia, still: &GeneratedMedia) -> Docume
         .insert("scale_percent".to_owned(), scale_ramp_curve());
     Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: ColorContext::default(),
@@ -2066,6 +2073,7 @@ fn mo1_export_document(video: &GeneratedMedia, still: &GeneratedMedia) -> Docume
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![
                 Clip {

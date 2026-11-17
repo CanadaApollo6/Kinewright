@@ -732,6 +732,7 @@ mod tests {
             track: Track {
                 id: TrackId(id),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             },

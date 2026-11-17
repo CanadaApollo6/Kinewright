@@ -8,8 +8,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AutomationCurve, ColorContext, ColorDescription, OpError, Rational, TimeCode, Title,
-    map_source_range_to_project,
+    AutomationCurve, ColorContext, ColorDescription, ImportRecord, OpError, Rational, TimeCode,
+    Title, map_source_range_to_project,
 };
 
 macro_rules! id_type {
@@ -574,6 +574,8 @@ const fn time_code_is_zero(value: &TimeCode) -> bool {
 pub struct Track {
     pub id: TrackId,
     pub kind: TrackKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Whether ripple edits initiated on other tracks shift this track to
     /// preserve cross-track synchronization. The edited track always ripples
     /// itself even when this flag is false. Defaults to true when omitted.
@@ -1473,6 +1475,8 @@ pub struct Document {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(default)]
     pub investigator: Option<InvestigatorPreferences>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imported_from: Vec<ImportRecord>,
     pub fps: Rational,
     pub resolution: (u32, u32),
     pub duration: TimeCode,
@@ -1489,6 +1493,7 @@ impl Default for Document {
             color_context: ColorContext::default(),
             lut_assets: Vec::new(),
             investigator: None,
+            imported_from: Vec::new(),
             fps: Rational::default(),
             resolution: (1_920, 1_080),
             duration: TimeCode::ZERO,
@@ -1938,6 +1943,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,

@@ -8903,6 +8903,7 @@ mod tests {
             track: Track {
                 id: TrackId(42),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             },

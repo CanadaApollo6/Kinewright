@@ -2668,6 +2668,7 @@ fn c10_resolve_feedback_maps_onto_the_host_chosen_checkpoint_read_only() {
                 track: Track {
                     id: TrackId(41),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![],
                 },

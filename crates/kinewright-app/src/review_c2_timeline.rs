@@ -104,11 +104,13 @@ fn rc2_band_drag_with_kept_outside_keys_matches_the_op_path() {
 fn linked_fixture_like(clip: Clip) -> kinewright_core::Document {
     let mut document = kinewright_core::Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         tracks: vec![kinewright_core::Track {
             id: kinewright_core::TrackId(1),
             kind: kinewright_core::TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![clip],
         }],

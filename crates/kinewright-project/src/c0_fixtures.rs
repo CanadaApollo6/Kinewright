@@ -163,6 +163,7 @@ fn build(
                 track: Track {
                     id: TrackId(id),
                     kind,
+                    name: None,
                     sync_lock: true,
                     clips: vec![],
                 },

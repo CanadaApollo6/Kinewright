@@ -158,6 +158,7 @@ fn base_document(scenario: Au6Scenario) -> Document {
         .map(|track| Track {
             id: track.track,
             kind: track.kind,
+            name: None,
             sync_lock: track.sync_lock,
             clips: spec
                 .clips

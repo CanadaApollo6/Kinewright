@@ -129,6 +129,7 @@ fn document_sized(resolution: (u32, u32), clips: Vec<Clip>) -> Document {
             .map(|(index, clip)| Track {
                 id: TrackId(index as u64 + 1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![clip],
             })
@@ -1131,6 +1132,7 @@ fn r22_audio_ramp_is_type_independent() {
         linked.tracks.push(Track {
             id: TrackId(id),
             kind,
+            name: None,
             sync_lock: true,
             clips: vec![clip],
         });

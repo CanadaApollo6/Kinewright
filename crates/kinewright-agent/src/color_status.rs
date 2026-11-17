@@ -5456,9 +5456,11 @@ mod tests {
         };
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -5814,6 +5816,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,

@@ -637,6 +637,7 @@ fn audio_video_placement_operations(
             track: Track {
                 id: track_id,
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             },
@@ -817,12 +818,14 @@ mod tests {
         };
         let document = Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             }],
@@ -840,6 +843,7 @@ mod tests {
                     track: Track {
                         id: TrackId(2),
                         kind: TrackKind::Audio,
+                        name: None,
                         sync_lock: true,
                         clips: Vec::new(),
                     },
@@ -866,12 +870,14 @@ mod tests {
     fn still_document(fps: Rational, frame: (u32, u32)) -> Document {
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             }],

@@ -222,6 +222,7 @@ mod tests {
                     .map(|id| Track {
                         id: TrackId(id),
                         kind: TrackKind::Video,
+                        name: None,
                         sync_lock: true,
                         clips: vec![],
                     })
@@ -657,6 +658,7 @@ mod tests {
                 tracks: vec![Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![],
                 }],
@@ -844,6 +846,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             }],

@@ -15,6 +15,7 @@ fn app_session_undo_stops_at_saved_floor_and_next_save_keeps_edits() {
             .map(|id| Track {
                 id: TrackId(id),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             })

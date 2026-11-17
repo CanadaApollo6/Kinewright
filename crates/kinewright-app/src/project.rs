@@ -1254,12 +1254,14 @@ mod tests {
                 Track {
                     id: TrackId(7),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
                 Track {
                     id: TrackId(3),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
@@ -1300,12 +1302,14 @@ mod tests {
                 Track {
                     id: TrackId(7),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
                 Track {
                     id: TrackId(3),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
@@ -1413,6 +1417,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             }],
@@ -2001,6 +2006,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips,
             }],

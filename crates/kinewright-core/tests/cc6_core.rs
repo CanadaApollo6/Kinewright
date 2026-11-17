@@ -1519,6 +1519,7 @@ fn managed_document_with_tracks(effects_per_track: &[Vec<Effect>]) -> Document {
             Track {
                 id: TrackId(identifier),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -2132,6 +2133,7 @@ fn track_document(clips: &[(u64, TimeCode)]) -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips,
         }],

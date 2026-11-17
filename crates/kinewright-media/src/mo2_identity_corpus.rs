@@ -106,6 +106,7 @@ pub(crate) fn corpus(media: &Path) -> Vec<(&'static str, Document, i64)> {
         document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![clip],
         });

@@ -2211,11 +2211,13 @@ mod tests {
         let second = asset(2);
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             tracks: vec![kinewright_core::Track {
                 id: kinewright_core::TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![
                     Clip {

@@ -1487,6 +1487,7 @@ mod tests {
         let track = |id, kind| Track {
             id: TrackId(id),
             kind,
+            name: None,
             sync_lock: true,
             clips: vec![],
         };

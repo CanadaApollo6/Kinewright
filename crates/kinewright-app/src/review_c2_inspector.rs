@@ -67,11 +67,13 @@ fn document(clips: Vec<Clip>) -> Document {
         .unwrap_or(0);
     let mut document = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips,
         }],

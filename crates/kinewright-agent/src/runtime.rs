@@ -608,6 +608,7 @@ mod tests {
         document.tracks.push(kinewright_core::Track {
             id: kinewright_core::TrackId(1),
             kind: kinewright_core::TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         });

@@ -2174,6 +2174,7 @@ mod tests {
                         track: Track {
                             id: TrackId(1),
                             kind: TrackKind::Video,
+                            name: None,
                             sync_lock: true,
                             clips: Vec::new(),
                         },
@@ -2218,6 +2219,7 @@ mod tests {
             track: Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             },
@@ -2261,6 +2263,7 @@ mod tests {
                 track: Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
@@ -2524,6 +2527,7 @@ mod tests {
             .collect();
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: crate::MediaCatalog::default(),
             audio_mix: crate::AudioMix::default(),
             color_context: crate::ColorContext::default(),
@@ -2531,6 +2535,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips,
             }],
@@ -2677,6 +2682,7 @@ mod tests {
                             track: Track {
                                 id: TrackId(next_track),
                                 kind: TrackKind::Video,
+                                name: None,
                                 sync_lock: true,
                                 clips: Vec::new(),
                             },
@@ -2752,6 +2758,7 @@ mod tests {
                             track: Track {
                                 id: TrackId(next_track_id),
                                 kind: TrackKind::Video,
+                                name: None,
                                 sync_lock: true,
                                 clips: Vec::new(),
                             },
@@ -2935,6 +2942,7 @@ mod tests {
             track: Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             },

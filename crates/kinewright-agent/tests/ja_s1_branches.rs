@@ -38,6 +38,7 @@ fn setup(path: &Path) -> (Core, ProjectBundle, ObjectRef) {
             track: Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             },
@@ -509,6 +510,7 @@ fn floored_specialist_reopens_original_full_delta_and_merges_once() {
             .map(|id| Track {
                 id: TrackId(id),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             })
