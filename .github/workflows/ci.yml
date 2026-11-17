@@ -298,6 +298,16 @@ jobs:
           cargo check -p kinewright-job-sys --all-targets || exit 1
           cargo build --workspace || exit 1
           readelf -d target/debug/kinewright-eval | grep -F '[libavcodec.so.62]' || exit 1
+          # MS2 ruling 31: this runner restricts unprivileged user namespaces.
+          # Without the helper's AppArmor profile, admission must refuse as
+          # SandboxUnavailable before parsing; after the install it admits.
+          # Every later test uses the installed profile.
+          gate=ms2_apparmor_userns_gate_refuses_without_the_profile_and_admits_with_it
+          test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1 || exit 1
+          KINEWRIGHT_MS2_USERNS_EXPECT=refused cargo test -p kinewright-media-client --test apparmor_native -- --exact "$gate" --nocapture || exit 1
+          sudo ./scripts/install-apparmor-profile.sh install "$PWD/target/debug/kinewright-media-helper" || exit 1
+          export KINEWRIGHT_MS2_USERNS_EXPECT=admitted
+          cargo test -p kinewright-media-client --test apparmor_native -- --exact "$gate" --nocapture || exit 1
           # slow_tests.py runs `cargo test --workspace` (the slow tests are
           # ignored without their feature) and fails unless the tests it
           # skipped are exactly ci/slow-tests.txt plus the ignores that
@@ -325,6 +335,10 @@ jobs:
           sudo systemctl start "user@$(id -u).service" || true
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+          # Test-only namespace users (the helper witness binary, job-sys
+          # boundary tests, the JA S4 guardian) are not the packaged helper, so
+          # the AppArmor profile cannot name them. The shipped helper's
+          # profile gate runs in the fast job, where this stays restricted.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
       - name: Install Rust

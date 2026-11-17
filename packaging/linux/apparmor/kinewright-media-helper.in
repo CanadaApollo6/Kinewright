@@ -1,0 +1,20 @@
+# AppArmor profile for Kinewright's confined media helper (MS2, ruling 31).
+#
+# Ubuntu 23.10+ restricts unprivileged user namespaces. The helper needs one
+# to build its sandbox (user, PID, mount and network namespaces, then
+# seccomp and Landlock). This profile grants only `userns` to the installed
+# helper executable and otherwise leaves it unconfined; the helper's own
+# boundary does the confining. Without this profile, media admission is
+# refused as SandboxUnavailable; Kinewright never disables the restriction or
+# parses media in the app.
+#
+# scripts/install-apparmor-profile.sh fills the attachment placeholder with the
+# helper's absolute path and loads the profile (root required).
+abi <abi/4.0>,
+include <tunables/global>
+
+profile kinewright-media-helper "@HELPER@" flags=(unconfined) {
+  userns,
+
+  include if exists <local/kinewright-media-helper>
+}
