@@ -308,6 +308,7 @@ pub fn spawn_helper(
     root: &Path,
     mode: media_boundary::Mode,
     address_space: u64,
+    allocation: u64,
     fds: [BorrowedFd<'_>; 5],
     spawner: Option<BorrowedFd<'_>>,
 ) -> io::Result<Child> {
@@ -323,6 +324,7 @@ pub fn spawn_helper(
             media_boundary::Mode::Degraded => "degraded",
         })
         .arg(address_space.to_string())
+        .arg(allocation.to_string())
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -353,4 +355,71 @@ pub fn children_peak_resident() -> io::Result<u64> {
         .map_err(io::Error::other)?
         .checked_mul(1024)
         .ok_or_else(|| invalid("child peak RSS overflow"))
+}
+
+/// One point-in-time smaps sample plus the kernel's status high-water counters.
+/// All sizes are bytes; VmRSS/VmHWM are explicitly the approximate status values.
+#[derive(Debug)]
+pub struct MemoryProfile {
+    pub rss: u64,
+    pub pss: u64,
+    pub private_clean: u64,
+    pub private_dirty: u64,
+    pub shared_clean: u64,
+    pub shared_dirty: u64,
+    pub vm_rss_status: u64,
+    pub vm_hwm_status: u64,
+    pub vm_peak: u64,
+    pub vm_size: u64,
+}
+pub fn open_smaps(process: &ProcessHandle) -> io::Result<File> {
+    if process.reaped()? {
+        return Err(invalid("memory observation identity disappeared"));
+    }
+    let file = File::open(format!("/proc/{}/smaps_rollup", process.pid()))?;
+    if process.reaped()? {
+        return Err(invalid("memory observation identity changed"));
+    }
+    Ok(file)
+}
+pub fn memory_profile(process: &ProcessHandle, smaps: &mut File) -> io::Result<MemoryProfile> {
+    use std::io::{Seek, SeekFrom};
+    if process.reaped()? {
+        return Err(invalid("memory observation identity disappeared"));
+    }
+    smaps.seek(SeekFrom::Start(0))?;
+    let mut rollup = String::new();
+    smaps.take(8193).read_to_string(&mut rollup)?;
+    if rollup.len() > 8192 {
+        return Err(invalid("oversized smaps observation"));
+    }
+    let status = bounded(format!("/proc/{}/status", process.pid()))?;
+    let status = std::str::from_utf8(&status).map_err(io::Error::other)?;
+    let field = |text: &str, key| -> io::Result<u64> {
+        let value = text
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| invalid("missing native memory counter"))?;
+        value
+            .checked_mul(1024)
+            .ok_or_else(|| invalid("memory counter overflow"))
+    };
+    let profile = MemoryProfile {
+        rss: field(&rollup, "Rss:")?,
+        pss: field(&rollup, "Pss:")?,
+        private_clean: field(&rollup, "Private_Clean:")?,
+        private_dirty: field(&rollup, "Private_Dirty:")?,
+        shared_clean: field(&rollup, "Shared_Clean:")?,
+        shared_dirty: field(&rollup, "Shared_Dirty:")?,
+        vm_rss_status: field(status, "VmRSS:")?,
+        vm_hwm_status: field(status, "VmHWM:")?,
+        vm_peak: field(status, "VmPeak:")?,
+        vm_size: field(status, "VmSize:")?,
+    };
+    if process.reaped()? {
+        return Err(invalid("memory observation identity changed"));
+    }
+    Ok(profile)
 }

@@ -94,7 +94,8 @@ codec/level/reference-set measurements. They are not evidence that 4K fits.
 
 | Reservation | Per helper | Global bound |
 | --- | --- | --- |
-| Audio/probe private memory, runtime included | 128 MiB provisional; probe must be measured separately | 256 MiB provisional; alternative to video private rows |
+| Audio private memory, runtime included | 128 MiB provisional | 256 MiB provisional; alternative to video private rows |
+| Admission probe private memory, shim/runtime included | 1,024 MiB; allocation component 896 MiB; AS 1,536 MiB | 2,048 MiB plus 128 MiB bootstrap; no rings/snapshots |
 | Video private memory, runtime/native buffers included | 384 MiB | 768 MiB; new helper reservation |
 | Preview rings, separately charged | Two slots × 64 MiB | 256 MiB; new shared-memory reservation |
 | Export rings, replacing preview rings | Two slots × 128 MiB | 512 MiB; new shared-memory reservation |
@@ -139,8 +140,13 @@ Without measurement, do not remove the guard or claim these targets sufficient.
 Slice 1a includes this replacement allocation sub-budget for the admission
 probe, including its first-frame decode and still inspection. Measure probe
 PSS and peak address space on 1080p, UHD, and still fixtures before freezing
-probe `MemoryMax` or `RLIMIT_AS`. The probe figures above and below remain
-provisional until those measurements; an audio-only peak does not qualify them.
+probe `MemoryMax` or `RLIMIT_AS`. Slice 1a records those measurements in
+`docs/reports/ms2-s1a.md` and its evidence archive before selecting the probe row.
+The initial unknown-format UHD AV1 DPB guard needs 836 MiB; 896 MiB leaves
+128 MiB inside MemoryMax for shim/runtime/native overhead. The measured
+295.7 MiB VmPeak leaves 1,240 MiB of virtual growth below AS. A 448 MiB
+component correctly refused that valid fixture; no automatic budget escalation
+exists. These fixtures do not qualify every codec/reference-set combination.
 
 Measure private bytes, shared mappings, PSS, and peak RSS separately on Linux.
 Record cgroup `memory.current`, `memory.peak`, and `memory.events` as well.
@@ -405,9 +411,9 @@ no check-then-move running decoder is allowed. Set the limits before release.
 and [D-Bus interface](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html).
 
 Without a user manager or enforceable controllers, log degraded resource mode.
-Use `RLIMIT_AS`, provisionally 1 GiB video or 256 MiB audio/probe including
-mappings, plus CPU rlimits/wall deadlines. Probe limits await the slice-1a
-measurements. An app supervision thread polls RSS every 100 ms and kills above
+Use `RLIMIT_AS`, provisionally 1 GiB video or 256 MiB audio including
+mappings, and the measured 1,536 MiB admission-probe ceiling above, plus CPU
+rlimits/wall deadlines. An app supervision thread polls RSS every 100 ms and kills above
 the admitted total. Polling can overshoot; it is not a hard RSS guarantee.
 Seccomp clone argument checks prohibit processes but cannot count threads.
 Therefore degraded mode uses single-threaded FFmpeg and a fixed trusted watchdog
@@ -506,6 +512,7 @@ live fd to use. Descriptor numbers cannot be reused through opens or duplication
 | `write`, `writev` | arg0 exactly response-write fd; no stderr |
 | `mmap` | `PROT_EXEC` absent; anonymous with fd −1, or only a designated ring fd; never source-backed |
 | `mprotect`, `pkey_mprotect` | `PROT_EXEC` absent, including mixed write/exec requests |
+| `mremap` | Ruling 33: resize/move only the helper's own mappings; old_size strictly positive and flags exactly 0 or MAYMOVE (1), full width. FIXED, DONTUNMAP, duplication and high-bit aliases are killed. Native anonymous shrink/grow preserves bytes. [mremap(2)](https://man7.org/linux/man-pages/man2/mremap.2.html) |
 | `munmap`, `brk`, `madvise` | Runtime memory only; madvise restricted to NORMAL (0), DONTNEED (4), FREE (8), GUARD_INSTALL (102), and GUARD_REMOVE (103), with exact full-width argument checks; every other advice value is killed. [madvise(2)](https://man7.org/linux/man-pages/man2/madvise.2.html) |
 | `futex` | Exact op values `FUTEX_WAIT` (0), `FUTEX_WAKE` (1), `FUTEX_WAIT_PRIVATE` (128), `FUTEX_WAKE_PRIVATE` (129), `FUTEX_WAIT_BITSET` (9), `FUTEX_WAIT_BITSET_PRIVATE` (137), and those two bitset waits with `FUTEX_CLOCK_REALTIME` (265, 393). Bitset waits require arg5=`FUTEX_BITSET_MATCH_ANY`; deny every other operation/flag combination, including requeue, PI, wake-op, and wake-bitset |
 | `clock_gettime`, `clock_nanosleep`, `nanosleep`, `sched_yield` | Reviewed runtime clocks/waits |
@@ -523,7 +530,7 @@ live fd to use. Descriptor numbers cannot be reused through opens or duplication
 | `kill`, `tkill`, `pidfd_send_signal`, `rt_sigqueueinfo`, `rt_tgsigqueueinfo` | Denied, including brute-forced external pids |
 | `open`, `openat`, `openat2`, `newfstatat`, `statx` | Denied |
 | `dup`, `dup2`, `dup3`, `fcntl`, `pidfd_getfd` | Denied, including every fd duplication route |
-| `memfd_create`, `userfaultfd`, `personality`, `ioctl`, `mremap`, `pkey_alloc` | Denied |
+| `memfd_create`, `userfaultfd`, `personality`, `ioctl`, `pkey_alloc` | Denied |
 | `prctl` | Only `PR_SET_DUMPABLE` with arg1=0 for the final monotonic drop; all other requests denied |
 | `execve`, `execveat`, `fork`, `vfork`, `unshare`, `setns`, `seccomp` | Denied after bootstrap |
 | `socket`, `socketpair`, `connect`, `bind`, `listen`, `accept`, `accept4`, `sendmsg`, `recvmsg` | Denied for all families |

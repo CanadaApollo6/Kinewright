@@ -81,14 +81,11 @@ fn runtime_fixture() {
             .success()
     );
     let binaries = bin_dir().canonicalize().unwrap();
-    let runtime = Runtime::start(Config {
-        helper: binaries.join("kinewright-media-helper"),
-        supervisor: binaries.join("kinewright-media-supervisor"),
-        limits: Limits {
-            address_space: 2 * 1024 * 1024 * 1024,
-            private_memory: 2 * 1024 * 1024 * 1024,
-        },
-    })
+    let runtime = Runtime::start(Config::new(
+        binaries.join("kinewright-media-helper"),
+        binaries.join("kinewright-media-supervisor"),
+        Limits::PROBE,
+    ))
     .unwrap();
     let result = runtime.probe(Request {
         source: Box::new(Input(File::open(&png).unwrap())),

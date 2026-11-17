@@ -52,6 +52,8 @@ pub(super) struct Launch<'a> {
     pub selected: [Option<u32>; 2],
     pub source: &'a File,
     pub spawner: Option<BorrowedFd<'a>>,
+    #[cfg(feature = "slow-tests")]
+    pub observer: Option<Arc<super::ProbeObserver>>,
 }
 struct Root(PathBuf);
 impl Drop for Root {
@@ -69,6 +71,21 @@ struct Lease {
     _root: Root,
     complete: bool,
     reaped: bool,
+    #[cfg(feature = "slow-tests")]
+    shim_smaps: Option<File>,
+}
+
+fn pin_child(child: Child) -> io::Result<(Child, Arc<ProcessHandle>)> {
+    let pin = match ProcessHandle::open(child.id()) {
+        Ok(pin) => Arc::new(pin),
+        Err(error) => {
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    Ok((child, pin))
 }
 
 pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
@@ -90,6 +107,7 @@ pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
         &root.0,
         launch.mode,
         launch.limits.address_space,
+        launch.limits.allocation,
         [
             command_read.as_fd(),
             response_write.as_fd(),
@@ -100,15 +118,7 @@ pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
         launch.spawner,
     )?;
     drop((command_read, response_write, lifetime_read, release_read));
-    let pin = match ProcessHandle::open(child.id()) {
-        Ok(pin) => Arc::new(pin),
-        Err(error) => {
-            let mut child = child;
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
-        }
-    };
+    let (child, pin) = pin_child(child)?;
     // Actor signalling and worker cleanup share the same pinned identity. Neither
     // resolves a numeric PID to signal it after this point.
     let observed_pin = Arc::clone(&pin);
@@ -124,11 +134,19 @@ pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
         _root: root,
         complete: false,
         reaped: false,
+        #[cfg(feature = "slow-tests")]
+        shim_smaps: None,
     };
+    #[cfg(feature = "slow-tests")]
+    if launch.observer.is_some() {
+        lease.shim_smaps = Some(media_host::open_smaps(&lease.pin)?);
+    }
     let generation = launch.generation;
     let selected = launch.selected;
     let limits = launch.limits;
     let mode = launch.mode;
+    #[cfg(feature = "slow-tests")]
+    let observer = launch.observer;
     let thread = std::thread::Builder::new()
         .name("media-probe-io".into())
         .spawn(move || {
@@ -151,6 +169,8 @@ pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
                     mode,
                     limits,
                     selected,
+                    #[cfg(feature = "slow-tests")]
+                    observer,
                 },
                 &source,
                 &mut release,
@@ -302,6 +322,8 @@ impl Lease {
         }
         let observation = media_host::observe_boundary(&self.pin, &payload, source)
             .map_err(|_| Failure::Sandbox(Error::SandboxUnavailable))?;
+        #[cfg(feature = "slow-tests")]
+        let mut observation = observation;
         for property in &observation.unobservable {
             eprintln!("MS2_BOUNDARY_UNOBSERVABLE {property}");
         }
@@ -337,6 +359,30 @@ impl Lease {
             .traffic
             .accept(complete)
             .map_err(Failure::Sandbox)?;
+        #[cfg(feature = "slow-tests")]
+        if let Some(observer) = &settings.observer {
+            let unavailable = |_| Failure::Sandbox(Error::SandboxUnavailable);
+            let shim_smaps = self
+                .shim_smaps
+                .as_mut()
+                .ok_or(Failure::Sandbox(Error::SandboxUnavailable))?;
+            let payload_smaps = observation
+                .smaps
+                .as_mut()
+                .ok_or(Failure::Sandbox(Error::SandboxUnavailable))?;
+            let memory = super::ProbeMemory {
+                shim: media_host::memory_profile(&self.pin, shim_smaps).map_err(unavailable)?,
+                payload: media_host::memory_profile(&payload, payload_smaps)
+                    .map_err(unavailable)?,
+                cgroup: self
+                    .group
+                    .as_ref()
+                    .map(cgroup_memory)
+                    .transpose()
+                    .map_err(unavailable)?,
+            };
+            observer(memory).map_err(unavailable)?;
+        }
         protocol.close()?;
         // observation (including the retained smaps fd) stays live through the
         // whole native probe; measurement capture is added before limit selection.
@@ -373,6 +419,9 @@ impl Lease {
                 Ok(status) => {
                     self.reaped = true;
                     success = status.success();
+                    if !success {
+                        eprintln!("MS2_HELPER_EXIT shim={} status={status}", self.pin.pid());
+                    }
                 }
                 Err(_) if self.pin.reaped().unwrap_or(false) => {
                     self.reaped = true;
@@ -447,6 +496,8 @@ struct Settings {
     mode: Mode,
     limits: Limits,
     selected: [Option<u32>; 2],
+    #[cfg(feature = "slow-tests")]
+    observer: Option<Arc<super::ProbeObserver>>,
 }
 struct Protocol<'a> {
     response: &'a mut File,
@@ -501,4 +552,41 @@ impl Protocol<'_> {
         }
         Ok(())
     }
+}
+
+#[cfg(feature = "slow-tests")]
+fn cgroup_memory(group: &Cgroup) -> io::Result<super::CgroupMemory> {
+    let read = |name: &str| -> io::Result<String> {
+        let mut text = String::new();
+        File::open(group.path().join(name))?
+            .take(4097)
+            .read_to_string(&mut text)?;
+        if text.len() > 4096 {
+            return Err(io::Error::other("oversized cgroup counter"));
+        }
+        Ok(text)
+    };
+    let scalar = |name| -> io::Result<u64> { read(name)?.trim().parse().map_err(io::Error::other) };
+    let text = read("memory.events")?;
+    let mut events = Vec::new();
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let name = fields
+            .next()
+            .ok_or_else(|| io::Error::other("memory event name"))?;
+        let value = fields
+            .next()
+            .ok_or_else(|| io::Error::other("memory event value"))?
+            .parse()
+            .map_err(io::Error::other)?;
+        if fields.next().is_some() || events.len() == 32 {
+            return Err(io::Error::other("memory event shape"));
+        }
+        events.push((name.to_owned(), value));
+    }
+    Ok(super::CgroupMemory {
+        current: scalar("memory.current")?,
+        peak: scalar("memory.peak")?,
+        events,
+    })
 }

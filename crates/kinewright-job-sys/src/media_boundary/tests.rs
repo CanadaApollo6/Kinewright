@@ -48,7 +48,10 @@ fn attack(name: &str) {
         "userfaultfd" => (libc::SYS_userfaultfd, [0; 6]),
         "personality" => (libc::SYS_personality, [u32::MAX.into(), 0, 0, 0, 0, 0]),
         "ioctl" => (libc::SYS_ioctl, [u64::MAX, 0, 0, 0, 0, 0]),
-        "mremap" => (libc::SYS_mremap, [0; 6]),
+        "mremap_duplicate" => (libc::SYS_mremap, [0, 0, 4096, 1, 0, 0]),
+        "mremap_fixed" => (libc::SYS_mremap, [0, 4096, 8192, 3, 0, 0]),
+        "mremap_dontunmap" => (libc::SYS_mremap, [0, 4096, 4096, 5, 0, 0]),
+        "mremap_high" => (libc::SYS_mremap, [0, 4096, 8192, (1_u64 << 32) | 1, 0, 0]),
         "pkey_alloc" => (libc::SYS_pkey_alloc, [u64::MAX, 0, 0, 0, 0, 0]),
         "execve" => (libc::SYS_execve, [0; 6]),
         "execveat" => (libc::SYS_execveat, [0; 6]),
@@ -300,6 +303,9 @@ fn fixture() {
             );
             assert!(libc::CPU_COUNT(&cpus) > 0);
         }
+    } else if case == "resize_mapping" {
+        install_filter(Mode::Degraded).unwrap();
+        resize_mapping();
     } else if case == "anonymous_mmap" {
         install_filter(Mode::Degraded).unwrap();
         // SAFETY: this fixture owns its anonymous page, never exposes a reference,
@@ -341,6 +347,29 @@ fn fixture() {
     }
     std::process::exit(0);
 }
+fn resize_mapping() {
+    // SAFETY: the fixture exclusively owns the anonymous mapping. It checks
+    // every resize before replacing its pointer and unmaps the final extent.
+    unsafe {
+        let page = libc::mmap(
+            std::ptr::null_mut(),
+            8192,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        );
+        assert_ne!(page, libc::MAP_FAILED);
+        page.cast::<u8>().write_volatile(71);
+        let smaller = libc::mremap(page, 8192, 4096, 0);
+        assert_ne!(smaller, libc::MAP_FAILED);
+        let larger = libc::mremap(smaller, 4096, 16384, libc::MREMAP_MAYMOVE);
+        assert_ne!(larger, libc::MAP_FAILED);
+        assert_eq!(larger.cast::<u8>().read_volatile(), 71);
+        larger.cast::<u8>().add(16383).write_volatile(19);
+        assert_eq!(libc::munmap(larger, 16384), 0);
+    }
+}
 extern "C" fn worker(_: *mut libc::c_void) -> *mut libc::c_void {
     let delay = libc::timespec {
         tv_sec: 0,
@@ -377,6 +406,7 @@ fn final_filter_joins_running_worker_and_clone3_falls_back() {
         "join",
         "pthread",
         "anonymous_mmap",
+        "resize_mapping",
         "guard_advice",
         "affinity_self",
         "clone3",
@@ -427,7 +457,10 @@ fn each_isolated_denial_is_sigsys_and_changes_without_filter() {
         "userfaultfd",
         "personality",
         "ioctl",
-        "mremap",
+        "mremap_duplicate",
+        "mremap_fixed",
+        "mremap_dontunmap",
+        "mremap_high",
         "pkey_alloc",
         "execve",
         "execveat",

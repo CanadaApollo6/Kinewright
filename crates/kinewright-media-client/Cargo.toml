@@ -21,3 +21,8 @@ unsafe_code = "forbid"
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 assert_is_empty = "allow"
+
+[[example]]
+name = "probe_memory"
+path = "examples/probe_memory.rs"
+required-features = ["slow-tests"]

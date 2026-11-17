@@ -330,6 +330,10 @@ impl Actor {
                 selected: [item.request.video, item.request.audio],
                 source: item.request.source.file(),
                 spawner: self.spawner.as_ref().map(std::os::fd::AsFd::as_fd),
+                // Measurement observers really are shared across independent
+                // I/O workers; no observer or extra sharing ships by default.
+                #[cfg(feature = "slow-tests")]
+                observer: self.config.observer.as_ref().map(Arc::clone),
             };
             match worker::start(launch) {
                 Ok(running) => self.active.push(Job {

@@ -103,7 +103,7 @@ fn run_inner(
     args: &[String],
     #[cfg(feature = "slow-tests")] witness: crate::witness::Witness,
 ) -> io::Result<()> {
-    if args.len() != 4 {
+    if args.len() != 5 {
         return Err(io::Error::other("media bootstrap arguments"));
     }
     let app_pid = args[0].parse().map_err(io::Error::other)?;
@@ -114,8 +114,11 @@ fn run_inner(
         _ => return Err(io::Error::other("media mode")),
     };
     // This is an admitted host limit. Slice 1a measurements freeze its production value.
-    let budget: u64 = args[3].parse().map_err(io::Error::other)?;
-    if !(64 * 1024 * 1024..=2 * 1024 * 1024 * 1024).contains(&budget) {
+    let address_space: u64 = args[3].parse().map_err(io::Error::other)?;
+    let budget: u64 = args[4].parse().map_err(io::Error::other)?;
+    if !(64 * 1024 * 1024..=2 * 1024 * 1024 * 1024).contains(&address_space)
+        || !(32 * 1024 * 1024..=address_space).contains(&budget)
+    {
         return Err(io::Error::other("probe reservation"));
     }
     // SAFETY: fd 8, when present, is the sole optional inherited thread pidfd;
@@ -151,6 +154,7 @@ fn run_inner(
     payload(
         &root,
         mode,
+        address_space,
         budget,
         #[cfg(feature = "slow-tests")]
         witness,
@@ -160,6 +164,7 @@ fn run_inner(
 fn payload(
     root: &std::path::Path,
     mode: Mode,
+    address_space: u64,
     budget: u64,
     #[cfg(feature = "slow-tests")] witness: crate::witness::Witness,
 ) -> io::Result<()> {
@@ -177,7 +182,7 @@ fn payload(
     prime_runtime(budget)?;
     boundary::close_inventory()?;
     boundary::empty_root(root)?;
-    boundary::limits(budget)?;
+    boundary::limits(address_space)?;
     let landlock = boundary::landlock();
     let control = control(
         Arc::clone(&command),
@@ -216,7 +221,7 @@ fn payload(
     };
     let length = boundary::source_length()?;
     control.active.store(true, Ordering::Release);
-    match crate::probe::probe(
+    let retained = match crate::probe::probe(
         source,
         length,
         [video, audio],
@@ -227,13 +232,16 @@ fn payload(
             witness.decoder_checkpoint(&mut response, request.request, request.generation);
         },
     ) {
-        Ok(result) => {
+        Ok(crate::probe::Probed {
+            metadata,
+            retention,
+        }) => {
             send(
                 &mut response,
                 request.request,
                 request.generation,
                 Message::ProbeResult {
-                    result: Box::new(result),
+                    result: Box::new(metadata),
                 },
             )?;
             send(
@@ -242,26 +250,28 @@ fn payload(
                 request.generation,
                 Message::Complete {},
             )?;
+            Some(retention)
         }
-        Err(error) => send(
-            &mut response,
-            request.request,
-            request.generation,
-            Message::Failed {
-                error: if control.cancel.load(Ordering::Acquire) {
-                    kinewright_media_ipc::MediaSandboxError::Cancelled
-                } else {
-                    error
+        Err(error) => {
+            send(
+                &mut response,
+                request.request,
+                request.generation,
+                Message::Failed {
+                    error: if control.cancel.load(Ordering::Acquire) {
+                        kinewright_media_ipc::MediaSandboxError::Cancelled
+                    } else {
+                        error
+                    },
                 },
-            },
-        )?,
-    }
+            )?;
+            None
+        }
+    };
     // Keep the one-shot lease alive until the host consumes Complete and closes
     // it. The watchdog alone reads post-Probe commands; EOF/lifetime loss remains
     // fatal, and host wall deadlines retain non-cooperative cleanup authority.
-    while !control.cancel.load(Ordering::Acquire) {
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
+    await_close(&control, retained);
     Ok(())
 }
 
@@ -301,4 +311,11 @@ fn prime_runtime(budget: u64) -> io::Result<()> {
         return Err(io::Error::other("media runtime created bootstrap threads"));
     }
     Ok(())
+}
+
+fn await_close(control: &Control, retained: Option<crate::probe::Retention>) {
+    while !control.cancel.load(Ordering::Acquire) {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    drop(retained);
 }

@@ -112,6 +112,20 @@ fn install(mode: Mode, default: Action) -> io::Result<()> {
             )?])?],
         );
     }
+    // Ruling 33: libc realloc may resize/move its own mapping. Reject mapping
+    // duplication (old_size == 0), FIXED, DONTUNMAP and all high-bit aliases.
+    rules.insert(
+        libc::SYS_mremap,
+        [0, u64::from(libc::MREMAP_MAYMOVE.cast_unsigned())]
+            .into_iter()
+            .map(|flags| {
+                rule(vec![
+                    Condition::new(1, Len::Qword, Op::Gt, 0).map_err(io::Error::other)?,
+                    eq(3, flags)?,
+                ])
+            })
+            .collect::<io::Result<_>>()?,
+    );
     rules.insert(
         libc::SYS_madvise,
         [

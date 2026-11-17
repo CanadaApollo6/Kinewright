@@ -84,14 +84,15 @@ mod support {
         } else {
             binaries.join("kinewright-media-helper")
         };
-        let runtime = Runtime::start(Config {
+        let runtime = Runtime::start(Config::new(
             helper,
-            supervisor: binaries.join("kinewright-media-supervisor"),
-            limits: Limits {
+            binaries.join("kinewright-media-supervisor"),
+            Limits {
                 address_space: 2 * 1024 * 1024 * 1024,
                 private_memory: ADMITTED,
+                allocation: ADMITTED / 2,
             },
-        })
+        ))
         .unwrap();
         // Descriptor extraction occurs only after the actor admits a launch.
         // The caller observes the same counter across both source capabilities.

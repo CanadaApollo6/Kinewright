@@ -121,14 +121,15 @@ mod support {
         )
         .unwrap();
         fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
-        let config = Config {
-            helper: wrapper.canonicalize().unwrap(),
-            supervisor: binaries.join("kinewright-media-supervisor"),
-            limits: Limits {
+        let config = Config::new(
+            wrapper.canonicalize().unwrap(),
+            binaries.join("kinewright-media-supervisor"),
+            Limits {
                 address_space: 2 * 1024 * 1024 * 1024,
                 private_memory: 2 * 1024 * 1024 * 1024,
+                allocation: 1024 * 1024 * 1024,
             },
-        };
+        );
         (directory, config, png)
     }
     fn await_stage(runtime: &Runtime, mode: &str, stage: &str) -> bool {

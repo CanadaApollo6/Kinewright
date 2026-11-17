@@ -73,7 +73,16 @@ fn ffmpeg(output: &Path, still: bool) {
         "1",
     ]);
     if still {
-        command.args(["-frames:v", "1", "-c:v", "png"]);
+        command.args([
+            "-frames:v",
+            "1",
+            "-c:v",
+            if output.extension().is_some_and(|v| v == "jpg") {
+                "mjpeg"
+            } else {
+                "png"
+            },
+        ]);
     } else {
         command.args(["-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p"]);
     }
@@ -130,6 +139,7 @@ fn run(directory: &Directory, source: &Path) -> Result<ProbeResult, MediaSandbox
             root.to_str().unwrap().into(),
             "degraded".into(),
             (2_u64 * 1024 * 1024 * 1024).to_string(),
+            (1024_u64 * 1024 * 1024).to_string(),
         ])
         .env_clear()
         .stdin(Stdio::null())
@@ -216,13 +226,21 @@ fn confined_video_probe_decodes_a_first_frame_and_closes() {
 }
 #[test]
 fn confined_still_probe_inspects_and_closes() {
-    let directory = Directory::new();
-    let source = directory.0.join("still.png");
-    ffmpeg(&source, true);
-    let result = run(&directory, &source).unwrap();
-    assert_eq!(result.resolution, Some([64, 32]));
-    assert_eq!(result.kind, kinewright_media_ipc::Kind::Image);
-    assert_eq!(result.duration_frames, 1);
+    for extension in ["png", "jpg"] {
+        let directory = Directory::new();
+        let source = directory.0.join(format!("still.{extension}"));
+        ffmpeg(&source, true);
+        let result = run(&directory, &source).unwrap();
+        assert_eq!(result.resolution, Some([64, 32]));
+        assert_eq!(result.kind, kinewright_media_ipc::Kind::Image);
+        assert_eq!(result.duration_frames, 1);
+        if extension == "jpg" {
+            assert_eq!(
+                result.color.matrix,
+                kinewright_core::ColorMatrix::Other("bt470bg".into())
+            );
+        }
+    }
 }
 #[test]
 fn confined_malformed_probe_refuses() {

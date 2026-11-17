@@ -76,13 +76,13 @@ impl ValidatedProbe {
             || result.color.confidence_basis_points > 10_000
             || matches!(
                 result.color.primaries,
-                kinewright_core::ColorPrimaries::Other(_)
+                kinewright_core::ColorPrimaries::Other(ref tag) if !["smpte428", "ebu3213"].contains(&tag.as_str())
             )
             || matches!(
                 result.color.transfer,
-                kinewright_core::ColorTransfer::Other(_)
+                kinewright_core::ColorTransfer::Other(ref tag) if !["smpte240m", "log_sqrt", "iec61966_2_4", "bt1361_ecg", "bt2020_10", "bt2020_12", "smpte428"].contains(&tag.as_str())
             )
-            || matches!(result.color.matrix, kinewright_core::ColorMatrix::Other(_))
+            || matches!(result.color.matrix, kinewright_core::ColorMatrix::Other(ref tag) if !["bt470bg", "fcc", "smpte2085", "ipt_c2", "ycgco_re", "ycgco_ro"].contains(&tag.as_str()))
             || matches!(result.color.range, kinewright_core::ColorRange::Other(_))
             || matches!(
                 result.color.white_point,

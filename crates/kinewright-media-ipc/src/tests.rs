@@ -165,9 +165,15 @@ fn metadata_bounds_and_actual_domain_consumer() {
     let mut bad = probe();
     bad.color.primaries = kinewright_core::ColorPrimaries::Other("forged".into());
     cases.push(bad);
+    let mut bad = probe();
+    bad.color.matrix = kinewright_core::ColorMatrix::Other("bt470bg\0forged".into());
+    cases.push(bad);
     for case in cases {
         assert!(ValidatedProbe::new(case).is_err());
     }
+    let mut jpeg = probe();
+    jpeg.color.matrix = kinewright_core::ColorMatrix::Other("bt470bg".into());
+    assert!(ValidatedProbe::new(jpeg).is_ok());
 }
 
 #[test]

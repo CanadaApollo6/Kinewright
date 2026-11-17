@@ -31,17 +31,62 @@ pub trait Source: Send {
     fn check(&self) -> Result<(), MediaError>;
 }
 
-/// Fixtures provide provisional limits. Production values are selected only
-/// after the slice-1a measurements, before this client is wired into admission.
+/// Native address-space ceiling, kernel/RSS ceiling, and the decoder component
+/// inside that reservation. No component may borrow the runtime headroom.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub address_space: u64,
     pub private_memory: u64,
+    pub allocation: u64,
+}
+impl Limits {
+    /// Qualified release probe measurements and margins: docs/reports/ms2-s1a.md.
+    pub const PROBE: Self = Self {
+        address_space: 1536 * 1024 * 1024,
+        private_memory: 1024 * 1024 * 1024,
+        allocation: 896 * 1024 * 1024,
+    };
 }
 pub struct Config {
     pub helper: PathBuf,
     pub supervisor: PathBuf,
     pub limits: Limits,
+    #[cfg(feature = "slow-tests")]
+    observer: Option<Arc<ProbeObserver>>,
+}
+impl Config {
+    #[must_use]
+    pub fn new(helper: PathBuf, supervisor: PathBuf, limits: Limits) -> Self {
+        Self {
+            helper,
+            supervisor,
+            limits,
+            #[cfg(feature = "slow-tests")]
+            observer: None,
+        }
+    }
+    #[cfg(feature = "slow-tests")]
+    #[must_use]
+    pub fn observe(mut self, observer: Arc<ProbeObserver>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+}
+#[cfg(feature = "slow-tests")]
+pub type ProbeObserver = dyn Fn(ProbeMemory) -> std::io::Result<()> + Send + Sync;
+#[cfg(feature = "slow-tests")]
+#[derive(Debug)]
+pub struct CgroupMemory {
+    pub current: u64,
+    pub peak: u64,
+    pub events: Vec<(String, u64)>,
+}
+#[cfg(feature = "slow-tests")]
+#[derive(Debug)]
+pub struct ProbeMemory {
+    pub shim: kinewright_job_sys::media_host::MemoryProfile,
+    pub payload: kinewright_job_sys::media_host::MemoryProfile,
+    pub cgroup: Option<CgroupMemory>,
 }
 pub struct Request {
     pub source: Box<dyn Source>,
@@ -120,7 +165,9 @@ impl Runtime {
             && config.supervisor.is_absolute()
             && (64 * 1024 * 1024..=2 * 1024 * 1024 * 1024).contains(&config.limits.address_space)
             && (64 * 1024 * 1024..=config.limits.address_space)
-                .contains(&config.limits.private_memory);
+                .contains(&config.limits.private_memory)
+            && (32 * 1024 * 1024..=config.limits.private_memory)
+                .contains(&config.limits.allocation);
         if !valid || STARTED.swap(true, Ordering::AcqRel) {
             return Err(MediaSandboxError::SandboxUnavailable);
         }

@@ -7,6 +7,26 @@ use kinewright_media_ipc::{
 };
 use std::sync::{Arc, atomic::AtomicBool};
 
+/// Metadata and the live native buffers which produced it. Keeping them until
+/// Close permits host measurement at Complete and makes teardown observable.
+pub struct Probed {
+    pub metadata: ProbeResult,
+    pub retention: Retention,
+}
+impl std::fmt::Debug for Probed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Probed")
+            .field("metadata", &self.metadata)
+            .finish_non_exhaustive()
+    }
+}
+pub struct Retention {
+    // Field order releases accepted frames/decoders before their format/AVIO.
+    _video: Option<(ffmpeg::frame::Video, ffmpeg::decoder::Video)>,
+    _audio: Option<ffmpeg::decoder::Audio>,
+    _input: Input,
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "one source-bound admission probe through first-frame decode"
@@ -18,7 +38,7 @@ pub fn probe(
     budget: u64,
     cancel: Arc<AtomicBool>,
     mut decoder_checkpoint: impl FnMut(),
-) -> Result<ProbeResult, Error> {
+) -> Result<Probed, Error> {
     let mut input = Input::open(file, length, budget, cancel)?;
     let original: Vec<_> = input
         .format
@@ -98,6 +118,8 @@ pub fn probe(
     let mut duration = metadata::duration_us_to_frames(input.format.duration(), fps);
     let mut resolution = None;
     let mut color = ColorDescription::unknown();
+    let mut retained_video = None;
+    let mut retained_audio = None;
     if let Some(index) = video {
         let stream = input.format.stream(index).ok_or(Error::UnsupportedMedia)?;
         let time_base = stream.time_base();
@@ -156,12 +178,15 @@ pub fn probe(
         let (w, h) = rotation.display_dimensions(frame.width(), frame.height());
         resolution = Some([w, h]);
         color = metadata::color_description_from_decoder(&decoder, Some(frame.format()));
+        retained_video = Some((frame, decoder));
     } else if let Some(index) = audio {
         let stream = input.format.stream(index).ok_or(Error::UnsupportedMedia)?;
-        let _decoder = Input::decoder_context(stream.parameters(), budget)?
-            .decoder()
-            .audio()
-            .map_err(|_| Error::UnsupportedMedia)?;
+        retained_audio = Some(
+            Input::decoder_context(stream.parameters(), budget)?
+                .decoder()
+                .audio()
+                .map_err(|_| Error::UnsupportedMedia)?,
+        );
     }
     input.check()?;
     let result = ProbeResult {
@@ -184,9 +209,17 @@ pub fn probe(
             provenance: color.provenance,
         },
     };
-    kinewright_media_ipc::ValidatedProbe::new(result)
+    let metadata = kinewright_media_ipc::ValidatedProbe::new(result)
         .map(kinewright_media_ipc::ValidatedProbe::into_metadata)
-        .map_err(|_| Error::UnsupportedMedia)
+        .map_err(|_| Error::UnsupportedMedia)?;
+    Ok(Probed {
+        metadata,
+        retention: Retention {
+            _video: retained_video,
+            _audio: retained_audio,
+            _input: input,
+        },
+    })
 }
 
 #[cfg(test)]
