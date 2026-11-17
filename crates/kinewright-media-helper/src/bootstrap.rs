@@ -283,10 +283,13 @@ fn control(
     #[cfg(feature = "slow-tests")]
     if !matches!(
         witness,
-        crate::witness::Witness::Off | crate::witness::Witness::RssBurst
+        crate::witness::Witness::Off
+            | crate::witness::Witness::RssBurst
+            | crate::witness::Witness::Escape
     ) {
         // Only kill-chain barriers in the distinct witness executable omit
-        // the monitor. Production and RSS qualification keep the fixed watchdog.
+        // the monitor. Production, RSS qualification and escape attacks keep
+        // the fixed watchdog.
         return Ok(Control {
             active: Arc::new(AtomicBool::new(false)),
             cancel: Arc::new(AtomicBool::new(false)),

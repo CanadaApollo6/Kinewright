@@ -27,6 +27,9 @@ ffmpeg-next.workspace = true
 
 kinewright-job-sys.workspace = true
 libc.workspace = true
+# The witness executable's escape attacks (raw socket families, signal
+# probes). kinewright-job-sys already builds these rustix features.
+rustix = { workspace = true, features = ["net", "process"] }
 
 [lints.rust]
 unsafe_code = "deny"
