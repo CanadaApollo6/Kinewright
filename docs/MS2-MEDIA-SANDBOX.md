@@ -1,7 +1,7 @@
 # MS2 media sandbox
 
-Status: proposed design for security-tier review. Source baseline is
-`origin/main` at `266f8890e259fb20d4c8f10d778b5b5fed6b3257`.
+Status: design with review-round-1 rulings incorporated; implementation unproven.
+Source baseline is `origin/main` at `266f8890e259fb20d4c8f10d778b5b5fed6b3257`.
 This document records decisions and future proof gates. No implementation,
 build, confinement test, GPU run, or performance measurement accompanied it.
 
@@ -32,7 +32,7 @@ points or calls, not a claim that the whole function moves unchanged.
 | --- | --- |
 | `crates/kinewright-media/src/decode.rs:46`, `:686`, `:804`, `:850` | Move probing, packet timing scans, and both path-based input opens into the helper. |
 | `crates/kinewright-media/src/owned_io.rs:467`, `:644`, `:676`, `:707`, `:1520` | Move certified probe and decoder construction, custom AVIO, and all FFmpeg input processing. |
-| `crates/kinewright-project/src/owned_media.rs:416`, `:451`, `:457`, `:471` | Replace certified admission/probe/decode calls with helper requests. Keep pinning, interpretation validation, and byte identity in the host. |
+| `crates/kinewright-project/src/owned_media.rs:415`, `:451`, `:457`, `:471` | Replace certified admission/probe/decode calls with helper requests. Keep pinning, interpretation validation, and byte identity in the host. |
 | `crates/kinewright-project/src/read_only_inputs.rs:188` | Preserve owner-bound read-only admission. Its subsequent probe must also cross the sandbox boundary. |
 | `crates/kinewright-media/src/decode.rs:1971`, `:1599`, `:3292` | Move video decode, FFmpeg pixel conversion/scaling, orientation parsing, and source thumbnails. |
 | `crates/kinewright-media/src/still_orientation.rs:62` | Move EXIF/container-byte inspection inside, using the source descriptor. |
@@ -44,7 +44,7 @@ points or calls, not a claim that the whole function moves unchanged.
 | `crates/kinewright-media/src/engine.rs:2261`, `:2269`; `crates/kinewright-media/src/room_tone_store.rs:532` | Route transcription entry probes and room-tone capture through the same helper boundary. |
 | `crates/kinewright-media/src/export.rs:1142` | Export's source audio still needs sandboxed decode. |
 | `crates/kinewright-media/src/export.rs:399`, `:425`, `:473`; `crates/kinewright-media/src/compositor.rs:181` | Keep muxing/encoding app-generated frames and mixed PCM, GPU compositing, effects, and timeline mix/loudness outside. |
-| `crates/kinewright-media/src/frame.rs:47` | Keep safe Rust conversion of validated RGBA64 pixels into the existing scene-linear working frame. |
+| `crates/kinewright-media/src/frame.rs:49` (`from_rgba64_le`) | Keep safe Rust conversion of validated RGBA64 pixels into the existing scene-linear working frame. |
 
 Source compositing for contact sheets stays outside. Imported compressed image
 caches must use the helper too, or be replaced with validated raw cached pixels.
@@ -63,39 +63,72 @@ Independent cursors on the same source serialize; they do not create hidden
 extra processes. This trades some seek throughput for bounded memory.
 
 The host supervisor admits at most two helpers across preview, export, and
-analysis. Playback has priority. Background work yields at chunk boundaries.
+analysis, counting probe helpers and blocked bootstraps. Playback has priority.
+Background work yields at chunk boundaries.
+The trusted outer PID-namespace shim is included in each helper's private
+reservation and `TasksMax`, never an additional decoder. The independent
+supervisor is charged to the global bootstrap allowance.
 Reserve capacity before launch. Keep at most 32 pending requests globally and
 one active plus one replaceable pending request per consumer. Coalesce obsolete
 seeks. Evict an idle helper after five seconds or immediately under pressure.
 A different source always requires a fresh process. No warm cross-file reuse.
 
-Proposed budgets are targets and admission limits, not measured facts.
+The probe helper only probes. After its validated raster is accepted, the host
+reaps it and starts a fresh decode helper with inherited rings sized for that
+raster. A decode helper never probes or negotiates a larger ring. This sequence
+costs two confined launches and two FFmpeg input initializations per cold source.
+Only the host opens the file; the decode helper parses required headers without
+probing for or negotiating geometry.
+It avoids overlapping probe/decode private reservations, but the host retains
+validated metadata and reserves rings plus snapshots before the second launch.
+
+Budgets below are provisional admission targets, pending worst-case compliant
+codec/level/reference-set measurements. They are not evidence that 4K fits.
 
 | Reservation | Per helper | Global bound |
 | --- | --- | --- |
-| Audio/measurement helper, including runtime | 128 MiB hard private/charged budget | Two helpers, 256 MiB |
-| Video helper including native buffers and its ring | 512 MiB hard reservation | Two helpers, 1,024 MiB |
-| Video ring, included in the preceding row | Two slots of at most 64 MiB | 256 MiB, counted once |
-| Host snapshots/conversion scratch | At most 128 MiB per active video consumer | 256 MiB |
-| Accepted source-frame cache | Shared byte ledger, no per-clip duplication | 128 MiB |
-| Bootstrap, IPC, and supervisor allowance | Account before spawning | 128 MiB |
+| Audio/probe private memory, runtime included | 128 MiB | 256 MiB; alternative to video private rows |
+| Video private memory, runtime/native buffers included | 384 MiB | 768 MiB; new helper reservation |
+| Preview rings, separately charged | Two slots × 64 MiB | 256 MiB; new shared-memory reservation |
+| Export rings, replacing preview rings | Two slots × 128 MiB | 512 MiB; new shared-memory reservation |
+| Host snapshots/conversion scratch | Two slot lengths per active helper | 256 MiB preview / 512 MiB export; existing media ledger |
+| Accepted source-frame cache | No per-clip duplication | 128 MiB; inside existing media ledger |
+| Bootstrap, IPC, and supervisor | Reserve before launch | 128 MiB; new reservation |
+| Video-path sum, two helpers | Private + rings + snapshots + cache + bootstrap | 1,536 MiB preview / 2,048 MiB export |
 
-The maximum MS2 reservation is 1,536 MiB, including host buffers and bootstrap.
-This excludes existing project data, Whisper models, compositor VRAM, and output
-encode buffers, which retain their own budgets. Merge source caches into the
-existing media ledger so this is not an additional uncounted cache allowance.
-Target actual peak audio RSS at 96 MiB and video RSS at 384 MiB including rings.
+The old table's additive rows totalled 1,792 MiB, not its stated 1,536 MiB.
+The replacement sums exclude the alternative audio row and count each ring once.
+Existing-ledger rows are included in these totals, not added again outside MS2.
+Project data, Whisper models, compositor VRAM, and output encode buffers retain
+their separate budgets. Limit snapshots to one active consumer per helper;
+additional consumers share or serialize rather than multiplying scratch.
+Target private peaks of 96 MiB audio and 384 MiB video; report shared pages apart.
 Use one helper on systems that cannot reserve the two-helper maximum. Refuse new
 work with `ResourceLimit` if even one reservation cannot fit. Do not retry OOM
-with a larger automatic allowance. Large reference sets and full-resolution
-frames above 64 MiB may be refused. Preview may explicitly request a smaller
-frame; export must refuse rather than silently reduce resolution or bit depth.
+with a larger automatic allowance. Preview slots cap at 64 MiB, export at
+128 MiB. Packed RGBA64 DCI 4K is 67.5 MiB and 5120 × 2880 is 112.5 MiB.
+The current full-resolution support limit excludes 6K and larger rasters.
+Refuse any geometry over its slot cap as `UnsupportedMedia`, with the limit in
+the UI. Preview may explicitly request a smaller frame; export never silently
+reduces resolution or bit depth. Strip transport is later work.
 
 Start with two FFmpeg decode threads per helper, one for measurement. Admit no
 more than four decode threads globally. Keep reference frames and conversion
-buffers inside the reservation. Reconcile `owned_io.rs:27`'s existing 24-buffer
-bound and reservations with this limit; never charge both ledgers independently
-or remove the conservative bound without allocation evidence.
+buffers inside the reservation. The 24-buffer multiplier at
+`crates/kinewright-media/src/owned_io.rs:25` and padded 16-byte/pixel formula in
+`crates/kinewright-media/src/owned_io.rs:1373` reserve 1,123 MiB at 1080p and
+3,649 MiB (3.563 GiB) at UHD, already exceeding the proposed private targets.
+Ruling 19's 3.65 GiB is an arithmetic error. The reproducible calculation is
+`(ceil(w/128)*128+256) * (ceil(h/128)*128+256) * 16 * 24 + 1,048,576`
+bytes, with UHD `w=3840, h=2160`.
+Replace that formula with a format/DPB-aware allocation sub-budget using codec
+level, reference count, bit depth, chroma, frame threading, and conversion work.
+Untrusted headers may lower supported admission, never raise the hard budget.
+In primary mode kernel containment is the hard total bound; the allocation
+guard is a component inside it. Degraded mode has a hard address-space bound
+and polled RSS, with the overshoot qualification below. Reconcile existing
+cursor/buffer ledger charges, never charge twice.
+Without measurement, do not remove the guard or claim these targets sufficient.
 
 Measure private bytes, shared mappings, PSS, and peak RSS separately on Linux.
 Record cgroup `memory.current`, `memory.peak`, and `memory.events` as well.
@@ -108,18 +141,26 @@ one source, long audio, cancellation churn, and repeated source replacement.
 
 Use two inherited anonymous pipes for control, one in each direction. No TCP,
 localhost server, named rendezvous, descriptor-passing command, or path-bearing
-request exists after bootstrap. Reuse the bounded framing discipline in
-`crates/kinewright-agent/src/job_guardian/protocol.rs:163`, in a dependency-light
-IPC crate. Do not depend on the agent crate from media.
+request exists after bootstrap. Put framing in a dependency-light IPC crate.
+Use buffered `read_exact` for a fixed header, validate its length before payload
+allocation, then read the bounded payload. Do not copy the one-byte-per-read
+loop at `crates/kinewright-agent/src/job_guardian/protocol.rs:163`.
+Do not depend on the agent crate from media.
 
 Each control frame has a fixed header containing magic, exact build protocol
 identifier, message tag, payload length, request ID, and source generation.
-The payload is strict typed JSON using existing serde dependencies. Cap a
-control frame at 64 KiB before allocation, nesting at eight, streams at 16,
+Control payloads are strict typed JSON using existing serde dependencies.
+Raw pixel/summary-array chunks use the named binary frame `DataChunk`, with
+request, generation, element count, and exact byte length in its fixed header.
+They are never JSON/base64. Cap all pipe frames, including `DataChunk`, at
+64 KiB before allocation, nesting at eight, streams at 16,
 waveform peaks at 2,048, text at 256 bytes, and outstanding responses at two.
 Reject unknown/duplicate fields, unknown enum tags, trailing data, invalid
 UTF-8, arithmetic overflow, and a different build protocol. There is one
 current protocol, no version ladder or mixed-build negotiation.
+Reject duplicate keys at every object depth with a custom deserializer or a
+bounded pre-scan before serde constructs a value; do not deserialize via a map
+that overwrites duplicates. Include nested duplicate keys in the fuzz corpus.
 
 Requests are `Probe`, `MeasureAudio`, `Thumbnail`, `ReadVideo`, `ReadAudio`,
 `Seek`, `Cancel`, `ReleaseSlot`, and `Close`. Responses are fixed-state variants
@@ -130,44 +171,72 @@ message can request a file open, command, allocation, or project edit.
 
 The host validates IDs, owner authority, state transitions, stream selection,
 positive rational denominators, checked timestamps, dimensions, colour enums,
-counts, and response cardinality before constructing domain values. It supplies
-asset IDs and cache keys itself. Never trust a helper's hash as source identity.
+counts, and response cardinality before constructing domain values. Validated
+domain types have private fields and checked constructors. Their invariants
+must satisfy downstream `expect`s even when every helper field is a lie.
+Fuzz real consuming paths for host panics. The host supplies asset IDs and cache
+keys itself. Never trust a helper's hash as source identity.
 Budget cumulative summary count/bytes per requested range and publish pages
 incrementally; a 64 KiB per-message limit alone does not bound a long analysis.
-Rate-limit progress to four messages per second. A flood is a protocol error.
+Enforce limits before enqueueing, including small-message floods.
+
+| Boundary field or traffic class | Maximum / acceptance rule | Existing guard or MS2 decision |
+| --- | --- | --- |
+| Streams and selected index | 16 streams; index in validated table | `crates/kinewright-media/src/owned_io.rs:21` |
+| Source rate and channels | 1..384,000 Hz; 1..32 channels | `crates/kinewright-media/src/owned_io.rs:24`, `:1403`; no eight-channel regression |
+| Raster | 1..8,192 each axis, plus slot-byte cap | `MAX_DECODER_DIMENSION` at `crates/kinewright-media/src/owned_io.rs:22`; transport cap is stricter |
+| FPS | Positive reduced rational; value ≤4,096; components fit u32 | New wire cap; `crates/kinewright-core/src/time.rs:64` currently checks positivity only |
+| Duration | Positive, at most seven days (604,800 s); checked frame/sample/microsecond conversions | New MS2 support limit; reject unknown/overflowing durations |
+| Frame timestamp / PCM position | Exactly the host's next requested position in the agreed grid | Host resets expectation on seek; duplicates, skips, and drift are protocol errors |
+| Every floating-point field | Finite, with a field-specific range; no unbounded generic float | PCM ±64; confidence 0..1; summary levels −200..100 dB and linear peaks 0..64; reject absent range definitions |
+| Helper errors/text | Prefer host-rendered error enums; at most 256 UTF-8 bytes if retained | Strip control/bidi/terminal escapes; never use as markup, path, or format string |
+| Progress | At most 4/s/helper, burst 1 | Exceeding it is `ProtocolViolation` |
+| Data messages | At most two outstanding, backed by ring credits or two host-granted `DataChunk` credits | No data without a matching request and credit |
+| Summary request | At most 8,192 chunks / 32 MiB cumulative output per admitted range | Host pages larger analyses as separate bounded requests |
+| All pipe traffic | 256 frames/s and 16 MiB/s/helper, one-second burst; global twice those limits | Count headers, control, binary chunks, and invalid bytes before parsing |
+
+Shared-ring payload bandwidth is separately bounded by credits, admitted fps,
+and slot size; the pipe byte ceiling is not a 4K pixel-bandwidth ceiling.
 
 ### Frame and audio transport
 
-Use a host-created shared-memory ring with two fixed slots per video helper.
-The app chooses dimensions, slot sizes, and format after bounded probing.
+Use a host-created shared-memory ring with two fixed slots per decode helper.
+Only the earlier confined probe returns metadata. The host validates it,
+chooses dimensions, sizes, and format, then launches the fresh decode helper.
 Transport packed RGBA64LE, one plane, for managed source video, preserving the
 existing conversion into `WorkingFrame`. Transport RGBA8, one plane, only for
 explicit display thumbnails. No NV12/P010 or native decoder planes in MS2.
 Those save bandwidth but would move colour conversion or more FFmpeg into the
 host. Keep existing colour refusals and golden-frame results unchanged.
 
-Dimensions are nonzero, at most 8,192 per axis, and subject to the 64 MiB slot
-limit. Compute packed strides and lengths with checked arithmetic in the host.
+Dimensions are nonzero, at most 8,192 per axis, and subject to the 64 MiB
+preview or 128 MiB export slot limit. Compute strides and lengths with checked
+arithmetic. Mid-stream resolution changes fail as `UnsupportedMedia`;
+the helper never resizes the ring or silently scales into a different contract.
 `FrameReady` carries a slot index, sequence, timestamp, and agreed format ID,
 never a pointer or helper-selected offset/stride. Each slot is single-use until
 `ReleaseSlot`. With no credits, the helper stops producing; it cannot allocate
 an overflow queue. The host owns all counters outside shared memory.
 
-On Linux use `memfd_create`, size it in the host, and apply
-`F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL`. The helper maps writable data, then
-closes the section fd before lockdown. The app maps read-only. Do not claim
-`F_SEAL_WRITE` while a writable ring is required. These seals prevent resize,
-not malicious pixel modification. [memfd semantics](https://man7.org/linux/man-pages/man2/memfd_create.2.html).
+On Linux the host uses `memfd_create(MFD_CLOEXEC | MFD_ALLOW_SEALING)`, adding
+`MFD_NOEXEC_SEAL` where supported and verifying `F_SEAL_EXEC` before sealing.
+Size it in the host and apply `F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL`.
+The helper maps writable data, then closes the section fd before lockdown.
+The app maps read-only. Do not claim `F_SEAL_WRITE` for a writable ring. These seals prevent resize,
+not malicious pixel modification. Seccomp denies executable mappings on kernels
+without the newer flag too. [Kernel no-exec memfd contract](https://docs.kernel.org/userspace-api/mfd_noexec.html).
 On Windows use unnamed `CreateFileMappingW(INVALID_HANDLE_VALUE, ...)` sections
-and `MapViewOfFile`, with minimal duplicate-handle rights, no executable
-mapping, and no resizing authority. [Mapping API](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-createfilemappingw).
+created `PAGE_READWRITE`. The duplicated handle mask is exactly
+`SECTION_MAP_WRITE | SECTION_QUERY`, with no execute, extend, or ACL rights.
+Use `MapViewOfFile` for a writable helper view and read-only app view.
+[Mapping API](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-createfilemappingw).
 
 A compromised helper can overwrite a credited slot at any moment. Copy its
-fixed byte range once into host-owned storage, then validate and consume that
-snapshot only. Do not lend Rust references into writable shared memory or let
-wgpu/DSP read it directly. Confine the necessary raw mapping/copy operations
-to an audited OS wrapper with a memory-safety argument. Slot acknowledgements
-provide back-pressure, not trust or immutable ownership.
+fixed byte range once with `ptr::copy_nonoverlapping` into host-owned storage,
+then validate and consume that snapshot only. Never form a `&[u8]` over racing
+memory, even briefly for copying. Do not let wgpu/DSP read the mapping directly.
+Confine raw mapping/copy operations to an audited OS wrapper with a memory-safety
+argument. Slot acknowledgements provide back-pressure, not immutable ownership.
 
 Count two transport copies for an RGBA64 frame: converted helper plane into
 the ring, then ring into the host snapshot. Conversion into the working frame
@@ -179,25 +248,36 @@ These are arithmetic estimates, not measured bandwidth. RGBA8 halves these
 figures but is unsuitable as a replacement for the managed colour path.
 
 PCM uses two slots of at most 256 KiB, little-endian interleaved f32, at an
-explicit requested rate of 16 or 48 kHz, at most eight channels and 8,192 sample
-frames per slot. Check exact lengths, sample positions, finiteness, and an
-explicit amplitude bound before DSP. Reject unsupported amplitudes rather than
-silently clamp. Whisper uses 16 kHz mono windows with bounded overlap; it never
-accumulates the entire recording. Pure measurements return summaries without a
+explicit requested rate of 16 or 48 kHz, at most 32 channels and 8,192 sample
+frames per slot, reduced to fit 256 KiB (2,048 frames at 32 channels).
+Validate exact lengths and the host's expected sample position on the snapshot.
+Reject NaN, Inf, subnormals, and amplitudes outside ±64.0 before DSP; never clamp
+hostile PCM into apparent validity. This limit is fixed in the wire contract
+before slice 3. `crates/kinewright-media/src/audio.rs:188` clips final mixes to
+±1, but gain at `:515` and additive mixing at `:3630` precede clipping.
+Room-tone input uses the same decode path (`crates/kinewright-media/src/audio.rs:68`).
+These operations provide no tighter source-amplitude guarantee. Use the lead's
+±64.0 ceiling (about 36.1 dB above unity), with gain/mix/room-tone qualification.
+Whisper uses 16 kHz mono windows with bounded overlap, never the whole recording. Pure measurements return summaries without a
 PCM ring. Cache writes and transcript merging remain host operations.
 
 ### Seeking, cancellation, and deadlines
 
 A seek advances a host-owned generation, flushes pending slots and codec state,
 and carries an integer source-frame target and rate. Decode from a keyframe
-inside, returning the actual source time. Preserve existing integer-frame,
-rotation, colour, and sample-boundary semantics. Reject stale generations even
-when the old result is structurally valid. Source/owner revocation cancels the
+inside, discarding preroll until the exact requested grid position. Preserve
+integer-frame, rotation, colour, and sample-boundary semantics. Reject stale
+generations even when the old result is structurally valid. Source/owner revocation cancels the
 lease, kills its helper, and invalidates outstanding results and cache grants.
 
-Allow five seconds for startup/initial probe, ten seconds for first frame or
-seek, and two seconds without requested streaming progress. Whole-file scans
-use a separate explicit analysis request, with a 30-second chunk deadline and
+Allow five seconds for startup/initial probe. Begin first-frame/seek attempts
+with a ten-second deadline, extend it through an explicit bounded slow-decode
+retry if necessary, and record validated first-frame cost per source/codec/raster.
+Set streaming inactivity to max(2 s, 4 × measured first-frame cost), capped at
+60 s per attempt. A source needing more receives retryable `TimedOut` with an
+explicit slower attempt, never an automatic "broken media" label. Qualify this
+policy on valid 4K AV1 and 10-bit HEVC. Whole-file scans use a separate analysis
+request, with a 30-second chunk deadline and
 checkpoint, never an unlimited extension of a probe. App deadlines count useful
 validated output, not heartbeats. Suspend stream deadlines while the host has
 withheld all credits. Cancellation has a 250 ms cooperative grace through the
@@ -206,88 +286,188 @@ A separate supervisor thread enforces deadlines even inside a stuck FFmpeg call.
 
 ## Linux confinement
 
-Use a single-threaded trusted bootstrap after exec. Load only the packaged
-helper and MS1 libraries, eagerly resolve imports, clear loader/plugin/proxy
-variables, and initialize required runtime state without reading media. Resolve
-the executable from the package, never PATH or the project's working directory.
-The host opens one regular local file `O_RDONLY | O_CLOEXEC`, rejects devices,
-FIFOs and sockets, and passes the descriptor, not a filename. Preserve the host's
-pinned snapshot, digest, selected-stream, and revocable-authority checks from
+The host calls `execve` with an empty environment and an absolute packaged
+executable path. Loader variables are consumed before `main`; clearing them in
+the helper is too late. Package eager binding in the ELF rather than passing
+`LD_BIND_NOW`. The single-threaded bootstrap initializes runtime state without
+reading media. The host opens one regular local file `O_RDONLY | O_CLOEXEC`,
+rejects devices/FIFOs/sockets, and passes the descriptor, never its path.
+Preserve pinning, digest, selected-stream, and revocable-authority checks from
 `crates/kinewright-project/src/owned_media.rs:691` and `owned_io.rs:33`.
-The helper can verify chunks, but its own verification cannot authorize host
-publication. Writable external sources require host admission to an immutable
-snapshot first. Do not mmap media files where truncation can SIGBUS the app.
+Writable external sources require an immutable host snapshot first. The helper's
+chunk verification cannot authorize publication. Never mmap source bytes in the
+app, where truncation could cause SIGBUS.
 
-Before parsing, perform the following ordered bootstrap.
+### Resource ownership and app loss
 
-1. Join a host-retained cgroup v2 leaf before release. Require working memory
-   and pids controllers. Set `memory.max` to the admitted budget,
-   `memory.swap.max=0`, `memory.oom.group=1`, and `pids.max=8`.
-   The app stays outside. Verify controls and cleanup ownership. Existing
-   user-service delegation can supply the subtree; absence fails closed.
-   [cgroup controls](https://docs.kernel.org/admin-guide/cgroup-v2.html).
-2. `unshare(CLONE_NEWUSER)`, deny setgroups, and map only the caller UID/GID.
-   Enter private mount and network namespaces with `unshare(CLONE_NEWNS |
-   CLONE_NEWNET)`. Make mounts private, pivot into an empty root, detach the old
-   root, and set cwd to `/`. Mount no procfs, sysfs, devices, home, or project.
-   Leave loopback down. Drop all capabilities after namespace setup.
-3. Put only command-read, response-write, lifetime-read, and source-read fds
-   into fixed slots. Map rings, close their fds and every other inherited fd,
-   including stdio, sockets, directory fds, and cgroup controls. Use
-   `close_range` over the complement and verify the inventory before removing
-   procfs access. [Descriptor closure](https://man7.org/linux/man-pages/man2/close_range.2.html).
-4. Set `PR_SET_NO_NEW_PRIVS=1`, `PR_SET_DUMPABLE=0`, and `RLIMIT_CORE=0`,
-   `RLIMIT_FSIZE=0`, `RLIMIT_NOFILE=16`, `RLIMIT_STACK=8 MiB`, and
-   `RLIMIT_AS=1 GiB` for video or 256 MiB for audio. A 300 CPU-second
-   `RLIMIT_CPU` ceiling retires a busy helper at a checkpoint; rotate before
-   that ceiling. The host's wall deadlines handle hangs independently.
-   `RLIMIT_RSS` is not a Linux memory limit and is not used as one.
-5. Install a Landlock ruleset that handles filesystem rights supported by the
-   required policy and grants no path access. No rule grants the source path:
-   its already-open read-only fd is the capability. Opened fds bypass Landlock
-   path checks, so the inventory and access modes are essential. Require
-   enforcement; never accept the crate's default best-effort success as proof.
-   [Landlock semantics](https://www.kernel.org/doc/html/latest/userspace-api/landlock.html).
-6. Install seccomp-bpf before creating decode threads. Default-deny syscalls,
-   reject foreign audit architectures and x32, and allow only bounded runtime
-   operations. Allow reads/preads/seeks on the source and control fds, writes
-   only on the response pipe, non-executable anonymous memory, clocks, futexes,
-   signals, and exit. Deny open/openat/openat2, filesystem mutation, ioctl,
-   execve/execveat, fork/vfork, sockets of every family, connect, ptrace,
-   process_vm access, pidfd_getfd, mount, bpf, keyctl, perf, and io_uring.
-   Permit legacy clone only with the exact reviewed pthread flags including
-   CLONE_THREAD; return ENOSYS for clone3 so libc uses that checked path.
-   Filter full argument widths. All new threads inherit restrictions.
-   [seccomp semantics](https://man7.org/linux/man-pages/man2/seccomp.2.html).
+A small trusted `kinewright-media-supervisor` process outside the helper scope
+owns D-Bus scope requests, retained process identities, and cleanup. It blocks
+on the app lifetime pipe independently of the UI and stops the scope on EOF.
+The helper has a separate lifetime pipe held only by this supervisor. No helper
+inherits the bus connection. Keep this owner in job-sys, separate from agent
+provider launch and the helper's untrusted runtime.
 
-Only then acknowledge bootstrap and accept a request. Keep the syscall policy
-explicit and based on traces plus negative tests, not a broad FFmpeg preset.
-Landlock ABI absence, disabled user namespaces, seccomp failure, or unavailable
-resource enforcement yields `SandboxUnavailable`. No unsandboxed fallback,
-sudo setup, kernel-policy change, or in-process retry is permitted. This is a
-platform support requirement, not a backward-compatibility implementation.
+The primary resource mechanism is a transient systemd **user scope**, created
+with D-Bus `StartTransientUnit`, never a shell or `systemd-run`. Set `MemoryMax`
+to the private reservation plus separately reserved ring pages charged there,
+`MemorySwapMax=0`, `TasksMax=8`, `CPUQuota=200%` for video or 100% for probe/audio,
+and `OOMPolicy=kill`. The bus encodes CPUQuota as `CPUQuotaPerSecUSec` (2,000,000
+or 1,000,000). Verify the resulting controls and keep the app outside the scope.
+`Cgroup::create` at `crates/kinewright-job-sys/src/linux.rs:135` requires its
+caller's service name, so a GUI process cannot use it as a generic allocator.
+Add the scope path rather than relaxing that existing guardian invariant.
+
+Choose the blocked-child join. Before any media read, the child waits on a
+release pipe while the supervisor attaches it to the scope, verifies host PID
+plus `/proc/<pid>/stat` starttime and actual membership, then releases it.
+`CLONE_INTO_CGROUP` is an atomic alternative only with an already-owned cgroup;
+no check-then-move running decoder is allowed. Set the limits before release.
+[Scope contract](https://www.freedesktop.org/software/systemd/man/latest/systemd.scope.html)
+and [D-Bus interface](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html).
+
+Without a user manager or enforceable controllers, log degraded resource mode.
+Use `RLIMIT_AS` (provisionally 1 GiB video / 256 MiB audio, including mappings),
+a supervisor RSS poll every 100 ms with kill above the admitted total, and CPU
+rlimits/wall deadlines. Polling can overshoot; it is not a hard RSS guarantee.
+Seccomp clone argument checks prohibit processes but cannot count threads.
+Therefore degraded mode uses single-threaded FFmpeg and a fixed trusted watchdog
+created before a final TSYNC filter that denies all further clone calls.
+Do not claim a numeric thread cap from stateless BPF. Primary mode combines the
+checked pthread flags below with `TasksMax`.
+[Seccomp limitations](https://man7.org/linux/man-pages/man2/seccomp.2.html).
+
+A scope does not automatically die with its creator. Ruling 5's lifecycle claim
+needs the named supervisor above to call `StopUnit` on app EOF, and systemd then
+kills the scope members. Test supervisor loss separately with parent-death and
+helper-lifetime protections. The scope lifecycle follows its member processes,
+not its creator ([systemd scope semantics](https://www.freedesktop.org/software/systemd/man/latest/systemd.scope.html)).
+
+### Ordered bootstrap and host evidence
+
+1. Perform the blocked resource join. Call `setsid` and arm
+   `PR_SET_PDEATHSIG=SIGKILL`, then compare `getppid` with the captured parent;
+   refuse if it changed. Repeat after credential changes and in fork children,
+   because fork/credential changes can clear the setting. Inside the PID
+   namespace the outer parent may appear as PID 0, so the lifetime handshake
+   also guards loss that `getppid` cannot distinguish.
+   [Parent-death semantics](https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html).
+2. Unshare `CLONE_NEWUSER`, deny setgroups, map only the caller UID/GID, then
+   enter `CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWPID`. Fork so the payload enters
+   the PID namespace. Reuse the single-threaded fork pattern at
+   `crates/kinewright-job-sys/src/namespace.rs:199`, called from
+   `crates/kinewright-agent/src/job_guardian/linux.rs:131`. Retain/reap the outer
+   bootstrap too. Keep loopback down. No media is parsed in either bootstrap.
+3. Before pivoting, inventory fds, put command-read, response-write,
+   lifetime-read, and source-read into fixed slots, map inherited rings, and
+   close their fds. Close every other fd, including stdio, directory fds,
+   sockets, resource controls, and release/verification pipes when spent.
+   Verify the inventory while procfs is accessible. Make mounts private, pivot
+   into an empty root, detach the old root, and set cwd to `/`. Mount no procfs,
+   sysfs, devices, home, or project. Drop all capabilities.
+4. Set `PR_SET_NO_NEW_PRIVS=1`, core/file-size limits to zero, `RLIMIT_NOFILE=16`,
+   `RLIMIT_STACK=8 MiB`, and the address-space bound above. Set a 300 CPU-second
+   `RLIMIT_CPU` ceiling. Hitting it is `TimedOut`; restart the unfinished job at
+   its last validated checkpoint. No planned process rotation near the ceiling.
+5. If Landlock ABI ≥3 is available, install a no-grants ruleset handling every
+   filesystem access right known to the pinned implementation and supported by
+   the detected ABI, including REFER/TRUNCATE. Add known network/scope rights
+   when supported. Verify enforcement; record older/absent ABI or failure as
+   defence-in-depth unavailable, never a reason to bypass namespace/seccomp.
+   Already-open fds bypass path rules, hence the inventory and access modes.
+   [Landlock ABI and rights](https://docs.kernel.org/userspace-api/landlock.html).
+6. Install the table's seccomp filter, default-deny foreign audit architectures
+   and x32, and filter full-width arguments. Primary-mode decode threads inherit
+   it. In degraded mode, pre-created parked trusted threads receive it with
+   TSYNC; cloning is denied thereafter. The watchdog polls the lifetime fd for
+   HUP/EOF and terminates its own thread group on loss using allowed self-tgkill.
+7. Pause before `PR_SET_DUMPABLE=0`. The host independently inspects `Seccomp`,
+   `NoNewPrivs`, user/mount/network/PID namespace links, and cgroup membership
+   against retained PID/starttime. Then complete the dumpable drop and readiness.
+   User-namespace credentials may already prevent host access to namespace links.
+   For every unobservable property, report that confinement rests on trusted
+   bootstrap self-report plus negative tests, not independent host verification.
+   `Ready` alone never establishes confinement.
+
+Missing user namespaces or seccomp fails closed as `SandboxUnavailable`.
+Other required boundary setup failures also refuse that launch; absence of
+cgroups or Landlock alone uses the specified degraded mode. No in-process or
+unsandboxed fallback, sudo setup, or kernel-policy change is permitted.
+Slice 1a must qualify availability on a stock desktop and the CI runner.
+
+### Seccomp syscall table
+
+All unlisted syscalls are denied. This is an allowlist to qualify against the
+packaged libc/FFmpeg, not permission to widen it from a generic trace preset.
+Ring fds exist only before final lockdown; afterward their mapping rule has no
+live fd to use. Descriptor numbers cannot be reused through opens or duplication.
+
+| Syscall(s) | Allowed arguments / result after lockdown |
+| --- | --- |
+| `read`, `pread64`, `lseek` | arg0 exactly source-read or command-read fd; no lifetime or arbitrary fd |
+| `write`, `writev` | arg0 exactly response-write fd; no stderr |
+| `mmap` | `PROT_EXEC` absent; anonymous with fd −1, or only a designated ring fd; never source-backed |
+| `mprotect`, `pkey_mprotect` | `PROT_EXEC` absent, including mixed write/exec requests |
+| `munmap`, `brk`, `madvise` | Runtime memory only; madvise restricted to NORMAL, DONTNEED, FREE |
+| `futex` | WAIT/WAKE private operations and required private bitset variants only |
+| `clock_gettime`, `clock_nanosleep`, `nanosleep`, `sched_yield` | Reviewed runtime clocks/waits |
+| `poll`, `ppoll` | Lifetime-HUP watchdog; BPF cannot inspect pollfd arrays, but these calls grant no read/write authority |
+| `fstat` | Source/command/response fd only; never path lookup |
+| `close` | Only surviving source/command/response/lifetime fds |
+| `getpid`, `gettid`, `getppid`, `getrandom` | Runtime identity/randomness only |
+| `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn`, `sigaltstack` | Runtime signal management |
+| `tgkill` | arg0 equals helper tgid captured at filter installation in its PID namespace |
+| `clone` | Primary mode only: exact reviewed pthread flags `CLONE_VM \| CLONE_FS \| CLONE_FILES \| CLONE_SIGHAND \| CLONE_THREAD \| CLONE_SYSVSEM \| CLONE_SETTLS \| CLONE_PARENT_SETTID \| CLONE_CHILD_CLEARTID`, no exit signal; degraded mode denies |
+| `clone3` | Return `ENOSYS` to reach checked legacy clone; degraded mode still denies clone |
+| `set_robust_list`, `rseq` | Reviewed libc per-thread registration |
+| `exit`, `exit_group` | Allowed |
+| `kill`, `tkill`, `pidfd_send_signal`, `rt_sigqueueinfo`, `rt_tgsigqueueinfo` | Denied, including brute-forced external pids |
+| `open`, `openat`, `openat2`, `newfstatat`, `statx` | Denied |
+| `dup`, `dup2`, `dup3`, `fcntl`, `pidfd_getfd` | Denied, including every fd duplication route |
+| `memfd_create`, `userfaultfd`, `personality`, `ioctl`, `mremap`, `pkey_alloc` | Denied |
+| `prctl` | Only `PR_SET_DUMPABLE` with arg1=0 for the final monotonic drop; all other requests denied |
+| `execve`, `execveat`, `fork`, `vfork`, `unshare`, `setns`, `seccomp` | Denied after bootstrap |
+| `socket`, `socketpair`, `connect`, `bind`, `listen`, `accept`, `accept4`, `sendmsg`, `recvmsg` | Denied for all families |
+| `ptrace`, `process_vm_readv`, `process_vm_writev`, `mount`, `bpf`, `keyctl`, `perf_event_open`, `io_uring_setup`, `io_uring_enter`, `io_uring_register` | Denied |
+| Filesystem mutations and all remaining syscalls | Denied by default |
+
+Each named denial and each argument predicate gets its own negative witness,
+including high argument bits, source/command/response fd swaps, ring/source mmap,
+exec permission changes, wrong-tgid `tgkill`, and alternate clone flags. Signals
+also attack synthetic parent, supervisor, and sibling processes with known and
+brute-forced pids. Verify unchanged canaries and actual native refusal.
 
 ## Windows confinement
 
-Require a less-privileged AppContainer (LPAC), layered with a restricted primary
-token and an unnamed Job. Do not fall back to a restricted token alone.
-Use `CreateAppContainerProfile` with a per-launch identity, zero capabilities,
-and `DeriveAppContainerSidFromAppContainerName` only to recover that identity.
-`DeleteAppContainerProfile` follows proven process cleanup. Grant read/execute
-only to the packaged helper and its DLLs using `SetNamedSecurityInfoW`, never
-to the source directory. Use explicit `SECURITY_CAPABILITIES` with
+Use the documented `CreateProcessW` LPAC launch with an unnamed Job. The native
+Windows spike is the first task of slice 1b. Use a stable name-derived SID from
+`DeriveAppContainerSidFromAppContainerName`, zero capabilities, and no per-launch
+profile or ACL edits. Grant that SID read/execute on the packaged helper/DLL
+directory once at install or first run in a user-owned install. For an
+admin-owned install, the installer grants access. Never grant the source
+directory. At startup, sweep stale profiles/storage/launch artefacts under our
+name prefix after proving they have no live owner; preserve the stable install
+grant and never touch unrelated profiles. Use `SECURITY_CAPABILITIES` with
 `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` and
 `PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY` set to
 `PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT`.
 [Microsoft's LPAC launch contract](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer).
 
-Use `OpenProcessToken`, `CreateRestrictedToken(DISABLE_MAX_PRIVILEGE, ...)`,
-disable administrative groups, and remove remaining unnecessary privileges.
-Set a low integrity label with `SetTokenInformation(TokenIntegrityLevel)`.
-Use `CreateProcessAsUserW` with that primary token, `STARTUPINFOEXW`,
+Use `STARTUPINFOEXW` with
 `EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT`,
-a minimal environment, and an explicit executable path. Do not request elevation.
-[Restricted-token API](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createrestrictedtoken).
+an explicit executable path, an environment containing only `SystemRoot`, and
+the install directory as cwd. Suppress stderr without an inherited console or
+writable file handle. Do not request elevation. Before `ResumeThread`, inspect
+the actual suspended child's `TokenIsAppContainer`, expected AppContainer SID,
+zero `TokenCapabilities`, and low integrity level. Successful token inspection,
+not successful API return, is the spike's launch pass criterion.
+
+If an additional restricted-token layer is necessary, compose a lowbox token
+from the restricted base via `NtCreateLowBoxToken`, as in Chromium's reviewed
+composition; its restricting-SID list includes the AppContainer SID so the
+second access check can grant the install-directory read/execute right.
+Do not substitute `CreateProcessAsUserW(restricted_token)` for verified LPAC.
+[Chromium composition witness](https://chromium.googlesource.com/chromium/src/+/71104fd3/sandbox/win/src/restricted_token_unittest.cc)
+and [restricting-SID access checks](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createrestrictedtoken).
 
 The host uses `CreateFileW` for the source and `GetFileInformationByHandleEx`
 for identity/type checks. Inherit only narrowed read-only source, pipe, and
@@ -305,9 +485,16 @@ admitted private budget. Allow no breakaway. Attach atomically with
 `PROC_THREAD_ATTRIBUTE_JOB_LIST`, verify with `QueryInformationJobObject`,
 and associate a completion port for memory/exit events. Resume only after
 membership, handles, token, and limits pass host checks, using `ResumeThread`.
+Set `JobObjectCpuRateControlInformation` with
+`JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP`.
+Reserve the CPU share before launch; provisionally cap each helper at
+min(100%, 200% / logical-CPU-count) of machine capacity for video and
+min(100%, 100% / logical-CPU-count) for audio/probe, rounded to API units.
+Host inspection verifies the actual hard-cap rate alongside memory/process limits.
 Use `TerminateJobObject` on timeout, then wait with `WaitForSingleObject` and
 verify emptiness. Reserve shared sections outside the Job commit limit.
 [Job memory limits](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information).
+[Job CPU rate contract](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_cpu_rate_control_information).
 
 Set creation-time `PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY` for DEP, mandatory
 ASLR, strict handle checks, extension-point disable, Win32k system-call disable,
@@ -319,11 +506,16 @@ packaged MS1 DLLs. Use `GetProcessMitigationPolicy` for host inspection and
 Do not require Microsoft-only signatures, which would reject our FFmpeg DLLs.
 [Mitigation policies](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setprocessmitigationpolicy).
 
-LPAC is not Linux's fd-only filesystem model. Windows must read OS/runtime
-images and permits private AppContainer storage. Keep that storage ephemeral,
-quota/account it, and expose no broker for host file or registry writes. Test
-that other user files, registry state, network, and sibling processes are
-inaccessible. Do not promise that a helper cannot write its own private storage.
+Windows reads OS/runtime images, but this launch grants no writable private
+storage. Do not create a profile that supplies an unbounded writable directory
+or registry hive. Native canaries must prove creation, growth, and mutation are
+denied in every reachable private/temp/profile/registry location. If any runtime
+write is unavoidable, enforce a hard quota before accepting any media and prove
+it on native Windows; cleanup or periodic disk polling is not a quota.
+Otherwise refuse Windows media launch. Expose no write broker. Also test named
+pipes, ALPC endpoints, and `OpenProcess` against the host and a sibling helper,
+in addition to user files, registry, and network. Stable SID reuse grants no
+sibling IPC authority; verify denial rather than infer it from capabilities.
 Unsupported LPAC, mitigations, token composition, or nested Job setup fails
 closed. Prove this exact combined launch on native Windows before shipping.
 
@@ -364,10 +556,18 @@ cache entries; publish completed entries atomically from the host only. Helper
 failures must leave Save, undo, recovery, and editing unrelated clips usable.
 
 Allow one automatic restart per source in five minutes for an unexpected crash,
-only after verified cleanup. After a second crash, timeout, OOM, or protocol
+only after verified cleanup. After a second crash, OOM, or protocol
 violation, quarantine that source for the session and require explicit Retry or
-Relink. No automatic retry for malformed output or sandbox failure. Explicit
+Relink. A slow source's `TimedOut` remains retryable at its checkpoint and does
+not count as hang quarantine. Repeated no-progress failures with independently
+established hang evidence require explicit Retry, preserving the slow-decode
+distinction. No automatic retry for malformed output or sandbox failure. Explicit
 retries have a one-second cooldown and at most three launches per minute.
+The global launch circuit breaker counts successful, failed, probe, decode, and
+explicit-retry launches across all sources: at most two/s, burst four, and 20
+per rolling minute. On exhaustion, pause admission as `ResourceLimit`, report
+the cooldown, and require explicit resume after 60 s; no endlessly draining
+launch queue for projects containing hundreds of hostile sources.
 The supervisor retains the reservation until the process is reaped and native
 membership is empty. Cleanup failure retains ownership and blocks replacement.
 Parent loss closes the lifetime pipe; the native supervisor kills the helper.
@@ -401,7 +601,7 @@ Keep narrow OS operations in job-sys. No Python/Node runtime ships with MS2.
 
 | Option | Decision and reason |
 | --- | --- |
-| [`landlock`](https://docs.rs/landlock/latest/landlock/) | Add a pinned direct Linux dependency. Safe ruleset construction avoids new handwritten syscall layouts. Require enforced policy, not best-effort degradation. |
+| [`landlock`](https://docs.rs/landlock/latest/landlock/) | Add a pinned direct Linux dependency. Require enforcement of selected known rights when available; log absent ABI/policy as defence in depth unavailable. Namespace/seccomp remain load-bearing. |
 | [`seccompiler`](https://docs.rs/seccompiler/latest/seccompiler/) | Add a pinned Linux dependency, with JSON policy loading disabled. Typed argument rules compile the reviewed policy to BPF; the policy remains our responsibility. |
 | [`extrasafe`](https://docs.rs/extrasafe/latest/extrasafe/) | Decline. It combines syscall, Landlock, and isolation helpers, but a second policy abstraction obscures our exact descriptor/argument rules. |
 | [`birdcage`](https://docs.rs/birdcage/latest/birdcage/) | Decline. Its Linux/macOS process sandbox does not supply Windows confinement and duplicates launch ownership. |
@@ -423,17 +623,24 @@ Run these later, on both native platforms. None has been run for this design.
   On Windows also attack profile storage boundaries, registry, clipboard,
   remote image loading, and nested Job breakaway. Use synthetic canary files
   and listeners. Assert native denial and unchanged canaries, not just exit.
-  Remove each protection in a disposable negative-control build and require
-  its targeted witness to fail. No real credentials or host policy changes.
+  Give each mechanism an isolated denial witness: seccomp with masking namespace/
+  Landlock protections absent, Landlock alone where applicable, PID namespace
+  signal isolation, and independent memory/CPU/job/handle restrictions. Removing
+  only that mechanism must change its specific refusal, not leave another guard
+  masking the result. Separately run full-stack attacks and negative controls
+  with deliberate combinations removed. No real credentials or host policy changes.
 - Probe bootstrap ordering with a helper that attempts each attack before its
   first request. Inspect every inherited descriptor/handle and token/namespace
-  property independently. Test denied namespaces, absent Landlock, missing
-  controllers, invalid mitigations, and corrupted helper/library bundles. All
-  must refuse before parsing. AppContainer-local writes are an allowed exception
-  to the generic write test, bounded and removed on cleanup.
+  property independently. Missing user namespaces/seccomp, invalid required
+  mitigations, and corrupted bundles must refuse before parsing. Absent Landlock
+  logs reduced defence in depth; missing controllers/user manager must exercise
+  degraded rlimits/RSS enforcement successfully. Gate both a stock desktop and
+  CI runner. Native Windows storage writes must be denied or hit a proven hard
+  quota before any source is read; there is no unbounded private-storage exception.
 - Fuzz the host's actual framing/parser/state validator with cargo-fuzz/libFuzzer
   and sanitizers. Include truncation, huge lengths, recursion, duplicate fields,
-  integer wrap, stale IDs, NaN/Inf PCM, wrong formats, out-of-order messages,
+  integer wrap, stale IDs, NaN/Inf/subnormal PCM, non-finite summary metadata,
+  wrong positions/formats, nested duplicate JSON keys, out-of-order messages,
   floods, ring overwrite during copy, and fake progress. Require no panic,
   out-of-bounds access, unbounded allocation, or project mutation.
 - Inject access violations/SIGSEGV, abort, CPU spin, memory exhaustion, pipe EOF,
@@ -445,65 +652,77 @@ Run these later, on both native platforms. None has been run for this design.
   fixtures. Exercise all call sites above, including project admission, mixed
   timelines, exported-artifact checks, cache hits, and background analyses.
 
+`LoudnessMeter` at `crates/kinewright-media/src/loudness.rs:381` retains per-channel
+energies plus ends, blocks, and short-term series. It is not constant-memory.
+In slice 4 use a charged 32 MiB history/snapshot/sort-work cap within the audio
+private reservation, checked before every growth/allocation. Exceeding it returns
+typed `ResourceLimit(LoudnessHistoryLimit)` with no partial final loudness result.
+Qualify accepted-length results against the existing meter and EBU fixtures.
+An exact bounded algorithm can replace this only after equivalent qualification;
+do not describe today's incremental update as bounded retained memory.
+
 Use release binaries named by commit and SHA-256, the same MS1 FFmpeg artifact,
 and local hashed H.264, HEVC 10-bit, AV1, still, malformed, and multi-hour audio
-fixtures. Pair baseline versus sandbox at equal thread counts and frame sizes.
+fixtures. Pair at equal thread counts/frame sizes to isolate transport overhead,
+and separately against the shipping `default_threads` configuration (frame
+threading up to 16 at `crates/kinewright-media/src/decode.rs:1786`).
 Do not wait for a quiet desktop. Record other load and run no build alongside
 timing. Report cold startup separately from warm requests, p50/p95 over at least
 30 launches/seeks, and five paired 60-second throughput lanes per video case.
 
 | Gate | Proposed number to hit |
 | --- | --- |
-| Sustained decode plus transport, compared with identical software baseline | At least 90% of baseline fps; IPC copy p95 at most 4 ms/frame at 4K |
-| Reference H.264 4K60, when equal-thread baseline reaches 60 fps | Sustain 60 fps; otherwise report baseline capacity separately from MS2 overhead |
-| First frame, cold launch | Added p95 at most 150 ms; absolute p95 at most 500 ms on the reference H.264 fixture |
+| Sustained decode plus transport, equal threads | At least 90% of baseline fps; separate from shipping-thread gate |
+| Absolute shipping-config H.264 4K60 gate | Sandbox sustains 60 fps when shipping frame-threaded baseline reaches 60; otherwise report measured absolute fps and capacity failure |
+| Copy p95 | Measure same-size two-copy memcpy ceiling on this machine, both hot/cold and two-source contention; freeze a p95 threshold at 1.5× that measured two-copy p95 before implementation; no assumed 4 ms |
+| First frame, cold source | Include probe + reap + fresh decode launch; added p95 at most 150 ms, absolute p95 at most 500 ms on reference H.264 |
 | Warm random seek | Added p95 at most 25 ms; absolute p95 at most 250 ms for GOP 60 and 1 s for GOP 250 |
-| Waveform/loudness | At least 90% baseline samples/s; memory independent of recording duration |
-| Resource use | Audio peak RSS at most 96 MiB; video at most 384 MiB; hard reservations and totals above always hold |
+| Waveform / admitted loudness | At least 90% baseline samples/s; waveform bounded, loudness obeys charged history cap with typed refusal |
+| Three-/four-angle multicam | Three and four distinct 1080p30 sources; sustain selected output at 30 fps with switch p95 ≤250 ms, two helpers only; also record 4K capacity |
+| Two distant playheads, one source | Alternate GOP-60/GOP-250 positions; p95 ≤250 ms / 1 s respectively; no extra helper or unbounded pending work |
+| Source-switch churn | 100 switches; record cold/warm p95, launch-breaker pauses, queue/cancellation stability, and reservation recovery |
+| Resource use | Provisional private peaks 96 MiB audio / 384 MiB video; rings separate; primary kernel totals hold, degraded RSS overshoot measured explicitly |
 | Cancellation and kill | Acknowledge or terminate within 250 ms; native emptiness and reap within a further 2 s |
 | Idle/leak test | After 100 open/seek/cancel/close cycles, host retained bytes within 8 MiB of start; zero helpers after idle expiry |
 
-These targets may fail. Record failures and review the design or limits before
-shipping; do not relabel an unmeasured estimate as evidence. Publish CPU time,
-copy bandwidth, PSS/commit, and two-source contention as well as fps.
+For a packed frame of size S and measured memcpy payload throughput B, two
+copies cost at least 2S/B; account for four S of memory reads+writes when the
+ceiling is expressed as bus bandwidth. Publish that floor beside measured p95.
+Measure worst-case compliant codec/DPB streams before freezing reservation rows.
+For multicam shortfalls, scale reservations by raster before considering any
+increase above two helpers. Record failed targets and review the design or
+limits before shipping; do not relabel an unmeasured estimate as evidence.
+Publish CPU time, copy bandwidth, PSS/commit, and two-source contention as well as fps.
 
-## Four build slices
+## Build slices
 
-1. Ship source waveform/loudness measurement through the helper on Linux and
-   Windows. Implement the typed summary protocol, both confinement profiles,
-   source-handle admission, budgets, supervision, and malicious-helper/crash
-   witnesses. Stream measurements internally, return capped summaries only.
-   No frame or PCM ring yet. No insecure fallback in this migrated operation.
-2. Move every import/project probe and source thumbnail/still inspection into
-   the helper. Return thumbnails as bounded raw-pixel chunks over control,
-   total at most 256 KiB per thumbnail. Preserve source authority and colour
-   refusals. Gate new-project and IX admission with hostile files and verify
-   that these paths no longer invoke FFmpeg input APIs in the host.
-3. Add shared-memory video and PCM rings. Move preview, source audio playback,
-   timeline rendering, and export input reads. Preserve compositor/encode
-   ownership, sample timing, cancellation, and output byte/colour contracts.
-   Pass native failure tests, ring/parser fuzzing, and paired overhead gates.
-4. Migrate recognition extraction, scene/beat/silence analysis, room tone,
-   cache inspection, and all remaining decode callers. Bound long audio and
-   cache retention. Delete direct input/decode APIs from the host dependency
-   boundary. Complete the all-callers audit, two-platform escape tests, full
-   affected-crate and dependent-crate gates, memory soak, and security review.
+| Slice | Required deliverable and gate |
+| --- | --- |
+| 1a, Linux confinement + probe | Implement source admission, blocked scope join/degraded limits, namespaces/seccomp, typed probe validation, supervision, and isolated/full-stack attack witnesses end to end. Migrate all Linux import/project probes, including `crates/kinewright-project/src/owned_media.rs:415`, so IX admission never probes hostile media in the host. Return metadata only, no PCM/pixel rings. Qualify stock-desktop and CI availability, cleanup, and malformed IX probes. |
+| 1b, Windows confinement + probe | Start with the native LPAC spike. Pass suspended-token inspection, stable SID/install ACL, no writable storage or proven hard quota, Job/CPU/mitigation, inherited-handle, and named-pipe/ALPC/process canaries before the same end-to-end probe protocol and IX admission. No Windows safety claim before this gate. |
+| 2, waveform | First streaming consumer on both platforms. A validated probe precedes a fresh source-bound measurement helper. Stream bounded peak summaries through credited binary `DataChunk` frames. Add cancellation/checkpoint/launch-breaker witnesses and long-audio memory qualification. No loudness yet. |
+| 3, frames | Add agreed-geometry video and PCM rings for preview, playback, timeline rendering, and export source reads. Freeze ±64.0 PCM validation, preserve sample/colour/rotation contracts, and refuse mid-stream geometry changes. Gate snapshot-copy/parser fuzzing, shipping-config absolute fps, copy ceiling, two playheads, multicam, and churn. |
+| 4, loudness/thumbnails/rest | Add charged-cap loudness, source thumbnails/still inspection, recognition extraction, scene/beat/silence analysis, room tone, and cache inspection. Thumbnail pixels use bounded binary chunks, ≤256 KiB total per thumbnail, never encoded images for host decode. Delete all direct input/decode host APIs. Complete all-callers audit, native escape tests, affected/dependent-crate gates, memory soak, and security review. |
 
-Each slice is a usable operation with its own security gate. Until slice 4,
-unmigrated operations retain their existing exposure; do not advertise complete
-media isolation. Partial rollout adds no runtime legacy mode or bypass switch.
-MS1 remains required for the final package; IX must not assume that a merged
-MS2 design or an early slice makes arbitrary interchange media safe.
+Each slice has its own security gate. Until slice 4, unmigrated operations retain
+their existing exposure; do not advertise complete media isolation. Partial
+rollout adds no legacy mode or bypass switch. MS1 remains required. Linux IX
+admission is confined at 1a, Windows at 1b; arbitrary subsequent media use is not
+fully isolated until the remaining consumers migrate.
 
-## Open questions for review
+## Decisions and remaining qualification
 
-1. Is fail-closed media support acceptable where Landlock, user namespaces,
-   or delegated memory/pids controllers are unavailable? This design requires it.
-2. Do measured 4K reference sets fit 512 MiB per helper and 1,536 MiB total,
-   including current certified-buffer reservations, without unacceptable refusals?
-3. Does native Windows prove restricted-token LPAC launch, inherited source
-   handles, required mitigations, and per-launch profile cleanup together?
-4. What explicit PCM amplitude limit preserves current supported recordings
-   while preventing unsafe DSP arithmetic? Fix it in the wire contract before PCM.
-5. Does two source-bound helpers with serialized same-source cursors meet real
-   multicam/transition latency targets? Measure before increasing concurrency.
+Availability is decided. Missing user namespaces or seccomp fails closed;
+missing cgroups uses degraded rlimits/RSS supervision, and absent Landlock logs
+reduced defence in depth. Memory numbers remain provisional until measured.
+The native Windows spike comes first in 1b. The PCM wire limit is ±64.0 before
+slice 3. Start with two helpers; measure three-/four-angle multicam and scale
+reservations by raster before raising the process cap. These are decisions and
+proof obligations, not unanswered product choices.
+
+Round-1 technical corrections are explicit above. Stateless seccomp cannot
+enforce a numeric thread count (ruling 3), and a systemd scope
+does not automatically follow its creator's lifetime (ruling 5). The fixed
+thread set and independent app-loss supervisor provide the missing mechanisms.
+Ruling 19's UHD reservation is corrected to 3,649 MiB / 3.563 GiB.
+No new product question is opened by this document revision.
