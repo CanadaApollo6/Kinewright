@@ -2,7 +2,7 @@
 
 Status: design, revision 3, 2026-11-17. Revision 1 is `48f6d0e3`. Revision 2 folds in the lead's
 rulings on revision 1's open questions, the lead's two corrections and the critic's fourteen
-findings; §0.1 maps each item to its section. Revision 3 adds rulings 6–10 (§14).
+findings; §0.1 maps each item to its section. Revision 3 adds rulings 6–16 (§14).
 
 This is the first slice of the interchange programme (IX), which Riel approved on 2026-11-16.
 Later slices are IX-T1 (native two-sided transitions), IX2 (`.prproj` import with a loss
@@ -120,14 +120,16 @@ grid (§4.2).
 An absolute `at` fits FCPXML lanes and Premiere starts. The OTIO parser sums trimmed durations and
 skips transitions, as OTIO's `range_of_child_at_index` does.
 
-**OTIO composition windows (ruling 7).** One parser-side function applies `source_range` on
-every OTIO composition, including tracks, stacks and nested timelines. It trims children,
-transitions and markers to the window and rebases the retained placements to its start.
-An item wholly outside the window is dropped and counts `outside_window`. A transition hit
-by a window edge becomes a hard cut.
+**Composition windows (rulings 7 and 11).** One parser-side function trims children,
+transitions and markers to the container's window and rebases the retained placements to
+its start. OTIO supplies `source_range` for tracks, stacks and nested timelines. FCPXML
+supplies `@start` and `@duration` for its containers, including `sync-clip`, `ref-clip`,
+compounds and multicam. Items wholly outside the window count as dropped under
+`outside_window`. A transition hit by a window edge becomes a hard cut.
 
-Exact rationals hold Premiere ticks (`crates/premiere_file/src/schema/timing.rs:7@cdea27e`)
-without Mirage's 0.5 ms rounding (`crates/fx_schema/src/time.rs:5@cdea27e`).
+Exact rationals hold Premiere ticks (Mirage repository,
+`crates/premiere_file/src/schema/timing.rs:7@cdea27e`) without the 0.5 ms rounding in the
+Mirage repository's `crates/fx_schema/src/time.rs:5@cdea27e`.
 
 ## 3. The mapping
 
@@ -172,7 +174,9 @@ carry rates such as 23.976024627685547 (OTIO issue #1822). Rates snap as follows
 - Anything else is refused with `unsupported_rate`.
 
 A value within 1e-6 of an integer is exact at its snapped rate; any other value counts
-`subframe_rounded`. `NaN` and `Infinity` never reach this step (§11).
+`subframe_rounded`. `NaN` and `Infinity` never reach this step (§11). Both parsers and
+offline estimation refuse project or asset rates above 1,000 fps with `unsupported_rate`
+(ruling 12). OTIO time magnitudes outside the representable range are `unrepresentable`.
 
 **4.2 Lowering to frames (ruling 6).** Round each IR boundary to its initial project frame
 with `frame = ⌊t × fps + ½⌋` in `i128`. Core derives a media clip's project length from its
@@ -262,6 +266,8 @@ audio-bearing lane.
   if the track holds a two-sided dissolve.
 - A track at base lane `b` owns lanes `b .. b+h−1`. Lane `b` is the track itself.
 - A nest's inner track *i* starts at `b + Σ(j<i) h_j`. Lane `b` is empty while the nest plays.
+- Nests and anchored items share this allocator. A block's height also includes the lanes
+  needed by concurrent anchors (ruling 15).
 - Blocks never interleave, so inner layers keep their order even when lane 1 is busy at the same
   time.
 - Overlap the source should not contain, such as two FCPXML clips on one lane in hostile input,
@@ -292,11 +298,13 @@ rests on a reading that is unverified against an editor (`anchor_retime_reading`
 *Variable and unsupported maps.* A variable map on a container is averaged into `s`, with the
 largest drift in parent frames as its bound (`variable_speed_averaged`). If the map falls, is not
 monotonic, or its net speed rounds outside 10..=1000 %, the container lowers as a gap of its span
-(`nest_retime_unsupported`, Ø).
+(`nest_retime_unsupported`, Ø). Count the container and every item in its subtree as dropped
+under that code (ruling 14).
 
 *Inner items.* Inner speeds are multiplied by `s`, rounded once and clamped (`speed_clamped`).
 Container effects are dropped. Container markers become project markers inside the window. Depth
-is capped at 8 (`too_deep`), Mirage's limit (`crates/premiere_file/src/schema/nested.rs:30-32@cdea27e`).
+is capped at 8 (`too_deep`), the limit in the Mirage repository's
+`crates/premiere_file/src/schema/nested.rs:30-32@cdea27e`.
 
 *Transitions at a container edge.* A per-layer crossfade cannot reproduce a dissolve between two
 composites. The outgoing layers stay visible at weight `(1 − a)²` under an opaque entering top
@@ -319,6 +327,8 @@ the cut and `out_offset` shows A after it. FCPXML exports centre `transition` on
 lane above P:              [B head T−before .. T+after, crossfade transition_in]
 track P:   [A ........ T+after][B body from T+after ..........]
 ```
+
+When the transition consumes the entire entering clip, omit the empty body (ruling 13).
 
 *Audio.* Audio follows on the audio tracks. B's head ramps in, and A gets
 `audio_fade_out_frames = before + after`.
@@ -541,6 +551,8 @@ refuses a remote `path` or root (`remote_path`), and reports remote media withou
 
 *Mapped drives and symlinks.* Mapped drive letters and symlinks are local to the OS and are
 treated as local. They are the person's own configuration, and the deadlines bound a hung mount.
+Under the open-a-project model, a timeline can name absolute local paths that the importer
+probes and hashes without confirmation.
 
 *No network code.* Neither IX crate links network code, and a test asserts it.
 
@@ -561,9 +573,11 @@ asset is verified, as M41 requires.
 - a probe must open the file and read its metadata within 10 s;
 - hashing must make progress at least every 10 s.
 
-A worker past its deadline is abandoned: its result is discarded, and the file counts as missing
-(`media_timeout`). The thread itself cannot be killed and ends when the call returns. If all four
-workers are stuck, the remaining locators are reported missing without a stat.
+A worker past its deadline is abandoned, and its result is discarded. The thread itself
+ends when the call returns. Replace an abandoned stat worker so other locators can still
+be checked. A locator can be declared missing after its own stat returns or its own
+deadline expires. Cap the number of abandoned workers. Once that cap prevents another
+dispatch, report the remaining locators as `media_timeout` (ruling 16).
 
 *Metadata.* Probe metadata wins over interchange metadata. A source range past the probed duration
 is clamped (`source_clamped`). A missing media start is taken as 0, and a range that then overruns
@@ -684,7 +698,7 @@ no download.
   raises the pin before writing any code.
 - A pre-scan refuses any DOCTYPE internal subset or `<!ENTITY` (`dtd_not_allowed`). `allow_dtd` is
   then set for FCPXML's bare `<!DOCTYPE fcpxml>`.
-- Mirage parses Premiere XML with `allow_dtd: false` and a 128-level check
+- The Mirage repository parses Premiere XML with `allow_dtd: false` and a 128-level check
   (`crates/premiere_file/src/format/graph/mod.rs:229-245@cdea27e`).
 - A DOM beats quick-xml streaming here, because `ref` ids resolve across resources and compounds.
 - The walk uses an explicit stack.
@@ -698,6 +712,7 @@ classification are about 80 hand-written lines, and they are fuzzed.
 | JSON depth / XML depth / nest depth | 128 / 128 / 8 | `too_deep` |
 | Parsed items / Kinewright clips / media / XML nodes (during parse) | 250 000 / 50 000 / 20 000 / 4 000 000 | `too_many_items` |
 | Tracks per kind, lanes included | 128 | `too_many_tracks` |
+| Project and asset fps | 1,000 | `unsupported_rate` |
 | Names and text; `ref` graph | 4 KiB, then truncated; cycle check | A row; `malformed` |
 | `media_roots` | 8 roots, depth 4, 100 000 entries each | the walk stops; names are listed as missing |
 | Stat / probe open / hash stall | 2 s / 10 s / 10 s | `media_timeout` |
@@ -734,7 +749,12 @@ Named cases:
 - retimed source-end drift over 100 seconds of 1.004× playback at 30 fps;
 - an OTIO track with red frames 0–24 and blue frames 24–48, windowed to 24–48, importing
   blue alone at frame zero;
-- one 24-frame clip followed by a 24-frame gap, reporting a 24-frame trimmed tail.
+- one 24-frame clip followed by a 24-frame gap, reporting a 24-frame trimmed tail;
+- a 31.52-second FCPXML sync clip over a 101.88-second inner spine containing a 41.88-second gap
+  and a 60-second clip;
+- a transition that consumes the whole entering clip, leaving no body;
+- the largest admitted rate, 1,000 fps, scaled to 1,000% speed within `Rational`'s
+  `u32` terms (`time.rs:138-141`).
 
 **Media-dependent rows.** Probing, `source_clamped`, `source_origin_assumed`, A/V sync and
 `media_timeout` are proven by the lavfi fixtures, never by the corpus, whose files come without
@@ -771,8 +791,9 @@ repository's sample data.
   the topmost opaque item in the IR is the topmost clip in the `Document`, with the same media and
   the same source frame (±½). It runs on every fixture and on generated nests. Compare topology at
   the decided cuts when a cut snaps. The mixed-rate property measures the snap against the IR.
+  Exempt containers that were gapped under `nest_retime_unsupported`.
 - **Nest order (finding 14).** Inner nest layers keep their order when lane 1 is busy at the same
-  time (nested nests, spill lanes).
+  time (nested nests, spill lanes), including when an anchored clip shares the lane block.
 
 **Locator safety (finding 2).** Hostile fixtures cover `file://evil.example/s/a.mov`,
 `\\host\share\a.mov`, `\\?\UNC\…`, `\\.\…`, `//host/a.mov`, `file://localhost//host/share/a.mov`,
@@ -789,7 +810,8 @@ an offline asset or a `remote_path` refusal.
   `libfuzzer-sys` never ships. Each runs for at least 1 CPU hour before IX1 closes, and every crash
   becomes a fixture.
 - Hostile inputs must each end in a typed refusal or an offline asset: billion laughs, an external
-  entity, 10⁶-deep nesting, a node count over the cap, NaN/∞/0/negative rates, rationals near 2⁶³,
+  entity, 10⁶-deep nesting, a node count over the cap, NaN/∞/0/negative rates, OTIO time at `1e300`,
+  rationals near 2⁶³,
   duplicate ids, `ref` cycles, and `..` locators.
 
 **Edit tests.**
@@ -833,7 +855,8 @@ indexed first if it takes over 200 ms.
   with IX-T1, before IX2.
 - **Export**, seeded by the §12 test writer.
 - **IX2 `.prproj`:** exact ticks into this IR, the same lowering and report, and a cap on
-  decompressed size, which Mirage lacks (`crates/premiere_file/src/format/reader.rs:70-88@cdea27e`).
+  decompressed size, missing in the Mirage repository's
+  `crates/premiere_file/src/format/reader.rs:70-88@cdea27e`.
 - **Containers:** `.otioz` (ruling 5), AAF and EDL.
 - **Import into the open project** as one undo step. It needs one new operation that inserts
   tracks and assets and validates once; `imported_from` and `estimated_assets` are lists already.
@@ -857,6 +880,12 @@ Lead rulings (2026-11-17):
 8. **Trailing gaps.** Report the timeline tail removed beyond the last clip (§6.2).
 9. **Locators.** Classify file URLs on the final decoded native path (§8.1).
 10. **Report size.** Bound the serialized record and trim samples before rows (§7.5).
+11. **Windows in both formats.** FCPXML containers use the same window function as OTIO (§2).
+12. **Rate cap.** Refuse project and asset rates above 1,000 fps (§4.1).
+13. **Whole-clip transitions.** Omit an empty entering body (§5.3).
+14. **Gapped subtrees.** Count all their items as dropped (§5.2).
+15. **Anchors beside nests.** Size lane blocks for concurrent anchors (§5.1).
+16. **Stuck stats.** Replace expired stat workers up to the abandonment cap (§8.2).
 
 Open questions:
 1. **Marker colour switch.** Should `MARKER_COLOR_POLICY` ship as `LabelPrefix` or `Drop`? This is
