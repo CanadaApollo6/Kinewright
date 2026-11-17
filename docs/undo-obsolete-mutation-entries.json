@@ -1,0 +1,921 @@
+[
+  {
+    "catalogue": "scripts/ja-s1-fix-r1-mutations.py",
+    "name": "unchanged-history-cache",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r1-mutations.py",
+    "name": "history-floor",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r1-mutations.py",
+    "name": "native-layout-decode-charge",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r1-mutations.py",
+    "name": "baseline-continuation",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r1-mutations.py",
+    "name": "archived-history-residency",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r2-mutations.py",
+    "name": "unchanged-history-cache",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r2-mutations.py",
+    "name": "history-floor",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r2-mutations.py",
+    "name": "native-layout-decode-charge",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r2-mutations.py",
+    "name": "baseline-continuation",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r2-mutations.py",
+    "name": "archived-history-residency",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r2-mutations.py",
+    "name": "r2-copy-trim",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r2-mutations.py",
+    "name": "r2-live-floor",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r2-mutations.py",
+    "name": "r2-first-floor",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r2-mutations.py",
+    "name": "r2-lut-floor",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r2-mutations.py",
+    "name": "r2-comment-cut",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r2-mutations.py",
+    "name": "r2-specialist",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r2-mutations.py",
+    "name": "r2-app-floor",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r2-mutations.py",
+    "name": "r2-core-cut",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r2-mutations.py",
+    "name": "r2-floor-noop-redo",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r2-mutations.py",
+    "name": "r2-floor-noop-undo",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r3-mutations.py",
+    "name": "r3-first-bytes",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r3-mutations.py",
+    "name": "r3-first-batches",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r3-mutations.py",
+    "name": "r3-first-copy-own",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r3-mutations.py",
+    "name": "r3-manual-own",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r3-mutations.py",
+    "name": "r3-manual-older",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r3-mutations.py",
+    "name": "r3-specialist-own",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r3-mutations.py",
+    "name": "r3-specialist-older",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r3-mutations.py",
+    "name": "r3-floor-search",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r4-mutations.py",
+    "name": "moving_manual_core_reconciles_and_saves",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r4-mutations.py",
+    "name": "moving_specialist_core_reconciles_and_saves",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r4-mutations.py",
+    "name": "first_copy_moving_core_reconciles_and_saves",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r4-mutations.py",
+    "name": "prefilter_small_excursion_keeps_first_valid_cut",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r4-mutations.py",
+    "name": "prefilter_large_excursion_keeps_twenty_undo_steps",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r4-mutations.py",
+    "name": "production_prefilter_matches_ten_thousand_seeded_histories",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r4-mutations.py",
+    "name": "first_failure_releases_every_original_undo_and_redo_then_retries",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r4-mutations.py",
+    "name": "older_root_releases_every_entry",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r4-mutations.py",
+    "name": "command_lands_mid_save_above_pending_floor",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r4-mutations.py",
+    "name": "zero-counter-digits",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r4-mutations.py",
+    "name": "exact_cap_saves_and_one_byte_over_floors_one_more_step",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r4-mutations.py",
+    "name": "core-current",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r4-mutations.py",
+    "name": "core-floor-revision",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r4-mutations.py",
+    "name": "core-settled-guard",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r4-mutations.py",
+    "name": "core-release-race",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r5-mutations.py",
+    "name": "single-barrier-hook",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r5-mutations.py",
+    "name": "pre-b5-release",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r5-mutations.py",
+    "name": "object-owner-drop",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r5-mutations.py",
+    "name": "contention-drop-release",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r5-mutations.py",
+    "name": "floor-alignment",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r5-mutations.py",
+    "name": "typed-undo",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r5-mutations.py",
+    "name": "ticket-identity",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r5-mutations.py",
+    "name": "stacking-invariant",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r5-mutations.py",
+    "name": "in-flight-contention",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r6-mutations.py",
+    "name": "failed-commit-release",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r6-mutations.py",
+    "name": "typed-restore",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r6-mutations.py",
+    "name": "proof-binding",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r6-mutations.py",
+    "name": "untagged-retention",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r6-mutations.py",
+    "name": "raw-api-visibility",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r6-mutations.py",
+    "name": "floor-cache-read",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-fix-r6-mutations.py",
+    "name": "floor-cache-binding",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja1-s2-c3-mutations.py",
+    "name": "stuck-live-ticket",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja1-s2-c3-mutations.py",
+    "name": "no-ticket-history-restore",
+    "status": "retired",
+    "reason": "The old Save-floor selection, mutable historical snapshot/cache, suffix alignment or executor save-ticket API is deleted. Save preserves the native owner record; folding happens only during execution, and native cut/authority/prepared-update tests retain the protection.",
+    "replacement_witnesses": [
+      "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+      "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-history-mutations.sh",
+    "name": "redo",
+    "status": "retired",
+    "reason": "Old Core history export/restore and journal-identity observer removed; validated native records and immutable step/origin identities replace them.",
+    "replacement_witnesses": [
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "operation_history::tests::folding_advances_seeds_and_resources"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-history-mutations.sh",
+    "name": "gesture",
+    "status": "retired",
+    "reason": "Old Core history export/restore and journal-identity observer removed; validated native records and immutable step/origin identities replace them.",
+    "replacement_witnesses": [
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "operation_history::tests::folding_advances_seeds_and_resources"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-history-mutations.sh",
+    "name": "batch",
+    "status": "retired",
+    "reason": "Old Core history export/restore and journal-identity observer removed; validated native records and immutable step/origin identities replace them.",
+    "replacement_witnesses": [
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "operation_history::tests::folding_advances_seeds_and_resources"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-history-mutations.sh",
+    "name": "corrupt",
+    "status": "retired",
+    "reason": "Old Core history export/restore and journal-identity observer removed; validated native records and immutable step/origin identities replace them.",
+    "replacement_witnesses": [
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "operation_history::tests::folding_advances_seeds_and_resources"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-history-mutations.sh",
+    "name": "identity",
+    "status": "retired",
+    "reason": "Old Core history export/restore and journal-identity observer removed; validated native records and immutable step/origin identities replace them.",
+    "replacement_witnesses": [
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts",
+      "operation_history::tests::folding_advances_seeds_and_resources"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-store-mutations.sh",
+    "name": "history",
+    "status": "retired",
+    "reason": "The old store-wide/per-branch history reservation no longer exists. Native immutable creation sizing is validated on every open.",
+    "replacement_witnesses": [
+      "operation_history::sizing_tests::sized_tasks_refuse_before_start_and_release_when_settled"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-store-mutations.sh",
+    "name": "branch",
+    "status": "retired",
+    "reason": "The old store-wide/per-branch history reservation no longer exists. Native immutable creation sizing is validated on every open.",
+    "replacement_witnesses": [
+      "operation_history::sizing_tests::sized_tasks_refuse_before_start_and_release_when_settled"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-transition-mutations.sh",
+    "name": "undone-ancestry",
+    "status": "retired",
+    "reason": "Old journal ancestry, mutable history restore or Save-floor checkpoint fields are removed. Native lineage, validated stacks and combined cut identity replace the mechanism.",
+    "replacement_witnesses": [
+      "operation_history::tests::folding_advances_seeds_and_resources",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-transition-mutations.sh",
+    "name": "actor-exact-cut",
+    "status": "retired",
+    "reason": "Old journal ancestry, mutable history restore or Save-floor checkpoint fields are removed. Native lineage, validated stacks and combined cut identity replace the mechanism.",
+    "replacement_witnesses": [
+      "operation_history::tests::folding_advances_seeds_and_resources",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-transition-mutations.sh",
+    "name": "restore-redo",
+    "status": "retired",
+    "reason": "Old journal ancestry, mutable history restore or Save-floor checkpoint fields are removed. Native lineage, validated stacks and combined cut identity replace the mechanism.",
+    "replacement_witnesses": [
+      "operation_history::tests::folding_advances_seeds_and_resources",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-transition-mutations.sh",
+    "name": "suffix-equivalence",
+    "status": "retired",
+    "reason": "Old journal ancestry, mutable history restore or Save-floor checkpoint fields are removed. Native lineage, validated stacks and combined cut identity replace the mechanism.",
+    "replacement_witnesses": [
+      "operation_history::tests::folding_advances_seeds_and_resources",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-transition-mutations.sh",
+    "name": "floor-cut",
+    "status": "retired",
+    "reason": "Old journal ancestry, mutable history restore or Save-floor checkpoint fields are removed. Native lineage, validated stacks and combined cut identity replace the mechanism.",
+    "replacement_witnesses": [
+      "operation_history::tests::folding_advances_seeds_and_resources",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja-s1-transition-mutations.sh",
+    "name": "floor-generation",
+    "status": "retired",
+    "reason": "Old journal ancestry, mutable history restore or Save-floor checkpoint fields are removed. Native lineage, validated stacks and combined cut identity replace the mechanism.",
+    "replacement_witnesses": [
+      "operation_history::tests::folding_advances_seeds_and_resources",
+      "operation_actor::tests::frozen_installs_preserve_original_command_keys_and_invalidate_old_cuts"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja_s0_mutations.py",
+    "name": "history-trace",
+    "status": "retired",
+    "reason": "The removed Core actor no longer fabricates HistoryTrace. Full native owner records are observed and compared directly in the persistent session model.",
+    "replacement_witnesses": [
+      "operation_history::stored::session_model::generated_sessions_preserve_acknowledgements_and_reachable_states"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja1-s2-c1-mutations.py",
+    "name": "memo-missing-branch",
+    "status": "retired",
+    "reason": "Old Save-floor tagging/barrier or store-wide decoded full-history dedup category removed; native sized owners and exact namespace publication replace it.",
+    "replacement_witnesses": [
+      "operation_history::tests::folding_advances_seeds_and_resources",
+      "operation_actor::tests::prepared_task_update_is_atomic_and_releases_its_working_lease_before_ack"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja1-s2-c1-mutations.py",
+    "name": "no-dedup",
+    "status": "retired",
+    "reason": "Old Save-floor tagging/barrier or store-wide decoded full-history dedup category removed; native sized owners and exact namespace publication replace it.",
+    "replacement_witnesses": [
+      "operation_history::tests::folding_advances_seeds_and_resources",
+      "operation_actor::tests::prepared_task_update_is_atomic_and_releases_its_working_lease_before_ack"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja1-s2-c1-mutations.py",
+    "name": "ordinary-barrier",
+    "status": "retired",
+    "reason": "Old Save-floor tagging/barrier or store-wide decoded full-history dedup category removed; native sized owners and exact namespace publication replace it.",
+    "replacement_witnesses": [
+      "operation_history::tests::folding_advances_seeds_and_resources",
+      "operation_actor::tests::prepared_task_update_is_atomic_and_releases_its_working_lease_before_ack"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja1-s2-c1-mutations.py",
+    "name": "tag",
+    "status": "retired",
+    "reason": "Old Save-floor tagging/barrier or store-wide decoded full-history dedup category removed; native sized owners and exact namespace publication replace it.",
+    "replacement_witnesses": [
+      "operation_history::tests::folding_advances_seeds_and_resources",
+      "operation_actor::tests::prepared_task_update_is_atomic_and_releases_its_working_lease_before_ack"
+    ]
+  },
+  {
+    "catalogue": "scripts/ja1-s2-c1-mutations.py",
+    "name": "target-only",
+    "status": "retired",
+    "reason": "Old Save-floor tagging/barrier or store-wide decoded full-history dedup category removed; native sized owners and exact namespace publication replace it.",
+    "replacement_witnesses": [
+      "operation_history::tests::folding_advances_seeds_and_resources",
+      "operation_actor::tests::prepared_task_update_is_atomic_and_releases_its_working_lease_before_ack"
+    ]
+  }
+]

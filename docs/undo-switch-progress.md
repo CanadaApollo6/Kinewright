@@ -139,3 +139,19 @@ project-test compilation; the platform sweep and portable-body probes do not
 replace Windows CI. This checkpoint deletes no old proof or record code.
 Legacy deletion, C6 retargeting, the remaining stream/resource mutations and the
 256-cycle maximal-task qualification remain for the next checkpoint.
+
+## Legacy and mutation checkpoints
+
+`3be098c8` removes the old executor, records, Save-side floor and cursor proofs;
+[the deletion report](undo-legacy-deletion.md) lists the removed paths and native
+replacements. All 207 inventory rows remain accounted for, including the 28
+obsolete-proof retirements. Muse F3's manual-history site and the CoreState
+restore fallback are removed with the legacy path.
+
+The [mutation checkpoint](undo-mutation-retargeting.md) accounts for the original
+C2/C4/C5/C6 case sets and qualifies all 29 retargeted C6 edits, five additional
+C4 edits and seven distinct C2 edits with runtime red/restored-green controls.
+Its final gates pass 5,463 fast, 5,587 Linux slow and 54 unpaid TE1 tests, all
+64 session seeds, workspace and feature clippy, fmt, workspace and three separate
+shipping builds, and lint/self-tests. The seven switch mutations and exact
+256-cycle maximal qualification remain; no new timing result is claimed here.

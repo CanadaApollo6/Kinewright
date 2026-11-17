@@ -290,71 +290,67 @@
   },
   {
     "name": "save-disclosure-cache-is-never-used",
-    "changes": [
-      [
-        "crates/kinewright-project/src/editing_session/recovery.rs",
-        "            && cached_limits == limits",
-        "            && cached_limits == limits && false"
-      ]
-    ],
+    "changes": [],
     "witness": "writer_host::s2h_tests::s2h_status_disclosures_cache_and_invalidate_actual_histories",
     "package": "kinewright-agent",
     "kind": "--lib",
     "target": "",
     "features": "kinewright-project/test-util",
     "production": true,
-    "build_host": false
+    "build_host": false,
+    "superseded_by": "operation_actor::tests::captured_state_pairs_its_revision_and_position_with_the_same_immutable_record",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Legacy full-history disclosure serialisation/cache removed; native footprint and fixed cut cache use command position and combined identity."
+    }
   },
   {
     "name": "registered-digest-cache-is-never-used",
-    "changes": [
-      [
-        "crates/kinewright-project/src/editing_session.rs",
-        "            && *cached_revision == revision\n",
-        "            && *cached_revision == revision && false\n"
-      ]
-    ],
+    "changes": [],
     "witness": "writer_host::s2h_tests::s2h_status_disclosures_cache_and_invalidate_actual_histories",
     "package": "kinewright-agent",
     "kind": "--lib",
     "target": "",
     "features": "kinewright-project/test-util",
     "production": true,
-    "build_host": false
+    "build_host": false,
+    "superseded_by": "operation_actor::tests::captured_state_pairs_its_revision_and_position_with_the_same_immutable_record",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Legacy serialized full-history digest removed; native exact owner cut is queried only at disclosure/save boundaries."
+    }
   },
   {
     "name": "registered-digest-never-invalidates",
-    "changes": [
-      [
-        "crates/kinewright-project/src/editing_session.rs",
-        "            && *cached_revision == revision\n",
-        "            && true\n"
-      ]
-    ],
+    "changes": [],
     "witness": "writer_host::s2h_tests::s2h_status_disclosures_cache_and_invalidate_actual_histories",
     "package": "kinewright-agent",
     "kind": "--lib",
     "target": "",
     "features": "kinewright-project/test-util",
     "production": true,
-    "build_host": false
+    "build_host": false,
+    "superseded_by": "operation_actor::tests::captured_state_pairs_its_revision_and_position_with_the_same_immutable_record",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Legacy serialized history cache removed; fixed native cut binds revision and command position atomically."
+    }
   },
   {
     "name": "save-disclosure-never-invalidates",
-    "changes": [
-      [
-        "crates/kinewright-project/src/editing_session/recovery.rs",
-        "            && *cached_revision == revision\n",
-        "            && true\n"
-      ]
-    ],
+    "changes": [],
     "witness": "writer_host::s2h_tests::s2h_status_disclosures_cache_and_invalidate_actual_histories",
     "package": "kinewright-agent",
     "kind": "--lib",
     "target": "",
     "features": "kinewright-project/test-util",
     "production": true,
-    "build_host": false
+    "build_host": false,
+    "superseded_by": "operation_actor::tests::captured_state_pairs_its_revision_and_position_with_the_same_immutable_record",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Legacy cache removed; native footprint/disclosure uses the accepted cut and combined identity."
+    }
   },
   {
     "name": "known-refusal-becomes-unknown-reply",
@@ -513,13 +509,7 @@
   },
   {
     "name": "app-bootstrap-replaces-frozen-gui-history-with-empty-core",
-    "changes": [
-      [
-        "crates/kinewright-app/src/ja1_host.rs",
-        "initial_snapshot: HostSnapshot::from_history(transfer.history).map_err(",
-        "initial_snapshot: HostSnapshot::capture(&kinewright_core::Core::spawn(kinewright_core::Document::default()).map_err(|error| BundleError::Corrupt(error.to_string()))?).map_err("
-      ]
-    ],
+    "changes": [],
     "witness": "ja1_attachment::tests::c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history",
     "package": "kinewright-app",
     "kind": "--bin",
@@ -527,7 +517,12 @@
     "features": "",
     "production": false,
     "environment": {},
-    "red_text": "the exact GUI snapshot must reach the shipping host bootstrap"
+    "red_text": "the exact GUI snapshot must reach the shipping host bootstrap",
+    "superseded_by": "operation_actor::tests::a_peer_actor_adopts_the_selected_epoch_at_its_own_frozen_cut",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "The removed Core document-only bootstrap constructor is not a product API. The exact portable owner is the mandatory install token; continuation, combined identity and full cold state are checked by the replacement witness."
+    }
   },
   {
     "name": "intermediate-recovery-receipts-omitted",

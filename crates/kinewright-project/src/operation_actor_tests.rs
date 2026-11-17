@@ -1719,3 +1719,95 @@ fn two_live_projects_compare_complete_snapshots_with_one_capture_window() {
         "TWO_LIVE_PROJECTS_USE_ONLY_ONE_CAPTURE_WINDOW"
     );
 }
+
+#[test]
+fn attachment_fences_every_mutator_when_frozen_or_sealed() {
+    struct OtherProof;
+    let pool = HistoryPool::new(PoolLimits::default());
+    let core = small(&pool, Role::Ordinary);
+    core.request(Command::Do(lock(true))).unwrap();
+    core.request(Command::Undo).unwrap();
+    let owner = core.attach(&Proof).unwrap();
+    assert!(
+        matches!(
+            core.attach(&OtherProof),
+            Err(Error::MutationRefused(CoreMutationRefusal::OwnerRequired))
+        ),
+        "FIRST_ATTACHMENT_IDENTITY_CANNOT_BE_REBOUND"
+    );
+    let cut = owner.freeze(&Proof).unwrap();
+    let before = serde_json::to_value(core.export_history().unwrap()).unwrap();
+    let change = core.change_id().unwrap();
+    for refusal in [CoreMutationRefusal::Frozen, CoreMutationRefusal::Sealed] {
+        for command in [
+            Command::Do(lock(false)),
+            Command::DoBatch(vec![lock(false)]),
+            Command::Undo,
+            Command::Redo,
+        ] {
+            assert!(
+                matches!(core.request(command), Err(Refusal { error: Error::MutationRefused(actual), .. }) if actual == refusal),
+                "FROZEN_AND_SEALED_ACTORS_REFUSE_EVERY_RAW_COMMAND: {refusal:?}"
+            );
+        }
+        assert!(
+            matches!(core.close_gesture(), Err(Error::MutationRefused(actual)) if actual == refusal),
+            "FROZEN_AND_SEALED_ACTORS_REFUSE_RAW_CLOSE: {refusal:?}"
+        );
+        let incoming = core.export_history().unwrap().validate().unwrap();
+        assert!(
+            matches!(
+                core.install_snapshot(incoming),
+                Err(Error::MutationRefused(CoreMutationRefusal::OwnerRequired))
+            ),
+            "RAW_INSTALL_CANNOT_BYPASS_THE_BOUND_ATTACHMENT"
+        );
+        assert_eq!(
+            core.change_id().unwrap(),
+            change,
+            "FENCED_COMMANDS_PRESERVE_THE_ACCEPTED_CUT"
+        );
+        assert_eq!(
+            serde_json::to_value(core.export_history().unwrap()).unwrap(),
+            before,
+            "FENCED_COMMANDS_PRESERVE_THE_COMPLETE_OWNER"
+        );
+        if refusal == CoreMutationRefusal::Frozen {
+            owner.seal(&Proof, cut).unwrap();
+        }
+    }
+    assert!(
+        matches!(
+            owner.capture(&Proof),
+            Err(Error::MutationRefused(CoreMutationRefusal::Sealed))
+        ),
+        "SEALED_ATTACHMENT_CANNOT_ISSUE_A_FRESH_CUT"
+    );
+    assert!(
+        matches!(
+            owner.freeze(&Proof),
+            Err(Error::MutationRefused(CoreMutationRefusal::Sealed))
+        ),
+        "SEALED_ATTACHMENT_CANNOT_FREEZE_AGAIN"
+    );
+    assert!(
+        matches!(
+            owner.resume(&Proof, cut),
+            Err(Error::MutationRefused(CoreMutationRefusal::Sealed))
+        ),
+        "SEALED_ATTACHMENT_CANNOT_RESUME_AN_OLD_CUT"
+    );
+    let incoming = core.export_history().unwrap().validate().unwrap();
+    assert!(
+        matches!(
+            owner.install_snapshot(&Proof, cut, incoming),
+            Err(Error::MutationRefused(CoreMutationRefusal::Sealed))
+        ),
+        "SEALED_ATTACHMENT_CANNOT_INSTALL_ANOTHER_SNAPSHOT"
+    );
+    assert_eq!(core.change_id().unwrap(), change);
+    assert_eq!(
+        serde_json::to_value(core.export_history().unwrap()).unwrap(),
+        before
+    );
+}

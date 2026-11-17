@@ -693,7 +693,7 @@
     "changes": [
       [
         "crates/kinewright-project/src/bundle_commit.rs",
-        "        if envelope.action == \"metadata\" {\n            return Err(BundleError::Unsupported(\n                \"metadata requires typed owner ingress\".into(),\n            ));\n        }\n",
+        "        if envelope.action == \"metadata\" {\n            return Err(BundleError::Unsupported(\n                \"typed owner ingress required\".into(),\n            ));\n        }",
         ""
       ]
     ],
@@ -703,7 +703,11 @@
     "features": "test-util",
     "witness": "linux::s3_metadata_retry_and_admission",
     "red_text": "S3_TYPED_METADATA_INGRESS",
-    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs"
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs",
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Same invariant at its native-history boundary."
+    }
   },
   {
     "name": "store-metadata-digest",

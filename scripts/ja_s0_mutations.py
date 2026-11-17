@@ -81,8 +81,6 @@ CASES = {
         'if Instant::now() >= deadline {\n            timed_out = true;',
         'if Instant::now() >= deadline + Duration::from_secs(6) {\n            timed_out = true;',
         "native", "native_deadline_interrupts_pending_confirmation_and_reaps_fixture"),
-    "history-trace": ("crates/kinewright-core/src/actor.rs",
-        "undo: state.undo.iter().map(observe).collect(),", "undo: Vec::new(),", "agent", HISTORY),
     "io-trace": ("crates/kinewright-project/src/project.rs",
         '    crate::io_observer::note("temp_write_and_file_sync", &temp);',
         "    let _ = &temp;", "agent", "ja_harness::tests::current_io_control_precedes_missing_directory_sync_assertion"),

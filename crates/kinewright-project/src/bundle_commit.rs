@@ -1862,6 +1862,169 @@ mod fu1_tests {
     };
 
     #[test]
+    fn root_admission_refuses_an_unopenable_owner_graph_before_staging() {
+        let temp = kinewright_media::test_support::TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "native-root-admission",
+        );
+        let path = temp.path("project.kinewright");
+        let core = Core::for_test(Document::default()).unwrap();
+        let mut bundle = ProjectBundle::activate(
+            &path,
+            BundleWriteAdmission::new_document(),
+            core.history_pool(),
+        )
+        .unwrap();
+        let inputs = bundle.empty_inputs().unwrap();
+        bundle.save(&core, &inputs.reference).unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        let identity = core.snapshot_identity().unwrap();
+        drop(bundle.store.prepare_root_write(&saved).unwrap());
+        let mut proposed: crate::ProjectFile = serde_json::from_slice(&saved).unwrap();
+        proposed.studio.as_mut().unwrap().branch_index_ref.sha256 = "f".repeat(64);
+        let bytes = serde_json::to_vec(&proposed).unwrap();
+        assert!(
+            bundle.store.prepare_root_write(&bytes).is_err(),
+            "ROOT_ADMISSION_REFUSES_UNOPENABLE_OWNER_GRAPH"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            saved,
+            "REFUSED_ROOT_LEAVES_THE_FILE_UNCHANGED"
+        );
+        assert_eq!(
+            core.snapshot_identity().unwrap(),
+            identity,
+            "REFUSED_ROOT_LEAVES_THE_CORE_UNCHANGED"
+        );
+        assert!(
+            crate::bundle::LoadedBundle::read(
+                &path,
+                &crate::operation_history::HistoryPool::new(
+                    crate::operation_history::PoolLimits::default()
+                ),
+            )
+            .is_ok(),
+            "REFUSED_ROOT_LEAVES_THE_SAVED_STATE_OPENABLE"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one native candidate transaction proves the absent outcome, source preservation and exact retry"
+    )]
+    fn absent_candidate_publication_preserves_work_and_retries_once() {
+        let temp = kinewright_media::test_support::TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "absent-native-candidate",
+        );
+        let core = Core::for_test(Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Document::default()
+        })
+        .unwrap();
+        let mut owner = crate::editing_session::Ja1EditingSession::new(
+            temp.root(),
+            &core,
+            crate::storage_budget::StorageLimits::default(),
+        )
+        .unwrap();
+        owner
+            .first_save(
+                &temp.path("project.kinewright"),
+                crate::storage_budget::StorageLimits::default(),
+            )
+            .unwrap();
+        let mut candidate = owner
+            .fork_durable_branch(
+                "candidate",
+                crate::editing_session::DurableBranchRole::RunCandidate,
+            )
+            .unwrap();
+        owner.persist_durable_branch(&mut candidate).unwrap();
+        let binding = owner.candidate_binding(candidate.branch_id()).unwrap();
+        let mut source = owner
+            .fork_registered_from_candidate(&binding, "Editor")
+            .unwrap();
+        source
+            .core()
+            .request(Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: false,
+            }))
+            .unwrap();
+        let frozen = owner.freeze_registered_candidate(&mut source).unwrap();
+        let source_identity = source.core().snapshot_identity().unwrap();
+        let issuer = owner
+            .issue_manual_lease("candidate".into(), "private".into())
+            .unwrap()
+            .issuer;
+        let envelope = owner
+            .candidate_merge_envelope(
+                &frozen,
+                crate::receipts::CommandId {
+                    issuer,
+                    sequence: 1,
+                },
+            )
+            .unwrap();
+        let original = candidate.core().snapshot_identity().unwrap();
+        let original_change = candidate.core().change_id().unwrap();
+        assert!(
+            matches!(
+                crate::io_observer::fail_once("root_rename_io", || owner
+                    .commit_candidate(&frozen, &envelope)),
+                Err(BundleError::DurabilityUnknown)
+            ),
+            "CANDIDATE_ROOT_OUTCOME_IS_UNKNOWN_BEFORE_RECONCILIATION"
+        );
+        owner.reconcile_active().unwrap();
+        assert_eq!(
+            candidate.core().snapshot_identity().unwrap(),
+            original,
+            "ABSENT_CANDIDATE_ROOT_NEVER_COMMITS_ITS_PREPARED_UPDATE"
+        );
+        assert_eq!(candidate.core().change_id().unwrap(), original_change);
+        assert_eq!(
+            source.core().snapshot_identity().unwrap(),
+            source_identity,
+            "ABSENT_PUBLICATION_PRESERVES_THE_SOURCE_WORK"
+        );
+        assert!(matches!(
+            owner.commit_candidate(&frozen, &envelope).unwrap(),
+            ReceiptLookup::Committed(_)
+        ));
+        let committed = candidate.core().change_id().unwrap();
+        assert_eq!(
+            committed.position.position,
+            original_change.position.position + 1,
+            "ABSENT_CANDIDATE_RETRY_APPLIES_EXACTLY_ONCE"
+        );
+        assert_eq!(
+            candidate
+                .core()
+                .export_history()
+                .unwrap()
+                .history()
+                .undo
+                .len(),
+            1
+        );
+        owner.commit_candidate(&frozen, &envelope).unwrap();
+        assert_eq!(
+            candidate.core().change_id().unwrap(),
+            committed,
+            "COMMITTED_CANDIDATE_RETRY_NEVER_REAPPLIES"
+        );
+    }
+
+    #[test]
     fn fu1_unknown_branch_refuses_after_receipt_lookup() {
         // Receipt ordering needs a real durable publisher, outside tmpfs.
         let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -79,9 +79,13 @@
     "changes": [
       [
         "crates/kinewright-project/src/bundle_commit.rs",
-        "            let branch = target.clone();\n            Self::publish_branch_selected(bundle, &after, inputs, &branch, None, Some(&after))",
-        "            let branch = target.clone();\n            if target != &bundle.manual_branch_id {\n                let root = bundle.root.as_mut().unwrap();\n                root.version_index_ref = None;\n                root.feedback_index_ref = None;\n                root.run_index_ref = None;\n                root.claim_index_ref = None;\n            }\n            Self::publish_branch_selected(bundle, &after, inputs, &branch, None, Some(&after))"
+        "        let old_switch = bundle\n            .root\n            .as_ref()\n            .map_or(0, |root| root.manual_switch_generation);",
+        "        if branch_id != &bundle.manual_branch_id { let root = bundle.root.as_mut().unwrap(); root.version_index_ref = None; root.feedback_index_ref = None; root.run_index_ref = None; root.claim_index_ref = None; }\n        let old_switch = bundle\n            .root\n            .as_ref()\n            .map_or(0, |root| root.manual_switch_generation);"
       ]
-    ]
+    ],
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Same invariant at its native-history boundary."
+    }
   }
 ]
