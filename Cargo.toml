@@ -2,6 +2,8 @@
 members = [
     "crates/kinewright-job-sys",
     "crates/kinewright-media-ipc",
+    "crates/kinewright-media-helper",
+    "crates/kinewright-media-input",
     "crates/kinewright-hash",
     "crates/kinewright-core",
     "crates/kinewright-media",
@@ -37,6 +39,8 @@ gethostname = "=1.1.0"
 getrandom = "=0.3.4"
 image = { version = "=0.25.9", default-features = false, features = ["png"] }
 libc = "=0.2.189"
+landlock = "=0.4.7"
+seccompiler = { version = "=0.5.0", default-features = false }
 proptest = "=1.11.0"
 pollster = "=0.4.0"
 rfd = "=0.17.2"

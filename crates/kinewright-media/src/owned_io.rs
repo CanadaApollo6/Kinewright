@@ -116,7 +116,7 @@ impl DecodeInput {
             Self::Legacy(_) => vec![],
             Self::Certified(input) => input
                 .avio
-                .cursor
+                .cursor()
                 .slots
                 .iter()
                 .filter_map(|slot| slot.index)
@@ -580,7 +580,7 @@ impl CertifiedSource {
                 .next_frame()?
                 .ok_or_else(|| decoder_error("video has no decoded frame"))?;
             if still {
-                let mut cursor = self.cursor(video.input.avio.cancel())?;
+                let mut cursor = self.cursor(Arc::clone(&video.input.avio.cursor().cancel))?;
                 let _header_charge =
                     (self.0.reserve)(AVIO_BUFFER_BYTES as u64).map_err(OwnedIoError::Capacity)?;
                 let mut header = Vec::new();
@@ -1001,7 +1001,7 @@ pub(crate) struct CertifiedInput {
 impl CertifiedInput {
     fn open(source: &CertifiedSource, cancel: Arc<AtomicBool>) -> Result<Self, OwnedIoError> {
         crate::initialize_ffmpeg().map_err(decoder_error)?;
-        let (format, avio) = bridge::Avio::open(source.cursor(cancel)?)?;
+        let (format, avio) = bridge::open(source.cursor(cancel)?)?;
         let mut input = Self {
             format,
             avio,
@@ -1015,7 +1015,7 @@ impl CertifiedInput {
         let still_pipe = input.format.nb_streams() == 1
             && matches!(input.format.format().name(), "png_pipe" | "jpeg_pipe");
         if still_pipe {
-            let mut cursor = source.cursor(input.avio.cancel())?;
+            let mut cursor = source.cursor(Arc::clone(&input.avio.cursor().cancel))?;
             let mut header = vec![0_u8; AVIO_BUFFER_BYTES];
             let count = cursor.read(&mut header)?;
             let dimensions = still_dimensions(&header[..count])
@@ -1197,7 +1197,7 @@ impl CertifiedVideoDecoder {
     pub fn cached_chunk_indices(&self) -> [Option<u64>; CACHE_SLOTS] {
         self.input
             .avio
-            .cursor
+            .cursor()
             .slots
             .each_ref()
             .map(|slot| slot.index)
@@ -1205,7 +1205,7 @@ impl CertifiedVideoDecoder {
     #[cfg(any(test, feature = "test-util"))]
     #[must_use]
     pub fn delivered_bytes(&self) -> u64 {
-        self.input.avio.cursor.delivered_bytes
+        self.input.avio.cursor().delivered_bytes
     }
 
     pub fn next_frame(&mut self) -> Result<Option<CertifiedVideoFrame>, OwnedIoError> {
@@ -1269,7 +1269,7 @@ impl CertifiedAudioDecoder {
     pub fn cached_chunk_indices(&self) -> [Option<u64>; CACHE_SLOTS] {
         self.input
             .avio
-            .cursor
+            .cursor()
             .slots
             .each_ref()
             .map(|slot| slot.index)
@@ -1277,7 +1277,7 @@ impl CertifiedAudioDecoder {
     #[cfg(any(test, feature = "test-util"))]
     #[must_use]
     pub fn delivered_bytes(&self) -> u64 {
-        self.input.avio.cursor.delivered_bytes
+        self.input.avio.cursor().delivered_bytes
     }
 
     pub fn next_frame(&mut self) -> Result<Option<CertifiedAudioFrame>, OwnedIoError> {
@@ -1326,23 +1326,100 @@ impl CertifiedAudioDecoder {
     }
 }
 
+impl kinewright_media_input::owned_io::Cursor for VerifiedCursor {
+    type Error = OwnedIoError;
+    fn read(&mut self, output: &mut [u8]) -> Result<usize, Self::Error> {
+        let count = VerifiedCursor::read(self, output)?;
+        #[cfg(any(test, feature = "test-util"))]
+        {
+            self.delivered_bytes = self.delivered_bytes.saturating_add(count as u64);
+        }
+        #[cfg(test)]
+        self.source
+            .hooks
+            .delivered
+            .fetch_add(count, Ordering::Relaxed);
+        Ok(count)
+    }
+    fn seek(&mut self, position: SeekFrom) -> Result<u64, Self::Error> {
+        VerifiedCursor::seek(self, position)
+    }
+    fn size(&mut self) -> Result<u64, Self::Error> {
+        VerifiedCursor::size(self)
+    }
+    fn check(&mut self) -> Result<(), Self::Error> {
+        VerifiedCursor::check(self)
+    }
+    fn temporarily_unavailable(error: &Self::Error) -> bool {
+        matches!(error, OwnedIoError::TemporarilyUnavailable)
+    }
+    fn capacity(&mut self, message: &str) -> Self::Error {
+        OwnedIoError::Capacity(message.into())
+    }
+    fn decoder(&mut self, message: String) -> Self::Error {
+        OwnedIoError::Decoder(message)
+    }
+    fn unavailable(&mut self, message: &str) -> Self::Error {
+        self.fail::<()>(OwnedIoError::Unavailable(message.into()))
+            .unwrap_err()
+    }
+    fn invalid(&mut self, message: &str) -> Self::Error {
+        self.fail::<()>(OwnedIoError::Damaged(message.into()))
+            .unwrap_err()
+    }
+    fn allocation_exceeded(&mut self, message: &str) -> Self::Error {
+        self.fail::<()>(OwnedIoError::Capacity(message.into()))
+            .unwrap_err()
+    }
+    fn deny_secondary(&mut self) {
+        #[cfg(test)]
+        self.source
+            .hooks
+            .nested_open_calls
+            .fetch_add(1, Ordering::AcqRel);
+        let _ = self.fail::<()>(OwnedIoError::Unavailable(
+            "secondary input open denied".into(),
+        ));
+    }
+    fn policy(&self) -> kinewright_media_input::owned_io::OpenPolicy {
+        let policy = kinewright_media_input::owned_io::OpenPolicy::default();
+        #[cfg(test)]
+        {
+            match self.source.hooks.open_policy {
+                TestOpenPolicy::Production => policy,
+                TestOpenPolicy::ProtocolGuard => kinewright_media_input::owned_io::OpenPolicy {
+                    demuxers: c"concat,hls,wav,mpegts",
+                    ..policy
+                },
+                TestOpenPolicy::FormatGuard => kinewright_media_input::owned_io::OpenPolicy {
+                    protocols: c"file",
+                    ..policy
+                },
+                TestOpenPolicy::NestedOutputControl => {
+                    kinewright_media_input::owned_io::OpenPolicy {
+                        demuxers: c"concat,wav",
+                        protocols: c"file",
+                    }
+                }
+            }
+        }
+        #[cfg(not(test))]
+        policy
+    }
+}
+
 #[allow(unsafe_code)]
 mod bridge {
-    use super::{
-        AVIO_BUFFER_BYTES, Arc, AtomicBool, CHUNK_BYTES, CODEC_BUFFER_COUNT, DecoderBound,
-        MAX_AUDIO_CHANNELS, MAX_AUDIO_FRAME_SAMPLES, MAX_CERTIFIED_STREAMS, MAX_DECODER_DIMENSION,
-        OwnedIoError, SeekFrom, VerifiedCursor, decoder_error, ffmpeg,
-    };
     #[cfg(test)]
-    use super::{CertifiedInput, Ordering};
-    use ffmpeg::ffi;
-    use std::{
-        ffi::{CStr, c_char, c_int, c_void},
-        panic::{AssertUnwindSafe, catch_unwind},
-        ptr::{self, NonNull},
+    use super::{Arc, AtomicBool, CertifiedInput, Ordering};
+    use super::{
+        CHUNK_BYTES, CODEC_BUFFER_COUNT, DecoderBound, MAX_AUDIO_CHANNELS, MAX_AUDIO_FRAME_SAMPLES,
+        MAX_DECODER_DIMENSION, OwnedIoError, VerifiedCursor, decoder_error, ffmpeg,
     };
-
-    const SINGLE_OBJECT_DEMUXERS: &CStr = c"avi,mov,matroska,webm,wav,mp3,flac,ogg,aac,nut,mpegts,mpeg,mpegvideo,image2,png_pipe,jpeg_pipe,webp_pipe,bmp_pipe,tiff_pipe";
+    use ffmpeg::ffi;
+    #[cfg(test)]
+    use std::ffi::CStr;
+    use std::ptr;
 
     pub(super) fn set_still_dimensions(
         input: &mut ffmpeg::format::context::Input,
@@ -1485,124 +1562,13 @@ mod bridge {
         Ok(())
     }
 
-    pub(super) struct Avio {
-        context: NonNull<ffi::AVIOContext>,
-        pub(super) cursor: Box<VerifiedCursor>,
-    }
-    // FFmpeg calls these callbacks synchronously. Moving the owner cannot overlap calls.
-    unsafe impl Send for Avio {}
-
-    impl Avio {
-        #[allow(clippy::too_many_lines)]
-        pub(super) fn open(
-            cursor: VerifiedCursor,
-        ) -> Result<(ffmpeg::format::context::Input, Self), OwnedIoError> {
-            let mut cursor = Box::new(cursor);
-            unsafe {
-                let buffer = ffi::av_malloc(AVIO_BUFFER_BYTES).cast::<u8>();
-                if buffer.is_null() {
-                    return Err(OwnedIoError::Capacity("AVIO buffer allocation".into()));
-                }
-                let context = ffi::avio_alloc_context(
-                    buffer,
-                    c_int::try_from(AVIO_BUFFER_BYTES).expect("bounded AVIO buffer"),
-                    0,
-                    ptr::from_mut(cursor.as_mut()).cast(),
-                    Some(read),
-                    None,
-                    Some(seek),
-                );
-                let Some(context) = NonNull::new(context) else {
-                    ffi::av_free(buffer.cast());
-                    return Err(OwnedIoError::Capacity("AVIO context allocation".into()));
-                };
-                let mut avio = Self { context, cursor };
-                let mut format = ffi::avformat_alloc_context();
-                if format.is_null() {
-                    return Err(OwnedIoError::Capacity("format allocation".into()));
-                }
-                (*format).pb = context.as_ptr();
-                (*format).opaque = ptr::from_mut(avio.cursor.as_mut()).cast();
-                (*format).flags |= ffi::AVFMT_FLAG_CUSTOM_IO;
-                (*format).io_open = Some(deny_open);
-                (*format).interrupt_callback.callback = Some(interrupt);
-                (*format).interrupt_callback.opaque = ptr::from_mut(avio.cursor.as_mut()).cast();
-                (*format).max_streams =
-                    i32::try_from(MAX_CERTIFIED_STREAMS).expect("bounded stream count");
-                (*format).probesize = 32_768;
-                (*format).format_probesize = 32_768;
-                let formats = SINGLE_OBJECT_DEMUXERS;
-                let protocols = c"none";
-                #[cfg(test)]
-                let (formats, protocols) = match avio.cursor.source.hooks.open_policy {
-                    super::TestOpenPolicy::Production => (formats, protocols),
-                    super::TestOpenPolicy::ProtocolGuard => (c"concat,hls,wav,mpegts", protocols),
-                    super::TestOpenPolicy::FormatGuard => (formats, c"file"),
-                    super::TestOpenPolicy::NestedOutputControl => (c"concat,wav", c"file"),
-                };
-                let mut options = ptr::null_mut();
-                // Concat inherits this through ff_copy_whiteblacklists.
-                let protocol_option = ffi::av_dict_set(
-                    &raw mut options,
-                    c"protocol_whitelist".as_ptr(),
-                    protocols.as_ptr(),
-                    0,
-                );
-                // C0 nested-format guard. Demuxer rejection precedes read_header/nested opens.
-                let format_option = ffi::av_dict_set(
-                    &raw mut options,
-                    c"format_whitelist".as_ptr(),
-                    formats.as_ptr(),
-                    0,
-                );
-                if protocol_option < 0 || format_option < 0 {
-                    ffi::av_dict_free(&raw mut options);
-                    ffi::avformat_free_context(format);
-                    return Err(OwnedIoError::Capacity("format policy allocation".into()));
-                }
-                // Some demuxers create contexts without copying our io_open callback.
-                let opened = ffi::avformat_open_input(
-                    &raw mut format,
-                    c"file:certified-owned-input".as_ptr(),
-                    ptr::null(),
-                    &raw mut options,
-                );
-                ffi::av_dict_free(&raw mut options);
-                if opened < 0 {
-                    avio.check()?;
-                    return Err(decoder_error(ffmpeg::Error::from(opened)));
-                }
-                let input = ffmpeg::format::context::Input::wrap(format);
-                avio.check()?;
-                Ok((input, avio))
-            }
-        }
-        pub(super) fn cancel(&self) -> Arc<AtomicBool> {
-            Arc::clone(&self.cursor.cancel)
-        }
-        pub(super) fn check(&mut self) -> Result<(), OwnedIoError> {
-            self.cursor.check()?;
-            unsafe {
-                if self.context.as_ref().error == ffi::AVERROR(ffmpeg::error::EAGAIN) {
-                    self.context.as_mut().error = 0;
-                    self.context.as_mut().eof_reached = 0;
-                }
-            }
-            let buffer_size = unsafe { self.context.as_ref().buffer_size };
-            if buffer_size < 0
-                || usize::try_from(buffer_size).expect("nonnegative AVIO buffer")
-                    > AVIO_BUFFER_BYTES
-            {
-                return self.cursor.fail(OwnedIoError::Capacity(
-                    "format exceeded bounded AVIO buffer".into(),
-                ));
-            }
-            Ok(())
-        }
-        #[cfg(test)]
-        pub(super) fn buffer_size(&self) -> usize {
-            usize::try_from(unsafe { self.context.as_ref().buffer_size }).unwrap()
-        }
+    pub(super) type Avio = kinewright_media_input::owned_io::Avio<VerifiedCursor>;
+    pub(super) fn open(
+        cursor: VerifiedCursor,
+    ) -> Result<(ffmpeg::format::context::Input, Avio), OwnedIoError> {
+        // SAFETY: CertifiedInput declares format before AVIO so format teardown
+        // finishes before the stable cursor/native buffer owner is dropped.
+        unsafe { Avio::open(cursor) }
     }
     #[cfg(test)]
     #[test]
@@ -1624,78 +1590,27 @@ mod bridge {
             }),
         );
         let source = source.with_read_authority(authority).unwrap();
-        let mut cursor = Box::new(source.cursor(Arc::new(AtomicBool::new(false))).unwrap());
-        unsafe {
-            let buffer = ffi::av_malloc(AVIO_BUFFER_BYTES).cast::<u8>();
-            assert!(!buffer.is_null());
-            let context = NonNull::new(ffi::avio_alloc_context(
-                buffer,
-                c_int::try_from(AVIO_BUFFER_BYTES).unwrap(),
-                0,
-                ptr::from_mut(cursor.as_mut()).cast(),
-                Some(read),
-                None,
-                Some(seek),
-            ))
-            .unwrap();
-            let mut avio = Avio { context, cursor };
-            let mut bytes = [0; 32];
-            busy.store(true, Ordering::Release);
-            assert_eq!(
-                ffi::avio_read(avio.context.as_ptr(), bytes.as_mut_ptr(), 32),
-                ffi::AVERROR(ffmpeg::error::EAGAIN)
-            );
-            assert_eq!(bytes, [0; 32]);
-            busy.store(false, Ordering::Release);
-            avio.check().unwrap();
-            assert_eq!(
-                ffi::avio_read(avio.context.as_ptr(), bytes.as_mut_ptr(), 32),
-                32,
-                "FIX2_NATIVE_RETRY_NEVER_FALSE_EOF"
-            );
-            assert_eq!(bytes, [71; 32]);
-        }
-    }
-    impl Drop for Avio {
-        fn drop(&mut self) {
-            // The format has closed first. FFmpeg may replace the buffer while probing.
-            unsafe {
-                let mut context = self.context.as_ptr();
-                ffi::av_free((*context).buffer.cast());
-                (*context).buffer = ptr::null_mut();
-                ffi::avio_context_free(&raw mut context);
-            }
-        }
-    }
-
-    unsafe extern "C" fn deny_open(
-        format: *mut ffi::AVFormatContext,
-        _io: *mut *mut ffi::AVIOContext,
-        _url: *const c_char,
-        _flags: c_int,
-        _options: *mut *mut ffi::AVDictionary,
-    ) -> c_int {
-        let cursor = unsafe { &mut *(*format).opaque.cast::<VerifiedCursor>() };
-        #[cfg(test)]
-        cursor
-            .source
-            .hooks
-            .nested_open_calls
-            .fetch_add(1, Ordering::AcqRel);
-        let _ = cursor.fail::<()>(OwnedIoError::Unavailable(
-            "secondary input open denied".into(),
-        ));
-        ffi::AVERROR(ffmpeg::error::EACCES)
+        let cursor = source.cursor(Arc::new(AtomicBool::new(false))).unwrap();
+        let mut avio = kinewright_media_input::owned_io::Avio::test_cursor(cursor).unwrap();
+        let mut bytes = [0; 32];
+        busy.store(true, Ordering::Release);
+        assert_eq!(
+            avio.test_read(&mut bytes),
+            ffi::AVERROR(ffmpeg::error::EAGAIN)
+        );
+        assert_eq!(bytes, [0; 32]);
+        busy.store(false, Ordering::Release);
+        avio.check().unwrap();
+        assert_eq!(
+            avio.test_read(&mut bytes),
+            32,
+            "FIX2_NATIVE_RETRY_NEVER_FALSE_EOF"
+        );
+        assert_eq!(bytes, [71; 32]);
     }
     #[cfg(test)]
     pub(super) fn callback_read(cursor: &mut VerifiedCursor, buffer: &mut [u8]) -> i32 {
-        unsafe {
-            read(
-                std::ptr::from_mut(cursor).cast(),
-                buffer.as_mut_ptr(),
-                i32::try_from(buffer.len()).unwrap(),
-            )
-        }
+        kinewright_media_input::owned_io::test_callback_read(cursor, buffer)
     }
     #[cfg(test)]
     pub(super) fn append_stream(input: &mut ffmpeg::format::context::Input) -> bool {
@@ -1721,78 +1636,6 @@ mod bridge {
             }
             ffi::avformat_free_context(nested);
             result
-        }
-    }
-    unsafe extern "C" fn interrupt(opaque: *mut c_void) -> c_int {
-        // The Box stays alive until format and AVIO teardown have completed.
-        let cursor = unsafe { &mut *opaque.cast::<VerifiedCursor>() };
-        i32::from(
-            matches!(cursor.check(), Err(error) if error != OwnedIoError::TemporarilyUnavailable),
-        )
-    }
-    unsafe extern "C" fn read(opaque: *mut c_void, buffer: *mut u8, length: c_int) -> c_int {
-        let cursor = unsafe { &mut *opaque.cast::<VerifiedCursor>() };
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            if length <= 0 {
-                return cursor.fail(OwnedIoError::Damaged("invalid AVIO read size".into()));
-            }
-            let output = unsafe {
-                std::slice::from_raw_parts_mut(
-                    buffer,
-                    usize::try_from(length).expect("positive FFmpeg buffer length"),
-                )
-            };
-            cursor.read(output)
-        }));
-        match result {
-            Ok(Ok(0)) => ffi::AVERROR_EOF,
-            Ok(Ok(count)) => {
-                #[cfg(any(test, feature = "test-util"))]
-                {
-                    cursor.delivered_bytes = cursor.delivered_bytes.saturating_add(count as u64);
-                }
-                #[cfg(test)]
-                cursor
-                    .source
-                    .hooks
-                    .delivered
-                    .fetch_add(count, Ordering::Relaxed);
-                c_int::try_from(count).expect("read cannot exceed FFmpeg c_int request")
-            }
-            Ok(Err(OwnedIoError::TemporarilyUnavailable)) => ffi::AVERROR(ffmpeg::error::EAGAIN),
-            Ok(Err(_)) => ffi::AVERROR(ffmpeg::error::EIO),
-            Err(_) => {
-                let _ = cursor.fail::<()>(OwnedIoError::Unavailable("panic in AVIO read".into()));
-                ffi::AVERROR(ffmpeg::error::EIO)
-            }
-        }
-    }
-    unsafe extern "C" fn seek(opaque: *mut c_void, offset: i64, whence: c_int) -> i64 {
-        let cursor = unsafe { &mut *opaque.cast::<VerifiedCursor>() };
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            if whence & ffi::AVSEEK_SIZE != 0 {
-                return cursor.size();
-            }
-            let position = match whence & !ffi::AVSEEK_FORCE {
-                0 if offset >= 0 => {
-                    SeekFrom::Start(u64::try_from(offset).expect("nonnegative offset"))
-                }
-                1 => SeekFrom::Current(offset),
-                2 => SeekFrom::End(offset),
-                _ => return cursor.fail(OwnedIoError::Damaged("invalid AVIO seek".into())),
-            };
-            cursor.seek(position)
-        }));
-        match result {
-            Ok(Ok(position)) => i64::try_from(position).expect("certificate fits i64"),
-            Ok(Err(OwnedIoError::TemporarilyUnavailable)) => {
-                i64::from(ffi::AVERROR(ffmpeg::error::EAGAIN))
-            }
-            Ok(Err(_)) => i64::from(ffi::AVERROR(ffmpeg::error::EIO)),
-            Err(_) => {
-                let _ = cursor.fail::<()>(OwnedIoError::Unavailable("panic in AVIO seek".into()));
-                i64::from(ffi::AVERROR(ffmpeg::error::EIO))
-            }
         }
     }
 }
@@ -2353,7 +2196,7 @@ mod tests {
             !decoder
                 .input
                 .avio
-                .cursor
+                .cursor()
                 .slots
                 .iter()
                 .any(|slot| slot.index == Some(chunk)),
@@ -2394,7 +2237,7 @@ mod tests {
             !decoder
                 .input
                 .avio
-                .cursor
+                .cursor()
                 .slots
                 .iter()
                 .any(|slot| slot.index == Some(chunk)),
@@ -2441,7 +2284,7 @@ mod tests {
             !video
                 .input
                 .avio
-                .cursor
+                .cursor()
                 .slots
                 .iter()
                 .any(|slot| slot.index == Some(chunk))
@@ -2450,7 +2293,7 @@ mod tests {
             !audio
                 .input
                 .avio
-                .cursor
+                .cursor()
                 .slots
                 .iter()
                 .any(|slot| slot.index == Some(chunk))
@@ -2459,10 +2302,10 @@ mod tests {
         for input in [&mut video.input, &mut audio.input] {
             let seek = input
                 .avio
-                .cursor
+                .cursor_mut()
                 .seek(SeekFrom::Start(chunk * CHUNK_BYTES as u64));
             if seek.is_ok() {
-                assert!(bridge::callback_read(&mut input.avio.cursor, &mut [0; 32]) < 0);
+                assert!(bridge::callback_read(input.avio.cursor_mut(), &mut [0; 32]) < 0);
             } else {
                 assert_damaged(seek);
             }
@@ -2525,7 +2368,7 @@ mod tests {
             &path,
         );
         let source = source(&path);
-        let (format, avio) = bridge::Avio::open(source.cursor(running()).unwrap()).unwrap();
+        let (format, avio) = bridge::open(source.cursor(running()).unwrap()).unwrap();
         let header = CertifiedInput {
             format,
             avio,
@@ -2583,7 +2426,7 @@ mod tests {
             &path,
         );
         let source = source(&path);
-        let (format, avio) = bridge::Avio::open(source.cursor(running()).unwrap()).unwrap();
+        let (format, avio) = bridge::open(source.cursor(running()).unwrap()).unwrap();
         let header = CertifiedInput {
             format,
             avio,
@@ -2619,7 +2462,7 @@ mod tests {
     fn s3_certified_probe_stream_limit_refuses_before_new_stream_allocation() {
         let directory = TempDirectory::new("kinewright-owned-probe-limit");
         let source = source(&wav_fixture(&directory));
-        let (format, avio) = bridge::Avio::open(source.cursor(running()).unwrap()).unwrap();
+        let (format, avio) = bridge::open(source.cursor(running()).unwrap()).unwrap();
         let mut header = CertifiedInput {
             format,
             avio,

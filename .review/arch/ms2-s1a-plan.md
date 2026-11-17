@@ -36,7 +36,7 @@ Each implementation step is one local commit after touched-file formatting,
 touched-crate all-target clippy (-D warnings), full touched-crate slow tests,
 and slow-test manifest lint. New markers also run slow_tests_selftest.py.
 Cargo uses setup-ffmpeg.sh and the prescribed flock/jobs/nice command.
-No GPU tests, sudo, host policy changes, credentials or pushes.
+No hardware GPU use, sudo, host policy changes, credentials or pushes.
 Final gate builds kinewright-app. Stop and report evidence for an unbuildable
 design point rather than silently altering the approved boundary.
 Report: docs/reports/ms2-s1a.md (at most 25 lines).

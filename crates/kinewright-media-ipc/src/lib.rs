@@ -83,6 +83,14 @@ pub struct ProbeResult {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum Message {
+    Forked {
+        pid: u32,
+    },
+    EnterBoundary {},
+    Boundary {
+        landlock: bool,
+    },
+    ConfirmBoundary {},
     Probe {
         video: Option<u32>,
         audio: Option<u32>,
@@ -121,6 +129,10 @@ pub enum Message {
 impl Message {
     fn tag(&self) -> u32 {
         match self {
+            Self::Forked { .. } => 14,
+            Self::EnterBoundary {} => 15,
+            Self::Boundary { .. } => 16,
+            Self::ConfirmBoundary {} => 17,
             Self::Probe { .. } => 1,
             Self::Cancel {} => 2,
             Self::Close {} => 3,
@@ -150,16 +162,25 @@ fn invalid() -> io::Error {
 }
 
 pub fn read_frame(reader: &mut impl Read) -> io::Result<Frame> {
+    read_charged(reader, |_| Ok(()))
+}
+pub(crate) fn read_charged(
+    reader: &mut impl Read,
+    mut charge: impl FnMut(usize) -> io::Result<()>,
+) -> io::Result<Frame> {
     let mut header = [0; HEADER_BYTES];
     reader.read_exact(&mut header)?;
     if header[..4] != MAGIC || header[4..20] != BUILD {
+        charge(HEADER_BYTES)?;
         return Err(invalid());
     }
     let tag = u32::from_le_bytes(header[20..24].try_into().map_err(|_| invalid())?);
     let length = u32::from_le_bytes(header[24..28].try_into().map_err(|_| invalid())?) as usize;
-    if length > MAX_FRAME - HEADER_BYTES || !(1..=13).contains(&tag) {
+    if length > MAX_FRAME - HEADER_BYTES || !(1..=17).contains(&tag) {
+        charge(HEADER_BYTES)?;
         return Err(invalid());
     }
+    charge(HEADER_BYTES + length)?;
     let request = u32::from_le_bytes(header[28..32].try_into().map_err(|_| invalid())?);
     let generation = u64::from_le_bytes(header[32..40].try_into().map_err(|_| invalid())?);
     if request == 0 || generation == 0 {

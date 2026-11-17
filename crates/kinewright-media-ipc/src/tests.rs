@@ -165,3 +165,52 @@ fn metadata_bounds_and_actual_domain_consumer() {
         assert!(ValidatedProbe::new(case).is_err());
     }
 }
+
+#[test]
+fn traffic_is_charged_before_payload_is_allocated_or_read() {
+    struct HeaderOnly {
+        header: std::io::Cursor<Vec<u8>>,
+    }
+    impl std::io::Read for HeaderOnly {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            assert!(
+                self.header.position() < u64::try_from(HEADER_BYTES).unwrap(),
+                "payload read after traffic refusal"
+            );
+            self.header.read(bytes)
+        }
+    }
+    let mut header = encoded(Message::Ready {});
+    header.truncate(HEADER_BYTES);
+    header[24..28].copy_from_slice(&100_u32.to_le_bytes());
+    let mut calls = 0;
+    let result = read_charged(
+        &mut HeaderOnly {
+            header: std::io::Cursor::new(header),
+        },
+        |bytes| {
+            assert_eq!(bytes, HEADER_BYTES + 100);
+            calls += 1;
+            Err(invalid())
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(calls, 1);
+}
+
+#[test]
+fn framing_caps_decoded_text_before_metadata_can_be_consumed() {
+    for (text, accepted) in [
+        ("x".repeat(256), true),
+        ("x".repeat(257), false),
+        ("é".repeat(128), true),
+        ("é".repeat(129), false),
+    ] {
+        let mut result = probe();
+        result.color.primaries = kinewright_core::ColorPrimaries::Other(text);
+        let bytes = encoded(Message::ProbeResult {
+            result: Box::new(result),
+        });
+        assert_eq!(read_frame(&mut bytes.as_slice()).is_ok(), accepted);
+    }
+}

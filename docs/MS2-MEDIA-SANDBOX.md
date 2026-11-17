@@ -501,9 +501,10 @@ live fd to use. Descriptor numbers cannot be reused through opens or duplication
 | `write`, `writev` | arg0 exactly response-write fd; no stderr |
 | `mmap` | `PROT_EXEC` absent; anonymous with fd −1, or only a designated ring fd; never source-backed |
 | `mprotect`, `pkey_mprotect` | `PROT_EXEC` absent, including mixed write/exec requests |
-| `munmap`, `brk`, `madvise` | Runtime memory only; madvise restricted to NORMAL, DONTNEED, FREE |
+| `munmap`, `brk`, `madvise` | Runtime memory only; madvise restricted to NORMAL (0), DONTNEED (4), FREE (8), GUARD_INSTALL (102), and GUARD_REMOVE (103), with exact full-width argument checks; every other advice value is killed. [madvise(2)](https://man7.org/linux/man-pages/man2/madvise.2.html) |
 | `futex` | Exact op values `FUTEX_WAIT` (0), `FUTEX_WAKE` (1), `FUTEX_WAIT_PRIVATE` (128), `FUTEX_WAKE_PRIVATE` (129), `FUTEX_WAIT_BITSET` (9), `FUTEX_WAIT_BITSET_PRIVATE` (137), and those two bitset waits with `FUTEX_CLOCK_REALTIME` (265, 393). Bitset waits require arg5=`FUTEX_BITSET_MATCH_ANY`; deny every other operation/flag combination, including requeue, PI, wake-op, and wake-bitset |
 | `clock_gettime`, `clock_nanosleep`, `nanosleep`, `sched_yield` | Reviewed runtime clocks/waits |
+| `sched_getaffinity` | arg0 exactly 0, querying only the calling thread; all explicit PID/TID values and high-bit aliases are killed. Required by the pinned FFmpeg CPU-count query. [sched_getaffinity(2)](https://man7.org/linux/man-pages/man2/sched_getaffinity.2.html) |
 | `poll`, `ppoll` | Lifetime-HUP watchdog; BPF cannot inspect pollfd arrays, but these calls grant no read/write authority |
 | `fstat` | Source/command/response fd only; never path lookup |
 | `close` | Only surviving source/command/response/lifetime fds |
@@ -523,6 +524,13 @@ live fd to use. Descriptor numbers cannot be reused through opens or duplication
 | `socket`, `socketpair`, `connect`, `bind`, `listen`, `accept`, `accept4`, `sendmsg`, `recvmsg` | Denied for all families |
 | `ptrace`, `process_vm_readv`, `process_vm_writev`, `mount`, `bpf`, `keyctl`, `perf_event_open`, `io_uring_setup`, `io_uring_enter`, `io_uring_register` | Denied |
 | Filesystem mutations and all remaining syscalls | Denied by default |
+
+Slice-1a rulings 32 and 33 permit guard advice 102/103 and narrowly scoped
+native-runtime additions. An added syscall or argument must act only on the
+helper's own address space, threads, or signal state, touch no fd, path,
+process, namespace, socket, credential, or external kernel object, and leave
+confinement unchanged. Each addition needs a cited table row, a positive native
+witness, and a report entry. All other policy changes require the lead's ruling.
 
 Shared futex waits are required even for process-local pthreads.
 [glibc's join path](https://codebrowser.dev/glibc/glibc/nptl/pthread_join_common.c.html#102)

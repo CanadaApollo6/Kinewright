@@ -16,3 +16,7 @@ pub use namespace::*;
 mod windows;
 #[cfg(windows)]
 pub use windows::*;
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+pub mod media_boundary;

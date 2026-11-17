@@ -1,0 +1,29 @@
+[package]
+name = "kinewright-media-helper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+slow-tests = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+kinewright-media-input = { path = "../kinewright-media-input" }
+kinewright-core = { path = "../kinewright-core" }
+kinewright-media-ipc = { path = "../kinewright-media-ipc" }
+ffmpeg-next.workspace = true
+
+kinewright-job-sys.workspace = true
+libc.workspace = true
+
+[lints.rust]
+unsafe_code = "deny"
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+assert_is_empty = "allow"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { workspace = true, features = ["pipe"] }

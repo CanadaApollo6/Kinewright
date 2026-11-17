@@ -1,0 +1,31 @@
+{
+  "sha256": "cf2718501f9a6d05b0cd7d22a36965df3bdc0d7a673d640600a3236efe1567f8",
+  "diagnostic_variant": "SIGSYS TRAP only; production filter remains KILL_PROCESS",
+  "records": [
+    {
+      "type": "Forked",
+      "pid": 3248919
+    },
+    {
+      "type": "Boundary",
+      "landlock": true
+    },
+    {
+      "type": "Ready"
+    },
+    {
+      "syscall": 72,
+      "args": [
+        6,
+        1,
+        15,
+        289,
+        94527742183568,
+        288
+      ]
+    },
+    {
+      "shim_exit": 99
+    }
+  ]
+}

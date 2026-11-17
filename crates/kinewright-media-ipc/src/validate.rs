@@ -155,6 +155,15 @@ impl ProbeSession {
             bytes: 0,
         }
     }
+    pub fn read(
+        &mut self,
+        reader: &mut impl std::io::Read,
+        now: Instant,
+    ) -> std::io::Result<Frame> {
+        crate::read_charged(reader, |bytes| {
+            self.charge(bytes, now).map_err(|_| crate::invalid())
+        })
+    }
     pub fn charge(&mut self, bytes: usize, now: Instant) -> Result<(), MediaSandboxError> {
         if now.saturating_duration_since(self.epoch) >= Duration::from_secs(1) {
             self.epoch = now;

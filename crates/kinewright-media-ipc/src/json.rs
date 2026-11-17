@@ -19,6 +19,9 @@ impl<'de> Visitor<'de> for Bounded {
     fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<(), M::Error> {
         let mut keys = BTreeSet::new();
         while let Some(key) = map.next_key::<String>()? {
+            if key.len() > 256 {
+                return Err(de::Error::custom("JSON key length"));
+            }
             if !keys.insert(key) {
                 return Err(de::Error::custom("duplicate key"));
             }
@@ -39,11 +42,19 @@ impl<'de> Visitor<'de> for Bounded {
     fn visit_u64<E: de::Error>(self, _: u64) -> Result<(), E> {
         Ok(())
     }
-    fn visit_f64<E: de::Error>(self, _: f64) -> Result<(), E> {
-        Ok(())
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<(), E> {
+        if value.is_finite() {
+            Ok(())
+        } else {
+            Err(de::Error::custom("non-finite JSON"))
+        }
     }
-    fn visit_str<E: de::Error>(self, _: &str) -> Result<(), E> {
-        Ok(())
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<(), E> {
+        if value.len() <= 256 {
+            Ok(())
+        } else {
+            Err(de::Error::custom("JSON text length"))
+        }
     }
     fn visit_unit<E: de::Error>(self) -> Result<(), E> {
         Ok(())
