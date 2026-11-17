@@ -4,6 +4,7 @@ Base: `9aef3952b76095334e144ebf7ff7513e52d34c3c`, branch `ms2`.
 Done means Linux IX video/still admission crosses a source-bound confined
 probe, with measured limits and passing native escape/lifecycle witnesses.
 Windows retains its explicitly cfg-gated in-process probe until slice 1b.
+Use the base FFmpeg unchanged; app/helper share owned_io opening so MS1 inherits automatically.
 
 1. IPC crate. Fixed bounded framing, strict typed probe/lifecycle messages,
    duplicate/depth rejection, private validated metadata, state/identity checks.
