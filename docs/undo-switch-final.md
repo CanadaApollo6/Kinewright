@@ -164,6 +164,15 @@ or claimed fast enough for that projected workload. Creation-sized capture
 leases and leases that grow with actual use remain the previously recorded
 follow-ups; admission accounting stays **312 + 400 + 144 + 168 = 1,024 MiB**.
 
+HX-G1 also covers the manual window. A full window of 64 messages at the
+`PENDING_BYTES` limit (2,097,140 bytes, one CommitHistory) publishes once per
+message, and each publication re-encodes and syncs the whole history. The
+commit takes 30–40 s in a debug build. In a release build, run once on
+2026-11-17, it took 15.9 s at a load average of 10.4 on 20 cores. Neither
+measurement gates anything. The R3-1 witnesses therefore fill the byte limit
+with three messages and the count limit with 64 small ones; none publishes 64
+messages over a 2 MiB history.
+
 Local ticket **HX-T1: publish task checkpoint before the MCP reply.** Publish
 the task's checkpoint before the MCP reply acknowledges a non-destructive task
 edit, so that an acknowledged edit survives a host stop.

@@ -1,4 +1,9 @@
 //! A full manual window crosses the real HTTP ingress; only the codec refuses more.
+//!
+//! Each publication re-encodes and syncs the whole history (ticket HX-G1), so
+//! no witness here publishes 64 messages over a 2 MiB history. The size gate
+//! sends the largest admissible body without a lease; the committed witnesses
+//! fill the byte limit with three messages or the count limit with small ones.
 use super::*;
 use kinewright_agent::writer_host::{
     COMMIT_HISTORY_BODY_BYTES, COMMIT_HISTORY_WINDOW_BYTES, HOST_ENVELOPE_BYTES, HostCommand,
@@ -7,7 +12,12 @@ use kinewright_project::operation_protocol::{EncodedMessage, PENDING_BYTES, PEND
 
 /// Each quote in a label is two bytes of raw JSON and four once the message
 /// travels as a JSON string, so these labels are the worst-case expansion.
-const QUOTES: usize = 15_500;
+/// Two such edits sit just under the 1 MiB step cap.
+const QUOTES: usize = 500_000;
+/// The edits that fill the byte limit: two near the step cap and the rest.
+const BYTE_EDITS: usize = 3;
+/// The old `CommitHistory` ingress cap, before it was derived from the window.
+const OLD_INGRESS_CAP: usize = 512 * 1024;
 
 fn marker(id: u64, quotes: usize, plain: usize) -> Command {
     let mut label = "\"".repeat(quotes);
@@ -41,8 +51,8 @@ fn hash_width(message: &EncodedMessage, field: &str) -> u64 {
 /// bytes, so its width is known only after encoding: 63 to 127 bytes.
 const TIP_MIN: u64 = 32 + 31;
 const TIP_MAX: u64 = 3 * 32 + 31;
-/// Fill all but the last slot with held edits, then size the last edit for the
-/// widest (`Fit`) or narrowest (`Over`) tip it can have.
+/// Fill all but the last of `BYTE_EDITS` with held edits, then size the last
+/// edit for the widest (`Fit`) or narrowest (`Over`) tip it can have.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Last {
     /// The largest edit that always fits: the window ends within 64 bytes of
@@ -54,12 +64,12 @@ enum Last {
 fn fill_to_limit(f: &mut Fixture, last_edit: Last) -> u64 {
     assert!(window(f).is_empty(), "MANUAL_WINDOW_STARTS_EMPTY");
     let first = 1_000_u64;
-    let last = first + PENDING_COMMANDS as u64 - 1;
+    let last = first + BYTE_EDITS as u64 - 1;
     for id in first..last {
         send(f, marker(id, QUOTES, 0));
     }
     let held = window(f);
-    assert_eq!(held.len(), PENDING_COMMANDS - 1, "MANUAL_WINDOW_HELD");
+    assert_eq!(held.len(), BYTE_EDITS - 1, "MANUAL_WINDOW_HELD");
     // The last message differs from its predecessor only in its label, its
     // predecessor hash and its own tip. Its predecessor is the previous tip, so
     // that width carries over. Ids, positions and sequence numbers keep their
@@ -81,6 +91,19 @@ fn fill_to_limit(f: &mut Fixture, last_edit: Last) -> u64 {
     );
     remaining
 }
+/// Wait until the held window drains. A refused request would freeze the
+/// attachment into recovery, which also empties the window, so every poll
+/// checks that the window drained through acknowledgement instead.
+fn until_acknowledged(f: &mut Fixture, drained: impl Fn(&Fixture) -> bool) {
+    f.until(|f| {
+        assert!(
+            !f.attachment().frozen,
+            "MANUAL_WINDOW_NOT_RECOVERED status={}",
+            f.app.status
+        );
+        drained(f)
+    });
+}
 fn assert_cold_document(f: &mut Fixture) {
     let gui = Arc::clone(&f.app.focused().document);
     let path = f.temp.path("p.kinewright");
@@ -100,13 +123,74 @@ fn assert_cold_document(f: &mut Fixture) {
         "MANUAL_FULL_WINDOW_COLD_DOCUMENT"
     );
 }
+/// A forged window of `total` raw bytes in `PENDING_COMMANDS` messages, built
+/// entirely from the worst-case escaping: each message is a JSON string of
+/// `\"` pairs, padded with one plain byte when its count is odd.
+fn forged_window(total: u64) -> Vec<EncodedMessage> {
+    let share = total / PENDING_COMMANDS as u64;
+    let mut forged = Vec::with_capacity(PENDING_COMMANDS);
+    for index in 0..PENDING_COMMANDS as u64 {
+        let raw_bytes = if index == 0 {
+            total - share * (PENDING_COMMANDS as u64 - 1)
+        } else {
+            share
+        };
+        let pairs = (raw_bytes - 2) / 2;
+        let mut raw = String::from("\"");
+        raw.push_str(&"\\\"".repeat(usize::try_from(pairs).unwrap()));
+        raw.push_str(&"a".repeat(usize::try_from((raw_bytes - 2) % 2).unwrap()));
+        raw.push('"');
+        forged.push(serde_json::from_value(serde_json::Value::String(raw)).unwrap());
+    }
+    assert_eq!(window_bytes(&forged), total, "MANUAL_FORGED_WINDOW_BYTES");
+    forged
+}
 
 #[test]
-fn manual_full_window_at_pending_limit_crosses_http_and_reopens() {
+fn manual_largest_window_crosses_http_and_the_codec_to_the_lease_check() {
+    let mut f = Fixture::new();
+    let host = f.attachment().host.as_ref().unwrap();
+    // Same width as the GUI's manual client, but not the one holding the lease.
+    let leased = host.manual_identity_for_test();
+    let stranger: String = leased
+        .chars()
+        .map(|c| if c == '0' { '1' } else { '0' })
+        .collect();
+    assert_ne!(stranger, leased, "MANUAL_SIZE_GATE_CLIENT_HOLDS_NO_LEASE");
+    let command = HostCommand::CommitHistory {
+        client: stranger,
+        messages: forged_window(PENDING_BYTES),
+    };
+    let encoded = serde_json::to_vec(&command).unwrap().len();
+    println!(
+        "MANUAL_WORST_EXPANSION raw={PENDING_BYTES} command={encoded} per_10000={}",
+        encoded as u64 * 10_000 / PENDING_BYTES
+    );
+    assert!(encoded > OLD_INGRESS_CAP, "MANUAL_WINDOW_EXCEEDS_OLD_CAP");
+    assert!(
+        encoded as u64 <= COMMIT_HISTORY_BODY_BYTES,
+        "MANUAL_WORST_WINDOW_FITS_INGRESS_CAP encoded={encoded}"
+    );
+    let reply = host.client.request(command).unwrap();
+    assert_eq!(
+        reply.error.as_ref().map(|error| error.code.as_str()),
+        Some("manual_lease"),
+        "MANUAL_LARGEST_WINDOW_REACHES_LEASE_CHECK {:?}",
+        reply.error
+    );
+    assert!(
+        reply.manual_ack.is_empty(),
+        "MANUAL_SIZE_GATE_COMMITS_NOTHING"
+    );
+    f.finish();
+}
+
+#[test]
+fn manual_byte_limit_window_crosses_http_and_reopens() {
     let mut f = Fixture::new();
     fill_to_limit(&mut f, Last::Fit);
     let held = window(&f);
-    assert_eq!(held.len(), PENDING_COMMANDS, "MANUAL_WINDOW_FULL_COUNT");
+    assert_eq!(held.len(), BYTE_EDITS, "MANUAL_WINDOW_FULL_COUNT");
     let bytes = window_bytes(&held);
     println!(
         "MANUAL_WINDOW_HELD bytes={bytes} below_limit={}",
@@ -131,13 +215,15 @@ fn manual_full_window_at_pending_limit_crosses_http_and_reopens() {
         "MANUAL_WINDOW_EXPANSION raw={bytes} command={command} per_10000={}",
         command as u64 * 10_000 / bytes
     );
-    assert!(command > 512 * 1024, "MANUAL_WINDOW_EXCEEDS_OLD_CAP");
+    assert!(command > OLD_INGRESS_CAP, "MANUAL_WINDOW_EXCEEDS_OLD_CAP");
     assert!(
         (command + HOST_ENVELOPE_BYTES) as u64 <= COMMIT_HISTORY_BODY_BYTES,
         "MANUAL_WINDOW_FITS_INGRESS_CAP"
     );
     f.release();
-    f.until(|f| window(f).is_empty() && !f.edits().attempt_running());
+    until_acknowledged(&mut f, |f| {
+        window(f).is_empty() && !f.edits().attempt_running()
+    });
     assert!(
         f.edits().notice().is_none(),
         "MANUAL_FULL_WINDOW_ACKNOWLEDGED {:?}",
@@ -145,8 +231,37 @@ fn manual_full_window_at_pending_limit_crosses_http_and_reopens() {
     );
     assert_eq!(
         f.app.focused().document.markers.len(),
-        PENDING_COMMANDS,
+        BYTE_EDITS,
         "MANUAL_FULL_WINDOW_ON_SCREEN"
+    );
+    f.finish();
+    assert_cold_document(&mut f);
+}
+
+#[test]
+fn manual_count_limit_window_is_acknowledged_and_reopens() {
+    let mut f = Fixture::new();
+    for id in 1_000..1_000 + PENDING_COMMANDS as u64 {
+        send(&mut f, marker(id, 0, 8));
+    }
+    assert_eq!(
+        window(&f).len(),
+        PENDING_COMMANDS,
+        "MANUAL_WINDOW_FULL_COUNT"
+    );
+    f.release();
+    until_acknowledged(&mut f, |f| {
+        window(f).is_empty() && !f.edits().attempt_running()
+    });
+    assert!(
+        f.edits().notice().is_none(),
+        "MANUAL_COUNT_WINDOW_ACKNOWLEDGED {:?}",
+        f.edits().notice()
+    );
+    assert_eq!(
+        f.app.focused().document.markers.len(),
+        PENDING_COMMANDS,
+        "MANUAL_COUNT_WINDOW_ON_SCREEN"
     );
     f.finish();
     assert_cold_document(&mut f);
@@ -157,11 +272,7 @@ fn manual_window_one_byte_over_is_refused_by_the_codec_not_http() {
     let mut f = Fixture::new();
     let remaining = fill_to_limit(&mut f, Last::Over);
     let held = window(&f);
-    assert_eq!(
-        held.len(),
-        PENDING_COMMANDS - 1,
-        "MANUAL_OVER_LIMIT_NOT_ENCODED"
-    );
+    assert_eq!(held.len(), BYTE_EDITS - 1, "MANUAL_OVER_LIMIT_NOT_ENCODED");
     assert_eq!(
         PENDING_BYTES - window_bytes(&held),
         remaining,
@@ -173,38 +284,12 @@ fn manual_window_one_byte_over_is_refused_by_the_codec_not_http() {
     );
     // A forged window one byte over, built entirely from the worst-case
     // escaping, reaches the host's codec check through real HTTP.
-    let share = (PENDING_BYTES + 1) / PENDING_COMMANDS as u64;
-    let mut forged = Vec::with_capacity(PENDING_COMMANDS);
-    let mut total = 0;
-    for index in 0..PENDING_COMMANDS as u64 {
-        let raw_bytes = if index == 0 {
-            PENDING_BYTES + 1 - share * (PENDING_COMMANDS as u64 - 1)
-        } else {
-            share
-        };
-        // A JSON string of escaped quotes: two quote bytes plus `\"` pairs,
-        // padded with one plain byte when the count is odd.
-        let pairs = (raw_bytes - 2) / 2;
-        let mut raw = String::from("\"");
-        raw.push_str(&"\\\"".repeat(usize::try_from(pairs).unwrap()));
-        raw.push_str(&"a".repeat(usize::try_from((raw_bytes - 2) % 2).unwrap()));
-        raw.push('"');
-        let message: EncodedMessage =
-            serde_json::from_value(serde_json::Value::String(raw)).unwrap();
-        total += message.byte_len();
-        forged.push(message);
-    }
-    assert_eq!(total, PENDING_BYTES + 1, "MANUAL_FORGED_ONE_BYTE_OVER");
     let host = f.attachment().host.as_ref().unwrap();
     let command = HostCommand::CommitHistory {
         client: host.manual_identity_for_test(),
-        messages: forged,
+        messages: forged_window(PENDING_BYTES + 1),
     };
     let encoded = serde_json::to_vec(&command).unwrap().len();
-    println!(
-        "MANUAL_WORST_EXPANSION raw={total} command={encoded} per_10000={}",
-        encoded as u64 * 10_000 / total
-    );
     // Past the window term, inside the envelope allowance: the reply below
     // shows HTTP admitted it and the codec refused it.
     assert!(
@@ -219,7 +304,9 @@ fn manual_window_one_byte_over_is_refused_by_the_codec_not_http() {
         "MANUAL_OVER_LIMIT_REFUSED_BY_CODEC"
     );
     f.release();
-    f.until(|f| !f.attachment().manual_edits_pending() && !f.edits().attempt_running());
+    until_acknowledged(&mut f, |f| {
+        !f.attachment().manual_edits_pending() && !f.edits().attempt_running()
+    });
     assert!(
         f.edits().notice().is_none(),
         "MANUAL_WAITING_EDIT_LANDS {:?}",
@@ -227,7 +314,7 @@ fn manual_window_one_byte_over_is_refused_by_the_codec_not_http() {
     );
     assert_eq!(
         f.app.focused().document.markers.len(),
-        PENDING_COMMANDS,
+        BYTE_EDITS,
         "MANUAL_EVERY_EDIT_ON_SCREEN"
     );
     f.finish();
