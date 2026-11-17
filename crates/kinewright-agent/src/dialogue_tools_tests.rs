@@ -903,4 +903,5 @@ mod dialogue_tool_tests {
     include!("dialogue_tools_item12_tests.rs");
     include!("dialogue_tools_item13_tests.rs");
     include!("dialogue_tools_r4_tests.rs");
+    include!("dialogue_tools_r6_tests.rs");
 }

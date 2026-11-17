@@ -63,7 +63,7 @@ fn r5_detached_transients_do_not_gain_the_early_voice_window() {
             ],
             &[
                 (200_000, 350_000, -4400, true),
-                (700_000, 720_000, -4400, voiced),
+                (700_000, 730_000, -4400, voiced),
                 (1_350_000, 1_500_000, -4400, true),
                 (2_200_000, 2_400_000, -4400, true),
             ],

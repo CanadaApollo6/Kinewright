@@ -176,6 +176,14 @@ pub trait DialogueMeasurements: Send + Sync {
 #[derive(Debug, PartialEq, Eq, Serialize, thiserror::Error)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum Refusal {
+    #[error(
+        "pause anchor #{anchor} was removed by member {removed_by}, and cannot re-anchor: {cause}"
+    )]
+    PauseReanchorUnavailable {
+        anchor: usize,
+        removed_by: usize,
+        cause: PauseReanchorCause,
+    },
     #[error("member conflicts with earlier member {other_index}: {cause}")]
     Conflict {
         other_index: usize,
@@ -401,4 +409,13 @@ pub enum ConflictCause {
     Overlap,
     #[error("a member word address would be removed")]
     AddressRemoved,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
+pub enum PauseReanchorCause {
+    #[error("no preceding word survives on this clip's source clock")]
+    NoSameSideWord,
+    #[error("no remaining source span reaches the original pause")]
+    NoRemainingPause,
 }

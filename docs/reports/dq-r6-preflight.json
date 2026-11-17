@@ -1,0 +1,3401 @@
+{
+  "baseline": "0088d7d8",
+  "quiet_rms_cdb": -6469,
+  "detachment": "At least one RMS-quiet hop on each side, irrespective of its VAD flag; no peak limit. Uses the unchanged maximal above-quiet RMS components.",
+  "all_rms_components": 1411,
+  "detached_components": 1410,
+  "length_histogram_us": {
+    "10000": 353,
+    "20000": 185,
+    "30000": 100,
+    "40000": 59,
+    "50000": 42,
+    "60000": 31,
+    "70000": 27,
+    "80000": 21,
+    "90000": 37,
+    "100000": 16,
+    "110000": 23,
+    "120000": 11,
+    "130000": 20,
+    "140000": 17,
+    "150000": 17,
+    "160000": 12,
+    "170000": 13,
+    "180000": 7,
+    "190000": 10,
+    "200000": 12,
+    "210000": 9,
+    "220000": 9,
+    "230000": 8,
+    "240000": 8,
+    "250000": 13,
+    "260000": 8,
+    "270000": 5,
+    "280000": 10,
+    "290000": 7,
+    "300000": 4,
+    "310000": 12,
+    "320000": 9,
+    "330000": 8,
+    "340000": 7,
+    "350000": 12,
+    "360000": 9,
+    "370000": 6,
+    "380000": 3,
+    "390000": 4,
+    "400000": 9,
+    "410000": 7,
+    "420000": 10,
+    "430000": 11,
+    "440000": 5,
+    "450000": 7,
+    "460000": 6,
+    "470000": 4,
+    "480000": 5,
+    "500000": 3,
+    "510000": 3,
+    "520000": 3,
+    "530000": 6,
+    "540000": 5,
+    "560000": 2,
+    "570000": 4,
+    "580000": 3,
+    "590000": 3,
+    "600000": 2,
+    "610000": 4,
+    "620000": 6,
+    "630000": 4,
+    "640000": 5,
+    "650000": 7,
+    "660000": 2,
+    "670000": 2,
+    "700000": 4,
+    "710000": 4,
+    "720000": 3,
+    "730000": 4,
+    "740000": 3,
+    "750000": 4,
+    "760000": 3,
+    "770000": 3,
+    "780000": 6,
+    "790000": 1,
+    "800000": 1,
+    "810000": 2,
+    "820000": 4,
+    "840000": 1,
+    "850000": 2,
+    "860000": 4,
+    "870000": 3,
+    "880000": 3,
+    "890000": 2,
+    "900000": 4,
+    "910000": 4,
+    "920000": 2,
+    "930000": 2,
+    "940000": 1,
+    "950000": 3,
+    "960000": 3,
+    "980000": 1,
+    "990000": 1,
+    "1010000": 2,
+    "1020000": 1,
+    "1040000": 1,
+    "1070000": 2,
+    "1080000": 1,
+    "1120000": 1,
+    "1140000": 1,
+    "1170000": 1,
+    "1200000": 1,
+    "1220000": 1,
+    "1240000": 1,
+    "1320000": 1,
+    "1340000": 1,
+    "1370000": 1,
+    "1400000": 1,
+    "1410000": 3,
+    "1430000": 1,
+    "1440000": 2,
+    "1470000": 1,
+    "1500000": 2,
+    "1520000": 1,
+    "1540000": 1,
+    "1570000": 1,
+    "1580000": 1,
+    "1590000": 1,
+    "1660000": 1,
+    "1700000": 1,
+    "1710000": 1,
+    "1780000": 1,
+    "1920000": 1,
+    "2020000": 1,
+    "2520000": 1,
+    "3190000": 1,
+    "3830000": 1
+  },
+  "eligible_initial_refusals": [
+    115,
+    148,
+    436,
+    552,
+    662,
+    773
+  ],
+  "clear_count": 6,
+  "full_candidate_prediction_with_remaining_guards": [
+    773
+  ],
+  "prediction_limit": "Eligibility clears the initial refusal only; later attribution, kept-owner and frame guards still apply.",
+  "stop_before_product_edits": false,
+  "candidates": [
+    {
+      "index": 9,
+      "asr_start_us": 5760000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 5760000,
+        "code": "acoustic",
+        "index": 0,
+        "outcome": "refused",
+        "quiet_us": [
+          4890000,
+          6000000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          0,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 32,
+      "asr_start_us": 19120000,
+      "r5_status": "moved",
+      "r5_reason": null,
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              560000000,
+              30
+            ],
+            [
+              588000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            56000000,
+            3
+          ],
+          [
+            19600000,
+            1
+          ]
+        ],
+        "raw_source_us": [
+          18690000,
+          19630000
+        ],
+        "request": {
+          "from": 32,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 32
+        },
+        "audible_acoustic_source_us": [
+          [
+            18690000,
+            1
+          ],
+          [
+            19630000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": null,
+      "old_actual": null,
+      "new_raw": null,
+      "new_actual": null,
+      "physical_source_us": [
+        [
+          56000000,
+          3
+        ],
+        [
+          19600000,
+          1
+        ]
+      ],
+      "waived_components": [],
+      "audible_clip_source_us": [
+        [
+          0,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 40,
+      "asr_start_us": 22400000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 22910000,
+        "code": "acoustic",
+        "index": 6,
+        "outcome": "refused",
+        "quiet_us": [
+          22910000,
+          22910000
+        ],
+        "reason": "no project frame lies inside this edge's measured support"
+      },
+      "candidate": {
+        "framed": {
+          "refused": {
+            "at_micros": 22910000,
+            "quiet_after": 22910000,
+            "quiet_before": 22910000,
+            "reason": {
+              "code": "no_frame_in_run"
+            }
+          }
+        },
+        "raw_source_us": [
+          22130000,
+          22910000
+        ],
+        "request": {
+          "from": 40,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 40
+        },
+        "audible_acoustic_source_us": [
+          [
+            22130000,
+            1
+          ],
+          [
+            22910000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          0,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 54,
+      "asr_start_us": 28000000,
+      "r5_status": "moved",
+      "r5_reason": null,
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              830000000,
+              30
+            ],
+            [
+              841000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            83000000,
+            3
+          ],
+          [
+            84100000,
+            3
+          ]
+        ],
+        "raw_source_us": [
+          27670000,
+          28045000
+        ],
+        "request": {
+          "from": 54,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 54
+        },
+        "audible_acoustic_source_us": [
+          [
+            27670000,
+            1
+          ],
+          [
+            28045000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": null,
+      "old_actual": null,
+      "new_raw": null,
+      "new_actual": null,
+      "physical_source_us": [
+        [
+          83000000,
+          3
+        ],
+        [
+          84100000,
+          3
+        ]
+      ],
+      "waived_components": [],
+      "audible_clip_source_us": [
+        [
+          0,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 65,
+      "asr_start_us": 32480000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 31690000,
+        "code": "selection_evidence",
+        "component": {
+          "end_micros": 32450000,
+          "start_micros": 31690000
+        },
+        "index": 9,
+        "outcome": "refused",
+        "quiet_us": [
+          31660000,
+          32560000
+        ],
+        "violation": "unrequested_sound",
+        "word": 64
+      },
+      "candidate": {
+        "framed": {
+          "refused": {
+            "at_micros": 31666666,
+            "quiet_after": 32560000,
+            "quiet_before": 31660000,
+            "reason": {
+              "code": "untranscribed_sound"
+            }
+          }
+        },
+        "raw_source_us": [
+          31655000,
+          32970000
+        ],
+        "request": {
+          "from": 65,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 65
+        },
+        "audible_acoustic_source_us": [
+          [
+            31655000,
+            1
+          ],
+          [
+            32970000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          0,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 76,
+      "asr_start_us": 36240000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 36320000,
+        "code": "acoustic",
+        "index": 10,
+        "outcome": "refused",
+        "quiet_us": [
+          36100000,
+          37230000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          0,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 88,
+      "asr_start_us": 40320000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 40480000,
+        "code": "selection_evidence",
+        "index": 11,
+        "outcome": "refused",
+        "quiet_us": [
+          40480000,
+          40480000
+        ],
+        "violation": "unrequested_word_start",
+        "word": 89
+      },
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              1209000000,
+              30
+            ],
+            [
+              1218000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            40300000,
+            1
+          ],
+          [
+            40600000,
+            1
+          ]
+        ],
+        "raw_source_us": [
+          40320000,
+          40600000
+        ],
+        "request": {
+          "from": 88,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 88
+        },
+        "audible_acoustic_source_us": [
+          [
+            40320000,
+            1
+          ],
+          [
+            40600000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": "unrequested_word_start",
+      "old_actual": "unrequested_word_start",
+      "new_raw": "unrequested_word_start",
+      "new_actual": "unrequested_word_start",
+      "physical_source_us": [
+        [
+          40300000,
+          1
+        ],
+        [
+          40600000,
+          1
+        ]
+      ],
+      "waived_components": [
+        [
+          40350000,
+          40360000
+        ],
+        [
+          40370000,
+          40390000
+        ]
+      ],
+      "audible_clip_source_us": [
+        [
+          0,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 96,
+      "asr_start_us": 42800000,
+      "r5_status": "moved",
+      "r5_reason": null,
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              1276000000,
+              30
+            ],
+            [
+              1295000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            127600000,
+            3
+          ],
+          [
+            129500000,
+            3
+          ]
+        ],
+        "raw_source_us": [
+          42560000,
+          43190000
+        ],
+        "request": {
+          "from": 96,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 96
+        },
+        "audible_acoustic_source_us": [
+          [
+            42560000,
+            1
+          ],
+          [
+            43190000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": null,
+      "old_actual": null,
+      "new_raw": null,
+      "new_actual": null,
+      "physical_source_us": [
+        [
+          127600000,
+          3
+        ],
+        [
+          129500000,
+          3
+        ]
+      ],
+      "waived_components": [],
+      "audible_clip_source_us": [
+        [
+          0,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 115,
+      "asr_start_us": 53040000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 53460000,
+        "code": "selection_evidence",
+        "component": {
+          "end_micros": 53470000,
+          "start_micros": 53460000
+        },
+        "index": 13,
+        "outcome": "refused",
+        "quiet_us": [
+          52620000,
+          53610000
+        ],
+        "violation": "unattributed_sound"
+      },
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              1575000000,
+              30
+            ],
+            [
+              1609000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            52500000,
+            1
+          ],
+          [
+            160900000,
+            3
+          ]
+        ],
+        "raw_source_us": [
+          52470000,
+          53610000
+        ],
+        "request": {
+          "from": 115,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 115
+        },
+        "audible_acoustic_source_us": [
+          [
+            52470000,
+            1
+          ],
+          [
+            53610000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": "unattributed_sound",
+      "old_actual": "unattributed_sound",
+      "new_raw": "unattributed_sound",
+      "new_actual": "unattributed_sound",
+      "physical_source_us": [
+        [
+          52500000,
+          1
+        ],
+        [
+          160900000,
+          3
+        ]
+      ],
+      "waived_components": [
+        [
+          53460000,
+          53470000
+        ],
+        [
+          53530000,
+          53540000
+        ]
+      ],
+      "audible_clip_source_us": [
+        [
+          0,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 135,
+      "asr_start_us": 62720000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 63400000,
+        "code": "selection_evidence",
+        "component": {
+          "end_micros": 63490000,
+          "start_micros": 63400000
+        },
+        "quiet_us": [
+          63370000,
+          63590000
+        ],
+        "violation": "unattributed_sound"
+      },
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              1883000000,
+              30
+            ],
+            [
+              14400000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            188300000,
+            3
+          ],
+          [
+            62800000,
+            1
+          ]
+        ],
+        "raw_source_us": [
+          62760000,
+          480000000
+        ],
+        "request": {
+          "from": 135,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 905
+        },
+        "audible_acoustic_source_us": [
+          [
+            62760000,
+            1
+          ],
+          [
+            62800000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": "unattributed_sound",
+      "old_actual": null,
+      "new_raw": "unattributed_sound",
+      "new_actual": null,
+      "physical_source_us": [
+        [
+          188300000,
+          3
+        ],
+        [
+          62800000,
+          1
+        ]
+      ],
+      "waived_components": [],
+      "audible_clip_source_us": [
+        [
+          1295000000,
+          30
+        ],
+        [
+          1884000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 148,
+      "asr_start_us": 68640000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 69020000,
+        "code": "selection_evidence",
+        "component": {
+          "end_micros": 69030000,
+          "start_micros": 69020000
+        },
+        "index": 17,
+        "outcome": "refused",
+        "quiet_us": [
+          68140000,
+          69110000
+        ],
+        "violation": "unattributed_sound"
+      },
+      "candidate": {
+        "framed": {
+          "refused": {
+            "at_micros": 69130000,
+            "quiet_after": 69130000,
+            "quiet_before": 69130000,
+            "reason": {
+              "code": "no_frame_in_run"
+            }
+          }
+        },
+        "raw_source_us": [
+          68140000,
+          69130000
+        ],
+        "request": {
+          "from": 148,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 148
+        },
+        "audible_acoustic_source_us": [
+          [
+            68140000,
+            1
+          ],
+          [
+            69130000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          0,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 150,
+      "asr_start_us": 70560000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 70560000,
+        "code": "acoustic",
+        "index": 18,
+        "outcome": "refused",
+        "quiet_us": [
+          69580000,
+          70610000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          0,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 202,
+      "asr_start_us": 126720000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 127020000,
+        "code": "selection_evidence",
+        "component": {
+          "end_micros": 127030000,
+          "start_micros": 127020000
+        },
+        "index": 5,
+        "outcome": "refused",
+        "quiet_us": [
+          126460000,
+          127450000
+        ],
+        "violation": "unrequested_sound",
+        "word": 203
+      },
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              3793000000,
+              30
+            ],
+            [
+              3812000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            379300000,
+            3
+          ],
+          [
+            381200000,
+            3
+          ]
+        ],
+        "raw_source_us": [
+          126460000,
+          127075000
+        ],
+        "request": {
+          "from": 202,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 202
+        },
+        "audible_acoustic_source_us": [
+          [
+            126460000,
+            1
+          ],
+          [
+            127075000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": "unrequested_sound",
+      "old_actual": "unrequested_sound",
+      "new_raw": "unrequested_sound",
+      "new_actual": "unrequested_sound",
+      "physical_source_us": [
+        [
+          379300000,
+          3
+        ],
+        [
+          381200000,
+          3
+        ]
+      ],
+      "waived_components": [
+        [
+          127020000,
+          127030000
+        ]
+      ],
+      "audible_clip_source_us": [
+        [
+          3167000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 206,
+      "asr_start_us": 128960000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 128280000,
+        "code": "selection_evidence",
+        "component": {
+          "end_micros": 128320000,
+          "start_micros": 128280000
+        },
+        "index": 6,
+        "outcome": "refused",
+        "quiet_us": [
+          127880000,
+          129380000
+        ],
+        "violation": "unattributed_sound"
+      },
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              3847000000,
+              30
+            ],
+            [
+              3901000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            384700000,
+            3
+          ],
+          [
+            390100000,
+            3
+          ]
+        ],
+        "raw_source_us": [
+          128235000,
+          130050000
+        ],
+        "request": {
+          "from": 206,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 206
+        },
+        "audible_acoustic_source_us": [
+          [
+            128235000,
+            1
+          ],
+          [
+            130050000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": "unattributed_sound",
+      "old_actual": "unattributed_sound",
+      "new_raw": "unattributed_sound",
+      "new_actual": "unattributed_sound",
+      "physical_source_us": [
+        [
+          384700000,
+          3
+        ],
+        [
+          390100000,
+          3
+        ]
+      ],
+      "waived_components": [],
+      "audible_clip_source_us": [
+        [
+          3167000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 238,
+      "asr_start_us": 143600000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 143600000,
+        "code": "acoustic",
+        "index": 11,
+        "outcome": "refused",
+        "quiet_us": [
+          141120000,
+          143650000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          3167000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 264,
+      "asr_start_us": 178560000,
+      "r5_status": "moved",
+      "r5_reason": null,
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              5339000000,
+              30
+            ],
+            [
+              5358000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            533900000,
+            3
+          ],
+          [
+            178600000,
+            1
+          ]
+        ],
+        "raw_source_us": [
+          177960000,
+          178600000
+        ],
+        "request": {
+          "from": 264,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 264
+        },
+        "audible_acoustic_source_us": [
+          [
+            177960000,
+            1
+          ],
+          [
+            178600000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": null,
+      "old_actual": null,
+      "new_raw": null,
+      "new_actual": null,
+      "physical_source_us": [
+        [
+          533900000,
+          3
+        ],
+        [
+          178600000,
+          1
+        ]
+      ],
+      "waived_components": [],
+      "audible_clip_source_us": [
+        [
+          3167000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 271,
+      "asr_start_us": 180480000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 180480000,
+        "code": "acoustic",
+        "index": 19,
+        "outcome": "refused",
+        "quiet_us": [
+          178790000,
+          182180000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          3167000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 358,
+      "asr_start_us": 228800000,
+      "r5_status": "moved",
+      "r5_reason": null,
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              6858000000,
+              30
+            ],
+            [
+              6876000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            228600000,
+            1
+          ],
+          [
+            229200000,
+            1
+          ]
+        ],
+        "raw_source_us": [
+          228600000,
+          229230000
+        ],
+        "request": {
+          "from": 358,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 358
+        },
+        "audible_acoustic_source_us": [
+          [
+            228600000,
+            1
+          ],
+          [
+            229230000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": null,
+      "old_actual": null,
+      "new_raw": null,
+      "new_actual": null,
+      "physical_source_us": [
+        [
+          228600000,
+          1
+        ],
+        [
+          229200000,
+          1
+        ]
+      ],
+      "waived_components": [
+        [
+          228630000,
+          228650000
+        ]
+      ],
+      "audible_clip_source_us": [
+        [
+          3167000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 379,
+      "asr_start_us": 234640000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 234020000,
+        "code": "selection_evidence",
+        "component": {
+          "end_micros": 234030000,
+          "start_micros": 234020000
+        },
+        "index": 27,
+        "outcome": "refused",
+        "quiet_us": [
+          231550000,
+          234790000
+        ],
+        "violation": "unrequested_sound",
+        "word": 378
+      },
+      "candidate": {
+        "framed": {
+          "refused": {
+            "at_micros": 234790000,
+            "quiet_after": 234790000,
+            "quiet_before": 234790000,
+            "reason": {
+              "code": "no_frame_in_run"
+            }
+          }
+        },
+        "raw_source_us": [
+          233995000,
+          234790000
+        ],
+        "request": {
+          "from": 379,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 379
+        },
+        "audible_acoustic_source_us": [
+          [
+            233995000,
+            1
+          ],
+          [
+            234790000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          3167000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 395,
+      "asr_start_us": 239840000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 239650000,
+        "code": "selection_evidence",
+        "component": {
+          "end_micros": 239960000,
+          "start_micros": 239650000
+        },
+        "index": 28,
+        "outcome": "refused",
+        "quiet_us": [
+          239620000,
+          239990000
+        ],
+        "violation": "unrequested_sound",
+        "word": 394
+      },
+      "candidate": {
+        "framed": {
+          "refused": {
+            "at_micros": 239990000,
+            "quiet_after": 239990000,
+            "quiet_before": 239990000,
+            "reason": {
+              "code": "no_frame_in_run"
+            }
+          }
+        },
+        "raw_source_us": [
+          239620000,
+          239990000
+        ],
+        "request": {
+          "from": 395,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 395
+        },
+        "audible_acoustic_source_us": [
+          [
+            239620000,
+            1
+          ],
+          [
+            239990000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          3167000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 401,
+      "asr_start_us": 242240000,
+      "r5_status": "moved",
+      "r5_reason": null,
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              7262000000,
+              30
+            ],
+            [
+              7285000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            726200000,
+            3
+          ],
+          [
+            728500000,
+            3
+          ]
+        ],
+        "raw_source_us": [
+          242080000,
+          242840000
+        ],
+        "request": {
+          "from": 401,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 401
+        },
+        "audible_acoustic_source_us": [
+          [
+            242080000,
+            1
+          ],
+          [
+            242840000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": null,
+      "old_actual": null,
+      "new_raw": null,
+      "new_actual": null,
+      "physical_source_us": [
+        [
+          726200000,
+          3
+        ],
+        [
+          728500000,
+          3
+        ]
+      ],
+      "waived_components": [],
+      "audible_clip_source_us": [
+        [
+          3167000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 436,
+      "asr_start_us": 256800000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 255940000,
+        "code": "selection_evidence",
+        "component": {
+          "end_micros": 255960000,
+          "start_micros": 255940000
+        },
+        "index": 30,
+        "outcome": "refused",
+        "quiet_us": [
+          255910000,
+          256960000
+        ],
+        "violation": "unattributed_sound"
+      },
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              7667000000,
+              30
+            ],
+            [
+              7709000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            766700000,
+            3
+          ],
+          [
+            770900000,
+            3
+          ]
+        ],
+        "raw_source_us": [
+          255550000,
+          256960000
+        ],
+        "request": {
+          "from": 436,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 436
+        },
+        "audible_acoustic_source_us": [
+          [
+            255550000,
+            1
+          ],
+          [
+            256960000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": "unattributed_sound",
+      "old_actual": "unattributed_sound",
+      "new_raw": "unattributed_sound",
+      "new_actual": "unattributed_sound",
+      "physical_source_us": [
+        [
+          766700000,
+          3
+        ],
+        [
+          770900000,
+          3
+        ]
+      ],
+      "waived_components": [
+        [
+          255940000,
+          255960000
+        ],
+        [
+          256090000,
+          256100000
+        ],
+        [
+          256880000,
+          256900000
+        ]
+      ],
+      "audible_clip_source_us": [
+        [
+          3167000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 468,
+      "asr_start_us": 275600000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 275600000,
+        "code": "acoustic",
+        "index": 0,
+        "outcome": "refused",
+        "quiet_us": [
+          275600000,
+          275600000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          7285000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 503,
+      "asr_start_us": 299040000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 297880000,
+        "code": "acoustic",
+        "index": 7,
+        "outcome": "refused",
+        "quiet_us": [
+          297880000,
+          297880000
+        ],
+        "reason": "the measured edges do not bracket one forward removal"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          7285000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 508,
+      "asr_start_us": 304800000,
+      "r5_status": "moved",
+      "r5_reason": null,
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              9138000000,
+              30
+            ],
+            [
+              9159000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            304600000,
+            1
+          ],
+          [
+            305300000,
+            1
+          ]
+        ],
+        "raw_source_us": [
+          304620000,
+          305310000
+        ],
+        "request": {
+          "from": 508,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 508
+        },
+        "audible_acoustic_source_us": [
+          [
+            304620000,
+            1
+          ],
+          [
+            305310000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": null,
+      "old_actual": null,
+      "new_raw": null,
+      "new_actual": null,
+      "physical_source_us": [
+        [
+          304600000,
+          1
+        ],
+        [
+          305300000,
+          1
+        ]
+      ],
+      "waived_components": [],
+      "audible_clip_source_us": [
+        [
+          7285000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 513,
+      "asr_start_us": 307120000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 306440000,
+        "code": "selection_evidence",
+        "component": {
+          "end_micros": 307260000,
+          "start_micros": 306440000
+        },
+        "index": 11,
+        "outcome": "refused",
+        "quiet_us": [
+          306410000,
+          307350000
+        ],
+        "violation": "unrequested_sound",
+        "word": 512
+      },
+      "candidate": {
+        "framed": {
+          "refused": {
+            "at_micros": 307350000,
+            "quiet_after": 307350000,
+            "quiet_before": 307350000,
+            "reason": {
+              "code": "no_frame_in_run"
+            }
+          }
+        },
+        "raw_source_us": [
+          306410000,
+          307350000
+        ],
+        "request": {
+          "from": 513,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 513
+        },
+        "audible_acoustic_source_us": [
+          [
+            306410000,
+            1
+          ],
+          [
+            307350000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          7285000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 516,
+      "asr_start_us": 309200000,
+      "r5_status": "moved",
+      "r5_reason": null,
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              9276000000,
+              30
+            ],
+            [
+              9289000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            309200000,
+            1
+          ],
+          [
+            928900000,
+            3
+          ]
+        ],
+        "raw_source_us": [
+          309205000,
+          309650000
+        ],
+        "request": {
+          "from": 516,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 516
+        },
+        "audible_acoustic_source_us": [
+          [
+            309205000,
+            1
+          ],
+          [
+            309650000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": null,
+      "old_actual": null,
+      "new_raw": null,
+      "new_actual": null,
+      "physical_source_us": [
+        [
+          309200000,
+          1
+        ],
+        [
+          928900000,
+          3
+        ]
+      ],
+      "waived_components": [],
+      "audible_clip_source_us": [
+        [
+          7285000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 524,
+      "asr_start_us": 312000000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 312000000,
+        "code": "acoustic",
+        "index": 13,
+        "outcome": "refused",
+        "quiet_us": [
+          309720000,
+          312360000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          7285000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 533,
+      "asr_start_us": 315920000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 315920000,
+        "code": "acoustic",
+        "index": 15,
+        "outcome": "refused",
+        "quiet_us": [
+          313240000,
+          317790000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          7285000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 551,
+      "asr_start_us": 322720000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 323150000,
+        "code": "selection_evidence",
+        "component": {
+          "end_micros": 323210000,
+          "start_micros": 323150000
+        },
+        "index": 16,
+        "outcome": "refused",
+        "quiet_us": [
+          322170000,
+          323280000
+        ],
+        "violation": "unattributed_sound"
+      },
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              9661000000,
+              30
+            ],
+            [
+              9699000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            966100000,
+            3
+          ],
+          [
+            323300000,
+            1
+          ]
+        ],
+        "raw_source_us": [
+          322030000,
+          323280000
+        ],
+        "request": {
+          "from": 551,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 551
+        },
+        "audible_acoustic_source_us": [
+          [
+            322030000,
+            1
+          ],
+          [
+            323280000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": "unattributed_sound",
+      "old_actual": "unattributed_sound",
+      "new_raw": "unattributed_sound",
+      "new_actual": "unattributed_sound",
+      "physical_source_us": [
+        [
+          966100000,
+          3
+        ],
+        [
+          323300000,
+          1
+        ]
+      ],
+      "waived_components": [
+        [
+          323230000,
+          323250000
+        ]
+      ],
+      "audible_clip_source_us": [
+        [
+          7285000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 552,
+      "asr_start_us": 325920000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 325030000,
+        "code": "selection_evidence",
+        "component": {
+          "end_micros": 325040000,
+          "start_micros": 325030000
+        },
+        "index": 17,
+        "outcome": "refused",
+        "quiet_us": [
+          325000000,
+          326470000
+        ],
+        "violation": "unattributed_sound"
+      },
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              9750000000,
+              30
+            ],
+            [
+              9795000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            325000000,
+            1
+          ],
+          [
+            326500000,
+            1
+          ]
+        ],
+        "raw_source_us": [
+          325000000,
+          326530000
+        ],
+        "request": {
+          "from": 552,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 552
+        },
+        "audible_acoustic_source_us": [
+          [
+            325000000,
+            1
+          ],
+          [
+            326530000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": "unattributed_sound",
+      "old_actual": "unattributed_sound",
+      "new_raw": "unattributed_sound",
+      "new_actual": "unattributed_sound",
+      "physical_source_us": [
+        [
+          325000000,
+          1
+        ],
+        [
+          326500000,
+          1
+        ]
+      ],
+      "waived_components": [
+        [
+          325030000,
+          325040000
+        ],
+        [
+          326430000,
+          326440000
+        ]
+      ],
+      "audible_clip_source_us": [
+        [
+          7285000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 571,
+      "asr_start_us": 332160000,
+      "r5_status": "moved",
+      "r5_reason": null,
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              9940000000,
+              30
+            ],
+            [
+              9969000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            994000000,
+            3
+          ],
+          [
+            332300000,
+            1
+          ]
+        ],
+        "raw_source_us": [
+          331330000,
+          332290000
+        ],
+        "request": {
+          "from": 571,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 571
+        },
+        "audible_acoustic_source_us": [
+          [
+            331330000,
+            1
+          ],
+          [
+            332290000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": null,
+      "old_actual": null,
+      "new_raw": null,
+      "new_actual": null,
+      "physical_source_us": [
+        [
+          994000000,
+          3
+        ],
+        [
+          332300000,
+          1
+        ]
+      ],
+      "waived_components": [
+        [
+          332210000,
+          332220000
+        ]
+      ],
+      "audible_clip_source_us": [
+        [
+          7285000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 573,
+      "asr_start_us": 336480000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 336480000,
+        "code": "acoustic",
+        "index": 20,
+        "outcome": "refused",
+        "quiet_us": [
+          335470000,
+          336920000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          7285000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 618,
+      "asr_start_us": 347440000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 347440000,
+        "code": "acoustic",
+        "index": 21,
+        "outcome": "refused",
+        "quiet_us": [
+          343780000,
+          351760000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          7285000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 662,
+      "asr_start_us": 369600000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 368680000,
+        "code": "selection_evidence",
+        "component": {
+          "end_micros": 368690000,
+          "start_micros": 368680000
+        },
+        "index": 23,
+        "outcome": "refused",
+        "quiet_us": [
+          368610000,
+          369780000
+        ],
+        "violation": "unattributed_sound"
+      },
+      "candidate": {
+        "framed": {
+          "refused": {
+            "at_micros": 369790000,
+            "quiet_after": 369790000,
+            "quiet_before": 369790000,
+            "reason": {
+              "code": "no_frame_in_run"
+            }
+          }
+        },
+        "raw_source_us": [
+          368610000,
+          369790000
+        ],
+        "request": {
+          "from": 662,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 662
+        },
+        "audible_acoustic_source_us": [
+          [
+            368610000,
+            1
+          ],
+          [
+            369790000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          7285000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 668,
+      "asr_start_us": 372800000,
+      "r5_status": "moved",
+      "r5_reason": null,
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              11159000000,
+              30
+            ],
+            [
+              11193000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            1115900000,
+            3
+          ],
+          [
+            373100000,
+            1
+          ]
+        ],
+        "raw_source_us": [
+          371950000,
+          373090000
+        ],
+        "request": {
+          "from": 668,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 668
+        },
+        "audible_acoustic_source_us": [
+          [
+            371950000,
+            1
+          ],
+          [
+            373090000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": null,
+      "old_actual": null,
+      "new_raw": null,
+      "new_actual": null,
+      "physical_source_us": [
+        [
+          1115900000,
+          3
+        ],
+        [
+          373100000,
+          1
+        ]
+      ],
+      "waived_components": [
+        [
+          372970000,
+          372980000
+        ]
+      ],
+      "audible_clip_source_us": [
+        [
+          7285000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 670,
+      "asr_start_us": 376320000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 376400000,
+        "code": "acoustic",
+        "index": 26,
+        "outcome": "refused",
+        "quiet_us": [
+          375440000,
+          378610000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          7285000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 679,
+      "asr_start_us": 380240000,
+      "r5_status": "moved",
+      "r5_reason": null,
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              11397000000,
+              30
+            ],
+            [
+              11434000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            379900000,
+            1
+          ],
+          [
+            1143400000,
+            3
+          ]
+        ],
+        "raw_source_us": [
+          379930000,
+          381140000
+        ],
+        "request": {
+          "from": 679,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 679
+        },
+        "audible_acoustic_source_us": [
+          [
+            379930000,
+            1
+          ],
+          [
+            381140000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": null,
+      "old_actual": null,
+      "new_raw": null,
+      "new_actual": null,
+      "physical_source_us": [
+        [
+          379900000,
+          1
+        ],
+        [
+          1143400000,
+          3
+        ]
+      ],
+      "waived_components": [
+        [
+          379960000,
+          379970000
+        ]
+      ],
+      "audible_clip_source_us": [
+        [
+          7285000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 685,
+      "asr_start_us": 384160000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 384240000,
+        "code": "acoustic",
+        "index": 30,
+        "outcome": "refused",
+        "quiet_us": [
+          383670000,
+          387030000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          7285000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 697,
+      "asr_start_us": 387520000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 387600000,
+        "code": "acoustic",
+        "index": 31,
+        "outcome": "refused",
+        "quiet_us": [
+          387210000,
+          388290000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          7285000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 706,
+      "asr_start_us": 393120000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 393200000,
+        "code": "acoustic",
+        "index": 1,
+        "outcome": "refused",
+        "quiet_us": [
+          392690000,
+          394230000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          11434000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 718,
+      "asr_start_us": 397920000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 397920000,
+        "code": "acoustic",
+        "index": 2,
+        "outcome": "refused",
+        "quiet_us": [
+          397240000,
+          398310000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          11434000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 728,
+      "asr_start_us": 400880000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 400960000,
+        "code": "acoustic",
+        "index": 3,
+        "outcome": "refused",
+        "quiet_us": [
+          398370000,
+          402350000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          11434000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 739,
+      "asr_start_us": 406560000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 406640000,
+        "code": "acoustic",
+        "index": 5,
+        "outcome": "refused",
+        "quiet_us": [
+          406010000,
+          407760000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          11434000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 746,
+      "asr_start_us": 409920000,
+      "r5_status": "moved",
+      "r5_reason": null,
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              12294000000,
+              30
+            ],
+            [
+              12307000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            409800000,
+            1
+          ],
+          [
+            1230700000,
+            3
+          ]
+        ],
+        "raw_source_us": [
+          409810000,
+          410245000
+        ],
+        "request": {
+          "from": 746,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 746
+        },
+        "audible_acoustic_source_us": [
+          [
+            409810000,
+            1
+          ],
+          [
+            410245000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": null,
+      "old_actual": null,
+      "new_raw": null,
+      "new_actual": null,
+      "physical_source_us": [
+        [
+          409800000,
+          1
+        ],
+        [
+          1230700000,
+          3
+        ]
+      ],
+      "waived_components": [],
+      "audible_clip_source_us": [
+        [
+          11434000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 773,
+      "asr_start_us": 424880000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 425630000,
+        "code": "selection_evidence",
+        "component": {
+          "end_micros": 425640000,
+          "start_micros": 425630000
+        },
+        "index": 9,
+        "outcome": "refused",
+        "quiet_us": [
+          424690000,
+          425730000
+        ],
+        "violation": "unattributed_sound"
+      },
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              12736000000,
+              30
+            ],
+            [
+              12772000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            1273600000,
+            3
+          ],
+          [
+            1277200000,
+            3
+          ]
+        ],
+        "raw_source_us": [
+          424530000,
+          425730000
+        ],
+        "request": {
+          "from": 773,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 773
+        },
+        "audible_acoustic_source_us": [
+          [
+            424530000,
+            1
+          ],
+          [
+            425730000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": true,
+      "old_raw": "unattributed_sound",
+      "old_actual": "unattributed_sound",
+      "new_raw": null,
+      "new_actual": null,
+      "physical_source_us": [
+        [
+          1273600000,
+          3
+        ],
+        [
+          1277200000,
+          3
+        ]
+      ],
+      "waived_components": [
+        [
+          425630000,
+          425640000
+        ],
+        [
+          425650000,
+          425670000
+        ],
+        [
+          425680000,
+          425700000
+        ]
+      ],
+      "audible_clip_source_us": [
+        [
+          11434000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 801,
+      "asr_start_us": 434800000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 434800000,
+        "code": "acoustic",
+        "index": 11,
+        "outcome": "refused",
+        "quiet_us": [
+          434220000,
+          435100000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          11434000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 805,
+      "asr_start_us": 436960000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 436960000,
+        "code": "acoustic",
+        "index": 12,
+        "outcome": "refused",
+        "quiet_us": [
+          436510000,
+          438530000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          11434000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 813,
+      "asr_start_us": 439760000,
+      "r5_status": "moved",
+      "r5_reason": null,
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              13178000000,
+              30
+            ],
+            [
+              13201000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            1317800000,
+            3
+          ],
+          [
+            1320100000,
+            3
+          ]
+        ],
+        "raw_source_us": [
+          439270000,
+          440050000
+        ],
+        "request": {
+          "from": 813,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 813
+        },
+        "audible_acoustic_source_us": [
+          [
+            439270000,
+            1
+          ],
+          [
+            440050000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": null,
+      "old_actual": null,
+      "new_raw": null,
+      "new_actual": null,
+      "physical_source_us": [
+        [
+          1317800000,
+          3
+        ],
+        [
+          1320100000,
+          3
+        ]
+      ],
+      "waived_components": [],
+      "audible_clip_source_us": [
+        [
+          11434000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 848,
+      "asr_start_us": 451520000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 450970000,
+        "code": "acoustic",
+        "index": 16,
+        "outcome": "refused",
+        "quiet_us": [
+          450970000,
+          450970000
+        ],
+        "reason": "no project frame lies inside this edge's measured support"
+      },
+      "candidate": {
+        "framed": {
+          "refused": {
+            "at_micros": 450970000,
+            "quiet_after": 450970000,
+            "quiet_before": 450970000,
+            "reason": {
+              "code": "no_frame_in_run"
+            }
+          }
+        },
+        "raw_source_us": [
+          450970000,
+          451740000
+        ],
+        "request": {
+          "from": 848,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 848
+        },
+        "audible_acoustic_source_us": [
+          [
+            450970000,
+            1
+          ],
+          [
+            451740000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          11434000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 856,
+      "asr_start_us": 460160000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 460160000,
+        "code": "acoustic",
+        "index": 20,
+        "outcome": "refused",
+        "quiet_us": [
+          458270000,
+          460430000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          11434000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 878,
+      "asr_start_us": 469440000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 469440000,
+        "code": "acoustic",
+        "index": 21,
+        "outcome": "refused",
+        "quiet_us": [
+          468450000,
+          469650000
+        ],
+        "reason": "no measured quiet or sufficiently deep dip brackets this word boundary"
+      },
+      "candidate": null,
+      "rule_clears": false,
+      "blocked_before_attribution": true,
+      "audible_clip_source_us": [
+        [
+          11434000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 880,
+      "asr_start_us": 471600000,
+      "r5_status": "refused",
+      "r5_reason": {
+        "at_us": 470620000,
+        "code": "selection_evidence",
+        "component": {
+          "end_micros": 470630000,
+          "start_micros": 470620000
+        },
+        "index": 23,
+        "outcome": "refused",
+        "quiet_us": [
+          470320000,
+          471820000
+        ],
+        "violation": "unrequested_sound",
+        "word": 879
+      },
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              14118000000,
+              30
+            ],
+            [
+              14157000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            470600000,
+            1
+          ],
+          [
+            471900000,
+            1
+          ]
+        ],
+        "raw_source_us": [
+          470595000,
+          471890000
+        ],
+        "request": {
+          "from": 880,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 880
+        },
+        "audible_acoustic_source_us": [
+          [
+            470595000,
+            1
+          ],
+          [
+            471890000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": "unrequested_sound",
+      "old_actual": "unrequested_sound",
+      "new_raw": "unrequested_sound",
+      "new_actual": "unrequested_sound",
+      "physical_source_us": [
+        [
+          470600000,
+          1
+        ],
+        [
+          471900000,
+          1
+        ]
+      ],
+      "waived_components": [
+        [
+          470620000,
+          470630000
+        ]
+      ],
+      "audible_clip_source_us": [
+        [
+          11434000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    },
+    {
+      "index": 882,
+      "asr_start_us": 472880000,
+      "r5_status": "moved",
+      "r5_reason": null,
+      "candidate": {
+        "framed": {
+          "source_us": [
+            [
+              14187000000,
+              30
+            ],
+            [
+              14194000000,
+              30
+            ]
+          ]
+        },
+        "inside_clip": true,
+        "physical_source_us": [
+          [
+            472900000,
+            1
+          ],
+          [
+            1419400000,
+            3
+          ]
+        ],
+        "raw_source_us": [
+          472885000,
+          473150000
+        ],
+        "request": {
+          "from": 882,
+          "kind": "remove_words",
+          "leave_micros": null,
+          "to": 882
+        },
+        "audible_acoustic_source_us": [
+          [
+            472885000,
+            1
+          ],
+          [
+            473150000,
+            1
+          ]
+        ]
+      },
+      "rule_clears": false,
+      "old_raw": null,
+      "old_actual": null,
+      "new_raw": null,
+      "new_actual": null,
+      "physical_source_us": [
+        [
+          472900000,
+          1
+        ],
+        [
+          1419400000,
+          3
+        ]
+      ],
+      "waived_components": [],
+      "audible_clip_source_us": [
+        [
+          11434000000,
+          30
+        ],
+        [
+          14400000000,
+          30
+        ]
+      ]
+    }
+  ],
+  "inventory_csv": "dq-r6-detached-components.csv",
+  "inventory_sha256": "2287d4f84f888b27577f2ac06f65c1d774f6c16c7f1c54fe84b2ea81291da05e",
+  "provenance": {
+    "baseline_commit": "0088d7d8",
+    "product_source_sha256": {
+      "crates/kinewright-core/src/dialogue/frame.rs": "d9116a92759ea3b699c3edc50f9259fcf9048bd4106be33dfe783050ecbe0495",
+      "crates/kinewright-core/src/dialogue/measure.rs": "d297c1ded739b50f3b27bd2ac65d0d8659b6c2814fb393836a3164cb79921241",
+      "crates/kinewright-core/src/dialogue/profile.rs": "ae4c9e708973e641a5553909836ebe35f2d1a3d06fa8db424ab01f1b4cccac15",
+      "crates/kinewright-core/src/dialogue/evidence.rs": "7d7d91f0a9d55aa8b3e6cdb0b8983821ce593646c1bde856a83e7ff05f097ae3",
+      "crates/kinewright-core/src/dialogue/r4_tests.rs": "bff5e72b6570cdcbb66b15a95d97b7ef021626a455d19d31c947ef39f3c3f878",
+      "crates/kinewright-core/src/dialogue/rehearsal_tests.rs": "89b6a1eede9c90fcf6aacd00a858dada00d2dd5b6e355feaa2e7364c843dc6a4",
+      "crates/kinewright-core/src/dialogue/resolve.rs": "b0bdd8f6ea3ef1170b28ebd5bbcf4e3d5e10c7d97f9268cef513aa6cc57a25c1",
+      "crates/kinewright-core/src/dialogue/tests.rs": "9bafd902c53f016db2263ad9b29fc6f87cb8c0e8a9a07b0a7f622643288fa497",
+      "crates/kinewright-core/src/dialogue/mod.rs": "2d3dedc2235631e96d6b67811c7bd73659548aefdfe101a2d88b1fef39b05aa5",
+      "crates/kinewright-core/src/dialogue/r5_tests.rs": "f8fc765d94b7898e59bc827194eaebea49380acd842445c40000f29742057b3a",
+      "crates/kinewright-core/src/dialogue/selection.rs": "152b6f2fcffce242fc120c9719e2dce3b2e3933b1ed5a7c4805c4c5b9281d8e2",
+      "crates/kinewright-core/src/dialogue/audit/leftovers.rs": "aac1ecb0068b023b1dd8633f6e175c1573864068b50a7b0592f7b146c0b5c1da",
+      "crates/kinewright-core/src/dialogue/audit/gaps.rs": "9dca8a61abb9b7bcbc47f03ceb730538a089425f50fd79cd44b055ad3074a287",
+      "crates/kinewright-core/src/dialogue/audit/hole_tests.rs": "a132f588dd2588539518f965bdd66c32c97b21730c4ae9839922bd9bda85e83c",
+      "crates/kinewright-core/src/dialogue/audit/joins.rs": "098dc7d0a2989050ed3be3934ea8fb77592c74b4fe69e92fdd0aa43de47c3d61",
+      "crates/kinewright-core/src/dialogue/audit/measured.rs": "243ed1d5b04aae334cdc3450be5292de5e94075e7d756974a418f16d0c985410",
+      "crates/kinewright-core/src/dialogue/audit/mod.rs": "af0b665c15a79e7c12d7ec57eb3cad0e5100e2b9a8b1c4e0184386adbe109842",
+      "crates/kinewright-core/src/dialogue/audit/tests.rs": "9aaaaafb0b5001c92d5466eb67660bc2452a8cf34516e9431a4ed748e9e503c9"
+    },
+    "candidate_geometry_replay_matches_final_document": true,
+    "input_fillers": 54,
+    "instrumentation": "One observer call added immediately before original validation in a private copy of resolve.rs. No original validation is removed; frame guards execute as written. All product files remain unchanged."
+  },
+  "pause_inventory_proof": "All measured gap hops are at or below calibrated quiet RMS; every pre-frame pause candidate is a subset of one of these runs, so no RMS component is contained in a pause candidate.",
+  "inventory_columns": "Core proposal, its intersection with the current audible clip, and frame-accepted physical proposals are separate columns. Unheard normalized Core prefix/suffix is not labelled as an audible cut."
+}
