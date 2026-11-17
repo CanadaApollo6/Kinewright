@@ -816,6 +816,24 @@ fn check_host_headers(headers: &HeaderMap, state: &HttpState) -> Result<String, 
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     Ok(bearer.to_owned())
 }
+/// Commands whose body holds one or more `HostSnapshot`s. They share Save's
+/// ingress cap rather than the envelope cap, so a long history reaches the door.
+fn carries_snapshot(command: &HostCommand) -> bool {
+    matches!(
+        command,
+        HostCommand::Save { .. }
+            | HostCommand::SaveAs { .. }
+            | HostCommand::FirstSave { .. }
+            | HostCommand::PreviewRescue { .. }
+            | HostCommand::PreviewRecovery { .. }
+            | HostCommand::RefreshUnsavedInputs { .. }
+            | HostCommand::PrepareOwnedMedia { .. }
+            | HostCommand::PrepareMediaInterpretation { .. }
+            | HostCommand::BeginRecovery { .. }
+            | HostCommand::PublishBarrier { .. }
+            | HostCommand::ConfirmBarrier { .. }
+    )
+}
 async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> Response {
     let bearer = match check_host_headers(request.headers(), &state) {
         Ok(bearer) => bearer,
@@ -841,15 +859,8 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
     if bytes.len() > HOST_ENVELOPE_BYTES
-        && !matches!(
-            &request.command,
-            HostCommand::CommitHistory { .. }
-                | HostCommand::Save { .. }
-                | HostCommand::SaveAs { .. }
-                | HostCommand::FirstSave { .. }
-                | HostCommand::PreviewRescue { .. }
-                | HostCommand::PreviewRecovery { .. }
-        )
+        && !matches!(&request.command, HostCommand::CommitHistory { .. })
+        && !carries_snapshot(&request.command)
     {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }

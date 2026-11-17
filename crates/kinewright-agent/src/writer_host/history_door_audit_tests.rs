@@ -454,3 +454,97 @@ fn task_capabilities_refuse_every_snapshot_shaped_door() {
         );
     }
 }
+
+fn holds_snapshot(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.contains_key("history_sha256") || map.values().any(holds_snapshot)
+        }
+        serde_json::Value::Array(values) => values.iter().any(holds_snapshot),
+        _ => false,
+    }
+}
+
+#[test]
+fn snapshot_doors_admit_a_long_history_past_the_envelope_cap() {
+    let temp = kinewright_media::test_support::TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "history-door-ingress",
+    );
+    let host = WriterHost::start(HostConfig {
+        scheduler_settings: Some(temp.path("scheduler")),
+        project: "history-door-ingress".into(),
+        path: None,
+        roots: SessionRoots::default(),
+        origin: HostOrigin::Headless,
+    })
+    .unwrap();
+    // One long label stands for a long history: the snapshot alone is larger
+    // than the envelope cap that used to apply to these doors.
+    let long = kinewright_project::operation_actor::Core::for_test(kinewright_core::Document {
+        markers: vec![kinewright_core::Marker {
+            id: kinewright_core::MarkerId(1),
+            position: kinewright_core::TimeCode(0),
+            label: "\"".repeat(HOST_ENVELOPE_BYTES),
+            color_token: 0,
+        }],
+        ..kinewright_core::Document::default()
+    })
+    .unwrap();
+    let snapshot = HostSnapshot::capture(&long).unwrap();
+    let branch = kinewright_project::bundle_records::BranchId::fresh().unwrap();
+    let barrier = RecoveryBarrier {
+        switch_generation: 0,
+        client: "a".repeat(64),
+        acknowledged: vec![],
+        checkpoint_ref: DoorSamples::object(
+            kinewright_project::bundle_records::RecordKind::BranchCheckpoint,
+        ),
+        before: snapshot.clone(),
+        after: snapshot.clone(),
+    };
+    let samples = DoorSamples {
+        temp: &temp,
+        snapshot: &snapshot,
+        barrier: &barrier,
+        source: serde_json::from_value(serde_json::json!({
+            "admission": "1".repeat(32), "project_id": null, "session_id": "2".repeat(32),
+            "owner_epoch": 0, "extra_overlap_bytes": 0, "roots": [], "objects": [],
+        }))
+        .unwrap(),
+        branch: &branch,
+        callback: host.client().bootstrap(),
+    };
+    let mut next = Door::after(None);
+    while let Some(door) = next {
+        let command = samples.command(door);
+        assert_eq!(
+            carries_snapshot(&command),
+            holds_snapshot(&serde_json::to_value(&command).unwrap()),
+            "SNAPSHOT_INGRESS_CLASS_MATCHES_PAYLOAD: {door:?}"
+        );
+        next = Door::after(Some(door));
+    }
+    for door in [
+        Door::RefreshUnsavedInputs,
+        Door::PrepareOwnedMedia,
+        Door::PrepareMediaInterpretation,
+        Door::BeginRecovery,
+        Door::PublishBarrier,
+        Door::ConfirmBarrier,
+    ] {
+        let command = samples.command(door);
+        assert!(
+            serde_json::to_vec(&command).unwrap().len() > HOST_ENVELOPE_BYTES,
+            "SNAPSHOT_DOOR_BODY_EXCEEDS_ENVELOPE: {door:?}"
+        );
+        // The door may refuse this foreign snapshot; HTTP ingress must not.
+        let reply = host.client().request(command);
+        assert!(
+            reply.is_ok(),
+            "SNAPSHOT_DOOR_PASSES_HTTP_INGRESS: {door:?}: {:?}",
+            reply.err()
+        );
+    }
+    host.shutdown().unwrap();
+}
