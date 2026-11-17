@@ -835,10 +835,12 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
     if request.protocol != HOST_PROTOCOL || request.project != state.bootstrap.endpoint.project {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if bytes.len() > 512 * 1024 && matches!(&request.command, HostCommand::CommitHistory { .. }) {
+    if bytes.len() as u64 > COMMIT_HISTORY_BODY_BYTES
+        && matches!(&request.command, HostCommand::CommitHistory { .. })
+    {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
-    if bytes.len() > 256 * 1024
+    if bytes.len() > HOST_ENVELOPE_BYTES
         && !matches!(
             &request.command,
             HostCommand::CommitHistory { .. }

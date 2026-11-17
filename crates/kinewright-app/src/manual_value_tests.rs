@@ -222,6 +222,9 @@ impl Drop for Fixture {
         in1_shutdown(&mut self.app);
     }
 }
+#[path = "manual_window_tests.rs"]
+mod manual_window_tests;
+
 fn param(value: i64) -> Operation {
     Operation::SetEffectParam {
         clip: ClipId(1),

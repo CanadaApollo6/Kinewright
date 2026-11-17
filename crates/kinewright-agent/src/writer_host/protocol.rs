@@ -13,6 +13,22 @@ use std::{net::SocketAddr, path::PathBuf};
 
 pub const HOST_PROTOCOL: u32 = 1;
 pub const HOST_BODY_BYTES: usize = 40 * 1024 * 1024;
+/// Every request outside the payload: editor, operation, project, roots and the
+/// command's own small fields. A request without a payload is refused above it.
+pub const HOST_ENVELOPE_BYTES: usize = 256 * 1024;
+/// A full manual window as it crosses HTTP. Each message's raw JSON travels as
+/// a JSON string. Valid raw JSON escapes only `"`, `\`, tab, LF and CR, each to
+/// two bytes; every other byte stays one. Each message adds two quotes and a comma.
+pub const COMMIT_HISTORY_WINDOW_BYTES: u64 = 2
+    * kinewright_project::operation_protocol::PENDING_BYTES
+    + 3 * kinewright_project::operation_protocol::PENDING_COMMANDS as u64;
+/// The `CommitHistory` ingress cap. The codec refuses a window before HTTP can.
+pub const COMMIT_HISTORY_BODY_BYTES: u64 = COMMIT_HISTORY_WINDOW_BYTES + HOST_ENVELOPE_BYTES as u64;
+const _: () = assert!(
+    COMMIT_HISTORY_BODY_BYTES >= COMMIT_HISTORY_WINDOW_BYTES + HOST_ENVELOPE_BYTES as u64
+        && COMMIT_HISTORY_BODY_BYTES <= HOST_BODY_BYTES as u64,
+    "FULL_MANUAL_WINDOW_CROSSES_HTTP"
+);
 pub const HOST_COMMAND_CAPACITY: usize = 64;
 pub const RETENTION_LOST: &str = "The host could not re-establish this session's retained data. Your edits remain here. Saving and rescue are paused, including saving elsewhere. Close this editing context explicitly to end it.";
 
