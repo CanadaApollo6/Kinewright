@@ -103,8 +103,12 @@ class BuildIdentity(unittest.TestCase):
                 self.assertNotEqual(builder.fingerprint()[0], baseline)
 
     def test_windows_pins_msys_make_and_shell_even_when_host_make_is_first(self):
+        import os
+        # The default root is the subject here; the CI root has its own witness below.
         with patch.object(builder.platform, 'system', return_value='Windows'), \
+             patch.dict(os.environ), \
              patch.object(builder.subprocess, 'run') as run:
+            os.environ.pop('KINEWRIGHT_MSYS_ROOT', None)
             builder.run(['make', '-j4', 'install'], builder.ROOT)
         command = run.call_args.args[0]
         self.assertEqual(command[0].replace('\\', '/'), 'C:/msys64/usr/bin/make.exe')
