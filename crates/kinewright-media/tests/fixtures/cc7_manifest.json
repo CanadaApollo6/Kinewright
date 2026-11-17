@@ -1087,11 +1087,17 @@
             "budget": 400000,
             "measured": {
               "linux": 18677,
-              "windows": 18688
+              "windows": 18677
             },
             "margin": {
               "linux": 21.4167,
-              "windows": 21.4041
+              "windows": 21.4167
+            },
+            "windows_remeasure": {
+              "before": 18688,
+              "after": 18677,
+              "measured": "CI run 44188673130, windows-latest, the project's own FFmpeg 9.0.2 MSVC build (scripts/build-ffmpeg.py, verified source), software_fallback lane",
+              "reason": "18688 came from System233 ffmpeg-8.0.1-r3, an MSVC build of FFmpeg 8.x. There, x86 libswscale chose the dithered yuv2yuvX vertical scaler (use_mmx_vfilter) only in code built under HAVE_MMXEXT_INLINE, which MSVC lacks, so 8-bit output went through ff_yuv2planeX_8_* instead. FFmpeg 9 makes that choice from external (nasm) SIMD, so Windows now takes Linux's path and measures Linux's value. This is a different, correct scaler path, not a widened budget. docs/reports/ff9-own-build.md section 4."
             }
           },
           "rgb_mean_code_millionths": {

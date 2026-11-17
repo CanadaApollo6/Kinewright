@@ -1,8 +1,9 @@
 # FF9: the project's own FFmpeg build at 9.0.2, joined with dq-native
 
 Branch `ff9`, from `origin/dq-native` (`5138cd5f`) with `origin/ms1` (`66a66cd1`) merged.
-Status: **partial**. Linux gates are green, including the TE1 still image converted to
-PNG under the lead's ruling (§7). The Windows questions (§4) wait on CI.
+Status: Linux gates green. CI run 44188673130 on `1df1c976` confirmed the Windows root
+cause (§4). The closing CI run on the TE1 PNG commit and the luma re-measure is pending.
+Windows' remaining 8-bit delivery terms have not been checked against our build yet (§8).
 
 ## 1. Merge resolutions
 
@@ -137,22 +138,39 @@ change of path rather than a new rounding defect.
 
 **Own build.** Linux and Windows build the same source with nasm
 (`--enable-x86asm`). Every x86-64 CPU has SSE2 and MMXEXT, so both select
-`yuv2yuvX`. The prediction is that both Windows failures go away, Windows
-matching Linux. **CI has not answered this yet.**
+`yuv2yuvX`. The prediction was that both Windows failures go away, with Windows matching Linux.
+
+**CI result (run 44188673130, `1df1c976`).** Both FFmpeg producers were green, and
+restore-by-key worked: every shard on both systems got the built profiles. The Windows
+Cb test passed under the single expectation. Linux and Windows slow tiers, clippy, the
+shipping builds and the recognition jobs were green. Three fast shards were red, all
+expected. Linux and Windows `te1_six_case_rendered_evidence_uses_production_preview`
+failed on the PPM (fixed by the TE1 PNG commit, §7). Windows
+`cc7_every_scenario_verifies_at_eight_bits` reported "declares 18688 but windows
+measured 18677" for `budgets.delivery.a.eight_bit.luma_mean_code_millionths`: Linux's
+value, as predicted.
 
 **Change (`4b850ecd`).** The 8-bit test's per-OS `NEUTRAL_CHROMA_CODES` (and its
 "unmeasured system" branch) becomes one constant: Cb {128,129}, Cr {127,128}. The
 assertion still requires these exact sets on both systems. The manifest's Windows
-luma column is **not** touched yet. It is re-measured only once CI shows what our own
-build produces on Windows. Before: Windows (a) 8-bit luma mean 18688 (System233
-8.0.1). Linux: 18677.
+luma entry was left untouched until CI had measured our build.
+
+**Luma re-measure (separate commit, `[slow-tier]`).** `cc7_manifest.json`
+`budgets.delivery.a.eight_bit.luma_mean_code_millionths.measured.windows` goes from
+18688 to 18677, measured in CI run 44188673130 on `windows-latest` with our own 9.0.2
+MSVC build. Its Windows margin goes from 21.4041 to 21.4167 (400000 / 18677). A
+`windows_remeasure` record beside the entry holds the before and after value, the run and
+the scaler root cause above. **Linux and Windows now declare the same value for this
+entry (18677, margin 21.4167).** The per-system structure stays; merging it is not part
+of this job. `CC7_MEASURED_DELIVERY_EIGHT`'s luma term is the worst row (scenario e,
+377,538 on both systems), so this change leaves it unchanged.
 
 **Why no explicit conversion setting.** The only options that pin the vertical
 scaler (`accurate_rnd`, `bitexact`) select `planeX_8`. That changes Linux's
 delivered Cb from {128,129} to {128}, and the brief's stop rule forbids changing
 Linux's delivered output. The default path is not selected by any filter
-argument; it follows from the build (external asm) and the CPU. See the open
-decision in §6.
+argument; it follows from the build (external asm) and the CPU. The lead accepted the
+single expectation: Linux's {128,129} is the accepted CC7 baseline.
 
 ## 5. Measurements
 
@@ -283,4 +301,22 @@ passes. `te15/README.md` names the PNG. `docs/reports/te1-1.md` is historical an
 
 ## 8. Open
 
-- Windows CI answers for §4, and the Windows luma entry is re-measured from it.
+- **Remaining Windows 8-bit delivery values, all measured on System233 8.0.1.** The
+  delivery gate (`check_cc7_measurement`) panics on its first mismatch, and scenario
+  (a)'s luma mean comes first. So run 44188673130 never evaluated these on our build,
+  and none of them has yet passed on it. Each still differs from Linux:
+  - (a): RGB mean 296109 (Linux 402050); PSNR 4225 (Linux 4204).
+  - (b): luma mean 38160 (Linux 38177); RGB mean 402744 (Linux 458622); PSNR 4142 (Linux 4129).
+  - (c): luma mean 195326 (Linux 195351); RGB mean 388796 (Linux 512581); PSNR 4148 (Linux 4126).
+  - (d): RGB mean 162581 (Linux 349950); PSNR 4132 (Linux 4103).
+  - (e): RGB mean 787598 (Linux 855810); PSNR 4070 (Linux 4059).
+  - (f): RGB mean 78742 (Linux 271299); PSNR 4668 (Linux 4579).
+  - Terms: "delivery, 8-bit RGB mean" 787598 (Linux 855810); "delivery, 8-bit PSNR" 4070 (Linux 4059).
+  - `kinewright_core::cc7_scenarios::CC7_MEASURED_DELIVERY_EIGHT` (Windows arm): RGB mean
+    787598 and PSNR 4070.
+
+  RGB mean and PSNR also go through the GPU lane, which differs: Windows runs WARP on
+  dx12 and Linux runs lavapipe. The ten-bit lane, which has no 8-bit dither, still
+  differs in (b)'s RGB mean. So these values need not converge to Linux's. The
+  closing run will report the next mismatch, if any, one at a time.
+- CC6 manifest: no per-system values.
