@@ -320,8 +320,17 @@ bytes in the app, where truncation could cause SIGBUS.
 The app spawns a blocked outer shim. The shim forks the payload, which is PID 1
 in its new PID namespace. Arm `PR_SET_PDEATHSIG=SIGKILL` on both edges, after
 each fork and after credential changes that clear it. The shim checks `getppid`
-against the app PID captured before spawn. Keep the app's spawning thread alive
-for the shim's lifetime, because PDEATHSIG follows that thread's death. After
+against the app PID captured before spawn. PDEATHSIG follows the spawning
+thread, not the app process, and Linux can reparent the shim to another app
+thread without changing `getppid()`. So all shims are spawned by one dedicated
+spawner thread whose exit is process exit. It never returns, and a guard on
+every exit path (return, unwind, or panic) calls `std::process::abort()`. Thread
+loss without process loss is then impossible by construction, on every kernel.
+Where `PIDFD_THREAD` is available (Linux 6.9+), the shim also inherits a thread
+pidfd on the spawner and polls it after each arm and re-arm, as a second check.
+The shim closes it before forking the payload. Witness: inject a spawner-thread
+exit while another app thread survives, and check that the app aborts and the
+chain dies, before arming and during decode. After
 forking, the single-threaded shim only waits for and reaps its payload. It does
 not exit early. App death kills the shim, whose death kills the payload even
 with the watchdog disabled. Both primary and degraded modes use this chain.
