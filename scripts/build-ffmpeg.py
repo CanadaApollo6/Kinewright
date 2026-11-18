@@ -351,13 +351,17 @@ def build(profile, no_binary_cache=False):
     prefix = ROOT / 'third_party' / {'libraries': 'ffmpeg', 'recorder': 'ffmpeg-recorder',
                                     'testgen': 'ffmpeg-testgen'}[profile]
     marker = prefix / '.build-key'
-    # A CI consumer reuses binaries by the exact key its producer exported. Its
-    # runner can be a newer image of the same label, with another compiler patch
-    # level, so its own fingerprint is not the one the binaries were built under.
-    expected = os.environ.get('KINEWRIGHT_FFMPEG_PRODUCER_KEY') or key
-    if not no_binary_cache and marker.exists() and marker.read_text() == expected:
-        print(f'{profile}: local/cache reuse {expected}', flush=True)
-        return
+    # A CI consumer whose cache step restored its producer's exact cache entry
+    # reuses those binaries as they are. Its own fingerprint can differ from the
+    # marker (a newer runner image of the same label has another compiler patch
+    # level), and so can the producer's exported key: on Windows the key step
+    # and the build do not compute the same fingerprint (ticket CI-T2).
+    restored = os.environ.get('KINEWRIGHT_FFMPEG_RESTORED_PRODUCER_CACHE') == 'true'
+    if not no_binary_cache and marker.exists():
+        stored = marker.read_text()
+        if stored and (restored or stored == key):
+            print(f'{profile}: local/cache reuse {stored}', flush=True)
+            return
     ensure_nasm()
     scratch = ROOT / 'target' / 'ffmpeg-build'
     scratch.mkdir(parents=True, exist_ok=True)

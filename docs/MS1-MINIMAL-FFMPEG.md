@@ -163,11 +163,15 @@ keys the binary cache and local `.build-key`: source hash, configure vectors,
 compiler/linker/assembler binary identities and full versions (including MSVC `/Bv`),
 dependency pkg-config versions/flags, build flags, host ABI, builder/profile/setup
 scripts and CI action. Producers export exact Linux/Windows keys; a CI consumer
-restores by that key and verifies the marker against it
-(`KINEWRIGHT_FFMPEG_PRODUCER_KEY`), not against its own toolchain: during a runner
-image rollout a consumer can run on a newer image than its producer, and it must
-reuse the producer's binaries instead of rebuilding inside a test shard. Local
-builds and release jobs verify against their own fingerprint. No fallback keys exist.
+restores by that key, and when the cache step reports an exact hit it reuses the
+restored binaries as they are (`KINEWRIGHT_FFMPEG_RESTORED_PRODUCER_CACHE`), without
+comparing the marker to its own toolchain: during a runner image rollout a consumer
+can run on a newer image than its producer, and it must reuse the producer's
+binaries instead of rebuilding inside a test shard. The exported key names the cache
+entry and is not compared to the marker: on Windows the two differ within one
+producer job (seen on run 44398295450; the key step and the build do not compute
+the same fingerprint, cause not yet found, ticket CI-T2). Local builds and release
+jobs verify against their own fingerprint. No fallback keys exist.
 
 Binary cache writes require a successful canonical-repository **push**; PR jobs
 never write, and fork PRs/fork repositories never restore these caches. Each job
