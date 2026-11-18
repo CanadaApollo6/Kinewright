@@ -139,6 +139,7 @@ fn window_item(placed: &mut Placed, window: &Range<Time>) -> Result<(), Refusal>
         let in_point = begin.checked_sub(placed.at)?;
         let out_point = finish.checked_sub(placed.at)?;
         let duration = finish.checked_sub(begin)?;
+        window_decorations(&mut placed.decorations, &(in_point..out_point))?;
         match &mut placed.item {
             Item::Clip(clip) => {
                 clip.source_start = clip
@@ -185,10 +186,15 @@ fn window_item(placed: &mut Placed, window: &Range<Time>) -> Result<(), Refusal>
 
 fn discard(placed: &mut Placed) {
     placed.item = Item::Discarded {
-        count: placed.item.population(),
+        count: if placed.counts_item {
+            placed.item.population() + placed.decorations.population()
+        } else {
+            0
+        },
         loss: Loss::dropped(LossCode::OutsideWindow),
     };
     placed.notes.clear();
+    placed.decorations = Decorations::empty();
 }
 
 fn window_decorations(decorations: &mut Decorations, window: &Range<Time>) -> Result<(), Refusal> {

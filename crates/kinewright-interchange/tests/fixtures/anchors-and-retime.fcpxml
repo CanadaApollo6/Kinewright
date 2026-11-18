@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.13">
+  <resources>
+    <format id="r1" frameDuration="1/25s" width="1920" height="1080"/>
+    <asset id="r2" name="Primary" format="r1" start="3600s" duration="100s" hasVideo="1">
+      <media-rep kind="original-media" src="file:///Media/primary.mov"/>
+    </asset>
+    <asset id="r3" name="Anchor" format="r1" start="0s" duration="100s" hasVideo="1">
+      <media-rep kind="original-media" src="file:///Media/anchor.mov"/>
+    </asset>
+  </resources>
+  <event name="Assembly">
+    <project name="Anchors and speed">
+      <sequence format="r1" tcStart="0s">
+        <spine>
+          <asset-clip ref="r2" offset="10s" start="3600s" duration="4s" videoRole="video.primary">
+            <asset-clip ref="r3" lane="1" offset="3602s" start="5s" duration="1s" videoRole="video.anchor"/>
+          </asset-clip>
+          <asset-clip ref="r2" offset="14s" start="1s" duration="3s">
+            <timeMap>
+              <timept time="0s" value="3602s"/>
+              <timept time="4s" value="3610s"/>
+            </timeMap>
+            <asset-clip ref="r3" lane="1" offset="3606s" start="0s" duration="1s"/>
+          </asset-clip>
+        </spine>
+      </sequence>
+    </project>
+  </event>
+</fcpxml>

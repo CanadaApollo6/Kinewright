@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+pub mod fcpxml;
+mod fcpxml_syntax;
+mod fcpxml_time;
 pub mod ir;
 pub mod locator;
 pub mod otio;

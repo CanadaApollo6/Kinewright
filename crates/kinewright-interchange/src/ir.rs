@@ -92,6 +92,9 @@ pub struct Placed {
     pub item: Item,
     pub site: String,
     pub notes: Vec<Loss>,
+    pub decorations: Decorations,
+    /// A separate A/V part can share the original source item's accounting site.
+    pub counts_item: bool,
     /// FCPXML connected clips, with placements in this track's coordinate system.
     pub anchors: Vec<Anchor>,
 }
@@ -104,13 +107,19 @@ impl Placed {
             item,
             site: site.into(),
             notes: Vec::new(),
+            decorations: Decorations::empty(),
+            counts_item: true,
             anchors: Vec::new(),
         }
     }
 
     #[must_use]
     pub fn population(&self) -> u32 {
+        if !self.counts_item {
+            return 0;
+        }
         self.item.population()
+            + self.decorations.population()
             + self
                 .anchors
                 .iter()
