@@ -1,0 +1,14 @@
+{
+  "problem": "Supervisor dependency feature unification hid an undeclared rustix time feature from workspace gates. A standalone shipping host build failed E0433: could not find time in rustix.",
+  "change": "Use rustix::event::Timespec, supplied by the already declared event feature; no added dependency feature or syscall.",
+  "before_source_sha256": "64574a166e35b6c514f4585583945ce983d946dbd1cb413aa6fa5ea710d3a85f",
+  "after_source_sha256": "7917633e23e84293f8f0ef0105a4aadf0bc22ff2a2bb2b053ce7f63c93071f52",
+  "gates": "Standalone job-sys all-target clippy -D warnings; 29 touched-crate slow-feature tests; standalone agent/kinewright build; explicit Rust 1.99.1.",
+  "logs": {
+    "supervisor-standalone-clippy.log": "c5a56566b373a81abd752fc86d798716b302f8b1f0d144817c1bc4628445b898",
+    "supervisor-tests-isolation-fix.log": "1e8259f78202d75c496f5d0455836093bcba5c5dc9fbc8e897a3501c0572468e",
+    "ci-fix-host-build-199.log": "52bf71d781f760f25eeb7bb6ed8ef946e8ea02a112591e6255e904a6aa36186e"
+  },
+  "scope_inventory": "  UNIT LOAD ACTIVE SUB DESCRIPTION\n\n0 loaded units listed.\nTo show all installed unit files use 'systemctl list-unit-files'.\n",
+  "ci_gate": "Check job-sys alone before the Linux workspace build, without the supervisor feature graph."
+}

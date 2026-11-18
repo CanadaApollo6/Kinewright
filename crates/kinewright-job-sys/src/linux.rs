@@ -60,6 +60,12 @@ pub struct ProcessHandle {
     start: u64,
 }
 
+impl std::os::fd::AsFd for ProcessHandle {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+
 impl ProcessHandle {
     /// # Errors
     /// Refuses a missing/replaced process or unavailable pidfd support.
@@ -297,6 +303,66 @@ pub struct Cgroup {
     path: PathBuf,
     device: u64,
     inode: u64,
+    /// Witness seam: the link count a hosted kernel reports for a removed
+    /// cgroup, in place of the real one (see [`Cgroup::hosted_link_count`]).
+    #[cfg(feature = "slow-tests")]
+    links: Option<u64>,
+}
+
+/// What the retained `cgroup.events` descriptor answers.
+#[derive(Debug)]
+pub enum CgroupEvents {
+    /// The file reads; `populated 1` or `populated 0`.
+    Populated(bool),
+    /// ENODEV: the kernel destroyed the cgroup this descriptor belongs to.
+    Removed,
+    /// Any other failure, or a body without a `populated` line.
+    Unreadable(io::Error),
+}
+
+/// Both deletion readings of one retained cgroup, for proof and for
+/// diagnostics: the directory's link count and the events descriptor.
+#[derive(Debug)]
+pub struct DeletionReading {
+    pub links: io::Result<u64>,
+    pub events: CgroupEvents,
+}
+impl DeletionReading {
+    /// Deletion proof from the two readings.
+    ///
+    /// A readable `cgroup.events` is never deletion, whatever the link count
+    /// says. ENODEV from it is deletion, whatever the link count says: the
+    /// file is a core interface file opened through the retained directory,
+    /// so it belongs to the same cgroup instance the identity check names;
+    /// the kernel deactivates core files only when it destroys that cgroup;
+    /// destruction is refused while the cgroup has live members or children;
+    /// and nothing can join a destroyed cgroup. That is exactly what
+    /// `st_nlink == 0` proves on kernels that report it, and the hosted
+    /// kernels that keep a removed directory at two links still answer
+    /// ENODEV. Any other failure refuses proof.
+    ///
+    /// # Errors
+    /// Returns the events failure when neither reading decides.
+    pub fn deleted(self) -> io::Result<bool> {
+        match self.events {
+            CgroupEvents::Populated(_) => Ok(false),
+            CgroupEvents::Removed => Ok(true),
+            CgroupEvents::Unreadable(error) => Err(error),
+        }
+    }
+}
+impl std::fmt::Display for DeletionReading {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.links {
+            Ok(links) => write!(out, "nlink={links}")?,
+            Err(error) => write!(out, "nlink=<{error}>")?,
+        }
+        match &self.events {
+            CgroupEvents::Populated(populated) => write!(out, " events=populated:{populated}"),
+            CgroupEvents::Removed => write!(out, " events=ENODEV"),
+            CgroupEvents::Unreadable(error) => write!(out, " events=<{error}>"),
+        }
+    }
 }
 
 impl Cgroup {
@@ -361,7 +427,16 @@ impl Cgroup {
             path: path.to_owned(),
             device: stat.st_dev,
             inode: stat.st_ino,
+            #[cfg(feature = "slow-tests")]
+            links: None,
         })
+    }
+
+    /// Witness seam: report this many links for the retained directory,
+    /// as the hosted kernels do for a removed cgroup (they keep it at 2).
+    #[cfg(feature = "slow-tests")]
+    pub fn hosted_link_count(&mut self, links: u64) {
+        self.links = Some(links);
     }
 
     #[must_use]
@@ -379,28 +454,35 @@ impl Cgroup {
         self.kill.write_all(b"1")
     }
 
+    /// What the retained events descriptor answers now.
+    fn events(&self) -> CgroupEvents {
+        let read = (|| {
+            (&self.events).seek(SeekFrom::Start(0))?;
+            let mut text = String::new();
+            (&self.events).take(1024).read_to_string(&mut text)?;
+            Ok::<_, io::Error>(text)
+        })();
+        match read {
+            Ok(text) => match text
+                .lines()
+                .find_map(|line| line.strip_prefix("populated "))
+            {
+                Some("0") => CgroupEvents::Populated(false),
+                Some("1") => CgroupEvents::Populated(true),
+                _ => CgroupEvents::Unreadable(invalid("missing cgroup populated observation")),
+            },
+            Err(error) if error.raw_os_error() == Some(19) => CgroupEvents::Removed,
+            Err(error) => CgroupEvents::Unreadable(error),
+        }
+    }
+
     /// # Errors
     /// Missing/malformed observation is never emptiness.
     pub fn empty(&mut self) -> io::Result<bool> {
-        if let Err(error) = self.events.seek(SeekFrom::Start(0)) {
-            if error.raw_os_error() == Some(19) {
-                return self.kernel_deleted();
-            }
-            return Err(error);
-        }
-        let mut text = String::new();
-        match (&self.events).take(1024).read_to_string(&mut text) {
-            Ok(_) => {}
-            Err(error) if error.raw_os_error() == Some(19) => return self.kernel_deleted(),
-            Err(error) => return Err(error),
-        }
-        match text
-            .lines()
-            .find_map(|line| line.strip_prefix("populated "))
-        {
-            Some("0") => Ok(true),
-            Some("1") => Ok(false),
-            _ => Err(invalid("missing cgroup populated observation")),
+        match self.events() {
+            CgroupEvents::Populated(populated) => Ok(!populated),
+            CgroupEvents::Removed => self.kernel_deleted(),
+            CgroupEvents::Unreadable(error) => Err(error),
         }
     }
 
@@ -437,19 +519,24 @@ impl Cgroup {
 }
 
 impl Cgroup {
-    /// Certify the retained-inode deletion signal on this hierarchy and kernel.
+    /// Certify the retained-inode deletion signal on this hierarchy and kernel:
+    /// a live leaf is not deleted and the same leaf, removed, is, by either
+    /// accepted form (see [`DeletionReading::deleted`]).
     ///
     /// # Errors
-    /// Missing zero-link evidence refuses launch, with no alternate proof route.
+    /// A kernel that gives neither form refuses launch.
     pub fn require_deletion_signal(&self) -> io::Result<()> {
         let sample = (|| {
             let leaf = self.create_child("kernel-deletion-probe")?;
-            let live = leaf.link_count()?;
+            let live = leaf.deletion_reading()?;
+            let live_text = live.to_string();
+            let live_deleted = live.deleted();
             leaf.try_remove()?;
-            let removed = leaf.link_count()?;
-            if live == 0 || removed != 0 || !leaf.kernel_deleted()? {
+            let removed = leaf.deletion_reading()?;
+            let removed_text = removed.to_string();
+            if !matches!(live_deleted, Ok(false)) || !matches!(removed.deleted(), Ok(true)) {
                 return Err(invalid(&format!(
-                    "live_nlink={live}, deleted_nlink={removed}"
+                    "live {live_text}, deleted {removed_text}"
                 )));
             }
             Ok(())
@@ -459,22 +546,40 @@ impl Cgroup {
         })
     }
 
-    /// The retained cgroup inode is the only source of deletion evidence.
+    /// Deletion of this exact retained cgroup, proven through its retained
+    /// descriptors: the identity check, then [`DeletionReading::deleted`].
     /// Linux forbids live members/children at rmdir and joining a removed group.
     ///
     /// # Errors
-    /// Any failed stat or changed native identity refuses proof.
+    /// Any failed stat, changed native identity or unreadable events
+    /// descriptor refuses proof.
     pub fn kernel_deleted(&self) -> io::Result<bool> {
+        self.deletion_reading()?.deleted()
+    }
+
+    /// The link count and events answer of this retained cgroup, after the
+    /// identity check.
+    ///
+    /// # Errors
+    /// Any failed stat or changed native identity.
+    pub fn deletion_reading(&self) -> io::Result<DeletionReading> {
         let stat = rustix::fs::fstat(&self.directory)?;
         if (stat.st_dev, stat.st_ino) != (self.device, self.inode) {
             return Err(invalid("retained cgroup identity changed"));
         }
-        Ok(stat.st_nlink == 0)
+        Ok(DeletionReading {
+            links: self.link_count(),
+            events: self.events(),
+        })
     }
 
     /// # Errors
     /// Returns a failed native stat, never an inferred link count.
     pub fn link_count(&self) -> io::Result<u64> {
+        #[cfg(feature = "slow-tests")]
+        if let Some(links) = self.links {
+            return Ok(links);
+        }
         Ok(rustix::fs::fstat(&self.directory)?.st_nlink)
     }
 
@@ -590,5 +695,50 @@ mod tests {
         });
         assert!(removed);
         assert!(!found.unwrap_or_else(|e| panic!("C6_WALK_REFUSED_A_REMOVED_CGROUP: {e}")));
+    }
+}
+
+#[cfg(test)]
+mod deletion_proof_tests {
+    use super::{CgroupEvents, DeletionReading};
+    use std::io;
+
+    fn reading(links: u64, events: CgroupEvents) -> DeletionReading {
+        DeletionReading {
+            links: Ok(links),
+            events,
+        }
+    }
+
+    #[test]
+    fn enodev_proves_deletion_when_the_link_count_stays_two() {
+        // The hosted kernels (6.17 azure, 7.0 aws) keep a removed cgroup's
+        // retained directory at two links.
+        assert!(reading(2, CgroupEvents::Removed).deleted().unwrap());
+        assert!(reading(0, CgroupEvents::Removed).deleted().unwrap());
+    }
+
+    #[test]
+    fn a_readable_events_file_is_never_deletion_whatever_the_link_count() {
+        for populated in [false, true] {
+            assert!(
+                !reading(0, CgroupEvents::Populated(populated))
+                    .deleted()
+                    .unwrap()
+            );
+            assert!(
+                !reading(2, CgroupEvents::Populated(populated))
+                    .deleted()
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn any_other_events_failure_refuses_proof() {
+        for links in [0, 2] {
+            let refused = reading(links, CgroupEvents::Unreadable(io::Error::other("EIO")));
+            assert!(refused.deleted().is_err());
+        }
     }
 }

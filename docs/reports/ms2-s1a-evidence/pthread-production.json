@@ -1,0 +1,22 @@
+{
+  "command": "prebuilt native pthread fixture under unchanged KILL_PROCESS filter",
+  "binary": "/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/target/debug/deps/kinewright_job_sys-5241270e6702da92",
+  "sha256": "4c6d26e673cbdd7465983cddafb294d5c66067797a626ca15e10c51678217148",
+  "returncode": -31,
+  "stdout": "\nrunning 1 test\n",
+  "stderr": "",
+  "argv": [
+    "nice",
+    "-n",
+    "10",
+    "/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/target/debug/deps/kinewright_job_sys-5241270e6702da92",
+    "--exact",
+    "media_boundary::tests::fixture",
+    "--nocapture"
+  ],
+  "environment": {
+    "CARGO_BUILD_JOBS": "4",
+    "RUST_TEST_THREADS": "4",
+    "KW_MEDIA_ATTACK": "pthread"
+  }
+}

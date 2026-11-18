@@ -422,7 +422,7 @@ impl CertifiedMediaInput {
         interpretation: MediaInterpretation,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self, BundleError> {
-        let probe = source.probe(cancel).map_err(io_error)?;
+        let probe = crate::media_sandbox::probe(&source, cancel)?;
         if !interpretation.matches_probe(&probe)? {
             return Err(BundleError::Corrupt("probe/interpretation conflict".into()));
         }
@@ -463,7 +463,7 @@ impl CertifiedMediaInput {
         &self,
         cancel: Arc<AtomicBool>,
     ) -> Result<kinewright_media::owned_io::CertifiedProbe, BundleError> {
-        let result = self.source.probe(cancel).map_err(io_error)?;
+        let result = crate::media_sandbox::probe(&self.source, cancel)?;
         if !self.interpretation.matches_probe(&result)? {
             return Err(BundleError::Corrupt("probe/interpretation conflict".into()));
         }
@@ -592,7 +592,7 @@ impl ProjectStore {
             Arc::new(AtomicBool::new(false)),
         )?;
         let cancel = Arc::new(AtomicBool::new(false));
-        let probe = certificate.probe(Arc::clone(&cancel)).map_err(io_error)?;
+        let probe = crate::media_sandbox::probe(&certificate, Arc::clone(&cancel))?;
         let probed_color = probe.color_description.clone();
         let asset = MediaAsset {
             id,

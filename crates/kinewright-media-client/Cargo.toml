@@ -1,0 +1,33 @@
+[package]
+name = "kinewright-media-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+slow-tests = ["kinewright-job-sys/slow-tests"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+kinewright-core = { path = "../kinewright-core" }
+kinewright-media-ipc = { path = "../kinewright-media-ipc" }
+kinewright-job-sys.workspace = true
+rustix = { version = "=1.1.4", features = ["pipe", "event", "thread", "process", "fs"] }
+
+# MS2 native-test diagnostics (`kinewright-job-sys/test_support/ms2_diag.rs`):
+# the kernel's Landlock ABI, probed with rulesets that are never enforced.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+landlock.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+assert_is_empty = "allow"
+
+[[example]]
+name = "probe_memory"
+path = "examples/probe_memory.rs"
+required-features = ["slow-tests"]

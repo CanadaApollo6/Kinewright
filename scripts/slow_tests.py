@@ -393,8 +393,9 @@ def lint() -> int:
         problems.append(f"marked slow for {scope} but not in {MANIFEST.relative_to(ROOT)}: {name} ({file})")
     for crate in sorted({crate_of(f) for _, _, f, _ in entries} | {crate_of(f) for f, _, _ in marked}):
         manifest_toml = (ROOT / "crates" / crate / "Cargo.toml").read_text(encoding="utf-8")
-        if not re.search(r"^slow-tests\s*=\s*\[\s*\]", manifest_toml, re.M):
-            problems.append(f"crates/{crate}/Cargo.toml has no `slow-tests = []` feature")
+        # The feature may forward to a dependency's slow-tier witness seams.
+        if not re.search(r'^slow-tests\s*=\s*\[(\s*"[\w-]+/slow-tests"\s*,?)*\s*\]', manifest_toml, re.M):
+            problems.append(f"crates/{crate}/Cargo.toml has no `slow-tests` feature")
     for file, name, _ in sorted(marked):
         text = (ROOT / file).read_text(encoding="utf-8")
         if not re.search(rf"\bfn\s+{re.escape(name)}\b|\b{re.escape(name)}\s*=>", text):
@@ -402,10 +403,16 @@ def lint() -> int:
     lint_ignored(problems, {(b, p) for b, p, _, _ in entries})
     guardian_source = "crates/kinewright-agent/tests/ja_s4_guardian.rs"
     guardian_path = ROOT / guardian_source
-    guarded = set(re.findall(r'equipped_session\("(s4_\w+)"\)', guardian_path.read_text())) if guardian_path.is_file() else set()
+    guarded = set(re.findall(r'(?:equipped|migration)_session\("(s4_\w+)"\)', guardian_path.read_text())) if guardian_path.is_file() else set()
     listed_guardians = {p for b, p, f, scope in entries if b == "ja_s4_guardian" and f == guardian_source and scope.startswith("linux")}
     for name in sorted(guarded - listed_guardians):
         problems.append(f"equipped-session skip has no slow-tier accounting: {name}")
+    ms2_source = "crates/kinewright-media-supervisor/tests/scope_native.rs"
+    ms2_path = ROOT / ms2_source
+    ms2_guarded = set(re.findall(r'primary_supervisor\(\s*"(native_\w+)"\s*,?\s*\)', ms2_path.read_text())) if ms2_path.is_file() else set()
+    ms2_listed = {p for b, p, f, scope in entries if b == "scope_native" and f == ms2_source and scope == "linux-only"}
+    for name in sorted(ms2_guarded - ms2_listed):
+        problems.append(f"MS2 availability skip has no slow-tier accounting: {name}")
     if problems:
         print("slow-test manifest, ignored-test allowlist and markers disagree:")
         for problem in problems:
@@ -414,7 +421,7 @@ def lint() -> int:
     print(
         f"slow-test manifest and markers agree: {len(entries)} tests, "
         f"features {feature_list(entries)}; {len(read_ignored())} allowlist entries well-formed; "
-        f"{len(guarded)} equipped-session skip sites counted"
+        f"{len(guarded) + len(ms2_guarded)} equipped-session skip sites counted"
     )
     return 0
 
@@ -598,6 +605,9 @@ def verify_slow(log: str, os_name: str | None = None) -> int:
     expected = {(b, p) for b, p, _, scope in read_manifest() if not scope.endswith("-only") or scope == (os_name or host_os()) + "-only"}
     skips = re.findall(r"C2_NATIVE_NOT_RUN test=(s4_\w+) reason=([^\r\n]+)", log)
     skipped = {("ja_s4_guardian", name) for name, _ in skips}
+    ms2_skips = re.findall(r"MS2_NATIVE_NOT_RUN binary=(\w+) test=(\w+) reason=([^\r\n]+)", log)
+    ms2_skipped = {(binary, name) for binary, name, _ in ms2_skips}
+    skipped |= ms2_skipped
     outcomes = {}
     for b, p, outcome in rows:
         outcomes.setdefault((b, p), []).append(outcome)
@@ -610,8 +620,10 @@ def verify_slow(log: str, os_name: str | None = None) -> int:
         if len(seen) != 1
     ]
     problems += [f"unaccounted equipped-session skip: {b} {p}" for b, p in sorted(skipped - expected)]
-    if log.count("C2_NATIVE_NOT_RUN") != len(skips) or len(skips) != len(skipped):
+    if log.count("C2_NATIVE_NOT_RUN") != len(skips) or len(skips) != len({name for name, _ in skips}):
         problems.append("malformed or duplicate equipped-session skip marker")
+    if log.count("MS2_NATIVE_NOT_RUN") != len(ms2_skips) or len(ms2_skips) != len(ms2_skipped):
+        problems.append("malformed or duplicate MS2 availability skip marker")
     if problems:
         print("slow tier and manifest disagree:")
         print("\n".join("  " + p for p in problems))
@@ -667,7 +679,9 @@ def main(argv: list[str]) -> int:
             sys.exit("--os must be linux or windows")
         return verify_fast(log, os_name)
     if command == "fast":
-        code, log = run_cargo(["cargo", "test", "--workspace", *extra])
+        # --no-fail-fast: one run reports every failing test binary, not
+        # only the first.
+        code, log = run_cargo(["cargo", "test", "--workspace", "--no-fail-fast", *extra])
         if code != 0:
             print(f"cargo test --workspace exited {code}")
             return code
@@ -676,7 +690,7 @@ def main(argv: list[str]) -> int:
         entries = read_manifest()
         names = [path for _, path, _, _ in entries]
         cargo = [
-            "cargo", "test", "--workspace",
+            "cargo", "test", "--workspace", "--no-fail-fast",
             "--features", feature_list(entries),
             "--lib", "--bins", "--tests",
             *extra,

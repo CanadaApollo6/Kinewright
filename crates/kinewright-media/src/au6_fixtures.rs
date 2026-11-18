@@ -2199,15 +2199,15 @@ fn au6_c_the_learned_profile_holds_its_pin_and_its_bound() {
     assert_eq!(learned.bands, AU6_C_LEARNED_PROFILE_TENTH_DB);
     let mut worst_excess = i32::MIN;
     let mut worst_band = 0;
-    for band in 0..NOISE_PROFILE_BAND_COUNT {
+    for (band, &measured) in learned.bands.iter().enumerate() {
         let bound = au6_c_analytic_mean_band_tenth_db(band);
-        let excess = learned.bands[band] - bound;
+        let excess = measured - bound;
         if excess > worst_excess {
             worst_excess = excess;
             worst_band = band;
         }
         assert!(
-            learned.bands[band] <= bound + AU6_PROFILE_LEAKAGE_ALLOWANCE_TENTH_DB,
+            measured <= bound + AU6_PROFILE_LEAKAGE_ALLOWANCE_TENTH_DB,
             "band {band} exceeds the Hann-main-lobe bound"
         );
     }

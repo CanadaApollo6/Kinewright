@@ -372,6 +372,7 @@ mod tests {
     }
     #[test]
     fn s4_unshare_failure_names_flag_and_errno() {
+        let _deadline = crate::deadline::test();
         let error = std::thread::spawn(|| {
             super::unshare_payload_namespace(rustix::thread::UnshareFlags::NEWUSER).unwrap_err()
         })

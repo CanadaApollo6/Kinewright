@@ -1,4 +1,9 @@
 //! C8 production host routes. Native durable success is Linux-only.
+#[path = "../../kinewright-job-sys/test_support/deadline.rs"]
+mod deadline;
+#[cfg(target_os = "linux")]
+#[path = "../../kinewright-job-sys/test_support/ms2_diag.rs"]
+mod ms2_diag;
 use kinewright_agent::{
     ScriptedCall, ScriptedTurn,
     writer_host::{
@@ -125,15 +130,19 @@ fn import_known_wav(
     Vec<u8>,
 ) {
     let bytes = known_wav_f32(tone);
-    let (asset, entry, pins) = store
-        .import_media(
-            &mut bytes.as_slice(),
-            bytes.len() as u64,
-            kinewright_core::AssetId(id),
-            locator,
-            None,
-        )
-        .unwrap();
+    // Import probes the media in the sandbox: on an unexpected failure or the
+    // test deadline, the samples name what the helper was doing.
+    ms2_diag::install(kinewright_media_client::diagnostics);
+    let sampler = ms2_diag::sample("ja_s2_host import_known_wav");
+    let imported = store.import_media(
+        &mut bytes.as_slice(),
+        bytes.len() as u64,
+        kinewright_core::AssetId(id),
+        locator,
+        None,
+    );
+    sampler.finish(imported.is_err());
+    let (asset, entry, pins) = imported.unwrap();
     (asset, entry, pins, bytes)
 }
 fn roots(path: &Path) -> SessionRoots {
@@ -152,6 +161,7 @@ fn config(path: &Path, named: Option<PathBuf>) -> HostConfig {
         origin: HostOrigin::Headless,
     }
 }
+#[track_caller]
 fn successful(
     client: &HostClient,
     command: HostCommand,
@@ -2007,6 +2017,10 @@ fn g05l_input_context_is_admitted_before_local_acceptance() {
 
 #[path = "support/ja_s2_c10.rs"]
 mod c10;
+/// Outer bound for the slow cases that reach the MS2 probe; locally they
+/// take under 21 s (all three together, 2026-11-17).
+const MS2_PROBE_TEST_LIMIT: Duration = Duration::from_secs(300);
+
 #[path = "support/ja_s2_c11.rs"]
 mod c11;
 
@@ -2029,6 +2043,12 @@ fn rescue_and_switch_share_one_owner_after_restart() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn g05a_switch_reply_drop_and_participant_death() {
+    // These cases import and reopen owned media, so they reach the MS2 probe:
+    // a stalled probe fails here by name, not at the job timeout.
+    let _deadline = deadline::start(
+        "ja_s2_host g05a_switch_reply_drop_and_participant_death (MS2 probe)",
+        MS2_PROBE_TEST_LIMIT,
+    );
     #[cfg(target_os = "linux")]
     c11::linux::matrix();
     #[cfg(not(target_os = "linux"))]
@@ -2056,6 +2076,12 @@ fn g05l_fast_restart_shared_floor_and_close_reply_loss() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn g05l_host_death_recovers_absent_and_committed_drag_suffix() {
+    // These cases import and reopen owned media, so they reach the MS2 probe:
+    // a stalled probe fails here by name, not at the job timeout.
+    let _deadline = deadline::start(
+        "ja_s2_host g05l_host_death_recovers_absent_and_committed_drag_suffix (MS2 probe)",
+        MS2_PROBE_TEST_LIMIT,
+    );
     #[cfg(target_os = "linux")]
     {
         for suffix in 0..3 {
@@ -2075,6 +2101,12 @@ fn g05l_host_death_recovers_absent_and_committed_drag_suffix() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn g05l_shared_floor_and_recovery_close_reply_drop() {
+    // These cases import and reopen owned media, so they reach the MS2 probe:
+    // a stalled probe fails here by name, not at the job timeout.
+    let _deadline = deadline::start(
+        "ja_s2_host g05l_shared_floor_and_recovery_close_reply_drop (MS2 probe)",
+        MS2_PROBE_TEST_LIMIT,
+    );
     #[cfg(target_os = "linux")]
     for suffix in 0..3 {
         for committed in [false, true] {

@@ -25,6 +25,7 @@ bench = false
 
 [dependencies]
 getrandom.workspace = true
+kinewright-media-input = { path = "../kinewright-media-input" }
 kinewright-hash = { path = "../kinewright-hash" }
 ab_glyph.workspace = true
 cpal.workspace = true
@@ -42,6 +43,7 @@ serde_json.workspace = true
 wgpu.workspace = true
 
 [dev-dependencies]
+kinewright-media-input = { path = "../kinewright-media-input", features = ["test-util"] }
 serde_json.workspace = true
 # The `cfg(test)` fixture modules (`cc7_fixtures`, `au6_fixtures`, ...) read
 # both, so testing this crate turns both gates on without a release build

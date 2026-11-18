@@ -1,0 +1,644 @@
+kinewright-media-supervisor v0.1.0 ($WORKSPACE/crates/kinewright-media-supervisor)
+├── kinewright-job-sys feature "default"
+│   └── kinewright-job-sys v0.1.0 ($WORKSPACE/crates/kinewright-job-sys)
+│       ├── seccompiler v0.5.0
+│       │   └── libc feature "default"
+│       │       ├── libc v0.2.189
+│       │       └── libc feature "std"
+│       │           └── libc v0.2.189
+│       ├── landlock feature "default"
+│       │   └── landlock v0.4.7
+│       │       ├── enumflags2 feature "default"
+│       │       │   └── enumflags2 v0.7.12
+│       │       │       ├── serde v1.0.229
+│       │       │       │   ├── serde_core feature "result"
+│       │       │       │   │   └── serde_core v1.0.229
+│       │       │       │   └── serde_derive feature "default"
+│       │       │       │       └── serde_derive v1.0.229 (proc-macro)
+│       │       │       │           ├── proc-macro2 feature "proc-macro"
+│       │       │       │           │   └── proc-macro2 v1.0.107
+│       │       │       │           │       └── unicode-ident feature "default"
+│       │       │       │           │           └── unicode-ident v1.0.24
+│       │       │       │           ├── quote feature "proc-macro"
+│       │       │       │           │   ├── quote v1.0.47
+│       │       │       │           │   │   └── proc-macro2 v1.0.107 (*)
+│       │       │       │           │   └── proc-macro2 feature "proc-macro" (*)
+│       │       │       │           ├── syn feature "clone-impls"
+│       │       │       │           │   └── syn v3.0.3
+│       │       │       │           │       ├── proc-macro2 v1.0.107 (*)
+│       │       │       │           │       ├── quote v1.0.47 (*)
+│       │       │       │           │       └── unicode-ident feature "default" (*)
+│       │       │       │           ├── syn feature "derive"
+│       │       │       │           │   └── syn v3.0.3 (*)
+│       │       │       │           ├── syn feature "parsing"
+│       │       │       │           │   └── syn v3.0.3 (*)
+│       │       │       │           ├── syn feature "printing"
+│       │       │       │           │   └── syn v3.0.3 (*)
+│       │       │       │           └── syn feature "proc-macro"
+│       │       │       │               ├── syn v3.0.3 (*)
+│       │       │       │               ├── proc-macro2 feature "proc-macro" (*)
+│       │       │       │               └── quote feature "proc-macro" (*)
+│       │       │       └── enumflags2_derive feature "default"
+│       │       │           └── enumflags2_derive v0.7.12 (proc-macro)
+│       │       │               ├── proc-macro2 feature "default"
+│       │       │               │   ├── proc-macro2 v1.0.107 (*)
+│       │       │               │   └── proc-macro2 feature "proc-macro" (*)
+│       │       │               ├── quote feature "default"
+│       │       │               │   ├── quote v1.0.47 (*)
+│       │       │               │   └── quote feature "proc-macro" (*)
+│       │       │               ├── syn feature "derive"
+│       │       │               │   └── syn v2.0.119
+│       │       │               │       ├── proc-macro2 v1.0.107 (*)
+│       │       │               │       ├── quote v1.0.47 (*)
+│       │       │               │       └── unicode-ident feature "default" (*)
+│       │       │               ├── syn feature "parsing"
+│       │       │               │   └── syn v2.0.119 (*)
+│       │       │               ├── syn feature "printing"
+│       │       │               │   └── syn v2.0.119 (*)
+│       │       │               └── syn feature "proc-macro"
+│       │       │                   ├── syn v2.0.119 (*)
+│       │       │                   ├── proc-macro2 feature "proc-macro" (*)
+│       │       │                   └── quote feature "proc-macro" (*)
+│       │       ├── libc feature "default" (*)
+│       │       └── thiserror feature "default"
+│       │           ├── thiserror v2.0.19
+│       │           │   └── thiserror-impl feature "default"
+│       │           │       └── thiserror-impl v2.0.19 (proc-macro)
+│       │           │           ├── proc-macro2 feature "default" (*)
+│       │           │           ├── quote feature "default" (*)
+│       │           │           └── syn feature "default"
+│       │           │               ├── syn v3.0.3 (*)
+│       │           │               ├── syn feature "clone-impls" (*)
+│       │           │               ├── syn feature "derive" (*)
+│       │           │               ├── syn feature "parsing" (*)
+│       │           │               ├── syn feature "printing" (*)
+│       │           │               └── syn feature "proc-macro" (*)
+│       │           └── thiserror feature "std"
+│       │               └── thiserror v2.0.19 (*)
+│       ├── libc feature "default" (*)
+│       ├── rustix feature "default"
+│       │   ├── rustix v1.1.4
+│       │   │   ├── bitflags v2.13.1
+│       │   │   ├── linux-raw-sys feature "auxvec"
+│       │   │   │   └── linux-raw-sys v0.12.1
+│       │   │   ├── linux-raw-sys feature "elf"
+│       │   │   │   └── linux-raw-sys v0.12.1
+│       │   │   ├── linux-raw-sys feature "errno"
+│       │   │   │   └── linux-raw-sys v0.12.1
+│       │   │   ├── linux-raw-sys feature "general"
+│       │   │   │   └── linux-raw-sys v0.12.1
+│       │   │   ├── linux-raw-sys feature "ioctl"
+│       │   │   │   └── linux-raw-sys v0.12.1
+│       │   │   └── linux-raw-sys feature "no_std"
+│       │   │       └── linux-raw-sys v0.12.1
+│       │   └── rustix feature "std"
+│       │       ├── rustix v1.1.4 (*)
+│       │       ├── rustix feature "alloc"
+│       │       │   └── rustix v1.1.4 (*)
+│       │       └── bitflags feature "std"
+│       │           └── bitflags v2.13.1
+│       ├── rustix feature "event"
+│       │   └── rustix v1.1.4 (*)
+│       ├── rustix feature "fs"
+│       │   └── rustix v1.1.4 (*)
+│       ├── rustix feature "linux_latest"
+│       │   ├── rustix v1.1.4 (*)
+│       │   └── rustix feature "linux_5_11"
+│       │       ├── rustix v1.1.4 (*)
+│       │       └── rustix feature "linux_5_1"
+│       │           ├── rustix v1.1.4 (*)
+│       │           └── rustix feature "linux_4_11"
+│       │               └── rustix v1.1.4 (*)
+│       ├── rustix feature "mount"
+│       │   └── rustix v1.1.4 (*)
+│       ├── rustix feature "net"
+│       │   ├── rustix v1.1.4 (*)
+│       │   ├── linux-raw-sys feature "if_ether"
+│       │   │   └── linux-raw-sys v0.12.1
+│       │   ├── linux-raw-sys feature "net"
+│       │   │   └── linux-raw-sys v0.12.1
+│       │   ├── linux-raw-sys feature "netlink"
+│       │   │   └── linux-raw-sys v0.12.1
+│       │   └── linux-raw-sys feature "xdp"
+│       │       └── linux-raw-sys v0.12.1
+│       ├── rustix feature "pipe"
+│       │   └── rustix v1.1.4 (*)
+│       ├── rustix feature "process"
+│       │   ├── rustix v1.1.4 (*)
+│       │   └── linux-raw-sys feature "prctl"
+│       │       └── linux-raw-sys v0.12.1
+│       ├── rustix feature "stdio"
+│       │   └── rustix v1.1.4 (*)
+│       └── rustix feature "thread"
+│           ├── rustix v1.1.4 (*)
+│           └── linux-raw-sys feature "prctl" (*)
+├── kinewright-media-ipc feature "default"
+│   └── kinewright-media-ipc v0.1.0 ($WORKSPACE/crates/kinewright-media-ipc)
+│       ├── serde feature "default"
+│       │   ├── serde v1.0.229 (*)
+│       │   └── serde feature "std"
+│       │       ├── serde v1.0.229 (*)
+│       │       └── serde_core feature "std"
+│       │           └── serde_core v1.0.229
+│       ├── serde feature "derive"
+│       │   ├── serde v1.0.229 (*)
+│       │   └── serde feature "serde_derive"
+│       │       └── serde v1.0.229 (*)
+│       ├── serde feature "rc"
+│       │   ├── serde v1.0.229 (*)
+│       │   └── serde_core feature "rc"
+│       │       └── serde_core v1.0.229
+│       ├── kinewright-core feature "default"
+│       │   └── kinewright-core v0.1.0 ($WORKSPACE/crates/kinewright-core)
+│       │       ├── serde feature "default" (*)
+│       │       ├── serde feature "derive" (*)
+│       │       ├── serde feature "rc" (*)
+│       │       ├── thiserror feature "default" (*)
+│       │       ├── ab_glyph feature "default"
+│       │       │   ├── ab_glyph v0.2.32
+│       │       │   │   ├── ab_glyph_rasterizer v0.1.10
+│       │       │   │   └── owned_ttf_parser v0.25.1
+│       │       │   │       └── ttf-parser v0.25.1
+│       │       │   ├── ab_glyph feature "gvar-alloc"
+│       │       │   │   ├── ab_glyph v0.2.32 (*)
+│       │       │   │   └── owned_ttf_parser feature "gvar-alloc"
+│       │       │   │       ├── owned_ttf_parser v0.25.1 (*)
+│       │       │   │       ├── owned_ttf_parser feature "std"
+│       │       │   │       │   ├── owned_ttf_parser v0.25.1 (*)
+│       │       │   │       │   └── ttf-parser feature "std"
+│       │       │   │       │       └── ttf-parser v0.25.1
+│       │       │   │       └── ttf-parser feature "gvar-alloc"
+│       │       │   │           ├── ttf-parser v0.25.1
+│       │       │   │           └── ttf-parser feature "std" (*)
+│       │       │   ├── ab_glyph feature "std"
+│       │       │   │   ├── ab_glyph v0.2.32 (*)
+│       │       │   │   ├── ab_glyph_rasterizer feature "default"
+│       │       │   │   │   ├── ab_glyph_rasterizer v0.1.10
+│       │       │   │   │   └── ab_glyph_rasterizer feature "std"
+│       │       │   │   │       └── ab_glyph_rasterizer v0.1.10
+│       │       │   │   └── owned_ttf_parser feature "default"
+│       │       │   │       ├── owned_ttf_parser v0.25.1 (*)
+│       │       │   │       ├── owned_ttf_parser feature "apple-layout"
+│       │       │   │       │   ├── owned_ttf_parser v0.25.1 (*)
+│       │       │   │       │   └── ttf-parser feature "apple-layout"
+│       │       │   │       │       └── ttf-parser v0.25.1
+│       │       │   │       ├── owned_ttf_parser feature "glyph-names"
+│       │       │   │       │   ├── owned_ttf_parser v0.25.1 (*)
+│       │       │   │       │   └── ttf-parser feature "glyph-names"
+│       │       │   │       │       └── ttf-parser v0.25.1
+│       │       │   │       ├── owned_ttf_parser feature "opentype-layout"
+│       │       │   │       │   ├── owned_ttf_parser v0.25.1 (*)
+│       │       │   │       │   └── ttf-parser feature "opentype-layout"
+│       │       │   │       │       └── ttf-parser v0.25.1
+│       │       │   │       ├── owned_ttf_parser feature "std" (*)
+│       │       │   │       └── owned_ttf_parser feature "variable-fonts"
+│       │       │   │           ├── owned_ttf_parser v0.25.1 (*)
+│       │       │   │           └── ttf-parser feature "variable-fonts"
+│       │       │   │               └── ttf-parser v0.25.1
+│       │       │   └── ab_glyph feature "variable-fonts"
+│       │       │       ├── ab_glyph v0.2.32 (*)
+│       │       │       └── owned_ttf_parser feature "variable-fonts" (*)
+│       │       ├── crossbeam-channel feature "default"
+│       │       │   ├── crossbeam-channel v0.5.16
+│       │       │   │   └── crossbeam-utils v0.8.22
+│       │       │   └── crossbeam-channel feature "std"
+│       │       │       ├── crossbeam-channel v0.5.16 (*)
+│       │       │       └── crossbeam-utils feature "std"
+│       │       │           └── crossbeam-utils v0.8.22
+│       │       ├── kinewright-hash feature "default"
+│       │       │   └── kinewright-hash v0.1.0 ($WORKSPACE/crates/kinewright-hash)
+│       │       ├── schemars feature "default"
+│       │       │   ├── schemars v1.2.2
+│       │       │   │   ├── serde feature "alloc"
+│       │       │   │   │   ├── serde v1.0.229 (*)
+│       │       │   │   │   └── serde_core feature "alloc"
+│       │       │   │   │       └── serde_core v1.0.229
+│       │       │   │   ├── dyn-clone feature "default"
+│       │       │   │   │   └── dyn-clone v1.0.20
+│       │       │   │   ├── ref-cast feature "default"
+│       │       │   │   │   └── ref-cast v1.0.26
+│       │       │   │   │       └── ref-cast-impl feature "default"
+│       │       │   │   │           └── ref-cast-impl v1.0.26 (proc-macro)
+│       │       │   │   │               ├── proc-macro2 feature "default" (*)
+│       │       │   │   │               ├── quote feature "default" (*)
+│       │       │   │   │               └── syn feature "default" (*)
+│       │       │   │   ├── schemars_derive feature "default"
+│       │       │   │   │   └── schemars_derive v1.2.2 (proc-macro)
+│       │       │   │   │       ├── proc-macro2 feature "default" (*)
+│       │       │   │   │       ├── quote feature "default" (*)
+│       │       │   │   │       ├── syn feature "default" (*)
+│       │       │   │   │       └── serde_derive_internals feature "default"
+│       │       │   │   │           └── serde_derive_internals v0.30.0
+│       │       │   │   │               ├── proc-macro2 v1.0.107 (*)
+│       │       │   │   │               ├── quote v1.0.47 (*)
+│       │       │   │   │               ├── syn feature "clone-impls" (*)
+│       │       │   │   │               ├── syn feature "derive" (*)
+│       │       │   │   │               ├── syn feature "parsing" (*)
+│       │       │   │   │               └── syn feature "printing" (*)
+│       │       │   │   └── serde_json feature "alloc"
+│       │       │   │       ├── serde_json v1.0.151
+│       │       │   │       │   ├── memchr v2.8.3
+│       │       │   │       │   ├── serde_core v1.0.229
+│       │       │   │       │   ├── itoa feature "default"
+│       │       │   │       │   │   └── itoa v1.0.18
+│       │       │   │       │   └── zmij feature "default"
+│       │       │   │       │       └── zmij v1.0.23
+│       │       │   │       └── serde_core feature "alloc" (*)
+│       │       │   ├── schemars feature "derive"
+│       │       │   │   ├── schemars v1.2.2 (*)
+│       │       │   │   └── schemars feature "schemars_derive"
+│       │       │   │       └── schemars v1.2.2 (*)
+│       │       │   └── schemars feature "std"
+│       │       │       └── schemars v1.2.2 (*)
+│       │       ├── serde_json feature "default"
+│       │       │   ├── serde_json v1.0.151 (*)
+│       │       │   └── serde_json feature "std"
+│       │       │       ├── serde_json v1.0.151 (*)
+│       │       │       ├── serde_core feature "std" (*)
+│       │       │       └── memchr feature "std"
+│       │       │           ├── memchr v2.8.3
+│       │       │           └── memchr feature "alloc"
+│       │       │               └── memchr v2.8.3
+│       │       └── serde_json feature "raw_value"
+│       │           └── serde_json v1.0.151 (*)
+│       ├── serde_json feature "default" (*)
+│       └── serde_json feature "raw_value" (*)
+├── zbus feature "async-io"
+│   ├── zbus v5.19.0
+│   │   ├── libc v0.2.189
+│   │   ├── enumflags2 feature "default" (*)
+│   │   ├── enumflags2 feature "serde"
+│   │   │   └── enumflags2 v0.7.12 (*)
+│   │   ├── serde feature "default" (*)
+│   │   ├── serde feature "derive" (*)
+│   │   ├── rustix feature "net" (*)
+│   │   ├── rustix feature "process" (*)
+│   │   ├── rustix feature "std" (*)
+│   │   ├── async-broadcast feature "default"
+│   │   │   └── async-broadcast v0.7.2
+│   │   │       ├── event-listener feature "default"
+│   │   │       │   ├── event-listener v5.4.2
+│   │   │       │   │   ├── parking feature "default"
+│   │   │       │   │   │   └── parking v2.2.1
+│   │   │       │   │   └── pin-project-lite feature "default"
+│   │   │       │   │       └── pin-project-lite v0.2.17
+│   │   │       │   └── event-listener feature "std"
+│   │   │       │       ├── event-listener v5.4.2 (*)
+│   │   │       │       └── event-listener feature "parking"
+│   │   │       │           └── event-listener v5.4.2 (*)
+│   │   │       ├── pin-project-lite feature "default" (*)
+│   │   │       ├── event-listener-strategy feature "default"
+│   │   │       │   ├── event-listener-strategy v0.5.4
+│   │   │       │   │   ├── event-listener v5.4.2 (*)
+│   │   │       │   │   └── pin-project-lite feature "default" (*)
+│   │   │       │   └── event-listener-strategy feature "std"
+│   │   │       │       ├── event-listener-strategy v0.5.4 (*)
+│   │   │       │       └── event-listener feature "std" (*)
+│   │   │       └── futures-core feature "default"
+│   │   │           ├── futures-core v0.3.33
+│   │   │           └── futures-core feature "std"
+│   │   │               ├── futures-core v0.3.33
+│   │   │               └── futures-core feature "alloc"
+│   │   │                   └── futures-core v0.3.33
+│   │   ├── event-listener feature "default" (*)
+│   │   ├── futures-core feature "default" (*)
+│   │   ├── async-executor feature "default"
+│   │   │   └── async-executor v1.14.0
+│   │   │       ├── futures-lite v2.6.1
+│   │   │       │   ├── fastrand v2.5.0
+│   │   │       │   ├── futures-core v0.3.33
+│   │   │       │   ├── parking feature "default" (*)
+│   │   │       │   ├── pin-project-lite feature "default" (*)
+│   │   │       │   └── futures-io feature "default"
+│   │   │       │       ├── futures-io v0.3.33
+│   │   │       │       └── futures-io feature "std"
+│   │   │       │           └── futures-io v0.3.33
+│   │   │       ├── pin-project-lite feature "default" (*)
+│   │   │       ├── async-task feature "default"
+│   │   │       │   ├── async-task v4.7.1
+│   │   │       │   └── async-task feature "std"
+│   │   │       │       └── async-task v4.7.1
+│   │   │       ├── concurrent-queue feature "default"
+│   │   │       │   ├── concurrent-queue v2.5.0
+│   │   │       │   │   └── crossbeam-utils v0.8.22
+│   │   │       │   └── concurrent-queue feature "std"
+│   │   │       │       └── concurrent-queue v2.5.0 (*)
+│   │   │       ├── fastrand feature "default"
+│   │   │       │   ├── fastrand v2.5.0
+│   │   │       │   └── fastrand feature "std"
+│   │   │       │       ├── fastrand v2.5.0
+│   │   │       │       └── fastrand feature "alloc"
+│   │   │       │           └── fastrand v2.5.0
+│   │   │       └── slab feature "default"
+│   │   │           ├── slab v0.4.12
+│   │   │           └── slab feature "std"
+│   │   │               └── slab v0.4.12
+│   │   ├── async-task feature "default" (*)
+│   │   ├── futures-lite feature "std"
+│   │   │   ├── futures-lite v2.6.1 (*)
+│   │   │   ├── fastrand feature "std" (*)
+│   │   │   ├── futures-lite feature "alloc"
+│   │   │   │   └── futures-lite v2.6.1 (*)
+│   │   │   ├── futures-lite feature "fastrand"
+│   │   │   │   └── futures-lite v2.6.1 (*)
+│   │   │   ├── futures-lite feature "futures-io"
+│   │   │   │   └── futures-lite v2.6.1 (*)
+│   │   │   └── futures-lite feature "parking"
+│   │   │       └── futures-lite v2.6.1 (*)
+│   │   ├── async-io feature "default"
+│   │   │   └── async-io v2.6.0
+│   │   │       ├── futures-lite v2.6.1 (*)
+│   │   │       ├── rustix feature "fs" (*)
+│   │   │       ├── rustix feature "net" (*)
+│   │   │       ├── rustix feature "std" (*)
+│   │   │       ├── parking feature "default" (*)
+│   │   │       ├── concurrent-queue feature "default" (*)
+│   │   │       ├── futures-io feature "std" (*)
+│   │   │       ├── slab feature "default" (*)
+│   │   │       ├── cfg-if feature "default"
+│   │   │       │   └── cfg-if v1.0.4
+│   │   │       └── polling feature "default"
+│   │   │           └── polling v3.11.0
+│   │   │               ├── rustix feature "event" (*)
+│   │   │               ├── rustix feature "fs" (*)
+│   │   │               ├── rustix feature "pipe" (*)
+│   │   │               ├── rustix feature "process" (*)
+│   │   │               ├── rustix feature "std" (*)
+│   │   │               ├── rustix feature "time"
+│   │   │               │   └── rustix v1.1.4 (*)
+│   │   │               └── cfg-if feature "default" (*)
+│   │   │       [build-dependencies]
+│   │   │       └── autocfg feature "default"
+│   │   │           └── autocfg v1.5.1
+│   │   ├── async-lock feature "default"
+│   │   │   ├── async-lock v3.4.2
+│   │   │   │   ├── event-listener v5.4.2 (*)
+│   │   │   │   ├── event-listener-strategy v0.5.4 (*)
+│   │   │   │   └── pin-project-lite feature "default" (*)
+│   │   │   └── async-lock feature "std"
+│   │   │       ├── async-lock v3.4.2 (*)
+│   │   │       ├── event-listener feature "std" (*)
+│   │   │       └── event-listener-strategy feature "std" (*)
+│   │   ├── async-process feature "default"
+│   │   │   └── async-process v2.5.0
+│   │   │       ├── rustix feature "fs" (*)
+│   │   │       ├── rustix feature "process" (*)
+│   │   │       ├── rustix feature "std" (*)
+│   │   │       ├── event-listener feature "default" (*)
+│   │   │       ├── async-task feature "default" (*)
+│   │   │       ├── futures-lite feature "default"
+│   │   │       │   ├── futures-lite v2.6.1 (*)
+│   │   │       │   ├── futures-lite feature "race"
+│   │   │       │   │   ├── futures-lite v2.6.1 (*)
+│   │   │       │   │   └── futures-lite feature "fastrand" (*)
+│   │   │       │   └── futures-lite feature "std" (*)
+│   │   │       ├── async-io feature "default" (*)
+│   │   │       ├── cfg-if feature "default" (*)
+│   │   │       ├── async-lock feature "default" (*)
+│   │   │       ├── async-channel feature "default"
+│   │   │       │   ├── async-channel v2.5.0
+│   │   │       │   │   ├── concurrent-queue v2.5.0 (*)
+│   │   │       │   │   ├── event-listener-strategy v0.5.4 (*)
+│   │   │       │   │   ├── futures-core v0.3.33
+│   │   │       │   │   └── pin-project-lite feature "default" (*)
+│   │   │       │   └── async-channel feature "std"
+│   │   │       │       ├── async-channel v2.5.0 (*)
+│   │   │       │       ├── event-listener-strategy feature "std" (*)
+│   │   │       │       └── concurrent-queue feature "std" (*)
+│   │   │       └── async-signal feature "default"
+│   │   │           └── async-signal v0.2.14
+│   │   │               ├── rustix feature "process" (*)
+│   │   │               ├── rustix feature "std" (*)
+│   │   │               ├── futures-core feature "default" (*)
+│   │   │               ├── futures-io feature "default" (*)
+│   │   │               ├── async-io feature "default" (*)
+│   │   │               ├── cfg-if feature "default" (*)
+│   │   │               └── signal-hook-registry feature "default"
+│   │   │                   └── signal-hook-registry v1.4.8
+│   │   │                       ├── libc feature "default" (*)
+│   │   │                       └── errno feature "default"
+│   │   │                           ├── errno v0.3.14
+│   │   │                           │   └── libc v0.2.189
+│   │   │                           └── errno feature "std"
+│   │   │                               ├── errno v0.3.14 (*)
+│   │   │                               └── libc feature "std" (*)
+│   │   ├── async-recursion feature "default"
+│   │   │   └── async-recursion v1.1.1 (proc-macro)
+│   │   │       ├── proc-macro2 v1.0.107 (*)
+│   │   │       ├── quote v1.0.47 (*)
+│   │   │       ├── syn feature "clone-impls"
+│   │   │       │   └── syn v2.0.119 (*)
+│   │   │       ├── syn feature "full"
+│   │   │       │   └── syn v2.0.119 (*)
+│   │   │       ├── syn feature "parsing" (*)
+│   │   │       ├── syn feature "printing" (*)
+│   │   │       ├── syn feature "proc-macro" (*)
+│   │   │       └── syn feature "visit-mut"
+│   │   │           └── syn v2.0.119 (*)
+│   │   ├── async-trait feature "default"
+│   │   │   └── async-trait v0.1.91 (proc-macro)
+│   │   │       ├── proc-macro2 feature "default" (*)
+│   │   │       ├── quote feature "default" (*)
+│   │   │       ├── syn feature "clone-impls" (*)
+│   │   │       ├── syn feature "full"
+│   │   │       │   └── syn v3.0.3 (*)
+│   │   │       ├── syn feature "parsing" (*)
+│   │   │       ├── syn feature "printing" (*)
+│   │   │       ├── syn feature "proc-macro" (*)
+│   │   │       └── syn feature "visit-mut"
+│   │   │           └── syn v3.0.3 (*)
+│   │   ├── blocking feature "default"
+│   │   │   └── blocking v1.6.2
+│   │   │       ├── futures-lite v2.6.1 (*)
+│   │   │       ├── async-task feature "default" (*)
+│   │   │       ├── futures-io feature "std" (*)
+│   │   │       ├── async-channel feature "default" (*)
+│   │   │       └── piper feature "default"
+│   │   │           ├── piper v0.2.5
+│   │   │           │   ├── fastrand v2.5.0
+│   │   │           │   ├── futures-io feature "default" (*)
+│   │   │           │   └── atomic-waker feature "default"
+│   │   │           │       └── atomic-waker v1.1.2
+│   │   │           └── piper feature "std"
+│   │   │               ├── piper v0.2.5 (*)
+│   │   │               ├── fastrand feature "std" (*)
+│   │   │               └── piper feature "futures-io"
+│   │   │                   └── piper v0.2.5 (*)
+│   │   ├── hex feature "default"
+│   │   │   ├── hex v0.4.3
+│   │   │   └── hex feature "std"
+│   │   │       ├── hex v0.4.3
+│   │   │       └── hex feature "alloc"
+│   │   │           └── hex v0.4.3
+│   │   ├── ordered-stream feature "default"
+│   │   │   └── ordered-stream v0.2.0
+│   │   │       ├── pin-project-lite feature "default" (*)
+│   │   │       └── futures-core feature "default" (*)
+│   │   ├── serde_repr feature "default"
+│   │   │   └── serde_repr v0.1.21 (proc-macro)
+│   │   │       ├── proc-macro2 feature "default" (*)
+│   │   │       ├── quote feature "default" (*)
+│   │   │       └── syn feature "default" (*)
+│   │   ├── tracing feature "default"
+│   │   │   ├── tracing v0.1.44
+│   │   │   │   ├── tracing-core v0.1.36
+│   │   │   │   │   └── once_cell feature "default"
+│   │   │   │   │       ├── once_cell v1.21.4
+│   │   │   │   │       └── once_cell feature "std"
+│   │   │   │   │           ├── once_cell v1.21.4
+│   │   │   │   │           └── once_cell feature "alloc"
+│   │   │   │   │               ├── once_cell v1.21.4
+│   │   │   │   │               └── once_cell feature "race"
+│   │   │   │   │                   └── once_cell v1.21.4
+│   │   │   │   ├── pin-project-lite feature "default" (*)
+│   │   │   │   └── tracing-attributes feature "default"
+│   │   │   │       └── tracing-attributes v0.1.31 (proc-macro)
+│   │   │   │           ├── proc-macro2 feature "default" (*)
+│   │   │   │           ├── quote feature "default" (*)
+│   │   │   │           ├── syn feature "clone-impls" (*)
+│   │   │   │           ├── syn feature "extra-traits"
+│   │   │   │           │   └── syn v2.0.119 (*)
+│   │   │   │           ├── syn feature "full" (*)
+│   │   │   │           ├── syn feature "parsing" (*)
+│   │   │   │           ├── syn feature "printing" (*)
+│   │   │   │           ├── syn feature "proc-macro" (*)
+│   │   │   │           └── syn feature "visit-mut" (*)
+│   │   │   ├── tracing feature "attributes"
+│   │   │   │   ├── tracing v0.1.44 (*)
+│   │   │   │   └── tracing feature "tracing-attributes"
+│   │   │   │       └── tracing v0.1.44 (*)
+│   │   │   └── tracing feature "std"
+│   │   │       ├── tracing v0.1.44 (*)
+│   │   │       └── tracing-core feature "std"
+│   │   │           ├── tracing-core v0.1.36 (*)
+│   │   │           └── tracing-core feature "once_cell"
+│   │   │               └── tracing-core v0.1.36 (*)
+│   │   ├── uuid feature "default"
+│   │   │   ├── uuid v1.24.0
+│   │   │   │   └── serde_core v1.0.229
+│   │   │   └── uuid feature "std"
+│   │   │       └── uuid v1.24.0 (*)
+│   │   ├── uuid feature "serde"
+│   │   │   └── uuid v1.24.0 (*)
+│   │   ├── winnow feature "default"
+│   │   │   ├── winnow v1.0.4
+│   │   │   ├── winnow feature "ascii"
+│   │   │   │   ├── winnow v1.0.4
+│   │   │   │   └── winnow feature "parser"
+│   │   │   │       └── winnow v1.0.4
+│   │   │   ├── winnow feature "binary"
+│   │   │   │   ├── winnow v1.0.4
+│   │   │   │   └── winnow feature "parser" (*)
+│   │   │   └── winnow feature "std"
+│   │   │       ├── winnow v1.0.4
+│   │   │       └── winnow feature "alloc"
+│   │   │           └── winnow v1.0.4
+│   │   ├── zbus_macros feature "default"
+│   │   │   └── zbus_macros v5.19.0 (proc-macro)
+│   │   │       ├── proc-macro2 feature "default" (*)
+│   │   │       ├── quote feature "default" (*)
+│   │   │       ├── syn feature "default" (*)
+│   │   │       ├── syn feature "extra-traits"
+│   │   │       │   └── syn v3.0.3 (*)
+│   │   │       ├── syn feature "fold"
+│   │   │       │   └── syn v3.0.3 (*)
+│   │   │       ├── syn feature "full" (*)
+│   │   │       ├── proc-macro-crate feature "default"
+│   │   │       │   └── proc-macro-crate v3.5.0
+│   │   │       │       └── toml_edit feature "parse"
+│   │   │       │           └── toml_edit v0.25.13+spec-1.1.0
+│   │   │       │               ├── winnow feature "default" (*)
+│   │   │       │               ├── indexmap feature "default"
+│   │   │       │               │   ├── indexmap v2.14.0
+│   │   │       │               │   │   ├── equivalent v1.0.2
+│   │   │       │               │   │   └── hashbrown v0.17.1
+│   │   │       │               │   └── indexmap feature "std"
+│   │   │       │               │       └── indexmap v2.14.0 (*)
+│   │   │       │               ├── indexmap feature "std" (*)
+│   │   │       │               ├── toml_datetime feature "default"
+│   │   │       │               │   ├── toml_datetime v1.1.1+spec-1.1.0
+│   │   │       │               │   └── toml_datetime feature "std"
+│   │   │       │               │       ├── toml_datetime v1.1.1+spec-1.1.0
+│   │   │       │               │       └── toml_datetime feature "alloc"
+│   │   │       │               │           └── toml_datetime v1.1.1+spec-1.1.0
+│   │   │       │               └── toml_parser feature "default"
+│   │   │       │                   ├── toml_parser v1.1.3+spec-1.1.0
+│   │   │       │                   │   └── winnow v1.0.4
+│   │   │       │                   └── toml_parser feature "std"
+│   │   │       │                       ├── toml_parser v1.1.3+spec-1.1.0 (*)
+│   │   │       │                       └── toml_parser feature "alloc"
+│   │   │       │                           └── toml_parser v1.1.3+spec-1.1.0 (*)
+│   │   │       ├── zbus_names feature "default"
+│   │   │       │   └── zbus_names v4.3.5
+│   │   │       │       ├── winnow feature "default" (*)
+│   │   │       │       ├── serde feature "default"
+│   │   │       │       │   ├── serde v1.0.229
+│   │   │       │       │   │   ├── serde_derive feature "default" (*)
+│   │   │       │       │   │   └── serde_core feature "result"
+│   │   │       │       │   │       └── serde_core v1.0.229
+│   │   │       │       │   └── serde feature "std"
+│   │   │       │       │       ├── serde v1.0.229 (*)
+│   │   │       │       │       └── serde_core feature "std"
+│   │   │       │       │           └── serde_core v1.0.229
+│   │   │       │       ├── serde feature "derive"
+│   │   │       │       │   ├── serde v1.0.229 (*)
+│   │   │       │       │   └── serde feature "serde_derive"
+│   │   │       │       │       └── serde v1.0.229 (*)
+│   │   │       │       ├── zvariant feature "default"
+│   │   │       │       │   └── zvariant v5.15.1
+│   │   │       │       │       ├── enumflags2 feature "default" (*)
+│   │   │       │       │       ├── enumflags2 feature "serde" (*)
+│   │   │       │       │       ├── winnow feature "default" (*)
+│   │   │       │       │       ├── serde feature "default" (*)
+│   │   │       │       │       ├── serde feature "derive" (*)
+│   │   │       │       │       ├── endi feature "default"
+│   │   │       │       │       │   ├── endi v1.1.1
+│   │   │       │       │       │   └── endi feature "std"
+│   │   │       │       │       │       └── endi v1.1.1
+│   │   │       │       │       ├── zcheapstr feature "default"
+│   │   │       │       │       │   └── zcheapstr v1.2.0
+│   │   │       │       │       │       └── serde feature "derive" (*)
+│   │   │       │       │       ├── zcheapstr feature "serde"
+│   │   │       │       │       │   └── zcheapstr v1.2.0 (*)
+│   │   │       │       │       ├── zvariant_derive feature "default"
+│   │   │       │       │       │   └── zvariant_derive v5.15.1 (proc-macro)
+│   │   │       │       │       │       ├── proc-macro2 feature "default" (*)
+│   │   │       │       │       │       ├── quote feature "default" (*)
+│   │   │       │       │       │       ├── syn feature "default" (*)
+│   │   │       │       │       │       ├── syn feature "extra-traits" (*)
+│   │   │       │       │       │       ├── syn feature "full" (*)
+│   │   │       │       │       │       ├── proc-macro-crate feature "default" (*)
+│   │   │       │       │       │       └── zvariant_utils feature "default"
+│   │   │       │       │       │           └── zvariant_utils v4.2.0
+│   │   │       │       │       │               ├── proc-macro2 feature "default" (*)
+│   │   │       │       │       │               ├── quote feature "default" (*)
+│   │   │       │       │       │               ├── syn feature "default" (*)
+│   │   │       │       │       │               ├── syn feature "extra-traits" (*)
+│   │   │       │       │       │               ├── syn feature "full" (*)
+│   │   │       │       │       │               ├── winnow feature "default" (*)
+│   │   │       │       │       │               ├── serde feature "default" (*)
+│   │   │       │       │       │               └── serde feature "derive" (*)
+│   │   │       │       │       └── zvariant_utils feature "default" (*)
+│   │   │       │       └── zvariant feature "enumflags2"
+│   │   │       │           └── zvariant v5.15.1 (*)
+│   │   │       ├── zvariant feature "default" (*)
+│   │   │       └── zvariant_utils feature "default" (*)
+│   │   ├── zbus_names feature "default" (*)
+│   │   ├── zvariant feature "default" (*)
+│   │   └── zvariant feature "enumflags2" (*)
+│   ├── zbus feature "async-executor"
+│   │   └── zbus v5.19.0 (*)
+│   ├── zbus feature "async-fs"
+│   │   └── zbus v5.19.0 (*)
+│   ├── zbus feature "async-lock"
+│   │   └── zbus v5.19.0 (*)
+│   ├── zbus feature "async-process"
+│   │   └── zbus v5.19.0 (*)
+│   ├── zbus feature "async-task"
+│   │   └── zbus v5.19.0 (*)
+│   └── zbus feature "blocking"
+│       └── zbus v5.19.0 (*)
+└── zbus feature "blocking-api"
+    ├── zbus v5.19.0 (*)
+    └── zbus_macros feature "blocking-api"
+        └── zbus_macros v5.19.0 (proc-macro) (*)

@@ -20,6 +20,11 @@ build into `third_party/ffmpeg` — no system FFmpeg install is required.
 A GPU is optional. Headless tests fall back to Mesa's lavapipe software Vulkan
 implementation. A display (or Xvfb) is required only to *launch* the GUI.
 
+CI qualifies Rust 1.99.1 on both platforms. Use `cargo +1.99.1` to reproduce
+that toolchain. Cargo 1.100 changes intermediate executable locations; the
+existing subprocess fixtures assume the earlier layout. CI pins its qualified
+version independently of the local `stable` default.
+
 ### Clean-clone setup
 
 ```bash

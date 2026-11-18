@@ -948,20 +948,22 @@ fn s4_retained_inode_deletion_signal() {
         },
         "a live retained inode must not prove deletion"
     );
+    let live = empty.deletion_reading().unwrap().to_string();
     empty.try_remove().unwrap();
-    let deleted_links = empty.link_count();
-    if live_links == 0 || !deleted_links.as_ref().is_ok_and(|links| *links == 0) {
-        let reason = format!("live_nlink={live_links}, deleted_nlink={deleted_links:?}");
-        skip_kernel_signal(&reason);
+    let removed = empty.deletion_reading().unwrap();
+    let removed_text = removed.to_string();
+    // Either accepted form proves deletion: zero links, or ENODEV from the
+    // retained events descriptor (hosted kernels keep two links).
+    if !matches!(removed.deleted(), Ok(true)) {
+        skip_kernel_signal(&format!("live {live}, deleted {removed_text}"));
         session.close_lifetime();
         return;
     }
     assert!(empty.kernel_deleted().unwrap());
     let kernel = Command::new("uname").arg("-r").output().unwrap();
     println!(
-        "C2 kernel={} live_nlink={live_links} removed_nlink={} nonempty_rmdir=refused",
+        "C2 kernel={} live_nlink={live_links} live=[{live}] removed=[{removed_text}] nonempty_rmdir=refused",
         String::from_utf8_lossy(&kernel.stdout).trim(),
-        deleted_links.unwrap()
     );
     session.close_lifetime();
     let proof = session.cleanup().unwrap();
@@ -1497,6 +1499,33 @@ fn equipped_session(test: &str) -> bool {
     true
 }
 
+/// Witnesses whose observer moves a process into another cgroup (a
+/// fixture writing `cgroup.procs`, or the shim entering the containment
+/// cgroup from this process) need this test process inside the user
+/// manager's delegated subtree: the kernel checks write access on the
+/// common ancestor's `cgroup.procs`, and only that subtree is delegated to
+/// the user. A runner whose test process sits in a system service reports
+/// NOT RUN up front instead of failing with EACCES at the write.
+#[cfg(target_os = "linux")]
+fn migration_session(test: &str) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    if !equipped_session(test) {
+        return false;
+    }
+    let uid = fs::metadata("/proc/self").unwrap().uid();
+    let manager = format!("/user.slice/user-{uid}.slice/user@{uid}.service/");
+    let cgroup = fs::read_to_string("/proc/self/cgroup").unwrap();
+    let path = cgroup
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .unwrap_or_default();
+    if path.starts_with(&manager) {
+        return true;
+    }
+    println!("\nC2_NATIVE_NOT_RUN test={test} reason=outside_user_subtree cgroup={path}");
+    false
+}
+
 #[cfg(target_os = "linux")]
 fn migration_refused(outside: bool) {
     let root = root("migration");
@@ -1729,7 +1758,7 @@ fn s4_c2_launch_refuses_without_nsdelegate() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn s4_c2_blocked_guardian_exits_and_manager_kills() {
-    if !equipped_session("s4_c2_blocked_guardian_exits_and_manager_kills") {
+    if !migration_session("s4_c2_blocked_guardian_exits_and_manager_kills") {
         return;
     }
     let root = root("blocked-manager");
@@ -2267,7 +2296,7 @@ fn s4_c2_launch_refuses_without_pid_namespace() {
 )]
 fn s4_c2_init_reaps_and_exits_with_provider() {
     use std::io::{Read as _, Write as _};
-    if !equipped_session("s4_c2_init_reaps_and_exits_with_provider") {
+    if !migration_session("s4_c2_init_reaps_and_exits_with_provider") {
         return;
     }
     let root = root("init-status");
@@ -2536,7 +2565,7 @@ fn service_proof_refused(caller: ProofCaller, zombie: bool, isolate_events: bool
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn s4_c2_service_proof_session_live() {
-    if !equipped_session("s4_c2_service_proof_session_live") {
+    if !migration_session("s4_c2_service_proof_session_live") {
         return;
     }
     service_proof_refused(ProofCaller::Session, false, false);
@@ -2549,7 +2578,7 @@ fn s4_c2_service_proof_session_live() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn s4_c2_service_proof_recovery_live() {
-    if !equipped_session("s4_c2_service_proof_recovery_live") {
+    if !migration_session("s4_c2_service_proof_recovery_live") {
         return;
     }
     service_proof_refused(ProofCaller::Retained, false, false);
@@ -2562,7 +2591,7 @@ fn s4_c2_service_proof_recovery_live() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn s4_c2_service_proof_session_zombie() {
-    if !equipped_session("s4_c2_service_proof_session_zombie") {
+    if !migration_session("s4_c2_service_proof_session_zombie") {
         return;
     }
     service_proof_refused(ProofCaller::Session, true, false);
@@ -2575,7 +2604,7 @@ fn s4_c2_service_proof_session_zombie() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn s4_c2_service_proof_recovery_zombie() {
-    if !equipped_session("s4_c2_service_proof_recovery_zombie") {
+    if !migration_session("s4_c2_service_proof_recovery_zombie") {
         return;
     }
     service_proof_refused(ProofCaller::Retained, true, false);
@@ -2662,7 +2691,7 @@ impl Drop for ProductionClaimCleanup {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn s4_c2_service_events_session() {
-    if !equipped_session("s4_c2_service_events_session") {
+    if !migration_session("s4_c2_service_events_session") {
         return;
     }
     service_proof_refused(ProofCaller::Session, false, true);
@@ -2675,7 +2704,7 @@ fn s4_c2_service_events_session() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn s4_c2_service_events_recovery() {
-    if !equipped_session("s4_c2_service_events_recovery") {
+    if !migration_session("s4_c2_service_events_recovery") {
         return;
     }
     service_proof_refused(ProofCaller::Retained, false, true);

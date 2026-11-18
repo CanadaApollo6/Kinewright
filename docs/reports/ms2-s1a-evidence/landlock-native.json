@@ -1,0 +1,14 @@
+{
+  "control": {
+    "returncode": 0,
+    "stdout": "\nrunning 1 test\n",
+    "stderr": ""
+  },
+  "restricted": {
+    "returncode": 0,
+    "stdout": "\nrunning 1 test\n",
+    "stderr": ""
+  },
+  "binary_sha256": "88a85d8c66d7ccfed815a1f2886db452270a7b1ff93c716c6556b04b58ba14d2",
+  "isolated": "Landlock only, no namespaces or seccomp; control omits only Landlock"
+}

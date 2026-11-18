@@ -1,0 +1,311 @@
+use super::*;
+
+fn encoded(message: Message) -> Vec<u8> {
+    let mut bytes = vec![];
+    write_frame(
+        &mut bytes,
+        &Frame {
+            request: 1,
+            generation: 2,
+            message,
+        },
+    )
+    .unwrap();
+    bytes
+}
+fn payload(bytes: &[u8]) -> Vec<u8> {
+    let mut frame = encoded(Message::Ready {});
+    frame.truncate(HEADER_BYTES);
+    frame[24..28].copy_from_slice(&u32::try_from(bytes.len()).unwrap().to_le_bytes());
+    frame.extend_from_slice(bytes);
+    frame
+}
+#[test]
+fn framing_roundtrip_and_all_truncations() {
+    let bytes = encoded(Message::Ready {});
+    assert!(matches!(
+        read_frame(&mut &bytes[..]).unwrap().message,
+        Message::Ready {}
+    ));
+    for length in 0..bytes.len() {
+        assert!(read_frame(&mut &bytes[..length]).is_err());
+    }
+    for index in 0..24 {
+        let mut corrupted = bytes.clone();
+        corrupted[index] ^= 128;
+        assert!(read_frame(&mut &corrupted[..]).is_err());
+    }
+    let mut huge = bytes;
+    huge[24..28].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(read_frame(&mut &huge[..]).is_err());
+}
+#[test]
+fn strict_json_including_nested_and_escaped_duplicate_keys() {
+    for json in [
+        r#"{"type":"Ready","extra":1}"#,
+        r#"{"type":"Ready","type":"Ready"}"#,
+        r#"{"type":"Ready","nested":{"a":1,"\u0061":2}}"#,
+        r#"{"type":"Ready"} {}"#,
+        r#"{"type":"Ready","x":[[[[[[[[[0]]]]]]]]]}"#,
+    ] {
+        assert!(
+            read_frame(&mut &payload(json.as_bytes())[..]).is_err(),
+            "{json}"
+        );
+    }
+    assert!(json::check(br#"{"a":{"b":1,"b":2}}"#).is_err());
+    assert!(json::check(br#"{"a":{"b":1},"b":2}"#).is_ok());
+    assert!(read_frame(&mut &payload(&[255])[..]).is_err());
+}
+#[test]
+fn state_rejects_stale_out_of_order_and_flooded_traffic() {
+    let frame = || read_frame(&mut &encoded(Message::Ready {})[..]).unwrap();
+    let mut session = ProbeSession::new(1, 2, [None, None]);
+    assert!(session.accept(frame()).unwrap().is_none());
+    assert!(session.accept(frame()).is_err());
+    assert!(
+        ProbeSession::new(1, 3, [None, None])
+            .accept(frame())
+            .is_err()
+    );
+    assert!(
+        ProbeSession::new(1, 2, [None, None])
+            .accept(Frame {
+                request: 1,
+                generation: 2,
+                message: Message::Complete {}
+            })
+            .is_err()
+    );
+    let now = std::time::Instant::now();
+    let mut session = ProbeSession::new(1, 2, [None, None]);
+    for _ in 0..256 {
+        session.charge(40, now).unwrap();
+    }
+    assert!(session.charge(40, now).is_err());
+}
+/// F1: only a cancellation the host sent may come back as `Cancelled`.
+#[test]
+fn unsolicited_cancellation_is_a_protocol_violation() {
+    let failed = |request| Frame {
+        request,
+        generation: 2,
+        message: Message::Failed {
+            error: MediaSandboxError::Cancelled,
+        },
+    };
+    let ready = || read_frame(&mut &encoded(Message::Ready {})[..]).unwrap();
+    for answered in [false, true] {
+        let mut session = ProbeSession::new(1, 2, [None, None]);
+        if answered {
+            assert!(session.accept(ready()).unwrap().is_none());
+        }
+        assert_eq!(
+            session.accept(failed(1)).unwrap_err(),
+            MediaSandboxError::ProtocolViolation,
+            "forged after ready={answered}"
+        );
+        let mut session = ProbeSession::new(1, 2, [None, None]);
+        if answered {
+            assert!(session.accept(ready()).unwrap().is_none());
+        }
+        session.cancel_sent();
+        assert_eq!(
+            session.accept(failed(1)).unwrap_err(),
+            MediaSandboxError::Cancelled,
+            "solicited after ready={answered}"
+        );
+    }
+}
+#[test]
+fn bounded_arbitrary_bytes_never_panic() {
+    let mut state = 42_u64;
+    for size in 0..1024 {
+        let mut bytes = Vec::with_capacity(size);
+        for _ in 0..size {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            bytes.push(state.to_le_bytes()[0]);
+        }
+        let _ = read_frame(&mut &bytes[..]);
+        let _ = json::check(&bytes);
+    }
+}
+
+fn probe() -> ProbeResult {
+    ProbeResult {
+        streams: vec![Stream {
+            index: 0,
+            kind: StreamKind::Video,
+            time_base: [1, 30],
+            timestamp_origin: 0,
+            duration: 30,
+            average_frame_rate: [30, 1],
+        }],
+        duration_microseconds: 1_000_000,
+        video_stream: Some(0),
+        audio_stream: None,
+        duration_frames: 30,
+        fps: [30, 1],
+        kind: Kind::Video,
+        resolution: Some([1920, 1080]),
+        color: Color {
+            primaries: kinewright_core::ColorPrimaries::Unknown,
+            transfer: kinewright_core::ColorTransfer::Unknown,
+            matrix: kinewright_core::ColorMatrix::Unknown,
+            range: kinewright_core::ColorRange::Unknown,
+            white_point: kinewright_core::ColorWhitePoint::Unknown,
+            bit_depth: kinewright_core::ColorBitDepth::Unknown,
+            confidence_basis_points: 0,
+            provenance: kinewright_core::ColorProvenance::Unknown,
+        },
+    }
+}
+#[test]
+fn metadata_bounds_and_actual_domain_consumer() {
+    let value = ValidatedProbe::new(probe()).unwrap().into_metadata();
+    let rate = kinewright_core::Rational::new(value.fps[0], value.fps[1]).unwrap();
+    assert_eq!(rate.numerator(), 30);
+    let mut cases = vec![];
+    let mut bad = probe();
+    bad.fps = [0, 1];
+    cases.push(bad);
+    let mut bad = probe();
+    bad.fps = [u32::MAX, 1];
+    cases.push(bad);
+    let mut bad = probe();
+    bad.fps = [60, 2];
+    cases.push(bad);
+    let mut bad = probe();
+    bad.video_stream = Some(16);
+    cases.push(bad);
+    let mut bad = probe();
+    bad.streams[0].time_base = [1, 0];
+    cases.push(bad);
+    let mut bad = probe();
+    bad.streams[0].timestamp_origin = i64::MAX;
+    cases.push(bad);
+    let mut bad = probe();
+    bad.duration_frames = i64::MAX;
+    cases.push(bad);
+    let mut bad = probe();
+    bad.resolution = Some([8192, 8192]);
+    cases.push(bad);
+    let mut bad = probe();
+    bad.color.confidence_basis_points = 10001;
+    cases.push(bad);
+    let mut bad = probe();
+    bad.color.primaries = kinewright_core::ColorPrimaries::Other("forged".into());
+    cases.push(bad);
+    let mut bad = probe();
+    bad.color.matrix = kinewright_core::ColorMatrix::Other("bt470bg\0forged".into());
+    cases.push(bad);
+    for case in cases {
+        assert!(ValidatedProbe::new(case).is_err());
+    }
+    let mut jpeg = probe();
+    jpeg.color.matrix = kinewright_core::ColorMatrix::Other("bt470bg".into());
+    assert!(ValidatedProbe::new(jpeg).is_ok());
+}
+
+#[test]
+fn traffic_is_charged_before_payload_is_allocated_or_read() {
+    struct HeaderOnly {
+        header: std::io::Cursor<Vec<u8>>,
+    }
+    impl std::io::Read for HeaderOnly {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            assert!(
+                self.header.position() < u64::try_from(HEADER_BYTES).unwrap(),
+                "payload read after traffic refusal"
+            );
+            self.header.read(bytes)
+        }
+    }
+    let mut header = encoded(Message::Ready {});
+    header.truncate(HEADER_BYTES);
+    header[24..28].copy_from_slice(&100_u32.to_le_bytes());
+    let mut calls = 0;
+    let result = read_charged(
+        &mut HeaderOnly {
+            header: std::io::Cursor::new(header),
+        },
+        |bytes| {
+            assert_eq!(bytes, HEADER_BYTES + 100);
+            calls += 1;
+            Err(invalid())
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(calls, 1);
+}
+
+#[test]
+fn framing_caps_decoded_text_before_metadata_can_be_consumed() {
+    for (text, accepted) in [
+        ("x".repeat(256), true),
+        ("x".repeat(257), false),
+        ("é".repeat(128), true),
+        ("é".repeat(129), false),
+    ] {
+        let mut result = probe();
+        result.color.primaries = kinewright_core::ColorPrimaries::Other(text);
+        let bytes = encoded(Message::ProbeResult {
+            result: Box::new(result),
+        });
+        assert_eq!(read_frame(&mut bytes.as_slice()).is_ok(), accepted);
+    }
+}
+
+#[test]
+fn explicit_stream_selection_cannot_be_replaced_or_widened() {
+    let alternative_video = || {
+        let mut result = probe();
+        let mut alternative = result.streams[0].clone();
+        alternative.index = 1;
+        result.streams.push(alternative);
+        result.video_stream = Some(1);
+        result
+    };
+    let with_audio = || {
+        let mut result = probe();
+        result.streams.push(Stream {
+            index: 1,
+            kind: StreamKind::Audio,
+            time_base: [1, 48_000],
+            timestamp_origin: 0,
+            duration: 48_000,
+            average_frame_rate: [0, 1],
+        });
+        result.kind = Kind::AudioVideo;
+        result.audio_stream = Some(1);
+        result
+    };
+    for (requested, result, accepted) in [
+        ([Some(0), None], alternative_video(), false),
+        ([Some(0), None], with_audio(), false),
+        ([None, Some(1)], with_audio(), false),
+        ([Some(1), None], alternative_video(), true),
+        ([Some(0), Some(1)], with_audio(), true),
+        ([None, None], alternative_video(), true),
+    ] {
+        let mut bytes = encoded(Message::Ready {});
+        bytes.extend(encoded(Message::ProbeResult {
+            result: Box::new(result),
+        }));
+        let mut input = bytes.as_slice();
+        let mut session = ProbeSession::new(1, 2, requested);
+        let ready = session.read(&mut input, std::time::Instant::now()).unwrap();
+        session.accept(ready).unwrap();
+        let reply = session.read(&mut input, std::time::Instant::now()).unwrap();
+        assert_eq!(
+            session.accept(reply).is_ok(),
+            accepted,
+            "request {requested:?}"
+        );
+    }
+}
+
+#[path = "probe_property_tests.rs"]
+mod probe_property;

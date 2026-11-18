@@ -1,0 +1,220 @@
+{
+  "failed_run": {
+    "id": 44070905358,
+    "revision": "ac1c60ce",
+    "linux_job": 133996563169,
+    "windows_job": 133996563561,
+    "compiler": "rustc 1.100.0 (0ef1bc386 2026-11-09)"
+  },
+  "green_comparisons": [
+    {
+      "revision": "266f8890e259fb20d4c8f10d778b5b5fed6b3257",
+      "run": 41001577341,
+      "windows_job": 123886954771,
+      "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+    },
+    {
+      "revision": "6180cef7e69d028a65cf742cda54b5304a6eb900",
+      "run": 44002696900,
+      "windows_job": 133770403708,
+      "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+      "ci_toolchain_explicitly_pinned": true
+    }
+  ],
+  "upstream_layout_change": "https://github.com/rust-lang/rust/issues/164098",
+  "source_before_fix": {
+    "crates/kinewright-agent/src/writer_host/voice_tests.rs": {
+      "identical_main_and_ms2": true,
+      "sha256": "7587ca5579eefb0e7306678a16a30ce05510057fb658434eda83c9b4bbff6f7c"
+    },
+    "crates/kinewright-media/src/au6_fixtures.rs": {
+      "identical_main_and_ms2": true,
+      "sha256": "6c5c718ffb46f73284c0d7219711b5abd2ab53cde7345143224000943d020993"
+    }
+  },
+  "minimal_reproduction": {
+    "results": [
+      {
+        "label": "single-build-199",
+        "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+        "command": [
+          "build",
+          "--manifest-path",
+          "/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/target/ms2-s1a/ci-minimal/single/Cargo.toml"
+        ],
+        "exit": 0,
+        "seconds_including_lock_wait": 1106.06,
+        "real_companion_exists": true
+      },
+      {
+        "label": "single-test-199",
+        "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+        "command": [
+          "test",
+          "--manifest-path",
+          "/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/target/ms2-s1a/ci-minimal/single/Cargo.toml",
+          "--",
+          "--show-output"
+        ],
+        "exit": 0,
+        "seconds_including_lock_wait": 911.0,
+        "real_companion_exists": true
+      },
+      {
+        "label": "clippy-199",
+        "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+        "command": [
+          "clippy",
+          "--manifest-path",
+          "/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/target/ms2-s1a/ci-minimal/clippy/Cargo.toml",
+          "--all-targets",
+          "--",
+          "-D",
+          "clippy::needless_range_loop"
+        ],
+        "exit": 0,
+        "seconds_including_lock_wait": 1.85,
+        "real_companion_exists": false
+      },
+      {
+        "label": "single-build-1100",
+        "compiler": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+        "command": [
+          "build",
+          "--manifest-path",
+          "/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/target/ms2-s1a/ci-minimal/single/Cargo.toml"
+        ],
+        "exit": 0,
+        "seconds_including_lock_wait": 14.96,
+        "real_companion_exists": true
+      },
+      {
+        "label": "single-test-1100",
+        "compiler": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+        "command": [
+          "test",
+          "--manifest-path",
+          "/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/target/ms2-s1a/ci-minimal/single/Cargo.toml",
+          "--",
+          "--show-output"
+        ],
+        "exit": 101,
+        "seconds_including_lock_wait": 27.09,
+        "real_companion_exists": true
+      },
+      {
+        "label": "clippy-1100",
+        "compiler": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+        "command": [
+          "clippy",
+          "--manifest-path",
+          "/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/target/ms2-s1a/ci-minimal/clippy/Cargo.toml",
+          "--all-targets",
+          "--",
+          "-D",
+          "clippy::needless_range_loop"
+        ],
+        "exit": 101,
+        "seconds_including_lock_wait": 0.11,
+        "real_companion_exists": false
+      }
+    ],
+    "no_ms2_dependencies": true,
+    "fixtures": {
+      "single/Cargo.toml": "[package]\nname=\"plain-host\"\nversion=\"0.1.0\"\nedition=\"2024\"\n[workspace]\n[[bin]]\nname=\"kinewright\"\npath=\"src/main.rs\"\n",
+      "single/src/main.rs": "fn main() {}\n",
+      "single/src/lib.rs": "#[test]\nfn launches_companion() {\n    let executable=std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().join(\"kinewright\");\n    println!(\"test_exe={} companion={} companion_exists={}\",std::env::current_exe().unwrap().display(),executable.display(),executable.exists());\n    assert!(std::process::Command::new(executable).status().unwrap().success());\n}\n",
+      "clippy/Cargo.toml": "[package]\nname=\"ms2-clippy-regression\"\nversion=\"0.1.0\"\nedition=\"2024\"\n[workspace]\n",
+      "clippy/src/lib.rs": "pub const N: usize = 31;\npub struct Report { pub bands: [i32; N] }\npub fn check(learned: &Report) -> (i32, usize) {\n    let mut worst_excess = i32::MIN;\n    let mut worst_band = 0;\n    for band in 0..N {\n        let bound = i32::try_from(band).unwrap();\n        let excess = learned.bands[band] - bound;\n        if excess > worst_excess { worst_excess = excess; worst_band = band; }\n        assert!(learned.bands[band] <= bound + 100);\n    }\n    (worst_excess, worst_band)\n}\n"
+    },
+    "logs": {
+      "single-build-199": "   Compiling plain-host v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/target/ms2-s1a/ci-minimal/single)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.11s\n",
+      "single-test-199": "   Compiling plain-host v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/target/ms2-s1a/ci-minimal/single)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s\n     Running unittests src/lib.rs (target/ms2-s1a/ci-minimal/single-target-199/debug/deps/plain_host-ac37ffe7c31a1f13)\n\nrunning 1 test\ntest launches_companion ... ok\n\nsuccesses:\n\n---- launches_companion stdout ----\ntest_exe=/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/target/ms2-s1a/ci-minimal/single-target-199/debug/deps/plain_host-ac37ffe7c31a1f13 companion=/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/target/ms2-s1a/ci-minimal/single-target-199/debug/kinewright companion_exists=true\n\n\nsuccesses:\n    launches_companion\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n     Running unittests src/main.rs (target/ms2-s1a/ci-minimal/single-target-199/debug/deps/kinewright-3b49b3e27a1271b1)\n\nrunning 0 tests\n\nsuccesses:\n\nsuccesses:\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n   Doc-tests plain_host\n\nrunning 0 tests\n\nsuccesses:\n\nsuccesses:\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+      "clippy-199": "    Checking ms2-clippy-regression v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/target/ms2-s1a/ci-minimal/clippy)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.07s\n",
+      "single-build-1100": "   Compiling plain-host v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/target/ms2-s1a/ci-minimal/single)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.21s\n",
+      "single-test-1100": "   Compiling plain-host v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/target/ms2-s1a/ci-minimal/single)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s\n     Running unittests src/lib.rs (target/ms2-s1a/ci-minimal/single-target-1100/debug/build/plain-host/c982d149a39de0f9/out/plain_host-c982d149a39de0f9)\n\nrunning 1 test\ntest launches_companion ... FAILED\n\nsuccesses:\n\nsuccesses:\n\nfailures:\n\n---- launches_companion stdout ----\ntest_exe=/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/target/ms2-s1a/ci-minimal/single-target-1100/debug/build/plain-host/c982d149a39de0f9/out/plain_host-c982d149a39de0f9 companion=/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/target/ms2-s1a/ci-minimal/single-target-1100/debug/build/plain-host/c982d149a39de0f9/kinewright companion_exists=false\n\nthread 'launches_companion' (349033) panicked at src/lib.rs:5:61:\ncalled `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    launches_companion\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\nerror: test failed, to rerun pass `--lib`\n",
+      "clippy-1100": "    Checking ms2-clippy-regression v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-dab33d0e/target/ms2-s1a/ci-minimal/clippy)\nerror: the loop variable `band` is used to index `learned.bands`\n  --> src/lib.rs:6:17\n   |\n 6 |     for band in 0..N {\n   |                 ^^^^\n   |\nnote: for this index operation\n  --> src/lib.rs:10:17\n   |\n10 |         assert!(learned.bands[band] <= bound + 100);\n   |                 ^^^^^^^^^^^^^^^^^^^\n   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.100.0/index.html#needless_range_loop\n   = note: requested on the command line with `-D clippy::needless-range-loop`\nhelp: consider using an iterator and `.enumerate()`\n   |\n 6 -     for band in 0..N {\n 6 +     for (band, <item>) in learned.bands.iter().enumerate().take(N) {\n   |\n\nerror: could not compile `ms2-clippy-regression` (lib test) due to 1 previous error\nwarning: build failed, waiting for other jobs to finish...\nerror: could not compile `ms2-clippy-regression` (lib) due to 1 previous error\n"
+    },
+    "root_path_note": "Recorded paths identify this worker and can be replaced with another scratch root when replaying the fixtures."
+  },
+  "local_c8_and_workspace_clippy": {
+    "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "tests": [
+      "writer_host::voice_tests::tests::c8_acknowledged_audio_survives_host_crash_before_asr",
+      "writer_host::voice_tests::tests::c8_bounds_refuse_without_objects_or_reservations",
+      "writer_host::voice_tests::tests::c8_completed_asr_kept_on_unsettled",
+      "writer_host::voice_tests::tests::c8_missing_model_and_silence_are_plain",
+      "writer_host::voice_tests::tests::c8_private_range_and_transcript_in_batch",
+      "writer_host::voice_tests::tests::c8_restart_before_commit_and_after_lost_reply"
+    ],
+    "count": 6,
+    "clippy": "Linux workspace, all targets, -D warnings, pass",
+    "logs": {
+      "ci-fix-c8-199.log": "5e71ce6aab11a9f123b52dae0572f0783cf9f36cabb60eba3cf2e457b0b9492d",
+      "ci-fix-workspace-clippy-199.log": "7b878465f411e7159f4164d3b5e0dc38195d36b6351968ffe8e38b3494b7e9a3"
+    },
+    "host_source_unchanged": true,
+    "gpu": "CPU Mesa lavapipe forced; XDG data/config isolated to this worker's target directory"
+  },
+  "fix_1": "Pin all four CI Rust jobs to the previously qualified 1.99.1, preserving the existing process-crash tests and their behavior; no binary-path fallback or skip.",
+  "fix_2": {
+    "change": "Iterate the fixed learned-bands array with iter().enumerate(), retaining the band index and all existing bounds/pin assertions.",
+    "before_source_sha256": "6c5c718ffb46f73284c0d7219711b5abd2ab53cde7345143224000943d020993",
+    "after_source_sha256": "d32e99cb55656c5fc9c5e087cdac6484db066502fb8e8da16993cc54806d8495",
+    "clippy": "Rust 1.100.0 Linux workspace all targets, -D warnings, pass",
+    "clippy_log_sha256": "e12ef3b743251725eb01eb48d468d315a4010ba94914f89af1ac95c8ee36c924",
+    "media_slow_feature_tests": {
+      "passed": 1267,
+      "failed": 0,
+      "ignored_existing_opt_ins": 32,
+      "log_sha256": "09b383119e38e97a18c77b2e4f9c9839d57681f6ee9184786ed2cc32a34884a1",
+      "ignored": [
+        "test cc1_fixtures::cc1_gpu_compositor_matches_canonical_cpu_reference_on_hardware ... ignored, requires a physical supported GPU; run explicitly with --ignored --nocapture",
+        "test cc3_fixtures::cc3_gpu_compositor_matches_the_cpu_reference_on_hardware ... ignored, requires a physical supported GPU; run explicitly with --ignored --nocapture",
+        "test cc4_fixtures::cc4_gpu_compositor_matches_the_cpu_reference_on_hardware ... ignored, requires a physical supported GPU; run explicitly with --ignored --nocapture",
+        "test cc5_fixtures::cc5_gpu_compositor_matches_the_cpu_reference_on_hardware ... ignored, requires a physical supported GPU; run explicitly with --ignored --nocapture",
+        "test cc5_fixtures::cc5_performance_evidence_is_recorded_on_hardware ... ignored, requires a physical supported GPU; run explicitly with --ignored --nocapture",
+        "test cc5_fixtures::cc5_performance_evidence_is_recorded_on_software_fallback ... ignored, on demand: performance evidence on the software renderer",
+        "test cc6_fixtures::cc6_performance_evidence_is_recorded_on_hardware ... ignored, requires a physical supported GPU; run explicitly with --ignored --nocapture",
+        "test cc6_fixtures::cc6_performance_evidence_is_recorded_on_software_fallback ... ignored, on demand: performance evidence on the software renderer",
+        "test cc7_fixtures::cc7_canonical_node_stack_matches_the_cpu_reference_on_hardware ... ignored, requires a real GPU adapter; the default lane is fallback_gpu()",
+        "test compositor::tests::cc5_matte_gpu_anchors_hold_on_hardware ... ignored, requires a real (non-fallback) GPU adapter",
+        "test compositor::tests::cc6_working_proof_matches_the_cpu_reference_on_hardware ... ignored, requires a physical supported GPU; run explicitly with --ignored --nocapture",
+        "test display::tests::s3a_g7b_play_timing ... ignored, S3a G7b/LL timing: release binary, isolated lane, load recorded",
+        "test media_matrix_tests::full_media_matrix_covers_4k_hevc_and_long_gop_sources ... ignored, long-running 4K/HEVC matrix; run with KINEWRIGHT_MEDIA_MATRIX=1 and --ignored",
+        "test media_matrix_tests::proxy_preview_performance_on_heavy_matrix_media ... ignored, performance measurement; run with KINEWRIGHT_PERF_TEST=1 and --ignored",
+        "test mo2_fixtures::mo2_gates_on_hardware ... ignored, requires a physical GPU adapter; run with --ignored",
+        "test mo2_fixtures::review_probes::mo2_gates_on_hardware ... ignored, requires a physical GPU adapter; run with --ignored",
+        "test mo2_perf_fixtures::blend_heavy_holds_floors_on_hardware ... ignored, R28 hardware lane (the RTX 3090)",
+        "test mo2_perf_fixtures::blend_heavy_holds_floors_on_the_fallback_adapter ... ignored, R28 perf lane: cargo test --release -p kinewright-media --lib blend_heavy_holds_floors -- --ignored",
+        "test mo2_perf_fixtures::r28_end_to_end_tracked ... ignored, R28 end-to-end tracked lane (decode-bound until PF1)",
+        "test pf1_export_lane::pf1_export_lane ... ignored, PF1 G18: cargo test --release -p kinewright-media --lib pf1_export_lane -- --ignored --nocapture --test-threads=1",
+        "test pf1_harness::pf1_play_baseline ... ignored, PF1 P-play lane: cargo test --release -p kinewright-media --lib pf1_play_baseline -- --ignored --nocapture --test-threads=1",
+        "test pf1_harness::pf1_rss_baseline ... ignored, PF1 P-rss lane (LL pinned): cargo test --release -p kinewright-media --lib pf1_rss_baseline -- --ignored --nocapture --test-threads=1",
+        "test pf1_harness::pf1_rss_child ... ignored, PF1 P-rss child: spawned by pf1_rss_baseline",
+        "test pf1_harness::pf1_seek_baseline ... ignored, PF1 P-seek lane: cargo test --release -p kinewright-media --lib pf1_seek_baseline -- --ignored --nocapture --test-threads=1",
+        "test pf1_harness::s3b_d12_working_step_lane ... ignored, S3b D12 R57 working-step paired lane; isolated release with recorded load",
+        "test pf1_harness::s3b_i4_lane ... ignored, S3b I4 paired R28 30+300 frame lane; isolated release with recorded load",
+        "test pf1_harness::s3b_native_play_lane ... ignored, S3b R75 native P-play timing lane; isolated release with recorded load",
+        "test pf1_harness::s4_d13_active ... ignored, PF1 D13 parent: release LL development series",
+        "test pf1_harness::s4_prepare_inputs ... ignored, PF1 frozen-input preparation; run before pinning and measurement",
+        "test audio_device_play_pause_and_seek_smoke_test ... ignored, requires an audio device; run with KINEWRIGHT_AUDIO_TEST=1 and --ignored",
+        "test multi_track_audio_device_play_pause_and_seek_smoke_test ... ignored, requires an audio device; run with KINEWRIGHT_AUDIO_TEST=1 and --ignored",
+        "test timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test ... ignored, requires an audio device; run with KINEWRIGHT_AUDIO_TEST=1 and --ignored"
+      ],
+      "gpu": "CPU Mesa lavapipe forced; physical hardware tests were not run"
+    },
+    "windows_native_rerun": "pending lead push; the reported loop and its fixed array type are platform-independent Rust code",
+    "lint_allowance_added": false,
+    "dependency_features_changed": false,
+    "fmt": "Explicit touched root, rustfmt 1.99.1, pass",
+    "slow_lint": "123 markers agree; 45 parser self-tests pass"
+  },
+  "clippy_source_comparison": {
+    "old": "https://github.com/rust-lang/rust-clippy/blob/rust-1.99.0/clippy_lints/src/loops/needless_range_loop.rs",
+    "new": "https://github.com/rust-lang/rust-clippy/blob/rust-1.100.0/clippy_lints/src/loops/needless_range_loop.rs",
+    "observation": "The old visitor tracks directly indexed named variables; the new visitor tracks a base symbol with an extended expression and handles field projections. The fixture indexes the learned.bands field."
+  },
+  "isolated_shipping_correction": "ef8195b2 independently fixes the supervisor rustix event/time feature leak; details in supervisor-isolation-fix.json.",
+  "ci_pin": "All four Rust jobs select 1.99.1 from one workflow value. Native CI rerun after this local commit is pending lead push."
+}

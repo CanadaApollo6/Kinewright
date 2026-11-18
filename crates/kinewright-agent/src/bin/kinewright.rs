@@ -17,6 +17,13 @@ fn run() -> Result<(), HostError> {
     }
     match mode.as_str() {
         "host" => {
+            // MS2: the writer host admits media through the confined helper
+            // shipped beside this executable; without it admission fails.
+            if let Err(error) =
+                kinewright_project::media_sandbox::configure_media_sandbox_beside_executable()
+            {
+                eprintln!("media sandbox unavailable: {error}");
+            }
             let launch: HostLaunch = serde_json::from_str(&bootstrap)?;
             let host = WriterHost::start_with_issuer(launch.config, launch.auth, launch.issuer)?;
             let mut output = std::io::stdout().lock();

@@ -1,0 +1,23 @@
+{
+  "host_glibc": "glibc 2.44",
+  "kernel": "Linux 7.2.15-2-omarchy",
+  "binary_sha256": "4c6d26e673cbdd7465983cddafb294d5c66067797a626ca15e10c51678217148",
+  "policy": "Production KILL_PROCESS; test-only diagnostic TRAP; no policy widening",
+  "diagnostics": [
+    {
+      "witness": "pthread-diagnostic-direct.log",
+      "syscall": 28,
+      "length": 4096,
+      "advice": 102,
+      "fixture_mode": "pthread_diag"
+    },
+    {
+      "witness": "primary-clone-diagnostic-direct.log",
+      "syscall": 28,
+      "length": 4096,
+      "advice": 102,
+      "fixture_mode": "primary_clone_diag"
+    }
+  ],
+  "patch_sha256": "853788bf8e82b30126776e7ea7bc4dba66d0f818bd1f932bd295495655ae505b"
+}

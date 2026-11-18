@@ -212,3 +212,22 @@ kinewright_agent writer_host::hooks_tests::tests::tests::storage_admission::test
 kinewright_agent writer_host::hooks_tests::tests::tests::storage_admission::tests::followups::c4f_fix1_reused_ids_do_not_claim_missing crates/kinewright-agent/src/writer_host/run_limit_c4_followup_tests.rs linux-only # C4 authenticated kept history distinguishes clip and track id reuse from Undo
 kinewright_app ja1_attachment::tests::s2h_lost_save_floor_stays_frozen_until_exact_publisher_result crates/kinewright-app/src/ja1_attachment_tests.rs linux-only # Real 12,000-edit Save floor; lost reply stays frozen until exact publisher result
 kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_expired_authority_keeps_accepted_work_and_stops crates/kinewright-agent/src/writer_host/c5e_tests.rs linux-only # Exact short authority expiry preserves accepted work through Freeze, Stop and reopen
+
+probe_native confined_uhd_av1_probe_uses_the_final_filter crates/kinewright-media-helper/tests/probe_native.rs linux-only # MS2 CPU UHD AV1 confinement qualification
+kinewright_job_sys media_boundary::tests::all_other_madvise_values_and_high_bits_are_killed crates/kinewright-job-sys/src/media_boundary/tests.rs linux-only # MS2 native advice-domain denial controls
+scope_native native_scope_limits_join_before_release_and_supervisor_stays_outside crates/kinewright-media-supervisor/tests/scope_native.rs linux-only # MS2 native user-manager availability counted explicitly
+scope_native native_scope_records_are_bounded_and_self_or_stale_requests_are_refused crates/kinewright-media-supervisor/tests/scope_native.rs linux-only # MS2 native user-manager availability counted explicitly
+scope_native native_socket_eof_stops_scope_and_waits_for_empty crates/kinewright-media-supervisor/tests/scope_native.rs linux-only # MS2 socket loss retains cleanup until native emptiness
+runtime_native runtime_png_automatic_admission_closes_and_cleans crates/kinewright-media-client/tests/runtime_native.rs linux-only # MS2 real spawner/probe native cleanup
+runtime_native runtime_png_degraded_admission_closes_and_cleans crates/kinewright-media-client/tests/runtime_native.rs linux-only # MS2 no-manager real spawner/probe native cleanup
+witness_native watchdog_disabled_primary_app_and_supervisor_loss crates/kinewright-media-client/tests/witness_native.rs linux-only
+witness_native watchdog_disabled_degraded_app_and_supervisor_loss crates/kinewright-media-client/tests/witness_native.rs linux-only
+witness_native watchdog_disabled_spawner_abort_and_payload_prearm_race crates/kinewright-media-client/tests/witness_native.rs linux-only
+witness_native cancellation_deadline_and_revocation_discard_partial_results crates/kinewright-media-client/tests/witness_native.rs linux-only
+witness_native a_silent_helper_fails_typed_within_the_probe_bound crates/kinewright-media-client/tests/witness_native.rs linux-only
+escape_native full_stack_escapes_are_killed_and_canaries_unchanged crates/kinewright-media-client/tests/escape_native.rs linux-only # MS2 full-stack malicious-helper escapes
+rss_native degraded_rss_polling_records_overshoot_and_quarantines_source crates/kinewright-media-client/tests/rss_native.rs linux-only
+runtime_native runtime_releases_both_slots_during_bus_disconnect crates/kinewright-media-client/tests/runtime_native.rs linux-only # Native scope cleanup and supervisor reconnect/restart
+runtime_native runtime_scope_proof_holds_when_a_removed_scope_keeps_two_links crates/kinewright-media-client/tests/runtime_native.rs linux-only # Hosted-kernel deletion shape: ENODEV proves a two-link removed scope
+runtime_native runtime_scope_proof_error_keeps_the_reservation crates/kinewright-media-client/tests/runtime_native.rs linux-only # Persistent scope proof error: bounded, typed, reservation kept
+runtime_native runtime_unproven_fallback_is_not_relaunched crates/kinewright-media-client/tests/runtime_native.rs linux-only # Attached-then-failed scope with unproven cleanup: no degraded relaunch

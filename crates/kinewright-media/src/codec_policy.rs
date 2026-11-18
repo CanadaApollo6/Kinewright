@@ -1,47 +1,15 @@
 //! The MS1 profile is shared with the source builder. Refuse before probe decoding.
 use crate::ffmpeg;
 use kinewright_core::MediaError;
-use std::{ffi::CString, sync::LazyLock};
-
-#[derive(serde::Deserialize)]
-struct Profile {
-    decoders: Vec<String>,
-    demuxers: Vec<String>,
-}
-static PROFILE: LazyLock<Profile> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("../../../scripts/ffmpeg-profile.json"))
-        .expect("compiled FFmpeg profile")
-});
-pub(crate) static CODECS: LazyLock<CString> =
-    LazyLock::new(|| CString::new(PROFILE.decoders.join(",")).expect("codec names"));
-pub(crate) static FORMATS: LazyLock<CString> = LazyLock::new(|| {
-    // libavformat's registered name differs from its configure component name.
-    CString::new(
-        PROFILE
-            .demuxers
-            .iter()
-            .map(|name| match name.as_str() {
-                "image_png_pipe" => "png_pipe",
-                "image_jpeg_pipe" => "jpeg_pipe",
-                "matroska" => "matroska,webm",
-                name => name,
-            })
-            .collect::<Vec<_>>()
-            .join(","),
-    )
-    .expect("format names")
-});
+pub(crate) use kinewright_media_input::codec_policy::{CODECS, FORMATS};
 
 pub(crate) fn check(id: ffmpeg::codec::Id) -> Result<(), MediaError> {
-    let name = id.name();
-    if PROFILE
-        .decoders
-        .iter()
-        .any(|decoder| decoder == name || (decoder == "libdav1d" && name == "av1"))
-    {
+    if kinewright_media_input::codec_policy::allows(id) {
         Ok(())
     } else {
-        Err(MediaError::UnsupportedCodec { codec: name.into() })
+        Err(MediaError::UnsupportedCodec {
+            codec: id.name().into(),
+        })
     }
 }
 
