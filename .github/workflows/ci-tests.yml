@@ -46,6 +46,8 @@ jobs:
         with:
           ffmpeg-key: ${{ inputs.ffmpeg-key }}
       - uses: ./.github/actions/ci-nextest
+      - uses: ./.github/actions/ci-user-session
+        if: runner.os == 'Linux'
       - name: Count shards
         shell: bash
         env:
@@ -58,7 +60,9 @@ jobs:
         run: |
           source scripts/setup-ffmpeg.sh || exit 1
           set -euo pipefail
-          python scripts/ci_archive.py build --tier "$TIER" --count "$SHARD_COUNT" || exit 1
+          session() { systemd-run --user --scope --quiet --collect -- "$@"; }
+          session cat /proc/self/cgroup | sed 's/^/test cgroup: /'
+          session python scripts/ci_archive.py build --tier "$TIER" --count "$SHARD_COUNT"
       - if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -176,24 +180,93 @@ jobs:
         with:
           name: compiler-inputs-${{ inputs.os }}
           path: ci-artifacts
-      - name: Equip guardian user session
-        if: runner.os == 'Linux' && inputs.tier == 'slow'
+      - uses: ./.github/actions/ci-user-session
+        if: runner.os == 'Linux'
+        with:
+          unrestrict-userns: ${{ inputs.tier == 'slow' }}
+      - name: Extract the Linux test shard
+        id: linux-extract
+        if: runner.os == 'Linux'
         shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+          TIER: ${{ inputs.tier }}
         run: |
-          sudo loginctl enable-linger "$(id -un)" || true
-          sudo systemctl start "user@$(id -u).service" || true
-          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
-          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-      - if: runner.os == 'Linux'
+          source scripts/setup-ffmpeg.sh || exit 1
+          set -euo pipefail
+          session() { systemd-run --user --scope --quiet --collect -- "$@"; }
+          session cat /proc/self/cgroup | sed 's/^/test cgroup: /'
+          session python scripts/ci_archive.py extract --index "$SHARD" --defer-inputs
+          test -x target/debug/kinewright-media-helper
+          test -x target/debug/kinewright-media-supervisor
+          if [[ "$TIER" == slow ]]; then
+            test -x target/debug/kinewright-media-helper-witness
+          fi
+      - name: Check media admission before installing the AppArmor profile
+        if: runner.os == 'Linux' && steps.requirements.outputs.ms2_apparmor_binary != ''
+        shell: bash
+        env:
+          MS2_APPARMOR_BINARY: ${{ steps.requirements.outputs.ms2_apparmor_binary }}
+          KINEWRIGHT_MS2_CI_DIAG: '1'
+          KINEWRIGHT_MS2_USERNS_EXPECT: refused
+        run: |
+          source scripts/setup-ffmpeg.sh || exit 1
+          set -euo pipefail
+          session() { systemd-run --user --scope --quiet --collect -- "$@"; }
+          session cat /proc/self/cgroup | sed 's/^/test cgroup: /'
+          test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1
+          session "$MS2_APPARMOR_BINARY" \
+            --exact ms2_apparmor_userns_gate_refuses_without_the_profile_and_admits_with_it --nocapture
+      - name: Install the media helper AppArmor profile and prepare shard inputs
+        id: linux-prepare
+        if: ${{ !cancelled() && steps.linux-extract.outcome == 'success' }}
         shell: bash
         env:
           SHARD: ${{ matrix.shard }}
         run: |
+          sudo ./scripts/install-apparmor-profile.sh install "$PWD/target/debug/kinewright-media-helper"
           source scripts/setup-ffmpeg.sh || exit 1
           set -euo pipefail
-          python scripts/ci_archive.py extract --index "$SHARD" || exit 1
-          python scripts/ci_shards.py run --plan ci-artifacts/ci-plan.json --index "$SHARD" || exit 1
+          session() { systemd-run --user --scope --quiet --collect -- "$@"; }
+          session cat /proc/self/cgroup | sed 's/^/test cgroup: /'
+          mkdir -p target/ms2-s1a
+          session python scripts/ci_archive.py prepare --index "$SHARD"
+      - name: Run the Linux test shard
+        if: ${{ !cancelled() && steps.linux-prepare.outcome == 'success' && steps.requirements.outputs.ms2_client_slow != 'true' }}
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+          KINEWRIGHT_MS2_USERNS_EXPECT: admitted
+          KINEWRIGHT_MS2_CI_DIAG: '1'
+        run: |
+          source scripts/setup-ffmpeg.sh || exit 1
+          set -euo pipefail
+          session() { systemd-run --user --scope --quiet --collect -- "$@"; }
+          session cat /proc/self/cgroup | sed 's/^/test cgroup: /'
+          session python scripts/ci_shards.py run --plan ci-artifacts/ci-plan.json --index "$SHARD"
+      - name: MS2 media-client native tests (slow tier)
+        if: steps.linux-prepare.outcome == 'success' && steps.requirements.outputs.ms2_client_slow == 'true'
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+          KINEWRIGHT_MS2_CI_DIAG: '1'
+        run: |
+          source scripts/setup-ffmpeg.sh || exit 1
+          set -euo pipefail
+          session() { systemd-run --user --scope --quiet --collect -- "$@"; }
+          session cat /proc/self/cgroup | sed 's/^/test cgroup: /'
+          session python scripts/ci_shards.py run --plan ci-artifacts/ci-plan.json --index "$SHARD"
+      - name: MS2 kernel diagnostics on failure
+        if: runner.os == 'Linux' && (failure() || cancelled())
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          sudo journalctl -k --no-pager -o short-monotonic 2>/dev/null |
+            grep -iE 'apparmor|audit|seccomp|kinewright' | tail -n 100 || true
+          sudo dmesg 2>/dev/null | grep -iE 'apparmor|audit|seccomp|kinewright' | tail -n 100 || true
+          sudo aa-status 2>/dev/null | grep -iE 'kinewright|profiles are|processes' || true
+          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns || true
+          journalctl --user --no-pager -o short-monotonic -n 60 -u 'kinewright-media-*' 2>/dev/null || true
       - if: runner.os == 'Windows'
         shell: pwsh
         env:

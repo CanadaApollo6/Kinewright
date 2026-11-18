@@ -1,0 +1,21 @@
+name: Equip user session
+description: Start the systemd user manager for Linux test processes.
+inputs:
+  unrestrict-userns:
+    description: Permit the slow tier's test-only executables to create user namespaces.
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Equip user session
+      shell: bash
+      env:
+        UNRESTRICT_USERNS: ${{ inputs.unrestrict-userns }}
+      run: |
+        sudo loginctl enable-linger "$(id -un)"
+        sudo systemctl start "user@$(id -u).service"
+        echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+        echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+        if [[ "$UNRESTRICT_USERNS" == true ]]; then
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        fi

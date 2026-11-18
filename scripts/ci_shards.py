@@ -97,6 +97,10 @@ def predicted_seconds(units):
     return exclusive + max(lanes)
 
 
+def ms2_client(suite):
+    return Path(suite["cwd"]).name == "kinewright-media-client"
+
+
 def plan(listing, tier, count):
     suites = inventory(listing, tier)
     estimates, measured_batches = weights(tier)
@@ -142,18 +146,26 @@ def plan(listing, tier, count):
                           "timeout_seconds": 1800 if display else 600})
     shards = [[] for _ in range(count)]
     ordered = sorted(units, key=lambda u: (-u["estimate"], suites[u["suite"]]["label"], u["tests"]))
+    # The Linux slow client witnesses share one runner. They launch real
+    # helper/supervisor pairs, including cases that disconnect the user bus.
+    client = [u for u in ordered if tier == "slow" and st.host_os() == "linux"
+              and count > 2 and ms2_client(suites[u["suite"]])]
+    if client:
+        shards[-1].extend(client)
+        ordered = [u for u in ordered if u not in client]
+    slots = count - bool(client)
     # Display workloads get separate runners and finish before the parallel tail.
     # Control/compiler fixtures and other long units retain exclusive runners.
     mandatory = [u for u in ordered if u.get("display", False) or u.get("preserved", False)]
-    if len(mandatory) > max(0, count - 2):
+    if len(mandatory) > max(0, slots - 2):
         raise ValueError("too few shards for mandatory display and preserved runners")
     opportunistic = [u for u in ordered if u not in mandatory and
                      (u.get("dedicated", False) or (u["isolated"] and u["estimate"] > 240))]
-    long_tests = mandatory + opportunistic[:max(0, count - 2 - len(mandatory))]
+    long_tests = mandatory + opportunistic[:max(0, slots - 2 - len(mandatory))]
     for slot, unit in enumerate(long_tests, 1):
         shards[slot].append(unit)
     available = ([i for i, shard in enumerate(shards) if any(u.get("display", False) for u in shard)] +
-                 list(range(1 + len(long_tests), count))) if count > 1 else [0]
+                 list(range(1 + len(long_tests), slots))) if slots > 1 else [0]
     for unit in ordered:
         if unit in long_tests:
             continue
@@ -236,9 +248,10 @@ def run_shard(plan_path, index, output):
     # Full binaries retain libtest's scheduling and never share their runner's GPU.
     for number, unit in enumerate(units):
         if not unit["isolated"]:
-            record(number, execute_unit(data, unit, number, index, directory))
-            if errors:
-                raise ValueError("; ".join(errors))
+            try:
+                record(number, execute_unit(data, unit, number, index, directory))
+            except (OSError, ValueError) as error:
+                errors.append(f"test process {number}: {error}")
     with ThreadPoolExecutor(max_workers=4) as executor:
         pending = {executor.submit(execute_unit, data, u, n, index, directory): n
                    for n, u in enumerate(units) if u["isolated"]}
@@ -339,7 +352,13 @@ def main():
         save(args.plan, data)
         print(f"{sum(len(s['tests']) for s in data['suites'])} compiled tests; estimated shard seconds {data['estimated_seconds']}")
     elif args.command == "requirements":
-        units = load(args.plan)["shards"][args.index]
+        data = load(args.plan)
+        units = data["shards"][args.index]
+        suites = [data["suites"][unit["suite"]] for unit in units]
+        print("ms2_client_slow=" + str(data["tier"] == "slow" and bool(suites)
+                                      and all(ms2_client(suite) for suite in suites)).lower())
+        apparmor = next((suite["path"] for suite in suites if suite["label"] == "apparmor_native"), "")
+        print("ms2_apparmor_binary=" + (apparmor if data["tier"] == "fast" and data["os"] == "linux" else ""))
         print("compiler_inputs=" + str(any(u.get("compiler_inputs", False) for u in units)).lower())
         workloads = [ci_display_inputs.workload(u) for u in units if u.get("display", False)]
         if len(workloads) > 1:

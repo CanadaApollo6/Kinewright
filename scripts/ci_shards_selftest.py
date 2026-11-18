@@ -160,7 +160,8 @@ class Sharding(unittest.TestCase):
     def test_workflow_matrix_and_conditional_compiler_download(self):
         with tempfile.TemporaryDirectory(prefix="kinewright-ci-matrix-") as directory:
             path = Path(directory) / "plan.json"
-            cs.save(path, {"shards": [[{"timeout_seconds": 1800}], [{"compiler_inputs": True}], []]})
+            cs.save(path, {"tier": "fast", "os": "linux", "suites": [listing()["rust-suites"]["mcp_server"] | {"label": "mcp_server", "path": "/test"}],
+                           "shards": [[{"suite": 0, "timeout_seconds": 1800}], [{"suite": 0, "compiler_inputs": True}], []]})
             output = io.StringIO()
             with mock.patch.object(sys, "argv", ["ci_shards.py", "matrix", "--plan", str(path)]), contextlib.redirect_stdout(output):
                 cs.main()
@@ -170,7 +171,33 @@ class Sharding(unittest.TestCase):
                 output = io.StringIO()
                 with mock.patch.object(sys, "argv", ["ci_shards.py", "requirements", "--plan", str(path), "--index", str(index)]), contextlib.redirect_stdout(output):
                     cs.main()
-                self.assertEqual(output.getvalue().strip(), "compiler_inputs=" + wanted + "\ndisplay_workload=")
+                self.assertEqual(output.getvalue().strip(),
+                                 "ms2_client_slow=false\nms2_apparmor_binary=\ncompiler_inputs=" + wanted + "\ndisplay_workload=")
+
+    def test_ms2_client_slow_binaries_run_once_on_their_own_shard(self):
+        compiled = listing()
+        entries = [("mcp_server", "mcp1", "source", "any"),
+                   ("probe_native", "probe", "source", "linux-only")]
+        for binary, package, test in [
+            ("runtime_native", "kinewright-media-client", "runtime"),
+            ("witness_native", "kinewright-media-client", "watchdog"),
+            ("probe_native", "kinewright-media-helper", "probe"),
+        ]:
+            compiled["rust-suites"][binary] = {
+                "binary-path": f"/target/debug/deps/{binary}-0123456789abcdef",
+                "cwd": f"/repo/crates/{package}", "testcases": {test: {"ignored": False}},
+            }
+            if package == "kinewright-media-client":
+                entries.append((binary, test, "source", "linux-only"))
+        with mock.patch.object(st, "read_manifest", return_value=entries), \
+             mock.patch.object(st, "host_os", return_value="linux"):
+            data = cs.plan(compiled, "slow", 8)
+        labels = lambda units: {data["suites"][u["suite"]]["label"] for u in units}
+        self.assertEqual(labels(data["shards"][-1]), {"runtime_native", "witness_native"})
+        self.assertEqual(labels([u for shard in data["shards"][:-1] for u in shard]), {"mcp_server", "probe_native"})
+        expected = [(s["label"], p) for s in data["suites"] for p in s["tests"]]
+        rows = [(data["suites"][u["suite"]]["label"], p, "ok") for shard in data["shards"] for u in shard for p in u["tests"]]
+        st.verify_exact_rows(expected, rows)
 
     def test_slow_inventory_requires_every_manifest_test_enabled(self):
         entries = [("mcp_server", "mcp1", "source", "any")]
@@ -395,13 +422,21 @@ class Sharding(unittest.TestCase):
             data = {"tier": "fast", "suites": [suite], "shards": [[{"suite": 0, "tests": ["x"], "full": False, "isolated": False}]]}
             path = root / "plan.json"
             cs.save(path, data)
-            with mock.patch.object(subprocess, "run", side_effect=subprocess.TimeoutExpired("test", 600)), \
+            data["shards"][0].append({"suite": 0, "tests": ["y"], "full": False, "isolated": False})
+            cs.save(path, data)
+            def continue_after_timeout(args, **kwargs):
+                if "x" in args:
+                    raise subprocess.TimeoutExpired("test", 600)
+                kwargs["stdout"].write(log("witness", ["y"]).split("\n", 1)[1])
+                return subprocess.CompletedProcess(args, 0)
+            with mock.patch.object(subprocess, "run", side_effect=continue_after_timeout), \
                  contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaisesRegex(ValueError, "failed or timed out"):
                     cs.run_shard(path, 0, root)
             result = cs.load(root / "shard-0.json")
             self.assertFalse(result["completed"])
             self.assertEqual(result["runs"][0]["code"], 124)
+            self.assertEqual(result["runs"][1]["code"], 0)
 
 
 class ArchiveEnvironment(unittest.TestCase):

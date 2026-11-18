@@ -113,7 +113,7 @@ def restore_test_environment(directory, units):
             source.extractall(ROOT, filter="data")
 
 
-def extract(index=None):
+def extract(index=None, defer_inputs=False):
     directory = ROOT / "ci-artifacts"
     archive = directory / "tests.tar.zst"
     with archive.open("rb") as source:
@@ -130,19 +130,29 @@ def extract(index=None):
         raise ValueError("extracted test paths or inventory differ from builder")
     units = data["shards"][index] if index is not None else [u for shard in data["shards"] for u in shard]
     restore_test_environment(directory, units)
-    if index is not None:
+    if index is not None and not defer_inputs:
         ci_display_inputs.prepare(data, units, ROOT / "ci-results")
+
+
+def prepare(index):
+    data = ci_shards.load(ROOT / "ci-artifacts" / "ci-plan.json")
+    ci_display_inputs.prepare(data, data["shards"][index], ROOT / "ci-results")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["build", "extract"])
+    parser.add_argument("command", choices=["build", "extract", "prepare"])
     parser.add_argument("--tier", choices=["fast", "slow"])
     parser.add_argument("--count", type=int)
     parser.add_argument("--index", type=int)
+    parser.add_argument("--defer-inputs", action="store_true")
     args = parser.parse_args()
     os.environ["CARGO_TERM_COLOR"] = "never"
     if args.command == "build":
         build(args.tier, args.count)
     elif args.command == "extract":
-        extract(args.index)
+        extract(args.index, args.defer_inputs)
+    elif args.command == "prepare":
+        if args.index is None:
+            parser.error("prepare requires --index")
+        prepare(args.index)
