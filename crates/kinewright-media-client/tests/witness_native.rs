@@ -1,4 +1,7 @@
 #![cfg(target_os = "linux")]
+#[path = "../../kinewright-job-sys/test_support/deadline.rs"]
+mod deadline;
+
 #[cfg(feature = "slow-tests")]
 mod support {
     use kinewright_job_sys::{Cgroup, ProcessHandle, media_host, media_scope};
@@ -506,6 +509,7 @@ fn loss_fixture() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn watchdog_disabled_primary_app_and_supervisor_loss() {
+    let _deadline = deadline::test();
     #[cfg(feature = "slow-tests")]
     for stage in ["before-ready", "decode"] {
         for loss in ["app", "supervisor"] {
@@ -537,6 +541,7 @@ fn watchdog_disabled_primary_app_and_supervisor_loss() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn watchdog_disabled_degraded_app_and_supervisor_loss() {
+    let _deadline = deadline::test();
     #[cfg(feature = "slow-tests")]
     for stage in ["before-ready", "decode"] {
         for loss in ["app", "supervisor"] {
@@ -550,6 +555,7 @@ fn watchdog_disabled_degraded_app_and_supervisor_loss() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn watchdog_disabled_spawner_abort_and_payload_prearm_race() {
+    let _deadline = deadline::test();
     #[cfg(feature = "slow-tests")]
     for stage in ["before-shim-arm", "decode"] {
         assert!(support::loss(true, stage, "spawner"));
@@ -564,6 +570,7 @@ fn watchdog_disabled_spawner_abort_and_payload_prearm_race() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn cancellation_deadline_and_revocation_discard_partial_results() {
+    let _deadline = deadline::test();
     #[cfg(feature = "slow-tests")]
     for loss in ["cancel", "deadline", "authority"] {
         assert!(support::loss(true, "decode", loss));

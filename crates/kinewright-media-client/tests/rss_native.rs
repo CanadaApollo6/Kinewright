@@ -1,4 +1,7 @@
 #![cfg(target_os = "linux")]
+#[path = "../../kinewright-job-sys/test_support/deadline.rs"]
+mod deadline;
+
 #[cfg(feature = "slow-tests")]
 mod support {
     use kinewright_job_sys::media_host;
@@ -273,6 +276,7 @@ fn rss_fixture() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn degraded_rss_polling_records_overshoot_and_quarantines_source() {
+    let _deadline = deadline::test();
     #[cfg(feature = "slow-tests")]
     support::repeated();
 }

@@ -7,6 +7,9 @@
 //! and after installing the profile and names the expected outcome in
 //! `KINEWRIGHT_MS2_USERNS_EXPECT` (`refused` or `admitted`). On a host without
 //! the restriction (stock Arch) the expectation is `admitted`.
+#[path = "../../kinewright-job-sys/test_support/deadline.rs"]
+mod deadline;
+
 use kinewright_media_client::{Config, Failure, Limits, Request, Runtime, Source};
 use kinewright_media_ipc::{Kind, MediaSandboxError};
 use std::{
@@ -14,7 +17,16 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, atomic::AtomicBool},
+    time::Duration,
 };
+
+const PHASE_LIMIT: Duration = Duration::from_secs(20);
+const PROBE_PHASE: &str = "apparmor_native Runtime::probe";
+
+fn during<T>(name: &'static str, timeout: Duration, operation: impl FnOnce() -> T) -> T {
+    let _deadline = deadline::start(name, timeout);
+    operation()
+}
 
 struct Directory(PathBuf);
 impl Drop for Directory {
@@ -60,6 +72,7 @@ fn expectation() -> &'static str {
 
 #[test]
 fn ms2_apparmor_userns_gate_refuses_without_the_profile_and_admits_with_it() {
+    let _deadline = deadline::test();
     let expected = expectation();
     let directory = Directory(
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -69,19 +82,21 @@ fn ms2_apparmor_userns_gate_refuses_without_the_profile_and_admits_with_it() {
     fs::create_dir_all(&directory.0).unwrap();
     let png = directory.0.join("source.png");
     let ffmpeg = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/ffmpeg/bin/ffmpeg");
-    let status = Command::new(ffmpeg)
-        .args(["-nostdin", "-v", "error", "-f", "lavfi", "-i"])
-        .args([
-            "color=c=red:s=64x36:d=0.1",
-            "-frames:v",
-            "1",
-            "-threads",
-            "1",
-        ])
-        .arg(&png)
-        .stdin(Stdio::null())
-        .status()
-        .unwrap();
+    let status = during("apparmor_native ffmpeg fixture", PHASE_LIMIT, || {
+        Command::new(ffmpeg)
+            .args(["-nostdin", "-v", "error", "-f", "lavfi", "-i"])
+            .args([
+                "color=c=red:s=64x36:d=0.1",
+                "-frames:v",
+                "1",
+                "-threads",
+                "1",
+            ])
+            .arg(&png)
+            .stdin(Stdio::null())
+            .status()
+            .unwrap()
+    });
     assert!(status.success());
     let binaries = std::env::var_os("KINEWRIGHT_MS2_TEST_BIN_DIR")
         .map_or_else(
@@ -90,18 +105,22 @@ fn ms2_apparmor_userns_gate_refuses_without_the_profile_and_admits_with_it() {
         )
         .canonicalize()
         .expect("MS2 binaries: run `cargo build --workspace` first");
-    let runtime = Runtime::start(Config::new(
-        binaries.join("kinewright-media-helper"),
-        binaries.join("kinewright-media-supervisor"),
-        Limits::PROBE,
-    ))
-    .unwrap();
-    let result = runtime.probe(Request {
-        source: Box::new(Input(File::open(&png).unwrap())),
-        video: None,
-        audio: None,
-        cancel: Arc::new(AtomicBool::new(false)),
-        explicit_retry: false,
+    let runtime = during("apparmor_native Runtime::start", PHASE_LIMIT, || {
+        Runtime::start(Config::new(
+            binaries.join("kinewright-media-helper"),
+            binaries.join("kinewright-media-supervisor"),
+            Limits::PROBE,
+        ))
+        .unwrap()
+    });
+    let result = during(PROBE_PHASE, PHASE_LIMIT, || {
+        runtime.probe(Request {
+            source: Box::new(Input(File::open(&png).unwrap())),
+            video: None,
+            audio: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            explicit_retry: false,
+        })
     });
     println!("MS2_APPARMOR_GATE expected={expected} result={result:?}");
     match expected {
@@ -114,5 +133,34 @@ fn ms2_apparmor_userns_gate_refuses_without_the_profile_and_admits_with_it() {
         ),
         _ => assert_eq!(result.unwrap().metadata().kind, Kind::Image),
     }
-    runtime.shutdown().unwrap();
+    during("apparmor_native Runtime::shutdown", PHASE_LIMIT, || {
+        runtime.shutdown().unwrap();
+    });
+}
+
+#[test]
+fn blocked_probe_phase_fails_with_its_name() {
+    let _deadline = deadline::test();
+    if std::env::var_os("KW_MS2_PROBE_DEADLINE_FIXTURE").is_some() {
+        let (_sender, stalled) = std::sync::mpsc::channel::<()>();
+        during(PROBE_PHASE, Duration::from_millis(50), || {
+            stalled
+                .recv_timeout(Duration::from_secs(2))
+                .expect("the phase watchdog should have terminated the fixture");
+        });
+        return;
+    }
+
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "blocked_probe_phase_fails_with_its_name"])
+        .env("KW_MS2_PROBE_DEADLINE_FIXTURE", "1")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run the blocked probe phase fixture");
+    assert_eq!(output.status.code(), Some(124), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains(&format!("MS2_TEST_DEADLINE {PROBE_PHASE}")),
+        "{output:?}"
+    );
 }

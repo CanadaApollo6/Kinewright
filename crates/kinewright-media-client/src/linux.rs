@@ -1,4 +1,8 @@
 #![allow(clippy::missing_errors_doc)]
+#[cfg(test)]
+#[path = "../../kinewright-job-sys/test_support/deadline.rs"]
+mod deadline;
+
 use kinewright_core::MediaError;
 use kinewright_media_ipc::{MediaSandboxError, ValidatedProbe};
 use std::{
@@ -335,6 +339,7 @@ mod tests {
     }
     #[test]
     fn producer_reserves_the_global_pending_cap_before_the_actor_receives() {
+        let _deadline = deadline::test();
         let (sender, receiver) = mpsc::sync_channel(PENDING_PROBES + 1);
         let runtime = Runtime {
             sender,

@@ -2,6 +2,10 @@
 //! Linux cgroup handles and Windows query-only process handles can be observed
 //! independently without extending the Windows Job lifetime.
 
+#[cfg(all(target_os = "linux", test))]
+#[path = "../test_support/deadline.rs"]
+mod deadline;
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]

@@ -1,4 +1,7 @@
 #![cfg(target_os = "linux")]
+#[path = "../../kinewright-job-sys/test_support/deadline.rs"]
+mod deadline;
+
 use kinewright_media_client::{Config, Limits, Request, Runtime, Source};
 use kinewright_media_ipc::Kind;
 use std::{
@@ -182,6 +185,7 @@ fn run_case(case: &str) {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn runtime_png_automatic_admission_closes_and_cleans() {
+    let _deadline = deadline::test();
     run_case("automatic");
 }
 #[test]
@@ -190,6 +194,7 @@ fn runtime_png_automatic_admission_closes_and_cleans() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn runtime_png_degraded_admission_closes_and_cleans() {
+    let _deadline = deadline::test();
     run_case("degraded");
 }
 
@@ -199,6 +204,7 @@ fn runtime_png_degraded_admission_closes_and_cleans() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn runtime_releases_both_slots_during_bus_disconnect() {
+    let _deadline = deadline::test();
     if !Command::new("systemctl")
         .args(["--user", "show", "--property=Version"])
         .output()

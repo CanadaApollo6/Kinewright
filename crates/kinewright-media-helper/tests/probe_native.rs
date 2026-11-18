@@ -1,5 +1,8 @@
 #![cfg(target_os = "linux")]
 #![allow(unsafe_code)]
+#[path = "../../kinewright-job-sys/test_support/deadline.rs"]
+mod deadline;
+
 use kinewright_job_sys::media_boundary;
 use kinewright_media_ipc::{
     Frame, MediaSandboxError, Message, ProbeResult, ProbeSession, read_frame, write_frame,
@@ -217,6 +220,7 @@ fn run(directory: &Directory, source: &Path) -> Result<ProbeResult, MediaSandbox
 }
 #[test]
 fn confined_video_probe_decodes_a_first_frame_and_closes() {
+    let _deadline = deadline::test();
     let directory = Directory::new();
     let source = directory.0.join("video.mp4");
     ffmpeg(&source, false);
@@ -229,6 +233,7 @@ fn confined_video_probe_decodes_a_first_frame_and_closes() {
 /// (16-pixel edges) need the reserved envelope, not the declared picture.
 #[test]
 fn confined_video_probe_admits_padded_decoder_allocations() {
+    let _deadline = deadline::test();
     for (size, codec, name, expected) in [
         ("720x480", "libx264", "sd.mkv", [720, 480]),
         ("32x24", "libx264", "tiny.mkv", [32, 24]),
@@ -251,6 +256,7 @@ fn confined_video_probe_admits_padded_decoder_allocations() {
 }
 #[test]
 fn confined_still_probe_inspects_and_closes() {
+    let _deadline = deadline::test();
     for extension in ["png", "jpg"] {
         let directory = Directory::new();
         let source = directory.0.join(format!("still.{extension}"));
@@ -269,6 +275,7 @@ fn confined_still_probe_inspects_and_closes() {
 }
 #[test]
 fn confined_malformed_probe_refuses() {
+    let _deadline = deadline::test();
     let directory = Directory::new();
     let source = directory.0.join("bad.mp4");
     fs::write(&source, b"bad-media").unwrap();
@@ -284,6 +291,7 @@ fn confined_malformed_probe_refuses() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn confined_uhd_av1_probe_uses_the_final_filter() {
+    let _deadline = deadline::test();
     let directory = Directory::new();
     let source = directory.0.join("uhd-av1.mkv");
     let result = Command::new("ffmpeg")
@@ -316,6 +324,7 @@ fn confined_uhd_av1_probe_uses_the_final_filter() {
 
 #[test]
 fn confined_audio_probes_keep_the_channel_and_rate_bounds() {
+    let _deadline = deadline::test();
     for (codec, extension) in [("pcm_s16le", "wav"), ("libmp3lame", "mp3")] {
         let directory = Directory::new();
         let source = directory.0.join(format!("audio.{extension}"));

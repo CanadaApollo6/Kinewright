@@ -1,5 +1,8 @@
 #![cfg(target_os = "linux")]
 #![allow(unsafe_code)]
+#[path = "../../kinewright-job-sys/test_support/deadline.rs"]
+mod deadline;
+
 use kinewright_job_sys::{ProcessHandle, media_scope};
 use kinewright_media_ipc::{
     Frame, MediaSandboxError, Message, ScopeUnavailableReason, read_frame, write_frame,
@@ -279,6 +282,7 @@ fn primary_supervisor(test: &str) -> Option<Supervisor> {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn native_scope_limits_join_before_release_and_supervisor_stays_outside() {
+    let _deadline = deadline::test();
     let Some(mut supervisor) =
         primary_supervisor("native_scope_limits_join_before_release_and_supervisor_stays_outside")
     else {
@@ -313,6 +317,7 @@ fn native_scope_limits_join_before_release_and_supervisor_stays_outside() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn native_scope_records_are_bounded_and_self_or_stale_requests_are_refused() {
+    let _deadline = deadline::test();
     let Some(mut supervisor) = primary_supervisor(
         "native_scope_records_are_bounded_and_self_or_stale_requests_are_refused",
     ) else {
@@ -357,6 +362,7 @@ fn native_scope_records_are_bounded_and_self_or_stale_requests_are_refused() {
 }
 #[test]
 fn missing_user_manager_is_typed_and_creates_no_scope() {
+    let _deadline = deadline::test();
     let (mut supervisor, ready) = Supervisor::start(false);
     assert!(matches!(
         ready,
@@ -381,6 +387,7 @@ fn missing_user_manager_is_typed_and_creates_no_scope() {
 
 #[test]
 fn stale_identity_and_non_lifecycle_messages_close_the_contract() {
+    let _deadline = deadline::test();
     for (request, generation, message) in [
         (1, GENERATION, Message::StopScope { scope: 1 }),
         (2, GENERATION + 1, Message::StopScope { scope: 1 }),
@@ -425,6 +432,7 @@ fn stale_identity_and_non_lifecycle_messages_close_the_contract() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn native_socket_eof_stops_scope_and_waits_for_empty() {
+    let _deadline = deadline::test();
     let Some(mut supervisor) =
         primary_supervisor("native_socket_eof_stops_scope_and_waits_for_empty")
     else {
@@ -459,6 +467,7 @@ impl Drop for PrivateBus {
 
 #[test]
 fn bus_without_user_manager_is_typed() {
+    let _deadline = deadline::test();
     let mut bus = PrivateBus(
         Command::new("/usr/bin/dbus-daemon")
             .args(["--session", "--nofork", "--print-address=1"])

@@ -1,4 +1,5 @@
 use super::*;
+use crate::deadline;
 use std::{
     os::unix::process::ExitStatusExt,
     process::{Command, Stdio},
@@ -397,6 +398,7 @@ fn child(case: &str, control: bool) -> std::process::Output {
 }
 #[test]
 fn final_filter_joins_running_worker_and_clone3_falls_back() {
+    let _deadline = deadline::test();
     let control = child("clone3", true);
     assert!(
         control.status.success(),
@@ -418,6 +420,7 @@ fn final_filter_joins_running_worker_and_clone3_falls_back() {
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn foreign_audit_architecture_and_x32_are_killed() {
+    let _deadline = deadline::test();
     for case in ["i386_getpid", "x32_getpid"] {
         let denied = child(case, false);
         assert_eq!(
@@ -432,6 +435,7 @@ fn foreign_audit_architecture_and_x32_are_killed() {
 
 #[test]
 fn degraded_filter_kills_even_valid_pthread_creation() {
+    let _deadline = deadline::test();
     let denied = child("degraded_pthread", false);
     assert_eq!(denied.status.signal(), Some(libc::SIGSYS), "{denied:?}");
     let control = child("degraded_pthread", true);
@@ -440,6 +444,7 @@ fn degraded_filter_kills_even_valid_pthread_creation() {
 
 #[test]
 fn each_isolated_denial_is_sigsys_and_changes_without_filter() {
+    let _deadline = deadline::test();
     for case in [
         "affinity_other",
         "affinity_high",
@@ -532,6 +537,7 @@ fn each_isolated_denial_is_sigsys_and_changes_without_filter() {
 
 #[test]
 fn landlock_alone_refuses_synthetic_canary_and_control_can_read() {
+    let _deadline = deadline::test();
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ms2-s1a");
     std::fs::create_dir_all(&directory).unwrap();
     let path = directory.join(format!("landlock-{}", std::process::id()));
@@ -627,6 +633,7 @@ fn diagnostic() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn all_other_madvise_values_and_high_bits_are_killed() {
+    let _deadline = deadline::test();
     for advice in (0_u64..=255).chain([u64::MAX, 1_u64 << 32, (1_u64 << 32) | 0x66]) {
         if [0, 4, 8, 102, 103].contains(&advice) {
             continue;

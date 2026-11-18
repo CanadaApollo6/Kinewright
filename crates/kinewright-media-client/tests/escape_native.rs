@@ -7,6 +7,9 @@
 //! denial by a lower layer replies `UnsupportedMedia`, and a successful escape
 //! replies `ProtocolViolation`, so removing a guard changes the outcome. The
 //! `control` attack attempts nothing and must be admitted.
+#[path = "../../kinewright-job-sys/test_support/deadline.rs"]
+mod deadline;
+
 #[cfg(feature = "slow-tests")]
 mod support {
     use kinewright_media_client::{Config, Failure, Limits, Request, Runtime, Source};
@@ -207,6 +210,7 @@ fn escape_fixture() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn full_stack_escapes_are_killed_and_canaries_unchanged() {
+    let _deadline = deadline::test();
     #[cfg(feature = "slow-tests")]
     {
         use support::{attack, killed, workspace};

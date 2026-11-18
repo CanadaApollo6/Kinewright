@@ -132,8 +132,8 @@ pub(super) fn exercise(directory: &Path, binaries: &Path, png: &Path, restart: b
             close_allowed
                 .lock()
                 .unwrap()
-                .recv()
-                .map_err(io::Error::other)?;
+                .recv_timeout(Duration::from_secs(4))
+                .expect("bus cleanup probe observer release deadline");
         }
         Ok(())
     }));

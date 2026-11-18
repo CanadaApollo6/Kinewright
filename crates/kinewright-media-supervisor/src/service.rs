@@ -259,18 +259,31 @@ impl Service {
         use std::{
             fs::File,
             io::{Read, Write},
+            os::fd::AsFd,
         };
         let bus = self
             .bus
             .take()
             .ok_or_else(|| io::Error::other("no primary bus"))?;
         bus.disconnect().map_err(io::Error::other)?;
-        File::options()
-            .write(true)
-            .open(directory.join("disconnected"))?
-            .write_all(&[1])?;
+        // Opening both ends succeeds even when the test process has exited.
+        let open = |name| {
+            File::options()
+                .read(true)
+                .write(true)
+                .open(directory.join(name))
+        };
+        open("disconnected")?.write_all(&[1])?;
+        let mut reconnect = open("reconnect")?;
+        kinewright_job_sys::media_boundary::wait_readable(
+            reconnect.as_fd(),
+            Duration::from_secs(4),
+        )
+        .map_err(|error| {
+            io::Error::new(error.kind(), format!("D-Bus reconnect fixture: {error}"))
+        })?;
         let mut token = [0];
-        File::open(directory.join("reconnect"))?.read_exact(&mut token)?;
+        reconnect.read_exact(&mut token)?;
         Ok(token == [0])
     }
 

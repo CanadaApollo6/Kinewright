@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "../../kinewright-job-sys/test_support/deadline.rs"]
+mod deadline;
+
 use crate::{avio::Input, metadata, still};
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{ColorDescription, Rational};
@@ -285,6 +289,7 @@ mod tests {
 
     #[test]
     fn final_filter_cancels_native_open_and_control_decodes_and_closes() {
+        let _deadline = deadline::test();
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/ms2-s1a")
             .join(format!("cancel-{}.png", std::process::id()));
