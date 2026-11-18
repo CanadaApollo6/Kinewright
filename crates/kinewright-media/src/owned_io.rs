@@ -1497,7 +1497,6 @@ impl kinewright_media_input::owned_io::Cursor for VerifiedCursor {
                     kinewright_media_input::owned_io::OpenPolicy {
                         demuxers: c"concat,wav",
                         protocols: c"file",
-                        ..policy
                     }
                 }
             }
@@ -1511,8 +1510,8 @@ impl kinewright_media_input::owned_io::Cursor for VerifiedCursor {
 pub(crate) mod bridge {
     use super::{
         AVIO_BUFFER_BYTES, CHUNK_BYTES, CODEC_BUFFER_COUNT, DecoderBound, MAX_AUDIO_CHANNELS,
-        MAX_AUDIO_FRAME_SAMPLES, MAX_CERTIFIED_STREAMS, MAX_DECODER_DIMENSION, OwnedIoError,
-        VerifiedCursor, decoder_error, ffmpeg,
+        MAX_AUDIO_FRAME_SAMPLES, MAX_DECODER_DIMENSION, OwnedIoError, VerifiedCursor,
+        decoder_error, ffmpeg,
     };
     #[cfg(test)]
     use super::{Arc, AtomicBool, CertifiedInput, Ordering};
