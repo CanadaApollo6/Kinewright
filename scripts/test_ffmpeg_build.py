@@ -335,6 +335,26 @@ class BuildIdentity(unittest.TestCase):
                     builder.build('libraries', no_binary_cache=True)
                 download.assert_called_once()
 
+    def test_ci_consumer_reuses_only_the_exact_producer_key(self):
+        import os
+        with tempfile.TemporaryDirectory(dir=builder.ROOT/'target') as directory:
+            root = Path(directory)
+            prefix = root/'third_party/ffmpeg'
+            prefix.mkdir(parents=True)
+            (prefix/'.build-key').write_text('producer-key')
+            with patch.object(builder, 'ROOT', root), \
+                 patch.object(builder, 'fingerprint', return_value=('newer-image-key', {})), \
+                 patch.object(builder.urllib.request, 'urlopen', side_effect=RuntimeError('fresh verified-source download')) as download:
+                with patch.dict(os.environ, {'KINEWRIGHT_FFMPEG_PRODUCER_KEY': 'producer-key'}):
+                    builder.build('libraries')
+                    download.assert_not_called()
+                    with self.assertRaisesRegex(RuntimeError, 'fresh verified-source download'):
+                        builder.build('libraries', no_binary_cache=True)
+                for other in ['another-producer-key', '']:
+                    with patch.dict(os.environ, {'KINEWRIGHT_FFMPEG_PRODUCER_KEY': other}):
+                        with self.assertRaisesRegex(RuntimeError, 'fresh verified-source download'):
+                            builder.build('libraries')
+
     def test_fingerprint_changes_with_tool_dependency_flag_or_setup_changes(self):
         from types import SimpleNamespace
         import os

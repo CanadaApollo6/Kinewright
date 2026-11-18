@@ -103,6 +103,7 @@ runs:
       env:
         SOURCE_ONLY: ${{ inputs.no-binary-cache }}
         PRODUCER: ${{ inputs.producer }}
+        KINEWRIGHT_FFMPEG_PRODUCER_KEY: ${{ inputs.producer != 'true' && inputs.cache-key || '' }}
       run: |
         ./scripts/setup-ffmpeg.ps1 -ToolsOnly
         python scripts/build-ffmpeg.py --check-msvc-shell
@@ -119,6 +120,7 @@ runs:
       env:
         SOURCE_ONLY: ${{ inputs.no-binary-cache }}
         PRODUCER: ${{ inputs.producer }}
+        KINEWRIGHT_FFMPEG_PRODUCER_KEY: ${{ inputs.producer != 'true' && inputs.cache-key || '' }}
       run: |
         cache_arguments=()
         if [[ "$SOURCE_ONLY" == true ]]; then cache_arguments+=(--no-binary-cache); fi
