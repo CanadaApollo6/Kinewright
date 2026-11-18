@@ -173,6 +173,28 @@ measurement gates anything. The R3-1 witnesses therefore fill the byte limit
 with three messages and the count limit with 64 small ones; none publishes 64
 messages over a 2 MiB history.
 
+Local ticket **HX-S1: snapshot doors carry large snapshots by reference
+(owned file plus hash), not inline JSON.** A `SnapshotTransport` body can
+reach about 84 MiB raw (the smaller of the 104 MiB retained envelope and half
+the 168 MiB workspace, less its 4 KiB header). It escapes to up to twice that
+inline, and ConfirmBarrier carries three snapshots, against a 40 MiB
+`HOST_BODY_BYTES`. Until then, `HostClient` refuses a snapshot larger than its
+door's constant with `snapshot_capacity` before sending anything:
+
+| Door | Snapshots | Raw bytes per snapshot |
+|---|---|---|
+| Save and the other single-snapshot doors | 1 | 20,838,400 |
+| BeginRecovery (plus the manual window) | 1 | 18,741,152 |
+| PublishBarrier | 2 | 10,418,176 |
+| ConfirmBarrier | 3 | 6,944,768 |
+
+A large session (3,000 clips on four tracks, three hours at 30 fps, 40
+assets, 2,000 history steps) captured a 2,577,611-byte snapshot: a
+2,824,558-byte Save body and an 8,473,918-byte ConfirmBarrier body. That is
+2.7x under the ConfirmBarrier constant and 4.0x under PublishBarrier's. A
+transcript is not part of the document or its history, so it adds nothing to a
+snapshot.
+
 Local ticket **HX-T1: publish task checkpoint before the MCP reply.** Publish
 the task's checkpoint before the MCP reply acknowledges a non-destructive task
 edit, so that an acknowledged edit survives a host stop.

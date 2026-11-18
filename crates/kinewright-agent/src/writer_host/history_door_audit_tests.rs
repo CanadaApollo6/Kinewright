@@ -548,3 +548,274 @@ fn snapshot_doors_admit_a_long_history_past_the_envelope_cap() {
     }
     host.shutdown().unwrap();
 }
+
+/// `base` with a transport body of exactly `raw` bytes, all worst-case
+/// escaping: a JSON string of `\"` pairs, padded when the count is odd.
+fn sized_snapshot(base: &HostSnapshot, raw: u64) -> HostSnapshot {
+    let mut wire = serde_json::to_value(base).unwrap();
+    let mut body = String::from("\"");
+    body.push_str(&"\\\"".repeat(usize::try_from((raw - 2) / 2).unwrap()));
+    body.push_str(&"a".repeat(usize::try_from((raw - 2) % 2).unwrap()));
+    body.push('"');
+    wire["history"]["snapshot"]["body"] = serde_json::Value::String(body);
+    let snapshot: HostSnapshot = serde_json::from_value(wire).unwrap();
+    assert_eq!(
+        snapshot.history.snapshot.body_bytes(),
+        raw,
+        "SIZED_SNAPSHOT"
+    );
+    snapshot
+}
+
+#[test]
+fn snapshot_over_its_door_cap_is_refused_at_the_client_before_sending() {
+    let temp = kinewright_media::test_support::TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "history-door-snapshot-cap",
+    );
+    let host = WriterHost::start(HostConfig {
+        scheduler_settings: Some(temp.path("scheduler")),
+        project: "history-door-snapshot-cap".into(),
+        path: None,
+        roots: SessionRoots::default(),
+        origin: HostOrigin::Headless,
+    })
+    .unwrap();
+    let client = host.client();
+    let read = || {
+        client
+            .request(HostCommand::ReadHistory)
+            .unwrap()
+            .history
+            .unwrap()
+    };
+    let before = read();
+    let base = HostSnapshot::from_history(before.clone()).unwrap();
+    // A client whose endpoint accepts no connection: any byte it tried to send
+    // would fail as a connection error, not as the capacity refusal.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let mut endpoint = client.endpoint().clone();
+    endpoint.address = closed;
+    let bootstrap = client.bootstrap();
+    let unsent = HostClient::connect(endpoint, bootstrap.auth, bootstrap.roots).unwrap();
+    let barrier = |before: &HostSnapshot, after: &HostSnapshot| {
+        Box::new(RecoveryBarrier {
+            switch_generation: 0,
+            client: "a".repeat(64),
+            acknowledged: vec![],
+            checkpoint_ref: DoorSamples::object(
+                kinewright_project::bundle_records::RecordKind::BranchCheckpoint,
+            ),
+            before: before.clone(),
+            after: after.clone(),
+        })
+    };
+    let refused = |command: HostCommand, label: &str| {
+        for (name, target) in [("closed", &unsent), ("live", &client)] {
+            let error = target.request(command.clone()).err();
+            assert!(
+                matches!(&error, Some(HostError::Refused(refusal)) if refusal.code == "snapshot_capacity"),
+                "SNAPSHOT_CAPACITY_REFUSED_BEFORE_SENDING {label} {name}: {error:?}"
+            );
+        }
+        assert_eq!(read(), before, "SNAPSHOT_CAPACITY_LEAVES_HISTORY {label}");
+    };
+    let admitted = |command: HostCommand, label: &str| {
+        let encoded = serde_json::to_vec(&command).unwrap().len();
+        println!("SNAPSHOT_DOOR_AT_CAP {label} body={encoded} limit={HOST_BODY_BYTES}");
+        // The door may refuse this foreign snapshot; neither the client gate
+        // nor HTTP ingress may.
+        let reply = client.request(command);
+        assert!(
+            reply.is_ok(),
+            "SNAPSHOT_AT_CAP_CROSSES_HTTP {label}: {:?}",
+            reply.err()
+        );
+        assert_eq!(read(), before, "SNAPSHOT_AT_CAP_LEAVES_HISTORY {label}");
+    };
+
+    let over = sized_snapshot(&base, SNAPSHOT_DOOR_BYTES + 1);
+    refused(HostCommand::Save { snapshot: over }, "Save");
+    let at = sized_snapshot(&base, SNAPSHOT_DOOR_BYTES);
+    // The same call, retried within the cap, reaches the host.
+    admitted(HostCommand::Save { snapshot: at }, "Save");
+
+    let at = sized_snapshot(&base, CONFIRM_BARRIER_SNAPSHOT_BYTES);
+    let over = sized_snapshot(&base, CONFIRM_BARRIER_SNAPSHOT_BYTES + 1);
+    // Any one of the three snapshots over the cap refuses the whole request.
+    for (before_snapshot, after_snapshot, installed, slot) in [
+        (&over, &at, &at, "before"),
+        (&at, &over, &at, "after"),
+        (&at, &at, &over, "installed"),
+    ] {
+        refused(
+            HostCommand::ConfirmBarrier {
+                barrier: barrier(before_snapshot, after_snapshot),
+                installed: installed.clone(),
+            },
+            &format!("ConfirmBarrier {slot}"),
+        );
+    }
+    admitted(
+        HostCommand::ConfirmBarrier {
+            barrier: barrier(&at, &at),
+            installed: at.clone(),
+        },
+        "ConfirmBarrier",
+    );
+    host.shutdown().unwrap();
+}
+
+/// Measurement only: how close a large, realistic session comes to the
+/// snapshot door caps. A transcript is not part of the document or its
+/// history, so the 40,000-word transcript adds nothing to a snapshot.
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn snapshot_door_caps_against_a_large_realistic_session() {
+    use kinewright_core::{
+        AssetId, Clip, ClipContent, ClipId, ColorDescription, Command, Document, Marker, MarkerId,
+        MediaAsset, MediaKind, MediaSourceFingerprint, Operation, Rational, TimeCode, Track,
+        TrackId, TrackKind,
+    };
+    const ASSETS: u64 = 40;
+    const TRACKS: u64 = 4;
+    const CLIPS: u64 = 3_000;
+    const STEPS: u64 = 2_000;
+    let fps = Rational::new(30, 1).unwrap();
+    // 3,000 clips over four tracks of 750 clips, 432 frames each: three
+    // hours at 30 fps.
+    let clip_len = 432_i64;
+    let assets: Vec<MediaAsset> = (1..=ASSETS)
+        .map(|id| MediaAsset {
+            id: AssetId(id),
+            path: format!(
+                "/media/interview/day-{}/A{id:03}_C{id:03}_0613RK.mov",
+                id % 3
+            )
+            .into(),
+            name: format!("A{id:03}_C{id:03}_0613RK"),
+            duration: TimeCode(30 * 60 * 30),
+            fps,
+            kind: MediaKind::Video,
+            resolution: Some((3840, 2160)),
+            source_fingerprint: MediaSourceFingerprint::unknown(),
+            color_description: ColorDescription::default(),
+            assumed_from: None,
+        })
+        .collect();
+    let tracks = (0..TRACKS)
+        .map(|track| Track {
+            id: TrackId(track + 1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: (0..CLIPS / TRACKS)
+                .map(|slot| {
+                    let id = track * (CLIPS / TRACKS) + slot + 1;
+                    let source = i64::try_from(id * 97 % 40_000).unwrap();
+                    Clip {
+                        enabled: true,
+                        enabled_curve: None,
+                        id: ClipId(id),
+                        asset: AssetId(id % ASSETS + 1),
+                        source_range: TimeCode(source)..TimeCode(source + clip_len),
+                        content: ClipContent::Media,
+                        timeline_start: TimeCode(i64::try_from(slot).unwrap() * clip_len),
+                        effects: Vec::new(),
+                        transition_in: None,
+                        link: None,
+                        audio_gain_tenth_db: 0,
+                        audio_fade_in_frames: TimeCode::ZERO,
+                        audio_fade_out_frames: TimeCode::ZERO,
+                        speed_percent: 100,
+                        audio_gain_curve: None,
+                        blend_mode: kinewright_core::BlendMode::Normal,
+                    }
+                })
+                .collect(),
+        })
+        .collect();
+    let document = Document {
+        tracks,
+        media_pool: assets,
+        fps,
+        resolution: (3840, 2160),
+        duration: TimeCode(i64::try_from(CLIPS / TRACKS).unwrap() * clip_len),
+        ..Document::default()
+    };
+    document.validate().unwrap();
+    let pool = kinewright_project::operation_history::HistoryPool::new(
+        kinewright_project::operation_history::PoolLimits::default(),
+    );
+    let core = kinewright_project::operation_actor::Core::spawn(
+        &pool,
+        kinewright_project::operation_history::Role::Ordinary,
+        kinewright_project::operation_history::CreationOrigin {
+            branch: serde_json::from_str("\"11111111111111111111111111111111\"").unwrap(),
+            batch: serde_json::from_str("\"22222222222222222222222222222222\"").unwrap(),
+        },
+        document,
+    )
+    .unwrap();
+    // 2,000 ordinary edits: audio levels on every step, a review note every
+    // fifth step.
+    for step in 0..STEPS {
+        let clip = ClipId(step * 37 % CLIPS + 1);
+        let mut operations = vec![Operation::SetClipAudio {
+            clip,
+            gain_tenth_db: -i32::try_from(step % 60).unwrap(),
+            fade_in_frames: TimeCode(i64::try_from(step % 12).unwrap()),
+            fade_out_frames: TimeCode::ZERO,
+        }];
+        if step % 5 == 0 {
+            operations.push(Operation::AddMarker {
+                marker: Marker {
+                    id: MarkerId(step + 1),
+                    position: TimeCode(i64::try_from(step).unwrap() * 150),
+                    label: format!("Tighten the answer before take {step}; keep the laugh"),
+                    color_token: 0,
+                },
+            });
+        }
+        core.request(Command::DoBatch(operations)).unwrap();
+    }
+    let snapshot = HostSnapshot::capture(&core).unwrap();
+    let raw = snapshot.history.snapshot.body_bytes();
+    let save = serde_json::to_vec(&HostCommand::Save {
+        snapshot: snapshot.clone(),
+    })
+    .unwrap()
+    .len();
+    let confirm = serde_json::to_vec(&HostCommand::ConfirmBarrier {
+        barrier: Box::new(RecoveryBarrier {
+            switch_generation: 0,
+            client: "a".repeat(64),
+            acknowledged: vec![],
+            checkpoint_ref: DoorSamples::object(
+                kinewright_project::bundle_records::RecordKind::BranchCheckpoint,
+            ),
+            before: snapshot.clone(),
+            after: snapshot.clone(),
+        }),
+        installed: snapshot,
+    })
+    .unwrap()
+    .len();
+    println!(
+        "SNAPSHOT_SESSION_MEASURE raw={raw} save_body={save} confirm_body={confirm} \
+         single_cap={SNAPSHOT_DOOR_BYTES} single_headroom={} \
+         begin_recovery_cap={BEGIN_RECOVERY_SNAPSHOT_BYTES} begin_recovery_headroom={} \
+         publish_cap={PUBLISH_BARRIER_SNAPSHOT_BYTES} publish_headroom={} \
+         confirm_cap={CONFIRM_BARRIER_SNAPSHOT_BYTES} confirm_headroom={} \
+         body_limit={HOST_BODY_BYTES}",
+        SNAPSHOT_DOOR_BYTES / raw,
+        BEGIN_RECOVERY_SNAPSHOT_BYTES / raw,
+        PUBLISH_BARRIER_SNAPSHOT_BYTES / raw,
+        CONFIRM_BARRIER_SNAPSHOT_BYTES / raw,
+    );
+}

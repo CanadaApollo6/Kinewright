@@ -29,6 +29,102 @@ const _: () = assert!(
         && COMMIT_HISTORY_BODY_BYTES <= HOST_BODY_BYTES as u64,
     "FULL_MANUAL_WINDOW_CROSSES_HTTP"
 );
+/// One snapshot's wire bytes outside its transport body: role, sizing,
+/// identity, branch, revision and `history_sha256`, with their JSON syntax.
+pub const SNAPSHOT_WIRE_HEADER_BYTES: u64 = 4096;
+/// A transport body is raw JSON that travels as a JSON string; like a manual
+/// message, it escapes to at most twice its raw length.
+pub const SNAPSHOT_ESCAPE_FACTOR: u64 = 2;
+/// The largest raw transport body each of `snapshots` may have when the
+/// command also carries `other` payload bytes, so the whole request fits
+/// `HOST_BODY_BYTES` with its envelope.
+const fn snapshot_door_bytes(snapshots: u64, other: u64) -> u64 {
+    ((HOST_BODY_BYTES as u64 - HOST_ENVELOPE_BYTES as u64 - other) / snapshots
+        - SNAPSHOT_WIRE_HEADER_BYTES)
+        / SNAPSHOT_ESCAPE_FACTOR
+}
+const fn snapshot_door_fits(cap: u64, snapshots: u64, other: u64) -> bool {
+    HOST_ENVELOPE_BYTES as u64
+        + other
+        + snapshots * (SNAPSHOT_ESCAPE_FACTOR * cap + SNAPSHOT_WIRE_HEADER_BYTES)
+        <= HOST_BODY_BYTES as u64
+}
+/// `Save`, `SaveAs`, `FirstSave`, `PreviewRescue`, `PreviewRecovery`,
+/// `RefreshUnsavedInputs`, `PrepareOwnedMedia` and
+/// `PrepareMediaInterpretation` carry one snapshot.
+pub const SNAPSHOT_DOOR_BYTES: u64 = snapshot_door_bytes(1, 0);
+/// `BeginRecovery` carries one frozen snapshot and the pending manual window.
+pub const BEGIN_RECOVERY_SNAPSHOT_BYTES: u64 = snapshot_door_bytes(1, COMMIT_HISTORY_WINDOW_BYTES);
+/// `PublishBarrier` carries the barrier's two snapshots.
+pub const PUBLISH_BARRIER_SNAPSHOT_BYTES: u64 = snapshot_door_bytes(2, 0);
+/// `ConfirmBarrier` carries the barrier's two snapshots and the installed one.
+pub const CONFIRM_BARRIER_SNAPSHOT_BYTES: u64 = snapshot_door_bytes(3, 0);
+const _: () = assert!(
+    snapshot_door_fits(SNAPSHOT_DOOR_BYTES, 1, 0)
+        && snapshot_door_fits(
+            BEGIN_RECOVERY_SNAPSHOT_BYTES,
+            1,
+            COMMIT_HISTORY_WINDOW_BYTES
+        )
+        && snapshot_door_fits(PUBLISH_BARRIER_SNAPSHOT_BYTES, 2, 0)
+        && snapshot_door_fits(CONFIRM_BARRIER_SNAPSHOT_BYTES, 3, 0),
+    "SNAPSHOT_DOORS_CROSS_HTTP"
+);
+/// The snapshots one command carries and the raw transport bytes each may have.
+pub(crate) struct SnapshotDoor<'a> {
+    pub cap: u64,
+    pub snapshots: [Option<&'a HostSnapshot>; 3],
+}
+impl HostCommand {
+    /// `None` for a command that carries no snapshot.
+    pub(crate) fn snapshot_door(&self) -> Option<SnapshotDoor<'_>> {
+        let (cap, snapshots) = match self {
+            Self::Save { snapshot }
+            | Self::SaveAs { snapshot, .. }
+            | Self::FirstSave { snapshot, .. }
+            | Self::PreviewRescue { snapshot }
+            | Self::PreviewRecovery { snapshot, .. }
+            | Self::RefreshUnsavedInputs { snapshot, .. }
+            | Self::PrepareOwnedMedia { snapshot, .. }
+            | Self::PrepareMediaInterpretation { snapshot, .. } => {
+                (SNAPSHOT_DOOR_BYTES, [Some(snapshot), None, None])
+            }
+            Self::BeginRecovery { frozen, .. } => {
+                (BEGIN_RECOVERY_SNAPSHOT_BYTES, [frozen.as_ref(), None, None])
+            }
+            Self::PublishBarrier { barrier } => (
+                PUBLISH_BARRIER_SNAPSHOT_BYTES,
+                [Some(&barrier.before), Some(&barrier.after), None],
+            ),
+            Self::ConfirmBarrier { barrier, installed } => (
+                CONFIRM_BARRIER_SNAPSHOT_BYTES,
+                [Some(&barrier.before), Some(&barrier.after), Some(installed)],
+            ),
+            _ => return None,
+        };
+        Some(SnapshotDoor { cap, snapshots })
+    }
+    /// Refuses, before any byte is sent, a snapshot larger than its door can
+    /// carry across HTTP. Nothing is installed and the call can be retried.
+    pub(crate) fn check_snapshot_capacity(&self) -> Result<(), HostRefusal> {
+        let Some(door) = self.snapshot_door() else {
+            return Ok(());
+        };
+        for snapshot in door.snapshots.into_iter().flatten() {
+            let bytes = snapshot.history.snapshot.body_bytes();
+            if bytes > door.cap {
+                return Err(HostRefusal::new(
+                    "snapshot_capacity",
+                    &format!(
+                        "this history's snapshot is {bytes} bytes; this request carries at most {} per snapshot",
+                        door.cap
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
 pub const HOST_COMMAND_CAPACITY: usize = 64;
 pub const RETENTION_LOST: &str = "The host could not re-establish this session's retained data. Your edits remain here. Saving and rescue are paused, including saving elsewhere. Close this editing context explicitly to end it.";
 

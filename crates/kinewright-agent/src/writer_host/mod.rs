@@ -229,6 +229,7 @@ impl HostClient {
         command: HostCommand,
         operation: Option<u64>,
     ) -> Result<HostReply, HostError> {
+        command.check_snapshot_capacity()?;
         let request = HostRequest {
             editor: self.editor.clone(),
             operation,
@@ -819,20 +820,7 @@ fn check_host_headers(headers: &HeaderMap, state: &HttpState) -> Result<String, 
 /// Commands whose body holds one or more `HostSnapshot`s. They share Save's
 /// ingress cap rather than the envelope cap, so a long history reaches the door.
 fn carries_snapshot(command: &HostCommand) -> bool {
-    matches!(
-        command,
-        HostCommand::Save { .. }
-            | HostCommand::SaveAs { .. }
-            | HostCommand::FirstSave { .. }
-            | HostCommand::PreviewRescue { .. }
-            | HostCommand::PreviewRecovery { .. }
-            | HostCommand::RefreshUnsavedInputs { .. }
-            | HostCommand::PrepareOwnedMedia { .. }
-            | HostCommand::PrepareMediaInterpretation { .. }
-            | HostCommand::BeginRecovery { .. }
-            | HostCommand::PublishBarrier { .. }
-            | HostCommand::ConfirmBarrier { .. }
-    )
+    command.snapshot_door().is_some()
 }
 async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> Response {
     let bearer = match check_host_headers(request.headers(), &state) {

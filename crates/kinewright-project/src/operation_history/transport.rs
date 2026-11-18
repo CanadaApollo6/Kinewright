@@ -102,6 +102,11 @@ impl SnapshotTransport {
             && self.identity == other.identity
             && self.body.get() == other.body.get()
     }
+    /// The raw JSON bytes of the body, before it travels as a JSON string.
+    #[must_use]
+    pub fn body_bytes(&self) -> u64 {
+        self.body.get().len() as u64
+    }
     #[must_use]
     pub const fn role(&self) -> Role {
         self.role
