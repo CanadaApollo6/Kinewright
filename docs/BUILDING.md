@@ -2,8 +2,8 @@
 
 Kinewright is a native desktop app for **64-bit Windows** (MSVC) and **64-bit Linux**
 (glibc). The media crate links FFmpeg at build time and loads its shared
-libraries at test and run time. Each platform provisions a pinned GPL FFmpeg 9
-build into `third_party/ffmpeg` — no system FFmpeg install is required.
+libraries at test and run time. The Linux media helper links the same pinned GPL
+FFmpeg 9 libraries. Each platform provisions them into `third_party/ffmpeg`.
 
 ## Linux (x86_64)
 
@@ -32,15 +32,24 @@ version independently of the local `stable` default.
 source ./scripts/setup-ffmpeg.sh
 python3 scripts/build-ffmpeg.py --profile testgen
 cargo build --workspace
-cargo test --workspace
+systemd-run --user --scope --quiet --collect cargo test --workspace
 cargo run -p kinewright-app
 ```
 
-`cargo test --workspace` runs the fast test tier. The slowest tests (the list is
-`ci/slow-tests.txt`) run only when each crate's `slow-tests` feature is on:
+The workspace build puts `kinewright-media-helper` and
+`kinewright-media-supervisor` beside the app in `target/debug`. On a system
+that restricts unprivileged user namespaces, install the AppArmor profile
+with `sudo ./scripts/install-apparmor-profile.sh install "$PWD/target/debug/kinewright-media-helper"`.
+Set `KINEWRIGHT_MS2_USERNS_EXPECT=admitted` when running the fast tests with
+the profile installed.
 
-```
-cargo test --workspace --features kinewright-media/slow-tests,kinewright-agent/slow-tests,kinewright-app/slow-tests
+`cargo test --workspace` runs the fast tier. For the slow tier, build the
+helper witness and supervisor with their `slow-tests` features, then run the
+manifest tests in the user session.
+
+```bash
+cargo build -p kinewright-media-helper -p kinewright-media-supervisor --features slow-tests --bins
+systemd-run --user --scope --quiet --collect python3 scripts/slow_tests.py slow
 ```
 
 Programme documents whose exit gate says `cargo test --workspace` mean the fast
@@ -58,8 +67,10 @@ For tests, provision the isolated fixture generator separately:
 python3 scripts/build-ffmpeg.py --profile testgen
 ```
 
-The test tools never appear on the app PATH or in shipping bundles. The source
-build requires Python 3.12+ and explicitly listed codec development libraries.
+The Linux test generator uses libaom and LAME for the sandbox's AV1 and MP3
+fixtures. The test tools are installed in `third_party/ffmpeg-testgen`, outside
+the app PATH and shipping bundle. The source build requires Python 3.12+ and
+the codec development libraries listed in the dependency installer.
 The glibc floor follows the Linux build host; use the CI Ubuntu output for release
 packaging, rather than a rolling-distribution development build.
 

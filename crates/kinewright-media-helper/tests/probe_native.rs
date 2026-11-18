@@ -17,6 +17,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+const FFMPEG_TESTGEN: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../third_party/ffmpeg-testgen/bin/ffmpeg-testgen"
+);
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Directory(PathBuf);
 impl Directory {
@@ -64,7 +69,7 @@ impl Read for DeadlineReader {
     }
 }
 fn ffmpeg(output: &Path, still: bool) {
-    let mut command = Command::new("ffmpeg");
+    let mut command = Command::new(FFMPEG_TESTGEN);
     command.args([
         "-v",
         "error",
@@ -241,7 +246,7 @@ fn confined_video_probe_admits_padded_decoder_allocations() {
     ] {
         let directory = Directory::new();
         let source = directory.0.join(name);
-        let result = Command::new("ffmpeg")
+        let result = Command::new(FFMPEG_TESTGEN)
             .args(["-v", "error", "-f", "lavfi", "-i"])
             .arg(format!("color=c=red:size={size}:rate=24"))
             .args(["-t", "0.5", "-c:v", codec, "-pix_fmt", "yuv420p"])
@@ -291,7 +296,7 @@ fn confined_uhd_av1_probe_uses_the_final_filter() {
     let _deadline = deadline::test();
     let directory = Directory::new();
     let source = directory.0.join("uhd-av1.mkv");
-    let result = Command::new("ffmpeg")
+    let result = Command::new(FFMPEG_TESTGEN)
         .args([
             "-v",
             "error",
@@ -325,7 +330,7 @@ fn confined_audio_probes_keep_the_channel_and_rate_bounds() {
     for (codec, extension) in [("pcm_s16le", "wav"), ("libmp3lame", "mp3")] {
         let directory = Directory::new();
         let source = directory.0.join(format!("audio.{extension}"));
-        let fixture = Command::new("ffmpeg")
+        let fixture = Command::new(FFMPEG_TESTGEN)
             .args([
                 "-v",
                 "error",

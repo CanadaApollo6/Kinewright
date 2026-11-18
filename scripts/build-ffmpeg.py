@@ -57,6 +57,10 @@ def configure(profile, system=None):
                  '--enable-encoder=libx264,libx265,libvpx_vp9,ffv1,mpeg2video,mpeg4,mjpeg,png,rawvideo,pcm_s16le,pcm_f32le,aac,ac3,qtrle,subrip',
                  '--enable-muxer=mp4,ipod,mov,matroska,webm,avi,nut,mpeg1system,mpeg2video,mpegts,image2,image2pipe,rawvideo,framehash,pcm_f32le,wav',
                  '--enable-bsfs', '--enable-filters', '--enable-indev=lavfi']
+        if system == 'Linux':
+            # Native sandbox witnesses generate AV1 and MP3 before confinement.
+            args += ['--enable-libaom', '--enable-libmp3lame',
+                     '--enable-encoder=libaom_av1,libmp3lame', '--enable-muxer=mp3']
     if system == 'Windows':
         args += ['--toolchain=msvc', '--arch=x86_64', '--target-os=win64',
                  '--pkg-config=' + (ROOT / 'third_party/pkgconf/pkgconf/.bin/pkgconf.exe').as_posix(),
@@ -227,7 +231,7 @@ def fingerprint():
             identities['linker_driver'] = tool_identity(commands['ld'], [*shlex.split(os.environ.get('LDFLAGS', '')), '-Wl,--version'])
     packages = ['x264', 'x265', 'dav1d', 'zlib', 'vpx', 'freetype2', 'harfbuzz']
     if not windows:
-        packages += ['alsa', 'libpulse', 'xcb', 'xcb-shm', 'xcb-shape', 'xcb-xfixes']
+        packages += ['aom', 'lame', 'alsa', 'libpulse', 'xcb', 'xcb-shm', 'xcb-shape', 'xcb-xfixes']
     dependencies = {}
     for package in packages:
         query = subprocess.run([*commands['pkgconfig'], '--modversion', package],

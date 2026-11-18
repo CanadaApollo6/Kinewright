@@ -156,8 +156,8 @@ mod support {
                 .join(format!("rss-{}", std::process::id())),
         );
         fs::create_dir_all(&root.0).unwrap();
-        let ffmpeg =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/ffmpeg/bin/ffmpeg");
+        let ffmpeg = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../third_party/ffmpeg-testgen/bin/ffmpeg-testgen");
         assert!(
             Command::new(ffmpeg)
                 .args([

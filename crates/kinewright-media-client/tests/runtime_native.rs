@@ -65,7 +65,8 @@ fn runtime_fixture() {
     );
     fs::create_dir_all(&directory.0).unwrap();
     let png = directory.0.join("source.png");
-    let ffmpeg = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/ffmpeg/bin/ffmpeg");
+    let ffmpeg = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../third_party/ffmpeg-testgen/bin/ffmpeg-testgen");
     assert!(
         Command::new(ffmpeg)
             .args([

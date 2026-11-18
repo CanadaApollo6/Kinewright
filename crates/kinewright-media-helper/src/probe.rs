@@ -293,25 +293,28 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/ms2-s1a")
             .join(format!("cancel-{}.png", std::process::id()));
-        let fixture = Command::new("ffmpeg")
-            .args([
-                "-v",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                "color=size=64x32:rate=30",
-                "-frames:v",
-                "1",
-                "-c:v",
-                "png",
-                "-threads",
-                "1",
-            ])
-            .arg(&root)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
+        let fixture = Command::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../third_party/ffmpeg-testgen/bin/ffmpeg-testgen"
+        ))
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=size=64x32:rate=30",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "png",
+            "-threads",
+            "1",
+        ])
+        .arg(&root)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
         assert!(fixture.status.success(), "{fixture:?}");
         let mut source = fs::File::open(&root).unwrap();
         let end = source.seek(SeekFrom::End(0)).unwrap();

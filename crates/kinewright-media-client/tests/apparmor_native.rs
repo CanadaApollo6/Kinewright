@@ -84,7 +84,8 @@ fn ms2_apparmor_userns_gate_refuses_without_the_profile_and_admits_with_it() {
     );
     fs::create_dir_all(&directory.0).unwrap();
     let png = directory.0.join("source.png");
-    let ffmpeg = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/ffmpeg/bin/ffmpeg");
+    let ffmpeg = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../third_party/ffmpeg-testgen/bin/ffmpeg-testgen");
     let status = during("apparmor_native ffmpeg fixture", PHASE_LIMIT, || {
         Command::new(ffmpeg)
             .args(["-nostdin", "-v", "error", "-f", "lavfi", "-i"])

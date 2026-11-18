@@ -15,6 +15,8 @@ apt_packages=(
     libx264-dev
     libx265-dev
     libdav1d-dev
+    libaom-dev
+    libmp3lame-dev
     zlib1g-dev
     libvpx-dev
     libfreetype6-dev
@@ -88,6 +90,8 @@ elif command -v pacman >/dev/null 2>&1; then
         x264
         x265
         dav1d
+        aom
+        lame
         zlib
         libvpx
         freetype2
