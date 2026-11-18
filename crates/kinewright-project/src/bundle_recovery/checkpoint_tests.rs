@@ -512,6 +512,41 @@ fn unreadable_history_refuses_rescue_and_stays_recoverable() {
     );
 }
 #[test]
+fn checkpoint_history_read_failure_refuses_empty_history_rescue() {
+    let (temp, core, bundle) = fixture();
+    let pool = core.history_pool().clone();
+    let path = temp.path("source.kinewright");
+    let (object, owner) = owner_object(&temp, &bundle);
+    let expected = core.snapshot_identity().unwrap();
+    drop(bundle);
+    drop(core);
+    let original = std::fs::read(&path).unwrap();
+    let history = std::fs::read(&object).unwrap();
+    let refused =
+        crate::io_observer::fail_path("owned_verification_read", Path::new(&owner.sha256), || {
+            VerifiedCheckpointRecovery::open(&path, &pool)
+        });
+    assert_retryable_refusal(
+        refused,
+        |error| {
+            matches!(
+                error,
+                BundleError::Operation(crate::operation_actor::Error::History(
+                    crate::operation_history::Error::Store(reason)
+                )) if reason == "injected owned_verification_read"
+            )
+        },
+        &path,
+        &original,
+        "mid-object read failure",
+    );
+    assert_eq!(std::fs::read(&object).unwrap(), history);
+    let restored = reopen(&path, &pool);
+    assert_eq!(restored.snapshot_identity().unwrap(), expected);
+    assert!(!restored.export_history().unwrap().history().undo.is_empty());
+}
+
+#[test]
 fn history_store_capacity_refuses_rescue_and_stays_recoverable() {
     // A long Undo over a tiny document: the owner record is the only object
     // whose encoded or decoded size reaches the cap below.

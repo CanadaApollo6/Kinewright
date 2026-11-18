@@ -525,7 +525,7 @@ fn snapshot_doors_admit_a_long_history_past_the_envelope_cap() {
             "SNAPSHOT_INGRESS_CLASS_MATCHES_PAYLOAD: {door:?}"
         );
         let limit = match door {
-            Door::CommitHistory => COMMIT_HISTORY_BODY_BYTES as usize,
+            Door::CommitHistory => usize::try_from(COMMIT_HISTORY_BODY_BYTES).unwrap(),
             _ if carries_snapshot => HOST_BODY_BYTES,
             _ => HOST_ENVELOPE_BYTES,
         };

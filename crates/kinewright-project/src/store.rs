@@ -1172,9 +1172,10 @@ impl ProjectStore {
                 inner: reader,
                 bytes: 0,
                 limit: reference.byte_length,
+                #[cfg(test)]
+                fault_reference: None,
             };
-            let digest = kinewright_media::sha256_reader(&mut counted)
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            let digest = kinewright_media::sha256_reader(&mut counted)?;
             if counted.bytes != reference.byte_length || digest != reference.sha256 {
                 return Err(BundleError::Corrupt(
                     "duplicate input differs from owned bytes".into(),
@@ -1206,6 +1207,8 @@ impl ProjectStore {
                 inner: reader,
                 bytes: 0,
                 limit: reference.byte_length,
+                #[cfg(test)]
+                fault_reference: None,
             };
             let digest = kinewright_media::sha256_reader(&mut measured)?;
             if digest == reference.sha256 && measured.bytes == reference.byte_length {
@@ -1243,8 +1246,7 @@ impl ProjectStore {
                         return Err(BundleError::Corrupt("short owned input".into()));
                     }
                     file.seek(SeekFrom::Start(0))?;
-                    let digest = kinewright_media::sha256_reader(file)
-                        .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+                    let digest = kinewright_media::sha256_reader(file)?;
                     if digest != reference.sha256 {
                         return Err(BundleError::Corrupt("owned input digest mismatch".into()));
                     }
@@ -1870,36 +1872,15 @@ impl ProjectStore {
             let mut file = self
                 .with_namespace(|namespace| namespace.open_owned(&path))?
                 .ok_or_else(|| BundleError::Corrupt("missing owned object".into()))?;
-            let mut reader = CountingReader {
-                inner: &mut file,
-                bytes: 0,
-                limit: reference.byte_length,
-            };
-            let digest = kinewright_media::sha256_reader(&mut reader);
-            let bytes = reader.bytes;
-            let mut usage = self
-                .inner
-                .usage
-                .lock()
-                .map_err(|_| BundleError::Capacity("usage poisoned"))?;
-            usage.verified_calls = usage
-                .verified_calls
-                .checked_add(1)
-                .ok_or(BundleError::Capacity("verification count overflow"))?;
-            usage.verified_bytes = usage
-                .verified_bytes
-                .checked_add(bytes)
-                .ok_or(BundleError::Capacity("verification byte overflow"))?;
-            drop(usage);
-            if file.metadata()?.len() != reference.byte_length
-                || !digest.as_ref().is_ok_and(|h| h == &reference.sha256)
-            {
+            let verified = verify_owned_bytes(&mut file, reference, &self.inner.usage);
+            if verified.is_err() || file.metadata()?.len() != reference.byte_length {
                 self.inner
                     .ledger
                     .lock()
                     .map_err(|_| BundleError::Capacity("ledger poisoned"))?
                     .verified
                     .remove(&reference.sha256);
+                verified?;
                 return Err(BundleError::Corrupt("owned identity changed".into()));
             }
             file.seek(SeekFrom::Start(0))?;
@@ -2088,9 +2069,20 @@ struct CountingReader<'a, R> {
     inner: &'a mut R,
     bytes: u64,
     limit: u64,
+    #[cfg(test)]
+    fault_reference: Option<&'a ObjectRef>,
 }
 impl<R: Read> Read for CountingReader<'_, R> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        #[cfg(test)]
+        if self.bytes > 0
+            && let Some(reference) = self.fault_reference
+        {
+            crate::io_observer::check_failure(
+                "owned_verification_read",
+                Path::new(&reference.sha256),
+            )?;
+        }
         let count = self.inner.read(buffer)?;
         self.bytes = self
             .bytes
@@ -2101,6 +2093,39 @@ impl<R: Read> Read for CountingReader<'_, R> {
         }
         Ok(count)
     }
+}
+
+fn verify_owned_bytes(
+    reader: &mut impl Read,
+    reference: &ObjectRef,
+    usage: &Mutex<StorageUsage>,
+) -> Result<(), BundleError> {
+    let mut counted = CountingReader {
+        inner: reader,
+        bytes: 0,
+        limit: reference.byte_length,
+        #[cfg(test)]
+        fault_reference: Some(reference),
+    };
+    let digest = kinewright_media::sha256_reader(&mut counted);
+    let measured = counted.bytes;
+    let mut state = usage
+        .lock()
+        .map_err(|_| BundleError::Capacity("usage poisoned"))?;
+    state.verified_calls = state
+        .verified_calls
+        .checked_add(1)
+        .ok_or(BundleError::Capacity("verification calls"))?;
+    state.verified_bytes = state
+        .verified_bytes
+        .checked_add(measured)
+        .ok_or(BundleError::Capacity("verification bytes"))?;
+    drop(state);
+    let digest = digest?;
+    if measured != reference.byte_length || digest != reference.sha256 {
+        return Err(BundleError::Corrupt("owned identity changed".into()));
+    }
+    Ok(())
 }
 impl StorePin {
     #[cfg(any(test, feature = "test-util"))]
@@ -2983,30 +3008,7 @@ impl ProjectStore {
         if file.metadata()?.len() != reference.byte_length {
             return Err(BundleError::Corrupt("owned byte length changed".into()));
         }
-        let mut counted = CountingReader {
-            inner: &mut file,
-            bytes: 0,
-            limit: reference.byte_length,
-        };
-        let digest = kinewright_media::sha256_reader(&mut counted);
-        let measured = counted.bytes;
-        let mut state = usage
-            .lock()
-            .map_err(|_| BundleError::Capacity("usage poisoned"))?;
-        state.verified_calls = state
-            .verified_calls
-            .checked_add(1)
-            .ok_or(BundleError::Capacity("verification calls"))?;
-        state.verified_bytes = state
-            .verified_bytes
-            .checked_add(measured)
-            .ok_or(BundleError::Capacity("verification bytes"))?;
-        drop(state);
-        if measured != reference.byte_length
-            || !digest.as_ref().is_ok_and(|h| h == &reference.sha256)
-        {
-            return Err(BundleError::Corrupt("owned identity changed".into()));
-        }
+        verify_owned_bytes(&mut file, reference, usage)?;
         file.seek(SeekFrom::Start(0))?;
         Ok(file)
     }
@@ -4578,6 +4580,53 @@ impl ProjectStore {
         // the exact prior inventory that rollback just restored.
         ledger.can_collect = false;
         result.map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod verified_read_tests {
+    use super::*;
+
+    fn object_reference(bytes: &[u8]) -> ObjectRef {
+        ObjectRef {
+            sha256: kinewright_media::sha256_bytes(bytes),
+            byte_length: bytes.len() as u64,
+            record_kind: RecordKind::OwnedData,
+        }
+    }
+
+    #[test]
+    fn incomplete_verification_preserves_read_error_and_counts_prefix() {
+        struct FailingRead;
+        impl Read for FailingRead {
+            fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("mid-object read failed"))
+            }
+        }
+        let reference = object_reference(b"complete");
+        let mut reader = b"com".as_slice().chain(FailingRead);
+        let usage = Mutex::new(StorageUsage::default());
+        let error = verify_owned_bytes(&mut reader, &reference, &usage).unwrap_err();
+        assert!(
+            matches!(&error, BundleError::Io(cause) if cause.to_string() == "mid-object read failed"),
+            "{error:?}"
+        );
+        let usage = usage.into_inner().unwrap();
+        assert_eq!((usage.verified_calls, usage.verified_bytes), (1, 3));
+    }
+
+    #[test]
+    fn complete_verification_reports_length_and_digest_mismatches() {
+        let reference = object_reference(b"complete");
+        let usage = Mutex::new(StorageUsage::default());
+        for mut bytes in [b"com".as_slice(), b"modified".as_slice()] {
+            assert!(matches!(
+                verify_owned_bytes(&mut bytes, &reference, &usage),
+                Err(BundleError::Corrupt(reason)) if reason == "owned identity changed"
+            ));
+        }
+        let usage = usage.into_inner().unwrap();
+        assert_eq!((usage.verified_calls, usage.verified_bytes), (2, 11));
     }
 }
 

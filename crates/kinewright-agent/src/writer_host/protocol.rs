@@ -73,7 +73,12 @@ impl HostCommand {
     #[must_use]
     pub fn ingress_bytes(&self) -> usize {
         if matches!(self, Self::CommitHistory { .. }) {
-            COMMIT_HISTORY_BODY_BYTES as usize
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the const assertion bounds this value by HOST_BODY_BYTES, a usize"
+            )]
+            let limit = COMMIT_HISTORY_BODY_BYTES as usize;
+            limit
         } else if self.snapshot_door().is_some() {
             HOST_BODY_BYTES
         } else {
