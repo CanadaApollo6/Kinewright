@@ -32,21 +32,15 @@ const _: () = assert!(
 /// One snapshot's wire bytes outside its transport body: role, sizing,
 /// identity, branch, revision and `history_sha256`, with their JSON syntax.
 pub const SNAPSHOT_WIRE_HEADER_BYTES: u64 = 4096;
-/// A transport body is raw JSON that travels as a JSON string; like a manual
-/// message, it escapes to at most twice its raw length.
-pub const SNAPSHOT_ESCAPE_FACTOR: u64 = 2;
-/// The largest raw transport body each of `snapshots` may have when the
+/// The largest escaped transport body each of `snapshots` may have when the
 /// command also carries `other` payload bytes, so the whole request fits
 /// `HOST_BODY_BYTES` with its envelope.
 const fn snapshot_door_bytes(snapshots: u64, other: u64) -> u64 {
-    ((HOST_BODY_BYTES as u64 - HOST_ENVELOPE_BYTES as u64 - other) / snapshots
-        - SNAPSHOT_WIRE_HEADER_BYTES)
-        / SNAPSHOT_ESCAPE_FACTOR
+    (HOST_BODY_BYTES as u64 - HOST_ENVELOPE_BYTES as u64 - other) / snapshots
+        - SNAPSHOT_WIRE_HEADER_BYTES
 }
 const fn snapshot_door_fits(cap: u64, snapshots: u64, other: u64) -> bool {
-    HOST_ENVELOPE_BYTES as u64
-        + other
-        + snapshots * (SNAPSHOT_ESCAPE_FACTOR * cap + SNAPSHOT_WIRE_HEADER_BYTES)
+    HOST_ENVELOPE_BYTES as u64 + other + snapshots * (cap + SNAPSHOT_WIRE_HEADER_BYTES)
         <= HOST_BODY_BYTES as u64
 }
 /// `Save`, `SaveAs`, `FirstSave`, `PreviewRescue`, `PreviewRecovery`,
@@ -70,7 +64,7 @@ const _: () = assert!(
         && snapshot_door_fits(CONFIRM_BARRIER_SNAPSHOT_BYTES, 3, 0),
     "SNAPSHOT_DOORS_CROSS_HTTP"
 );
-/// The snapshots one command carries and the raw transport bytes each may have.
+/// The snapshots one command carries and the escaped transport bytes each may take.
 pub(crate) struct SnapshotDoor<'a> {
     pub cap: u64,
     pub snapshots: [Option<&'a HostSnapshot>; 3],
@@ -105,18 +99,18 @@ impl HostCommand {
         Some(SnapshotDoor { cap, snapshots })
     }
     /// Refuses, before any byte is sent, a snapshot larger than its door can
-    /// carry across HTTP. Nothing is installed and the call can be retried.
+    /// carry across HTTP.
     pub(crate) fn check_snapshot_capacity(&self) -> Result<(), HostRefusal> {
         let Some(door) = self.snapshot_door() else {
             return Ok(());
         };
         for snapshot in door.snapshots.into_iter().flatten() {
-            let bytes = snapshot.history.snapshot.body_bytes();
+            let bytes = snapshot.history.snapshot.escaped_body_bytes();
             if bytes > door.cap {
                 return Err(HostRefusal::new(
                     "snapshot_capacity",
                     &format!(
-                        "this history's snapshot is {bytes} bytes; this request carries at most {} per snapshot",
+                        "this history's snapshot is {bytes} escaped bytes, and this request carries at most {} escaped bytes per snapshot",
                         door.cap
                     ),
                 ));

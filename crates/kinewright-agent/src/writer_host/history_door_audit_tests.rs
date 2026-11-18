@@ -549,25 +549,34 @@ fn snapshot_doors_admit_a_long_history_past_the_envelope_cap() {
     host.shutdown().unwrap();
 }
 
-/// `base` with a transport body of exactly `raw` bytes, all worst-case
-/// escaping: a JSON string of `\"` pairs, padded when the count is odd.
-fn sized_snapshot(base: &HostSnapshot, raw: u64) -> HostSnapshot {
+/// Each raw backslash-quote pair takes four bytes on the wire. The raw
+/// string's quotes and the outer string's quotes add six more.
+fn sized_snapshot(base: &HostSnapshot, escaped: u64) -> HostSnapshot {
     let mut wire = serde_json::to_value(base).unwrap();
-    let mut body = String::from("\"");
-    body.push_str(&"\\\"".repeat(usize::try_from((raw - 2) / 2).unwrap()));
-    body.push_str(&"a".repeat(usize::try_from((raw - 2) % 2).unwrap()));
+    let payload = usize::try_from(escaped - 6).unwrap();
+    let mut body = String::with_capacity(2 + 2 * (payload / 4) + payload % 4);
     body.push('"');
+    for _ in 0..payload / 4 {
+        body.push_str("\\\"");
+    }
+    body.extend(std::iter::repeat_n('a', payload % 4));
+    body.push('"');
+    assert_eq!(serde_json::to_string(&body).unwrap().len() as u64, escaped);
     wire["history"]["snapshot"]["body"] = serde_json::Value::String(body);
     let snapshot: HostSnapshot = serde_json::from_value(wire).unwrap();
     assert_eq!(
-        snapshot.history.snapshot.body_bytes(),
-        raw,
+        snapshot.history.snapshot.escaped_body_bytes(),
+        escaped,
         "SIZED_SNAPSHOT"
     );
     snapshot
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one HTTP witness exercises all four snapshot budgets and every barrier slot"
+)]
 fn snapshot_over_its_door_cap_is_refused_at_the_client_before_sending() {
     let temp = kinewright_media::test_support::TempDirectory::new_in(
         &kinewright_media::test_support::workspace_target_dir(),
@@ -613,11 +622,14 @@ fn snapshot_over_its_door_cap_is_refused_at_the_client_before_sending() {
             after: after.clone(),
         })
     };
-    let refused = |command: HostCommand, label: &str| {
+    let refused = |command: HostCommand, label: &str, cap: u64| {
         for (name, target) in [("closed", &unsent), ("live", &client)] {
             let error = target.request(command.clone()).err();
             assert!(
-                matches!(&error, Some(HostError::Refused(refusal)) if refusal.code == "snapshot_capacity"),
+                matches!(&error, Some(HostError::Refused(refusal))
+                    if refusal.code == "snapshot_capacity"
+                        && refusal.message.contains(&format!("{} escaped bytes", cap + 1))
+                        && refusal.message.contains(&format!("{cap} escaped bytes"))),
                 "SNAPSHOT_CAPACITY_REFUSED_BEFORE_SENDING {label} {name}: {error:?}"
             );
         }
@@ -638,10 +650,33 @@ fn snapshot_over_its_door_cap_is_refused_at_the_client_before_sending() {
     };
 
     let over = sized_snapshot(&base, SNAPSHOT_DOOR_BYTES + 1);
-    refused(HostCommand::Save { snapshot: over }, "Save");
+    refused(
+        HostCommand::Save { snapshot: over },
+        "Save",
+        SNAPSHOT_DOOR_BYTES,
+    );
     let at = sized_snapshot(&base, SNAPSHOT_DOOR_BYTES);
     // The same call, retried within the cap, reaches the host.
     admitted(HostCommand::Save { snapshot: at }, "Save");
+
+    let at = sized_snapshot(&base, PUBLISH_BARRIER_SNAPSHOT_BYTES);
+    let over = sized_snapshot(&base, PUBLISH_BARRIER_SNAPSHOT_BYTES + 1);
+    for (before_snapshot, after_snapshot) in [(&over, &at), (&at, &over)] {
+        refused(
+            HostCommand::PublishBarrier {
+                barrier: barrier(before_snapshot, after_snapshot),
+            },
+            "PublishBarrier",
+            PUBLISH_BARRIER_SNAPSHOT_BYTES,
+        );
+    }
+    admitted(
+        HostCommand::PublishBarrier {
+            barrier: barrier(&at, &at),
+        },
+        "PublishBarrier",
+    );
+    drop((at, over));
 
     let at = sized_snapshot(&base, CONFIRM_BARRIER_SNAPSHOT_BYTES);
     let over = sized_snapshot(&base, CONFIRM_BARRIER_SNAPSHOT_BYTES + 1);
@@ -657,6 +692,7 @@ fn snapshot_over_its_door_cap_is_refused_at_the_client_before_sending() {
                 installed: installed.clone(),
             },
             &format!("ConfirmBarrier {slot}"),
+            CONFIRM_BARRIER_SNAPSHOT_BYTES,
         );
     }
     admitted(
@@ -666,10 +702,191 @@ fn snapshot_over_its_door_cap_is_refused_at_the_client_before_sending() {
         },
         "ConfirmBarrier",
     );
+    drop((at, over));
+
+    let begin = |snapshot| HostCommand::BeginRecovery {
+        client: "a".repeat(64),
+        frozen: Some(snapshot),
+        pending: vec![],
+    };
+    let over = sized_snapshot(&base, BEGIN_RECOVERY_SNAPSHOT_BYTES + 1);
+    refused(begin(over), "BeginRecovery", BEGIN_RECOVERY_SNAPSHOT_BYTES);
+    let at = sized_snapshot(&base, BEGIN_RECOVERY_SNAPSHOT_BYTES);
+    admitted(begin(at), "BeginRecovery");
     host.shutdown().unwrap();
 }
 
-/// Measurement only: how close a large, realistic session comes to the
+#[test]
+fn publish_barrier_capacity_refusal_keeps_edits_reopenable() {
+    barrier_capacity_refusal_keeps_edits_reopenable(Door::PublishBarrier);
+}
+
+#[test]
+fn confirm_barrier_capacity_refusal_keeps_edits_reopenable() {
+    barrier_capacity_refusal_keeps_edits_reopenable(Door::ConfirmBarrier);
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one durable recovery sequence from an unacknowledged edit through cold open and Save"
+)]
+fn barrier_capacity_refusal_keeps_edits_reopenable(door: Door) {
+    use kinewright_core::{
+        AttachmentState, Command as CoreCommand, Marker, MarkerId, Operation, TimeCode, Track,
+        TrackId, TrackKind,
+    };
+    use kinewright_project::{
+        editing_session::Ja1EditingSession,
+        operation_history::{HistoryPool, PoolLimits},
+    };
+
+    let cap = match door {
+        Door::PublishBarrier => PUBLISH_BARRIER_SNAPSHOT_BYTES,
+        Door::ConfirmBarrier => CONFIRM_BARRIER_SNAPSHOT_BYTES,
+        _ => unreachable!(),
+    };
+    let temp = kinewright_media::test_support::TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "barrier-capacity-recovery",
+    );
+    let path = temp.path("project.kinewright");
+    let core = Core::for_test(Document {
+        markers: vec![Marker {
+            id: MarkerId(1),
+            position: TimeCode::ZERO,
+            // The label is in both the baseline and current document. One
+            // tab takes three bytes on the wire in each copy.
+            label: "\t".repeat(usize::try_from(cap / 6 + 1).unwrap()),
+            color_token: 0,
+        }],
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    })
+    .unwrap();
+    let mut gui = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
+    gui.first_save(&path, StorageLimits::default()).unwrap();
+    drop(gui.prepare_host_attachment().unwrap());
+
+    let host = WriterHost::start(HostConfig {
+        project: "barrier-capacity-recovery".into(),
+        path: Some(path.clone()),
+        roots: SessionRoots {
+            read: vec![temp.root().into()],
+            write: vec![temp.root().into()],
+        },
+        origin: HostOrigin::Headless,
+        scheduler_settings: Some(temp.path("scheduler")),
+    })
+    .unwrap();
+    let client_id = "e".repeat(64);
+    let client = host.client().with_manual_editor(client_id.clone());
+    let checked = |command| {
+        let reply = client.request(command).unwrap();
+        assert!(reply.error.is_none(), "{:?}", reply.error);
+        reply
+    };
+    let cut = gui.freeze_host_cut().unwrap();
+    gui.complete_host_cut(&cut, None, None).unwrap();
+    let acquired = checked(HostCommand::AcquireManual {
+        client: client_id.clone(),
+    });
+    let lease = acquired.manual_lease.unwrap();
+    let saved_before = lease.snapshot;
+    let permit = gui
+        .bind_manual_producer(
+            lease,
+            acquired.manual_inputs.unwrap(),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        )
+        .unwrap();
+    let set_sync_lock = |locked| {
+        CoreCommand::Do(Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked,
+        })
+    };
+    permit.request(set_sync_lock(false)).unwrap();
+    let pending = permit.pending().unwrap();
+    assert_eq!(pending.len(), 1);
+    let cut = gui.recapture_host_recovery_cut().unwrap();
+    assert_ne!(cut.identity(), saved_before);
+    let mut endpoint = gui
+        .manual_recovery_endpoint(&cut, permit.pending().unwrap())
+        .unwrap();
+    let barrier = checked(HostCommand::BeginRecovery {
+        client: client_id,
+        frozen: Some(HostSnapshot::capture(&core).unwrap()),
+        pending,
+    })
+    .recovery
+    .unwrap();
+    let published_identity = barrier.after.history.identity();
+    let command = match door {
+        Door::PublishBarrier => HostCommand::PublishBarrier {
+            barrier: Box::new(barrier),
+        },
+        Door::ConfirmBarrier => {
+            let published = checked(HostCommand::PublishBarrier {
+                barrier: Box::new(barrier.clone()),
+            });
+            endpoint
+                .install(published.history.unwrap(), published.manual_ack)
+                .unwrap();
+            HostCommand::ConfirmBarrier {
+                barrier: Box::new(barrier),
+                installed: HostSnapshot::from_history(endpoint.snapshot().unwrap()).unwrap(),
+            }
+        }
+        _ => unreachable!(),
+    };
+    let expected_gui_identity = if matches!(door, Door::PublishBarrier) {
+        cut.identity()
+    } else {
+        published_identity
+    };
+    for _ in 0..2 {
+        let error = client.request(command.clone()).unwrap_err();
+        assert!(
+            matches!(error, HostError::Refused(refusal) if refusal.code == "snapshot_capacity"),
+            "{door:?} must refuse the same retained plan"
+        );
+    }
+    assert_eq!(core.snapshot_identity().unwrap(), expected_gui_identity);
+    assert_eq!(core.attachment_state().unwrap(), AttachmentState::Frozen);
+    let save = client
+        .request(HostCommand::Save {
+            snapshot: HostSnapshot::capture(&core).unwrap(),
+        })
+        .unwrap();
+    assert_eq!(save.error.unwrap().code, "recovery_frozen");
+    checked(HostCommand::Shutdown);
+    host.shutdown().unwrap();
+    drop((command, endpoint, permit, gui, core));
+
+    let pool = HistoryPool::new(PoolLimits::default());
+    let mut reopened = Ja1EditingSession::open(&path, &pool).unwrap();
+    assert_eq!(
+        reopened.core().snapshot_identity().unwrap(),
+        published_identity
+    );
+    assert!(!document_for_test(reopened.core()).tracks[0].sync_lock);
+    reopened.core().request(set_sync_lock(true)).unwrap();
+    let saved = reopened.save_active().unwrap();
+    drop(reopened);
+    let cold = Ja1EditingSession::open(&path, &pool).unwrap();
+    assert_eq!(
+        cold.core().snapshot_identity().unwrap().to_string(),
+        saved.history_sha256
+    );
+    assert!(document_for_test(cold.core()).tracks[0].sync_lock);
+}
+
+/// Measures how close a large, realistic session comes to the
 /// snapshot door caps. A transcript is not part of the document or its
 /// history, so the 40,000-word transcript adds nothing to a snapshot.
 #[test]
@@ -786,6 +1003,11 @@ fn snapshot_door_caps_against_a_large_realistic_session() {
     }
     let snapshot = HostSnapshot::capture(&core).unwrap();
     let raw = snapshot.history.snapshot.body_bytes();
+    let escaped = snapshot.history.snapshot.escaped_body_bytes();
+    let headroom = |cap| {
+        let hundredths = (cap * 100 + escaped / 2) / escaped;
+        format!("{}.{:02}", hundredths / 100, hundredths % 100)
+    };
     let save = serde_json::to_vec(&HostCommand::Save {
         snapshot: snapshot.clone(),
     })
@@ -807,15 +1029,16 @@ fn snapshot_door_caps_against_a_large_realistic_session() {
     .unwrap()
     .len();
     println!(
-        "SNAPSHOT_SESSION_MEASURE raw={raw} save_body={save} confirm_body={confirm} \
+        "SNAPSHOT_SESSION_MEASURE raw={raw} escaped={escaped} save_body={save} confirm_body={confirm} \
          single_cap={SNAPSHOT_DOOR_BYTES} single_headroom={} \
          begin_recovery_cap={BEGIN_RECOVERY_SNAPSHOT_BYTES} begin_recovery_headroom={} \
          publish_cap={PUBLISH_BARRIER_SNAPSHOT_BYTES} publish_headroom={} \
          confirm_cap={CONFIRM_BARRIER_SNAPSHOT_BYTES} confirm_headroom={} \
          body_limit={HOST_BODY_BYTES}",
-        SNAPSHOT_DOOR_BYTES / raw,
-        BEGIN_RECOVERY_SNAPSHOT_BYTES / raw,
-        PUBLISH_BARRIER_SNAPSHOT_BYTES / raw,
-        CONFIRM_BARRIER_SNAPSHOT_BYTES / raw,
+        headroom(SNAPSHOT_DOOR_BYTES),
+        headroom(BEGIN_RECOVERY_SNAPSHOT_BYTES),
+        headroom(PUBLISH_BARRIER_SNAPSHOT_BYTES),
+        headroom(CONFIRM_BARRIER_SNAPSHOT_BYTES),
     );
+    assert!(CONFIRM_BARRIER_SNAPSHOT_BYTES >= 4 * escaped);
 }

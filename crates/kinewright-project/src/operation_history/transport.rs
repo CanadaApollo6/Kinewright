@@ -9,6 +9,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 const HEADER_BYTES: u64 = 4096;
 
+fn json_string_bytes(body: &RawValue) -> u64 {
+    let raw = body.get();
+    // Inside valid raw JSON, the only literal control bytes are JSON
+    // whitespace. Like quotes and backslashes, tab, LF and CR expand to
+    // two bytes. A control such as NUL already has a textual escape.
+    let extra = raw
+        .bytes()
+        .filter(|byte| matches!(byte, b'"' | b'\\' | b'\t' | b'\n' | b'\r'))
+        .count();
+    raw.len() as u64 + extra as u64 + 2
+}
+
 fn encode(data: &SnapshotData, limit: u64) -> Result<Box<RawValue>, Error> {
     struct Writer {
         bytes: Vec<u8>,
@@ -106,6 +118,11 @@ impl SnapshotTransport {
     #[must_use]
     pub fn body_bytes(&self) -> u64 {
         self.body.get().len() as u64
+    }
+    /// Bytes of the body encoded as a JSON string, including both quotes.
+    #[must_use]
+    pub fn escaped_body_bytes(&self) -> u64 {
+        json_string_bytes(&self.body)
     }
     #[must_use]
     pub const fn role(&self) -> Role {
@@ -235,6 +252,22 @@ mod tests {
         tests::{document, origin},
     };
     use kinewright_core::{Command, Operation, TrackId};
+
+    proptest::proptest! {
+        #[test]
+        fn escaped_snapshot_body_bytes_match_serde_json(text in proptest::arbitrary::any::<String>()) {
+            let controls: String = (0_u8..32).map(char::from).chain(['"', '\\']).collect();
+            let raw = RawValue::from_string(format!(
+                "[\t\n\r{},{}]",
+                serde_json::to_string(&controls).unwrap(),
+                serde_json::to_string(&text).unwrap(),
+            )).unwrap();
+            proptest::prop_assert_eq!(
+                json_string_bytes(&raw),
+                serde_json::to_string(raw.get()).unwrap().len() as u64
+            );
+        }
+    }
 
     #[test]
     fn portable_capture_validates_both_owner_and_core_before_install() {
