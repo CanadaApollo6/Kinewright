@@ -1049,7 +1049,20 @@ fn opposing_save_as_try_locks_do_not_deadlock() {
         assert!(elapsed < Duration::from_secs(5));
         assert_eq!(graph(&source), before_source);
         assert_eq!(graph(&destination), before_destination);
-        fs::write(directory.join(format!("{role}.result")),serde_json::to_vec(&serde_json::json!({"pid":std::process::id(),"contention":true,"source_preserved":true,"destination_preserved":true,"elapsed_ms":elapsed.as_millis()})).unwrap()).unwrap();
+        let result_tmp = directory.join(format!("{role}.result.tmp"));
+        fs::write(
+            &result_tmp,
+            serde_json::to_vec(&serde_json::json!({
+                "pid": std::process::id(),
+                "contention": true,
+                "source_preserved": true,
+                "destination_preserved": true,
+                "elapsed_ms": elapsed.as_millis(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::rename(result_tmp, directory.join(format!("{role}.result"))).unwrap();
         while !directory.join("release").exists() {
             assert!(Instant::now() < deadline, "controller release deadline");
             std::thread::sleep(Duration::from_millis(5));
