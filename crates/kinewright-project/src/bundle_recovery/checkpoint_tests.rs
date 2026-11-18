@@ -512,6 +512,43 @@ fn unreadable_history_refuses_rescue_and_stays_recoverable() {
     );
 }
 #[test]
+fn checkpoint_overlong_history_offers_empty_history_rescue() {
+    use std::io::Write as _;
+    let (temp, core, bundle) = fixture();
+    let pool = core.history_pool().clone();
+    let path = temp.path("source.kinewright");
+    let (object, owner) = owner_object(&temp, &bundle);
+    drop(bundle);
+    drop(core);
+    let original = std::fs::read(&path).unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&object)
+        .unwrap()
+        .write_all(b"!")
+        .unwrap();
+    let overlong = std::fs::read(&object).unwrap();
+    assert_eq!(overlong.len() as u64, owner.byte_length + 1);
+    let recovery = VerifiedCheckpointRecovery::open(&path, &pool)
+        .unwrap()
+        .expect("an over-long history object must allow checkpoint rescue");
+    assert_eq!(recovery.disclosure().history_ref, owner);
+    assert!(
+        recovery
+            .disclosure()
+            .reason
+            .contains("owned byte length changed")
+    );
+    let destination = temp.path("recovered.kinewright");
+    recovery.save_copy(&destination).unwrap();
+    let restored = reopen(&destination, &pool);
+    let history = restored.export_history().unwrap();
+    assert!(history.history().undo.is_empty() && history.history().redo.is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(std::fs::read(&object).unwrap(), overlong);
+}
+
+#[test]
 fn checkpoint_history_read_failure_refuses_empty_history_rescue() {
     let (temp, core, bundle) = fixture();
     let pool = core.history_pool().clone();

@@ -1175,12 +1175,10 @@ impl ProjectStore {
                 #[cfg(test)]
                 fault_reference: None,
             };
-            let digest = kinewright_media::sha256_reader(&mut counted)?;
-            if counted.bytes != reference.byte_length || digest != reference.sha256 {
-                return Err(BundleError::Corrupt(
-                    "duplicate input differs from owned bytes".into(),
-                ));
-            }
+            counted.verify_digest(
+                &reference.sha256,
+                "duplicate input differs from owned bytes",
+            )?;
             self.verify(reference)?;
             return Ok(SealedObject {
                 reference: reference.clone(),
@@ -1210,22 +1208,21 @@ impl ProjectStore {
                 #[cfg(test)]
                 fault_reference: None,
             };
-            let digest = kinewright_media::sha256_reader(&mut measured)?;
-            if digest == reference.sha256 && measured.bytes == reference.byte_length {
-                #[cfg(any(test, feature = "test-util"))]
-                crate::io_observer::note_digest(
-                    "object_stage",
-                    path.as_path(),
-                    digest,
-                    usize::try_from(measured.bytes)
-                        .map_err(|_| BundleError::Capacity("object address space"))?,
-                );
-                self.with_namespace(|n| n.seal_existing(&path))
-            } else {
-                Err(BundleError::Corrupt(
-                    "recovered input differs from owned object".into(),
-                ))
-            }
+            let digest = measured.verify_digest(
+                &reference.sha256,
+                "recovered input differs from owned object",
+            )?;
+            #[cfg(any(test, feature = "test-util"))]
+            crate::io_observer::note_digest(
+                "object_stage",
+                path.as_path(),
+                digest,
+                usize::try_from(measured.bytes)
+                    .map_err(|_| BundleError::Capacity("object address space"))?,
+            );
+            #[cfg(not(any(test, feature = "test-util")))]
+            drop(digest);
+            self.with_namespace(|n| n.seal_existing(&path))
         } else {
             self.with_namespace(|namespace| {
                 namespace.publish_with(&path, |file| {
@@ -2095,6 +2092,21 @@ impl<R: Read> Read for CountingReader<'_, R> {
     }
 }
 
+impl<R: Read> CountingReader<'_, R> {
+    fn verify_digest(&mut self, expected: &str, mismatch: &str) -> Result<String, BundleError> {
+        let digest = kinewright_media::sha256_reader(self);
+        // A successful read can exceed the reservation and stop the hash.
+        if self.bytes > self.limit {
+            return Err(BundleError::Corrupt(mismatch.into()));
+        }
+        let digest = digest?;
+        if self.bytes != self.limit || digest != expected {
+            return Err(BundleError::Corrupt(mismatch.into()));
+        }
+        Ok(digest)
+    }
+}
+
 fn verify_owned_bytes(
     reader: &mut impl Read,
     reference: &ObjectRef,
@@ -2107,7 +2119,7 @@ fn verify_owned_bytes(
         #[cfg(test)]
         fault_reference: Some(reference),
     };
-    let digest = kinewright_media::sha256_reader(&mut counted);
+    let verified = counted.verify_digest(&reference.sha256, "owned identity changed");
     let measured = counted.bytes;
     let mut state = usage
         .lock()
@@ -2121,11 +2133,7 @@ fn verify_owned_bytes(
         .checked_add(measured)
         .ok_or(BundleError::Capacity("verification bytes"))?;
     drop(state);
-    let digest = digest?;
-    if measured != reference.byte_length || digest != reference.sha256 {
-        return Err(BundleError::Corrupt("owned identity changed".into()));
-    }
-    Ok(())
+    verified.map(drop)
 }
 impl StorePin {
     #[cfg(any(test, feature = "test-util"))]
@@ -4627,6 +4635,70 @@ mod verified_read_tests {
         }
         let usage = usage.into_inner().unwrap();
         assert_eq!((usage.verified_calls, usage.verified_bytes), (2, 11));
+    }
+
+    #[cfg(target_os = "linux")]
+    mod stored_objects {
+        use super::*;
+        use crate::bundle_copy::SessionStore;
+        use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+
+        fn admitted_object() -> (TempDirectory, SessionStore, SealedObject) {
+            let temp = TempDirectory::new_in(&workspace_target_dir(), "owned-read-size");
+            let mut session = SessionStore::create(temp.root(), StorageLimits::default()).unwrap();
+            let bytes = b"complete";
+            let sealed = session
+                .store_mut()
+                .admit_blob(&mut bytes.as_slice(), &object_reference(bytes), &[])
+                .unwrap();
+            (temp, session, sealed)
+        }
+
+        #[test]
+        fn verify_rejects_appended_owned_byte_as_corrupt() {
+            let (_temp, session, sealed) = admitted_object();
+            let store = session.store();
+            store.verify(&sealed.reference).unwrap();
+            let root = store.resolved_root().unwrap();
+            let object = root.with_extension("kinewright-assets").join(
+                ProjectStore::object_path(&sealed.reference)
+                    .unwrap()
+                    .as_path(),
+            );
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(object)
+                .unwrap()
+                .write_all(b"!")
+                .unwrap();
+            let error = store.verify(&sealed.reference).unwrap_err();
+            assert!(
+                matches!(&error, BundleError::Corrupt(reason) if reason == "owned identity changed"),
+                "{error:?}"
+            );
+        }
+
+        #[test]
+        fn duplicate_admission_rejects_an_extra_byte_as_corrupt() {
+            struct UnexpectedTail;
+            impl Read for UnexpectedTail {
+                fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+                    panic!("duplicate admission kept reading after exceeding the length limit")
+                }
+            }
+            let (_temp, mut session, sealed) = admitted_object();
+            let mut longer = b"complete!".as_slice().chain(UnexpectedTail);
+            let error = session
+                .store_mut()
+                .admit_blob(&mut longer, &sealed.reference, &[])
+                .err()
+                .expect("over-long duplicate must be refused");
+            assert!(
+                matches!(&error, BundleError::Corrupt(reason) if reason == "duplicate input differs from owned bytes"),
+                "{error:?}"
+            );
+            session.store().verify(&sealed.reference).unwrap();
+        }
     }
 }
 
