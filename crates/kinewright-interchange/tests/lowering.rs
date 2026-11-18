@@ -583,3 +583,57 @@ fn fcpxml_nest_edge_mirroring_requires_an_applied_video_transition() {
             .any(|row| row.code == LossCode::AudioCrossfadeLinear)
     );
 }
+
+#[test]
+fn fcpxml_dissolve_preserves_gain_curves_on_the_head_and_body() {
+    let xml = br#"<fcpxml version="1.13">
+      <resources>
+        <format id="f" frameDuration="1/25s" width="1920" height="1080"/>
+        <asset id="a" format="f" start="0s" duration="6s" hasVideo="1" hasAudio="1">
+          <media-rep kind="original-media" src="file:///before.mov"/>
+        </asset>
+        <asset id="b" format="f" start="0s" duration="6s" hasVideo="1" hasAudio="1">
+          <media-rep kind="original-media" src="file:///after.mov"/>
+        </asset>
+      </resources>
+      <project><sequence format="f"><spine>
+        <asset-clip ref="a" start="1s" duration="1s"/>
+        <transition offset="23/25s" duration="6/25s"/>
+        <asset-clip ref="b" offset="1s" start="1s" duration="2s">
+          <adjust-volume amount="0dB"><param name="amount">
+            <keyframeAnimation>
+              <keyframe time="1s" value="-60dB"/>
+              <keyframe time="2s" value="0dB"/>
+            </keyframeAnimation>
+          </param></adjust-volume>
+        </asset-clip>
+      </spine></sequence></project>
+    </fcpxml>"#;
+    let parsed = fcpxml::parse(xml, "gain-dissolve.fcpxml", ParseOptions::default()).unwrap();
+    let (document, _) = lower(&parsed, &MediaTable::default()).unwrap();
+    let audio_at = |frame| {
+        document
+            .tracks
+            .iter()
+            .filter(|track| track.kind == TrackKind::Audio)
+            .flat_map(|track| &track.clips)
+            .find(|clip| clip.timeline_start == TimeCode(frame))
+            .unwrap()
+    };
+    let head = audio_at(23)
+        .audio_gain_curve
+        .as_ref()
+        .expect("head gain curve");
+    let body = audio_at(29)
+        .audio_gain_curve
+        .as_ref()
+        .expect("body gain curve");
+    assert_eq!(head.keyframes.first().unwrap().at, TimeCode::ZERO);
+    assert_eq!(head.value_at(TimeCode::ZERO), Some(-600));
+    assert_eq!(head.value_at(TimeCode(2)), Some(-600));
+    assert_eq!(head.value_at(TimeCode(5)), Some(-528));
+    assert_eq!(body.keyframes.first().unwrap().at, TimeCode::ZERO);
+    assert_eq!(body.value_at(TimeCode::ZERO), Some(-504));
+    assert_eq!(body.keyframes.last().unwrap().at, TimeCode(21));
+    assert_eq!(body.value_at(TimeCode(21)), Some(0));
+}

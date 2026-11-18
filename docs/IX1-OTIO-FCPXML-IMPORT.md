@@ -336,6 +336,8 @@ When the transition consumes the entire entering clip, omit the empty body (ruli
 
 *Audio.* Audio follows on the audio tracks. B's head ramps in, and A gets
 `audio_fade_out_frames = before + after`.
+The head and any surviving body both carry rebased gain keys. Each starts with a key at its
+first frame, sampled from the original curve, and the head keeps the curve through its last frame.
 
 *Link groups.* B's video head and B's audio head form their own link group. B's body keeps B's own
 A/V group. They cannot share one group:

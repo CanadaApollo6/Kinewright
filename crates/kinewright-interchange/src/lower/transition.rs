@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use kinewright_core::{
     AutomationCurve, ClipContent, ClipId, Effect, EffectId, LossBound, LossCode,
-    MAX_KEY_FRAME_OFFSET, ParamValue, Rational, TimeCode, TrackKind, Transition,
+    MAX_KEY_FRAME_OFFSET, ParamValue, Rational, TimeCode, TrackKind, Transition, rebase_clip_curve,
 };
 
 use crate::{Refusal, ir::Loss};
@@ -152,14 +152,11 @@ fn split(
     clamp_fades(outgoing, notes);
     entering.clip.source_range.start = TimeCode(trim);
     entering.clip.timeline_start = TimeCode(new_cut);
-    if let Some(mut gain) = entering.clip.audio_gain_curve.take() {
-        gain.keyframes.retain(|key| key.at.0 >= after);
-        for key in &mut gain.keyframes {
-            key.at.0 -= after;
-        }
-        if !gain.keyframes.is_empty() {
-            entering.clip.audio_gain_curve = Some(gain);
-        }
+    if let Some(gain) = &entering.clip.audio_gain_curve {
+        head.audio_gain_curve = Some(rebase_gain_segment(gain, -before, full_len));
+        let body_length = entering.end - new_cut;
+        entering.clip.audio_gain_curve =
+            (body_length > 0).then(|| rebase_gain_segment(gain, after, body_length));
     }
     clamp_fades(entering, notes);
     Ok(Some(Candidate {
@@ -168,6 +165,19 @@ fn split(
         asset: Some(b_asset),
         head: true,
     }))
+}
+
+fn rebase_gain_segment(curve: &AutomationCurve, start: i64, length: i64) -> AutomationCurve {
+    let mut segment = rebase_clip_curve(curve, TimeCode(start), TimeCode(length));
+    if segment
+        .keyframes
+        .first()
+        .is_some_and(|key| key.at != TimeCode::ZERO)
+        && let Some(value) = curve.value_at(TimeCode(start))
+    {
+        segment.keyframes.insert(0, linear(0, value));
+    }
+    segment
 }
 
 fn fade_in(
