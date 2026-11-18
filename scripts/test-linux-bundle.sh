@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Smoke-test a staged Linux bundle: layout, bundled FFmpeg, and GUI startup.
+# Smoke-test a Linux bundle: loader resolution, confined admission, and GUI startup.
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 --bundle-dir DIR [--startup-timeout-seconds N]" >&2
+    echo "Usage: $0 --bundle-dir DIR [--admission-only] [--startup-timeout-seconds N]" >&2
     exit 2
 }
 
 bundle_dir=""
 startup_timeout_seconds=8
+admission_only=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -19,6 +20,10 @@ while [[ $# -gt 0 ]]; do
         --startup-timeout-seconds)
             startup_timeout_seconds="${2:-}"
             shift 2
+            ;;
+        --admission-only)
+            admission_only=1
+            shift
             ;;
         *)
             usage
@@ -34,12 +39,8 @@ if [[ ! "$startup_timeout_seconds" =~ ^[0-9]+$ ]] || [[ "$startup_timeout_second
     exit 1
 fi
 
-bundle_dir="$(cd -- "$bundle_dir" && pwd)"
-source_bin="$bundle_dir/Kinewright"
-if [[ ! -f "$source_bin" ]]; then
-    echo "Staged executable not found: $source_bin" >&2
-    exit 1
-fi
+bundle_dir="$(cd -- "$bundle_dir" && pwd -P)"
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
 for pattern in libavcodec.so libavformat.so libavutil.so libswresample.so libswscale.so libnemo_speech_asr.so libnemo_speech_asr_c.so; do
     if ! compgen -G "$bundle_dir/lib/${pattern}*" >/dev/null; then
@@ -47,48 +48,78 @@ for pattern in libavcodec.so libavformat.so libavutil.so libswresample.so libsws
         exit 1
     fi
 done
-if [[ ! -f "$bundle_dir/ffmpeg" ]]; then
-    echo 'Bundle is missing the FFmpeg CLI used for in-editor recording.' >&2
-    exit 1
-fi
+ffmpeg_dependency='^[[:space:]]*lib(avcodec|avdevice|avfilter|avformat|avutil|swresample|swscale|postproc)\.so[^[:space:]]*[[:space:]]+=>[[:space:]]+(.*[^[:space:]])[[:space:]]+\(0x[[:xdigit:]]+\)$'
+for binary in Kinewright kinewright-media-helper kinewright-media-supervisor ffmpeg; do
+    executable="$bundle_dir/$binary"
+    if [[ ! -f "$executable" || ! -x "$executable" ]]; then
+        echo "Bundle executable is missing or not executable: $executable" >&2
+        exit 1
+    fi
+    dependencies="$(env -i PATH=/usr/bin:/bin LC_ALL=C ldd "$executable")"
+    if [[ "$dependencies" == *'=> not found'* ]]; then
+        printf '%s has unresolved libraries:\n%s\n' "$binary" "$dependencies" >&2
+        exit 1
+    fi
+    ffmpeg_found=0
+    while IFS= read -r line; do
+        if [[ "$line" =~ $ffmpeg_dependency ]]; then
+            resolved="$(realpath -e -- "${BASH_REMATCH[2]}")"
+            if [[ "$resolved" != "$bundle_dir/lib/"* ]]; then
+                echo "$binary resolves FFmpeg outside the bundle: $resolved" >&2
+                exit 1
+            fi
+            ffmpeg_found=1
+        fi
+    done <<< "$dependencies"
+    case "$binary:$ffmpeg_found" in
+        Kinewright:0|kinewright-media-helper:0)
+            echo "$binary did not resolve any FFmpeg libraries." >&2
+            exit 1
+            ;;
+        kinewright-media-supervisor:1)
+            echo 'The media supervisor unexpectedly links FFmpeg.' >&2
+            exit 1
+            ;;
+    esac
+done
+echo 'App and helper resolve their FFmpeg libraries from the bundle. The supervisor has no FFmpeg dependency.'
 
 smoke_dir="$(mktemp -d "${TMPDIR:-/tmp}/Kinewright-bundle-smoke-XXXXXX")"
-cleanup() {
-    if [[ -n "${smoke_pid:-}" ]] && kill -0 "$smoke_pid" 2>/dev/null; then
-        kill "$smoke_pid" 2>/dev/null || true
-        wait "$smoke_pid" 2>/dev/null || true
+trap 'rm -rf -- "$smoke_dir"' EXIT
+smoke_env=(
+    env -i HOME="$smoke_dir" TMPDIR="$smoke_dir" LOCALAPPDATA="$smoke_dir"
+    XDG_STATE_HOME="$smoke_dir" PATH=/usr/bin:/bin
+)
+# Preserve the user bus so the bundled supervisor can manage its resource scope.
+for variable in XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS; do
+    if [[ -v "$variable" ]]; then
+        smoke_env+=("$variable=${!variable}")
     fi
-    rm -rf "$smoke_dir"
-}
-trap cleanup EXIT
-
-cp -a "$bundle_dir/." "$smoke_dir/"
-smoke_bin="$smoke_dir/Kinewright"
-
-run_smoke() {
-    env -i \
-        HOME="$HOME" \
-        DISPLAY="${DISPLAY:-}" \
-        XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
-        WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
-        XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-}" \
-        PATH="/usr/bin:/bin" \
-        "$smoke_bin"
-}
-
-if command -v xvfb-run >/dev/null 2>&1 && [[ -z "${DISPLAY:-}" ]]; then
-    xvfb-run -a -s '-screen 0 1280x720x24' env -i HOME="$HOME" PATH="/usr/bin:/bin" "$smoke_bin" &
-    smoke_pid=$!
-else
-    run_smoke &
-    smoke_pid=$!
+done
+fixture="$repo_root/crates/kinewright-agent/tests/fixtures/te1/talking-head.wav"
+cd -- "$smoke_dir"
+admission="$("${smoke_env[@]}" "$bundle_dir/Kinewright" --check-bundle-admission "$fixture" "$smoke_dir")"
+if [[ "$admission" != "Admitted ${fixture##*/}" ]]; then
+    echo "Kinewright did not confirm admission of ${fixture##*/}: $admission" >&2
+    exit 1
+fi
+printf '%s\n' "$admission"
+if [[ "$admission_only" -eq 1 ]]; then
+    exit 0
 fi
 
-sleep "$startup_timeout_seconds"
-if ! kill -0 "$smoke_pid" 2>/dev/null; then
-    wait "$smoke_pid" || true
+lavapipe=(/usr/share/vulkan/icd.d/lvp_icd*.json)
+if [[ ! -f "${lavapipe[0]}" ]] || ! command -v xvfb-run >/dev/null 2>&1; then
+    echo 'The GUI smoke test requires xvfb-run and the Mesa lavapipe Vulkan driver.' >&2
+    exit 1
+fi
+status=0
+"${smoke_env[@]}" VK_DRIVER_FILES="${lavapipe[0]}" LIBGL_ALWAYS_SOFTWARE=1 \
+    xvfb-run -a -s '-screen 0 1280x720x24' timeout --kill-after=3s "$startup_timeout_seconds" \
+    "$bundle_dir/Kinewright" || status=$?
+if [[ "$status" -ne 124 ]]; then
     echo "Kinewright exited during the startup smoke window." >&2
     exit 1
 fi
 
-echo "Kinewright stayed running for ${startup_timeout_seconds} seconds from an isolated directory with a system-only PATH."
+echo "Kinewright stayed running for ${startup_timeout_seconds} seconds under Xvfb with lavapipe."

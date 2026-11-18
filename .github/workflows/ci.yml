@@ -127,6 +127,26 @@ jobs:
           cargo build -p kinewright-app --no-default-features --bin kinewright-app
           cargo build -p kinewright-agent --no-default-features --bin kinewright
           cargo build -p kinewright-media-helper -p kinewright-media-supervisor --bins
+      - name: Check Linux bundle executable requirements
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          ./scripts/package-linux.sh --check-binaries --target-dir target/debug
+          stage="$(mktemp -d "$RUNNER_TEMP/linux-bundle-check.XXXXXX")"
+          trap 'rm -rf -- "$stage"' EXIT
+          binaries=(kinewright-app kinewright-media-helper kinewright-media-supervisor)
+          for binary in "${binaries[@]}"; do
+            ln -s "$PWD/target/debug/$binary" "$stage/$binary"
+          done
+          for binary in "${binaries[@]}"; do
+            rm "$stage/$binary"
+            if output="$(./scripts/package-linux.sh --check-binaries --target-dir "$stage" 2>&1)"; then
+              echo "Packaging accepted a missing $binary." >&2
+              exit 1
+            fi
+            test "$output" = "Required bundle executable is missing or not executable: $stage/$binary"
+            ln -s "$PWD/target/debug/$binary" "$stage/$binary"
+          done
       - if: runner.os == 'Linux'
         shell: bash
         run: |
