@@ -432,6 +432,7 @@ struct ImportRecord {                      // kinewright-core; written once, nev
     items: u32, exact: u32, approximated: u32, dropped: u32,   // item rows only (§7.2)
     media: MediaCounts,                    // assets, online, offline, remote, timed_out
     estimated_assets: Vec<Range<AssetId>>, // ≤ 8 ranges of offline assets (§8.3)
+    retimed_source_end_drift_frames: Option<u64>, // maximum source-frame drift from speed quantization (§4.3)
     rows: Vec<LossRow>,                    // ≤ 8, ordered as §7.5
     omitted_codes: Vec<LossCode>,          // every code with a row past the cap (§7.5)
 }
