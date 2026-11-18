@@ -245,8 +245,23 @@ impl State {
             if self.item_limit > MAX_ITEMS {
                 return Err(parse::too_many_items());
             }
+            let start = map.to_parent(placed.at)?;
+            if let Some(count) = placed.item.zero_duration_count() {
+                if placed.counts_item {
+                    let frame = start.frame(self.project)?.0;
+                    self.report.item(&placed.site, count);
+                    self.report.loss_many(
+                        &Loss::dropped(LossCode::ClipTooShort),
+                        &placed.site,
+                        frame,
+                        None,
+                        count,
+                    );
+                }
+                continue;
+            }
             locations.push(Location {
-                start: map.to_parent(placed.at)?,
+                start,
                 end: map.to_parent(placed.at.checked_add(placed.item.span())?)?,
                 placed,
             });

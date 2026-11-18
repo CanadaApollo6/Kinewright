@@ -285,6 +285,7 @@ impl<'a, 'input> Parser<'a, 'input> {
         }
         let mut cursor = origin;
         let mut tracks = BTreeMap::<(bool, bool, i64), Track>::new();
+        let mut zero_duration = Vec::new();
         for element in node
             .children()
             .filter(|child| child.is_element() && is_story(*child))
@@ -293,6 +294,10 @@ impl<'a, 'input> Parser<'a, 'input> {
             let at = optional(element, "offset")?.unwrap_or(cursor);
             let parts = self.parts(element, at, cursor, depth)?;
             for (kind, placed) in parts {
+                if placed.item.zero_duration_count().is_some() {
+                    zero_duration.push(placed);
+                    continue;
+                }
                 if lane == 0 {
                     cursor = cursor.max(placed.at.checked_add(placed.item.span())?);
                 }
@@ -326,6 +331,12 @@ impl<'a, 'input> Parser<'a, 'input> {
         for track in &mut stack.tracks {
             self.track_roles(track);
         }
+        if !zero_duration.is_empty() {
+            if stack.tracks.is_empty() {
+                stack.tracks.push(Track::new(TrackKind::Video));
+            }
+            stack.tracks[0].items.extend(zero_duration);
+        }
         Ok(stack)
     }
 
@@ -351,10 +362,28 @@ impl<'a, 'input> Parser<'a, 'input> {
         depth: usize,
     ) -> Result<Parts, Refusal> {
         self.budget.item()?;
+        let span = duration(node, Time::ZERO)?;
+        if !node.has_tag_name("transition")
+            && node.attribute("duration").is_some()
+            && span <= Time::new(1, 1_000_000)?.checked_div(Time::rate(self.project_rate))?
+        {
+            let placed = Placed::discard_zero_duration(offset, &self.place(node));
+            return Ok(vec![(TrackKind::Video, placed)]);
+        }
+        self.timed_parts(node, offset, cut, depth, span)
+    }
+
+    fn timed_parts(
+        &mut self,
+        node: Xml<'a, 'input>,
+        offset: Time,
+        cut: Time,
+        depth: usize,
+        span: Time,
+    ) -> Result<Parts, Refusal> {
         let name = element_name(node);
         let source = self.place(node);
         let start = optional(node, "start")?.unwrap_or(Time::ZERO);
-        let span = duration(node, Time::ZERO)?;
         let mut notes = Vec::new();
         let mut frame_origin = start;
         let mut speed = Time::ONE;

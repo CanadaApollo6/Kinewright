@@ -1,0 +1,292 @@
+{
+  "OTIO_SCHEMA": "Timeline.1",
+  "name": "Written zero spans",
+  "global_start_time": {
+    "value": 0,
+    "rate": 24
+  },
+  "tracks": {
+    "OTIO_SCHEMA": "Stack.1",
+    "children": [
+      {
+        "OTIO_SCHEMA": "Track.1",
+        "name": "Clamped predecessor",
+        "kind": "Audio",
+        "children": [
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "short",
+            "source_range": {
+              "start_time": {
+                "value": 0,
+                "rate": 24
+              },
+              "duration": {
+                "value": 64,
+                "rate": 24
+              }
+            },
+            "media_reference": {
+              "OTIO_SCHEMA": "ExternalReference.1",
+              "target_url": "short.wav",
+              "available_range": {
+                "start_time": {
+                  "value": 0,
+                  "rate": 24
+                },
+                "duration": {
+                  "value": 37,
+                  "rate": 24
+                }
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "zero-after-short",
+            "source_range": {
+              "start_time": {
+                "value": 0,
+                "rate": 24
+              },
+              "duration": {
+                "value": 0,
+                "rate": 24
+              }
+            },
+            "media_reference": {
+              "OTIO_SCHEMA": "ExternalReference.1",
+              "target_url": "zero-after-short.wav",
+              "available_range": {
+                "start_time": {
+                  "value": 0,
+                  "rate": 24
+                },
+                "duration": {
+                  "value": 600,
+                  "rate": 24
+                }
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "next",
+            "source_range": {
+              "start_time": {
+                "value": 0,
+                "rate": 24
+              },
+              "duration": {
+                "value": 24,
+                "rate": 24
+              }
+            },
+            "media_reference": {
+              "OTIO_SCHEMA": "ExternalReference.1",
+              "target_url": "next.wav",
+              "available_range": {
+                "start_time": {
+                  "value": 0,
+                  "rate": 24
+                },
+                "duration": {
+                  "value": 600,
+                  "rate": 24
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "OTIO_SCHEMA": "Track.1",
+        "name": "Retimed item",
+        "kind": "Audio",
+        "children": [
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "before-retime",
+            "source_range": {
+              "start_time": {
+                "value": 0,
+                "rate": 24
+              },
+              "duration": {
+                "value": 24,
+                "rate": 24
+              }
+            },
+            "media_reference": {
+              "OTIO_SCHEMA": "ExternalReference.1",
+              "target_url": "before-retime.wav",
+              "available_range": {
+                "start_time": {
+                  "value": 0,
+                  "rate": 24
+                },
+                "duration": {
+                  "value": 600,
+                  "rate": 24
+                }
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "zero-retimed",
+            "source_range": {
+              "start_time": {
+                "value": 0,
+                "rate": 24
+              },
+              "duration": {
+                "value": 0,
+                "rate": 24
+              }
+            },
+            "media_reference": {
+              "OTIO_SCHEMA": "ExternalReference.1",
+              "target_url": "zero-retimed.wav",
+              "available_range": {
+                "start_time": {
+                  "value": 0,
+                  "rate": 24
+                },
+                "duration": {
+                  "value": 600,
+                  "rate": 24
+                }
+              }
+            },
+            "effects": [
+              {
+                "OTIO_SCHEMA": "LinearTimeWarp.1",
+                "time_scalar": 0.9
+              }
+            ]
+          },
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "after-retime",
+            "source_range": {
+              "start_time": {
+                "value": 0,
+                "rate": 24
+              },
+              "duration": {
+                "value": 24,
+                "rate": 24
+              }
+            },
+            "media_reference": {
+              "OTIO_SCHEMA": "ExternalReference.1",
+              "target_url": "after-retime.wav",
+              "available_range": {
+                "start_time": {
+                  "value": 0,
+                  "rate": 24
+                },
+                "duration": {
+                  "value": 600,
+                  "rate": 24
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "OTIO_SCHEMA": "Track.1",
+        "name": "Plain item",
+        "kind": "Audio",
+        "children": [
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "before-plain",
+            "source_range": {
+              "start_time": {
+                "value": 0,
+                "rate": 24
+              },
+              "duration": {
+                "value": 24,
+                "rate": 24
+              }
+            },
+            "media_reference": {
+              "OTIO_SCHEMA": "ExternalReference.1",
+              "target_url": "before-plain.wav",
+              "available_range": {
+                "start_time": {
+                  "value": 0,
+                  "rate": 24
+                },
+                "duration": {
+                  "value": 600,
+                  "rate": 24
+                }
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "zero-plain",
+            "source_range": {
+              "start_time": {
+                "value": 0,
+                "rate": 24
+              },
+              "duration": {
+                "value": 0,
+                "rate": 24
+              }
+            },
+            "media_reference": {
+              "OTIO_SCHEMA": "ExternalReference.1",
+              "target_url": "zero-plain.wav",
+              "available_range": {
+                "start_time": {
+                  "value": 0,
+                  "rate": 24
+                },
+                "duration": {
+                  "value": 600,
+                  "rate": 24
+                }
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "after-plain",
+            "source_range": {
+              "start_time": {
+                "value": 0,
+                "rate": 24
+              },
+              "duration": {
+                "value": 24,
+                "rate": 24
+              }
+            },
+            "media_reference": {
+              "OTIO_SCHEMA": "ExternalReference.1",
+              "target_url": "after-plain.wav",
+              "available_range": {
+                "start_time": {
+                  "value": 0,
+                  "rate": 24
+                },
+                "duration": {
+                  "value": 600,
+                  "rate": 24
+                }
+              }
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

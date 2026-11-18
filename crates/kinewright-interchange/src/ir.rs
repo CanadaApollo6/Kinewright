@@ -134,6 +134,17 @@ impl Placed {
         }
     }
 
+    pub(crate) fn discard_zero_duration(at: Time, site: &str) -> Self {
+        Self::new(
+            at,
+            Item::Discarded {
+                count: 1,
+                loss: Loss::dropped(LossCode::ClipTooShort),
+            },
+            site,
+        )
+    }
+
     #[must_use]
     pub fn population(&self) -> u32 {
         if !self.counts_item {
@@ -199,6 +210,14 @@ impl Item {
             | Self::Title { duration, .. }
             | Self::Unsupported { duration, .. } => *duration,
             Self::Transition { .. } | Self::Discarded { .. } => Time::ZERO,
+        }
+    }
+
+    pub(crate) fn zero_duration_count(&self) -> Option<u32> {
+        match self {
+            Self::Clip(clip) if clip.span == Time::ZERO => Some(1),
+            Self::Discarded { count, loss } if loss.code == LossCode::ClipTooShort => Some(*count),
+            _ => None,
         }
     }
 

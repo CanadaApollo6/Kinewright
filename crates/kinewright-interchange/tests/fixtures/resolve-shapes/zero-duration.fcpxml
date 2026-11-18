@@ -1,0 +1,16 @@
+<fcpxml version="1.13">
+  <resources>
+    <format id="f" frameDuration="1/24s"/>
+    <asset id="a" format="f" start="0s" duration="10s" hasVideo="1">
+      <media-rep kind="original-media" src="a.mov"/>
+    </asset>
+    <asset id="z" format="f" start="0s" duration="10s" hasVideo="1" hasAudio="1">
+      <media-rep kind="original-media" src="zero.mov"/>
+    </asset>
+  </resources>
+  <project><sequence format="f"><spine>
+    <asset-clip ref="a" duration="1s"/>
+    <asset-clip ref="z" offset="5s" duration="0s"/>
+    <asset-clip ref="a" duration="1s" start="1s"/>
+  </spine></sequence></project>
+</fcpxml>

@@ -221,6 +221,9 @@ fn accumulate<'a>(
         return Err(parse::too_deep());
     }
     for placed in &track.items {
+        if placed.item.zero_duration_count().is_some() {
+            continue;
+        }
         for anchor in &placed.anchors {
             tracks.push((&anchor.track, depth + 1));
         }

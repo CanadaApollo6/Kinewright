@@ -307,8 +307,6 @@ impl<'a> Parser<'a> {
         self.budget.item()?;
         let enclosing_fractionals = std::mem::take(&mut self.fractional_values);
         node.layout_version(site)?;
-        self.metadata(node);
-        let mut notes = Vec::new();
         let range = node
             .source_range
             .map(|range| self.range(range, site))
@@ -316,6 +314,12 @@ impl<'a> Parser<'a> {
         let span = range
             .as_ref()
             .map_or(Ok(Time::ZERO), |range| range.end.checked_sub(range.start))?;
+        if range.is_some() && span == Time::ZERO && node.kind() != "Transition" {
+            self.fractional_values = enclosing_fractionals;
+            return Ok(Placed::discard_zero_duration(at, site));
+        }
+        self.metadata(node);
+        let mut notes = Vec::new();
         let item = match node.kind() {
             "Clip" => self.clip(node, kind, range, site, &mut notes)?,
             "Gap" | "Filler" => Item::Gap { duration: span },
@@ -619,6 +623,7 @@ fn stack_duration(stack: &Stack) -> Result<Time, Refusal> {
         .tracks
         .iter()
         .flat_map(|track| &track.items)
+        .filter(|placed| placed.item.zero_duration_count().is_none())
         .try_fold(Time::ZERO, |end, placed| {
             Ok(end.max(placed.at.checked_add(placed.item.span())?))
         })

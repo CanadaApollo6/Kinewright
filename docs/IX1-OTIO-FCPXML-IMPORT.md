@@ -187,6 +187,11 @@ with `frame = ⌊t × fps + ½⌋` in `i128`. Core derives a media clip's projec
 source range as `map(source.end) − map(source.start)` at the effective rate
 (`model.rs:1652-1666`, `time.rs:276-290`). Cuts snap to the outgoing clip's source grid.
 
+A written zero duration, including a value within the §4.1 tolerance of zero, contributes
+`clip_too_short` and is removed from the layout before snapping (ruling 35). It cannot move the
+implicit cursor or affect neighbouring cuts and gaps. Positive spans, including subframe spans,
+follow the rules below.
+
 Lower each track from left to right:
 1. Start a first clip or a clip after a gap at its rounded IR start. Start an abutting
    successor at the previous clip's decided end.
@@ -1004,6 +1009,8 @@ Lead rulings (2026-11-17):
     dangling reference remains a typed refusal (§3).
 33. **Offline remote media.** Store the written locator as display text and keep an empty
     playback path. Allow or a person's relink replaces that state atomically (§8.1, §8.3).
+35. **Written zero durations.** Report `clip_too_short` before layout. Cuts keep ruling 6 for
+    positive spans (§4.2).
 
 Open questions:
 1. **Marker colour switch.** Should `MARKER_COLOR_POLICY` ship as `LabelPrefix` or `Drop`? This is
