@@ -168,6 +168,16 @@ pub struct Message {
     pub accepted: CommandKey,
     pub action: Action,
     pub context: CommandContext,
+    /// Later sub-batches of the same open gesture, in their accepted order.
+    /// A single receipt covers the whole packet, including these boundaries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folded: Vec<FoldedBatch>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FoldedBatch {
+    pub creation: crate::operation_history::CreationOrigin,
+    pub operations: Vec<Operation>,
 }
 /// Portable models have no namespace. Durable publishers bind the native parent
 /// and namespace name already granted by their lease, including after restart.
@@ -189,7 +199,30 @@ pub struct Receipt {
     pub accepted: CommandKey,
     pub tip: [u8; 32],
     pub command: [u8; 32],
+    /// Number of extra Core command boundaries in this packet.
+    #[serde(default, skip_serializing_if = "no_additional_batches")]
+    pub additional_batches: u64,
 }
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde checks its field by reference"
+)]
+fn no_additional_batches(value: &u64) -> bool {
+    *value == 0
+}
+impl Receipt {
+    pub(crate) fn next_position(&self) -> Option<CommandKey> {
+        Some(CommandKey {
+            epoch: self.accepted.epoch,
+            position: self
+                .accepted
+                .position
+                .checked_add(1)?
+                .checked_add(self.additional_batches)?,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StreamState {
@@ -243,23 +276,79 @@ fn hash(domain: &[u8], value: &impl Serialize) -> Result<[u8; 32], Conflict> {
 }
 impl Message {
     pub fn digest(&self) -> Result<[u8; 32], Conflict> {
-        hash(
-            b"kinewright/accepted-command/v1\0",
-            &(
-                self.publisher,
-                &self.id,
-                self.accepted,
-                &self.action,
-                &self.context,
-            ),
-        )
+        let header = (
+            self.publisher,
+            &self.id,
+            self.accepted,
+            &self.action,
+            &self.context,
+        );
+        if self.folded.is_empty() {
+            hash(b"kinewright/accepted-command/v1\0", &header)
+        } else {
+            hash(
+                b"kinewright/folded-manual-command/v1\0",
+                &(header, &self.folded),
+            )
+        }
     }
-    fn chained(&self) -> Result<[u8; 32], Conflict> {
+    pub(crate) fn validate_fold(&self) -> Result<(), Conflict> {
+        if self.folded.is_empty() {
+            return Ok(());
+        }
+        let Action::Do {
+            operations,
+            gesture: Some(_),
+        } = &self.action
+        else {
+            return Err(Conflict::Unnormalised);
+        };
+        if !foldable(&self.context, operations)
+            || self.folded.iter().any(|part| {
+                part.creation.branch != self.context.creation.branch
+                    || part.operations.is_empty()
+                    || crate::operation_inputs::ManualInputs::imports(&part.operations)
+            })
+        {
+            return Err(Conflict::Unnormalised);
+        }
+        Ok(())
+    }
+    pub(crate) fn into_parts(self) -> impl Iterator<Item = (Action, CommandContext)> {
+        let gesture = match &self.action {
+            Action::Do { gesture, .. } if !self.folded.is_empty() => gesture.clone(),
+            _ => None,
+        };
+        std::iter::once((self.action, self.context)).chain(self.folded.into_iter().map(
+            move |part| {
+                (
+                    Action::Do {
+                        operations: part.operations,
+                        gesture: gesture.clone(),
+                    },
+                    CommandContext {
+                        creation: part.creation,
+                        inputs: vec![],
+                        approval: None,
+                        transition: None,
+                    },
+                )
+            },
+        ))
+    }
+    pub(crate) fn chained(&self) -> Result<[u8; 32], Conflict> {
         hash(
             b"kinewright/accepted-chain/v1\0",
             &(self.predecessor, self.digest()?),
         )
     }
+}
+pub(crate) fn foldable(context: &CommandContext, operations: &[Operation]) -> bool {
+    context.approval.is_none()
+        && context.transition.is_none()
+        && context.inputs.is_empty()
+        && !operations.is_empty()
+        && !crate::operation_inputs::ManualInputs::imports(operations)
 }
 impl StreamState {
     pub fn installed(seed: Seed) -> Result<Self, Conflict> {
@@ -302,6 +391,7 @@ impl StreamState {
             accepted,
             action,
             context,
+            folded: vec![],
             sequence: self
                 .sequence
                 .checked_add(1)
@@ -331,6 +421,7 @@ impl StreamState {
             if receipt.command != message.digest()?
                 || receipt.sequence != message.sequence
                 || receipt.accepted != message.accepted
+                || receipt.additional_batches != message.folded.len() as u64
                 || receipt.tip != message.tip
             {
                 return Err(Conflict::CommandIdentity);
@@ -381,6 +472,7 @@ impl StreamState {
             accepted,
             tip: message.tip,
             command: message.digest()?,
+            additional_batches: message.folded.len() as u64,
         })
     }
 
@@ -394,6 +486,12 @@ impl StreamState {
         if self.receipts.len() > PENDING_COMMANDS {
             self.receipts.pop_front();
         }
+    }
+    pub(crate) fn replace_tail_receipt(&mut self, receipt: Receipt) {
+        let previous = self.receipts.pop_back().expect("an unsent receipt");
+        assert_eq!(previous.sequence, receipt.sequence);
+        assert_eq!(previous.id, receipt.id);
+        self.record_receipt(receipt);
     }
     pub fn receipts(&self) -> impl Iterator<Item = &Receipt> {
         self.receipts.iter()

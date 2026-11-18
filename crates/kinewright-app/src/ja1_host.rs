@@ -94,6 +94,8 @@ pub(super) struct HostAttachment {
     manual_client: String,
     #[cfg(all(test, target_os = "linux"))]
     pub(super) manual_publication_hold: bool,
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) after_first_manual_reply: Option<Box<dyn FnOnce() + Send>>,
     manual_inflight:
         Option<JoinHandle<Result<HostReply, kinewright_agent::writer_host::HostError>>>,
 }
@@ -429,6 +431,8 @@ impl HostAttachment {
             manual_client,
             #[cfg(all(test, target_os = "linux"))]
             manual_publication_hold: false,
+            #[cfg(all(test, target_os = "linux"))]
+            after_first_manual_reply: None,
             manual_inflight: None,
             edits: crate::manual_edits::ManualEdits::default(),
         })
@@ -503,6 +507,8 @@ impl HostAttachment {
             .to_owned(),
             #[cfg(all(test, target_os = "linux"))]
             manual_publication_hold: false,
+            #[cfg(all(test, target_os = "linux"))]
+            after_first_manual_reply: None,
             manual_inflight: None,
             edits: crate::manual_edits::ManualEdits::default(),
         })
@@ -976,8 +982,8 @@ impl HostAttachment {
     pub fn pending_count(&self) -> usize {
         self.manual
             .as_ref()
-            .and_then(|gate| gate.permit.pending().ok())
-            .map_or(0, |messages| messages.len())
+            .and_then(|gate| gate.permit.pending_count().ok())
+            .unwrap_or(0)
     }
     pub fn read_only(&self) -> bool {
         self.manual.is_none()
@@ -1067,11 +1073,18 @@ impl HostAttachment {
                 let stale = self.take_heartbeat();
                 let client = self.client.clone();
                 let identity = self.manual_client.clone();
+                #[cfg(all(test, target_os = "linux"))]
+                let after_reply = self.after_first_manual_reply.take();
                 self.manual_inflight = Some(std::thread::spawn(move || {
                     if let Some(stale) = stale {
                         let _ = stale.join();
                     }
-                    request_manual_history(&client, identity, messages)
+                    let reply = request_manual_history(&client, identity, messages);
+                    #[cfg(all(test, target_os = "linux"))]
+                    if let Some(after_reply) = after_reply {
+                        after_reply();
+                    }
+                    reply
                 }));
             }
         }

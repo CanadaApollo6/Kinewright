@@ -1516,6 +1516,8 @@ fn g05l_two_clients_one_editor_ordered_history() {
                 .unwrap(),
             Event::DocumentChanged { .. }
         ));
+        // Export each sample because this witness covers individual wire receipts.
+        let _ = permit.pending().unwrap();
         times.push(started);
     }
     let accepted = permit.pending().unwrap();

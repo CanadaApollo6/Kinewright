@@ -122,6 +122,7 @@ impl HostCommandOwner {
                 receipt.id == decoded.id
                     && receipt.sequence == decoded.sequence
                     && receipt.accepted == decoded.accepted
+                    && receipt.additional_batches == decoded.folded.len() as u64
                     && receipt.tip == decoded.tip
                     && decoded.digest().ok() == Some(receipt.command)
             }) {

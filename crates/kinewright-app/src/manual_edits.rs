@@ -137,7 +137,8 @@ impl ManualEdits {
         Ok(())
     }
     /// The opaque egui colour picker compares its input with its output. Feed it
-    /// this control's last requested value, including an unresolved flight.
+    /// this control's last requested value while Core is deciding. After a
+    /// capacity refusal, restore the last accepted swatch until retry.
     pub(crate) fn desired_solid_color(
         &self,
         clip: kinewright_core::ClipId,
@@ -173,14 +174,16 @@ impl ManualEdits {
             }
         }
         for (index, action) in self.actions.iter().enumerate().rev() {
-            if let Some(found) = action
-                .latest
-                .as_ref()
-                .and_then(|value| color(&value.command, clip))
+            if action.waiting_at.is_none()
+                && let Some(found) = action
+                    .latest
+                    .as_ref()
+                    .and_then(|value| color(&value.command, clip))
             {
                 return Some(found);
             }
             if index == 0
+                && action.waiting_at.is_none()
                 && let Some(found) = self
                     .in_flight
                     .as_ref()

@@ -387,7 +387,7 @@ impl BundleCommit {
     /// Stream receipts remain the authoritative duplicate check after restart.
     pub fn admitted_history(
         bundle: &mut ProjectBundle,
-        message: &crate::operation_protocol::Message,
+        message: crate::operation_protocol::Message,
         shadow: &Core,
         inputs: &ObjectRef,
     ) -> Result<(crate::operation_protocol::Receipt, Option<BundleSaveReport>), BundleError> {
@@ -397,7 +397,7 @@ impl BundleCommit {
             .stream
             .as_ref()
             .ok_or(BundleError::HistoryChanged)?;
-        if let Some(receipt) = stream.lookup(message).map_err(|e| {
+        if let Some(receipt) = stream.lookup(&message).map_err(|e| {
             crate::bundle::operation_error(crate::operation_actor::Error::Protocol(e))
         })? {
             return Ok((receipt.clone(), None));
@@ -423,9 +423,11 @@ impl BundleCommit {
         {
             return Err(BundleError::HistoryChanged);
         }
-        let (stream, receipt) = stream.advanced(message, checkpoint.position).map_err(|e| {
-            crate::bundle::operation_error(crate::operation_actor::Error::Protocol(e))
-        })?;
+        let (stream, receipt) = stream
+            .advanced(&message, checkpoint.position)
+            .map_err(|e| {
+                crate::bundle::operation_error(crate::operation_actor::Error::Protocol(e))
+            })?;
         let owner = bundle.attach_core(shadow)?;
         let cut = owner
             .freeze_published(
@@ -434,7 +436,12 @@ impl BundleCommit {
                 checkpoint.revision,
             )
             .map_err(crate::bundle::operation_error)?;
-        let update = match owner.prepare(&cut, message.action.clone(), message.context.clone()) {
+        let update = match owner.preview_manual(cut).and_then(|mut preview| {
+            preview.apply_message(message)?;
+            preview
+                .finish()?
+                .ok_or(crate::operation_actor::Error::CaptureChanged)
+        }) {
             Ok(update) => update,
             Err(error) => {
                 owner.resume(&cut).map_err(crate::bundle::operation_error)?;

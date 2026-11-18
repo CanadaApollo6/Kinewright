@@ -608,6 +608,7 @@ fn pending_receipts(permit: &ManualPermit) -> Vec<crate::operation_protocol::Rec
         .map(|encoded| {
             let message = encoded.decode().unwrap();
             crate::operation_protocol::Receipt {
+                additional_batches: message.folded.len() as u64,
                 id: message.id.clone(),
                 sequence: message.sequence,
                 accepted: message.accepted,

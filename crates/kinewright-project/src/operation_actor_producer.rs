@@ -48,9 +48,15 @@ impl ManualPermit {
         self.core
             .call(|reply| Message::Close(Some(self.generation), reply))?
     }
+    /// Export pending packets and freeze their wire identities for retry.
     pub fn pending(&self) -> Result<Vec<EncodedMessage>, Error> {
         self.core
             .call(|reply| Message::Pending(self.generation, reply))?
+    }
+    /// Observe the window without exporting any packets.
+    pub fn pending_count(&self) -> Result<usize, Error> {
+        self.core
+            .call(|reply| Message::PendingCount(self.generation, reply))?
     }
 }
 pub(super) struct BoundProducer {
@@ -134,6 +140,17 @@ impl State {
                 CoreMutationRefusal::ManualPermitRequired,
             ))
     }
+    pub(super) fn current_producer_mut(
+        &mut self,
+        generation: u64,
+    ) -> Result<&mut BoundProducer, Error> {
+        self.producer
+            .as_mut()
+            .filter(|bound| bound.permit == generation)
+            .ok_or(Error::MutationRefused(
+                CoreMutationRefusal::ManualPermitRequired,
+            ))
+    }
     pub(super) fn check_permit(&self, permit: Option<u64>) -> Result<(), Error> {
         match (&self.producer, permit) {
             // Revoking an installed stream must not turn escaped raw handles
@@ -212,10 +229,7 @@ impl State {
         receipts: &[Receipt],
     ) -> Result<(), Error> {
         self.authorize(owner)?;
-        self.current_producer(generation)?;
-        self.producer
-            .as_mut()
-            .expect("checked producer")
+        self.current_producer_mut(generation)?
             .stream
             .acknowledge(receipts)
             .map_err(Error::Protocol)

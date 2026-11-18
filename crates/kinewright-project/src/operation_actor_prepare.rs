@@ -47,6 +47,15 @@ impl ManualPreview {
         self.revision = revision;
         Ok(())
     }
+    pub(crate) fn apply_message(
+        &mut self,
+        message: crate::operation_protocol::Message,
+    ) -> Result<(), Error> {
+        for (action, context) in message.into_parts() {
+            self.apply(action, context)?;
+        }
+        Ok(())
+    }
 
     pub(crate) fn finish(mut self) -> Result<Option<PreparedUpdate>, Error> {
         let Some(effects) = self.effects.take() else {

@@ -85,6 +85,7 @@ pub(crate) fn ack(owner: &Attachment<Proof>, permit: &ManualPermit, edits: &mut 
                 .map(|encoded| {
                     let message = encoded.decode().unwrap();
                     Receipt {
+                        additional_batches: message.folded.len() as u64,
                         id: message.id.clone(),
                         sequence: message.sequence,
                         accepted: message.accepted,

@@ -37,7 +37,7 @@ fn fresh(pool: &HistoryPool) -> OwnerHistory {
 }
 
 use crate::operation_actor::CommandContext;
-use crate::operation_protocol::{Action, Receipt, Seed, StreamState};
+use crate::operation_protocol::{Action, FoldedBatch, Receipt, Seed, StreamState, foldable};
 #[derive(Clone, Serialize, Deserialize)]
 struct Message {
     id: u64,
@@ -76,6 +76,8 @@ fn message_id(message: &crate::operation_protocol::Message) -> u64 {
 }
 struct Pending {
     message: crate::operation_protocol::Message,
+    logical_ids: Vec<u64>,
+    sent: bool,
     authority: u64,
     resources: BTreeSet<Resource>,
 }
@@ -89,6 +91,7 @@ struct Root {
 struct Coverage {
     edits: usize,
     folds: usize,
+    outbox_folds: usize,
     undos: usize,
     redos: usize,
     closes: usize,
@@ -115,6 +118,7 @@ impl Coverage {
     fn accumulate(&mut self, other: &Self) {
         self.edits += other.edits;
         self.folds += other.folds;
+        self.outbox_folds += other.outbox_folds;
         self.undos += other.undos;
         self.redos += other.redos;
         self.closes += other.closes;
@@ -199,7 +203,8 @@ impl<S: ModelStore> Session<S> {
         }
     }
     fn send(&mut self, message: Message) {
-        if self.pending.len() == crate::operation_protocol::PENDING_COMMANDS {
+        let folded = self.fold_tail(&message);
+        if folded.is_none() && self.pending.len() == crate::operation_protocol::PENDING_COMMANDS {
             return;
         }
         let before = self.gui.identity().unwrap();
@@ -234,19 +239,32 @@ impl<S: ModelStore> Session<S> {
                     ),
                     Action::Undo | Action::Redo | Action::Close => BTreeSet::new(),
                 };
-                let wire = message.into_wire(&self.gui_stream, effects.accepted);
-                assert!(
-                    serde_json::to_vec(&wire).unwrap().len() as u64
-                        <= crate::operation_protocol::PENDING_BYTES,
-                    "GENERATED_COMMAND_FITS_PRODUCER_WINDOW"
-                );
-                self.gui_stream = self.gui_stream.advanced(&wire, effects.accepted).unwrap().0;
+                let accepted = effects.accepted;
                 self.accepted.insert(id, effects);
-                self.pending.push_back(Pending {
-                    message: wire,
-                    authority: self.authority,
-                    resources,
-                });
+                if let Some(wire) = folded {
+                    let receipt = StreamState::new_receipt(&wire, wire.accepted).unwrap();
+                    self.gui_stream.replace_tail_receipt(receipt);
+                    let tail = self.pending.back_mut().unwrap();
+                    tail.message = wire;
+                    tail.logical_ids.push(id);
+                    tail.resources.extend(resources);
+                    self.coverage.outbox_folds += 1;
+                } else {
+                    let wire = message.into_wire(&self.gui_stream, accepted);
+                    assert!(
+                        serde_json::to_vec(&wire).unwrap().len() as u64
+                            <= crate::operation_protocol::PENDING_BYTES,
+                        "GENERATED_COMMAND_FITS_PRODUCER_WINDOW"
+                    );
+                    self.gui_stream = self.gui_stream.advanced(&wire, accepted).unwrap().0;
+                    self.pending.push_back(Pending {
+                        message: wire,
+                        logical_ids: vec![id],
+                        sent: false,
+                        authority: self.authority,
+                        resources,
+                    });
+                }
             }
             Err(_) => assert_eq!(
                 self.gui.identity().unwrap(),
@@ -255,6 +273,75 @@ impl<S: ModelStore> Session<S> {
             ),
         }
     }
+    fn fold_tail(&self, message: &Message) -> Option<crate::operation_protocol::Message> {
+        let Action::Do {
+            gesture: Some(key),
+            operations,
+        } = &message.action
+        else {
+            return None;
+        };
+        let tail = self.pending.back().filter(|tail| !tail.sent)?;
+        let Action::Do {
+            gesture: Some(previous_key),
+            operations: previous,
+        } = &tail.message.action
+        else {
+            return None;
+        };
+        if self
+            .gui
+            .history()
+            .undo()
+            .back()
+            .and_then(kinewright_core::undo::Step::coalesce_key)
+            != Some(key)
+            || previous_key != key
+            || tail.message.context.creation.branch != message.creation.branch
+            || !foldable(&tail.message.context, previous)
+            || !foldable(&message.context(), operations)
+        {
+            return None;
+        }
+        let mut packet = tail.message.clone();
+        packet.folded.push(FoldedBatch {
+            creation: message.creation.clone(),
+            operations: operations.clone(),
+        });
+        packet.tip = packet.chained().unwrap();
+        (serde_json::to_vec(&packet).unwrap().len() as u64
+            <= crate::operation_protocol::PENDING_BYTES)
+            .then_some(packet)
+    }
+
+    fn apply_packet(
+        writer: &mut OwnerHistory,
+        accepted: &BTreeMap<u64, Effects>,
+        pending: &Pending,
+    ) {
+        for ((action, context), id) in pending
+            .message
+            .clone()
+            .into_parts()
+            .zip(&pending.logical_ids)
+        {
+            let effects = action
+                .apply(&context, writer)
+                .expect("SHADOW_ACCEPTS_GUI_TRANSITION");
+            if !effects.folded.is_empty() {
+                writer.fold.as_ref().unwrap().assert_matches(
+                    &writer.seeds,
+                    writer.history().baseline(),
+                    &writer.resources.baseline,
+                );
+            }
+            assert_eq!(
+                &effects, &accepted[id],
+                "SHADOW_ACCOUNTS_FOR_EACH_GUI_TRANSITION"
+            );
+        }
+    }
+
     fn drain(&mut self) {
         while !self.pending.is_empty() {
             self.group(
@@ -280,6 +367,9 @@ impl<S: ModelStore> Session<S> {
         root.stream
             .validate()
             .expect("OPENED_STREAM_HAS_A_VALID_BOUNDED_RECEIPT_WINDOW");
+        for pending in self.pending.iter_mut().take(attempted) {
+            pending.sent = true;
+        }
         let mut prefix = Vec::with_capacity(attempted);
         for (index, pending) in self.pending.iter().take(attempted).enumerate() {
             let message = &pending.message;
@@ -319,22 +409,8 @@ impl<S: ModelStore> Session<S> {
                     self.writer.history().position(),
                     "SHADOW_CHECKS_ACCEPTED_KEY_BEFORE_APPLYING"
                 );
-                let effects = message
-                    .action
-                    .apply(&message.context, &mut self.writer)
-                    .expect("SHADOW_ACCEPTS_GUI_TRANSITION");
-                if !effects.folded.is_empty() {
-                    self.writer.fold.as_ref().unwrap().assert_matches(
-                        &self.writer.seeds,
-                        self.writer.history().baseline(),
-                        &self.writer.resources.baseline,
-                    );
-                }
-                assert_eq!(
-                    &effects, &self.accepted[&id],
-                    "SHADOW_ACCOUNTS_FOR_EACH_GUI_TRANSITION"
-                );
-                root.stream = root.stream.advanced(message, effects.accepted).unwrap().0;
+                Self::apply_packet(&mut self.writer, &self.accepted, pending);
+                root.stream = root.stream.advanced(message, message.accepted).unwrap().0;
             }
             prefix.push((id, root.stream.lookup(message).unwrap().unwrap().clone()));
             if matches!(fault, GroupFault::StopBeforeRoot(at) if at % attempted == index) {

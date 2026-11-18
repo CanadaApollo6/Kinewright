@@ -152,7 +152,11 @@ impl Fixture {
                 Instant::now() < deadline,
                 "MANUAL_TEST_BOUND status={} message={:?}",
                 self.app.status,
-                self.attachment().manual_edit_message()
+                self.app
+                    .focused()
+                    .ja1
+                    .as_ref()
+                    .and_then(Ja1Attachment::manual_edit_message)
             );
             self.tick();
         }
@@ -175,6 +179,8 @@ impl Fixture {
             self.gate().permit.close_gesture().unwrap();
         }
         self.send_value(1);
+        // Already exported packets retain their identity and cannot take another sample.
+        let _ = self.gate().permit.pending().unwrap();
         self.send_value(2);
         assert!(self.edits().waiting_for_ack(), "MANUAL_FULL_WINDOW");
         let pending = self.gate().permit.pending().unwrap();
@@ -327,6 +333,8 @@ fn hx_h4_refused_message_leaves_only_the_durable_prefix() {
                 coalesce_key: "prefix".into(),
             })
             .unwrap();
+        // Give each command a wire identity for the out-of-order prefix test.
+        let _ = f.gate().permit.pending().unwrap();
         identities.push(attachment.owner.core().snapshot_identity().unwrap());
     }
     let messages = f.gate().permit.pending().unwrap();
@@ -389,6 +397,8 @@ fn hx_h4_app_retry_resends_the_unattempted_edits() {
                 coalesce_key: "retained".into(),
             })
             .unwrap();
+        // Each command is exported before adding the next packet to the suffix.
+        let _ = f.gate().permit.pending().unwrap();
     }
     let originals = f.gate().permit.pending().unwrap();
     let host = f.attachment().host.as_ref().unwrap();
@@ -435,6 +445,35 @@ fn hx_h4_app_retry_resends_the_unattempted_edits() {
             .parameters["exposure_milli_stops"],
         ParamValue::Integer(4),
     );
+}
+
+#[test]
+fn hx_h4_full_distinct_window_displays_accepted_solid_color() {
+    let mut f = Fixture::new();
+    for _ in 0..kinewright_project::operation_protocol::PENDING_COMMANDS {
+        f.gate().permit.close_gesture().unwrap();
+    }
+    let clip = ClipId(1);
+    let operation = Operation::SetSolidColor {
+        clip,
+        color: SolidColor { r: 255, g: 0, b: 0 },
+    };
+    f.app
+        .send_operations_coalesced(vec![operation.clone()], f.key.clone());
+    f.attempt();
+    assert!(f.edits().waiting_for_ack());
+    assert_eq!(f.edits().backpressure_refusals, 1);
+    assert_eq!(*f.app.focused().document, *f.before);
+    assert_eq!(
+        f.edits().message(),
+        Some(crate::manual_edits::PENDING_WORDS)
+    );
+    assert_eq!(f.edits().desired_solid_color(clip), None);
+
+    f.finish();
+    let mut expected = (*f.before).clone();
+    operation.apply(&mut expected).unwrap();
+    assert_eq!(*f.app.focused().document, expected);
 }
 
 fn strict_drag(control: &str, operation: impl Fn(i64) -> Operation) -> usize {
@@ -490,6 +529,86 @@ fn strict_drag(control: &str, operation: impl Fn(i64) -> Operation) -> usize {
     f.finish();
     assert_eq!(*f.app.focused().document, *before, "HX_H4_DRAG_UNDO");
     accepted
+}
+
+fn held_reply_drag(control: &str, operation: impl Fn(i64) -> Operation) -> (usize, usize) {
+    let mut f = Fixture::with_document(undo_fixture::heavy());
+    let gate = Arc::new(SendGate::default());
+    let _release = Release(Arc::clone(&gate));
+    let held = Arc::clone(&gate);
+    f.app
+        .focused_mut()
+        .ja1
+        .as_mut()
+        .unwrap()
+        .host
+        .as_mut()
+        .unwrap()
+        .after_first_manual_reply = Some(Box::new(move || held.hold()));
+    f.release();
+    let mut accepted = 0;
+    let path = f.temp.path("p.kinewright");
+    for value in 0..120 {
+        let before = f.attachment().owner.core().change_id().unwrap().position;
+        f.app
+            .send_operations_coalesced(vec![operation(value)], f.key.clone());
+        f.attempt();
+        if value == 0 {
+            f.until(|_| gate.entered());
+        }
+        let after = f.attachment().owner.core().change_id().unwrap().position;
+        accepted += usize::from(after.position == before.position + 1);
+    }
+    assert_eq!(f.gate().permit.pending_count().unwrap(), 2);
+    println!("HX_H4_HELD {control} issued=120 accepted={accepted} pending=2");
+    let before = root_generation(&path);
+    gate.release();
+    f.finish();
+    let publications = root_generation(&path) - before;
+    let mut expected = (*f.before).clone();
+    operation(119).apply(&mut expected).unwrap();
+    assert_eq!(*f.app.focused().document, expected, "HX_H4_HELD_LAST_VALUE");
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        *loaded
+            .open_manual()
+            .unwrap()
+            .export_history()
+            .unwrap()
+            .history()
+            .document,
+        expected,
+        "HX_H4_HELD_COLD"
+    );
+    drop(loaded);
+    f.app.undo();
+    f.finish();
+    assert_eq!(*f.app.focused().document, *f.before, "HX_H4_HELD_ONE_UNDO");
+    println!(
+        "HX_H4_HELD {control} publications_after_release={publications} cold_reopen_and_undo=ok"
+    );
+    assert!(publications <= 2, "HX_H4_HELD_PUBLICATIONS {publications}");
+    (accepted, f.edits().backpressure_refusals)
+}
+
+#[test]
+fn hx_h4_held_first_reply_folds_unsent_gesture() {
+    let exposure = held_reply_drag("exposure", param);
+    let sync_lock = held_reply_drag("sync-lock", |value| Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: value % 2 == 0,
+    });
+    assert_eq!(
+        [exposure, sync_lock],
+        [(120, 0), (120, 0)],
+        "HX_H4_HELD_NO_BACKPRESSURE"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -1094,6 +1213,8 @@ fn manual_value_fix1_open_gesture_does_not_claim_backpressure() {
         None,
         "MANUAL_OPEN_GESTURE_IS_NOT_WAITING"
     );
+    // Export the last slot before issuing a value that really needs space.
+    let _ = f.gate().permit.pending().unwrap();
     f.send_value(-555);
     assert!(f.edits().waiting_for_ack());
     assert_eq!(

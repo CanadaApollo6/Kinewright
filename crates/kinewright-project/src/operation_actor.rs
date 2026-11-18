@@ -249,6 +249,7 @@ enum Message {
         u64,
         Sender<Result<Vec<crate::operation_protocol::EncodedMessage>, Error>>,
     ),
+    PendingCount(u64, Sender<Result<usize, Error>>),
     Acknowledge(
         TypeId,
         u64,
@@ -880,8 +881,14 @@ impl State {
                 }
                 Message::Pending(permit, reply) => {
                     let result = self
-                        .current_producer(permit)
+                        .current_producer_mut(permit)
                         .map(|producer| producer.stream.pending());
+                    let _ = reply.send(result);
+                }
+                Message::PendingCount(permit, reply) => {
+                    let result = self
+                        .current_producer(permit)
+                        .map(|producer| producer.stream.pending_count());
                     let _ = reply.send(result);
                 }
                 Message::Acknowledge(owner, permit, receipts, reply) => {

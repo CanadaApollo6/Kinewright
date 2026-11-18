@@ -128,6 +128,29 @@ fn message<S: ModelStore>(session: &mut Session<S>, id: u64, choice: u64) -> Mes
 }
 
 fn prime_group<S: ModelStore>(session: &mut Session<S>, seed: u64, state: &mut u64) {
+    let base = 2_000_000 + seed * 4;
+    for id in base..base + 3 {
+        session.send(Message {
+            id,
+            action: Action::Do {
+                operations: vec![marker(id)],
+                gesture: Some("held reply gesture".into()),
+            },
+            creation: origin(id + 2),
+            approval: None,
+            transition: None,
+        });
+        if id == base + 1 {
+            assert_eq!(session.pending.len(), 1);
+            assert_eq!(session.pending[0].message.folded.len(), 1);
+            session.group(1, GroupFault::RefuseAt(0));
+        }
+    }
+    assert_eq!(session.pending.len(), 2, "EXPORTED_PACKET_STAYS_IMMUTABLE");
+    assert_eq!(session.pending[0].logical_ids, [base, base + 1]);
+    session.group(1, GroupFault::LoseAcknowledgement);
+    session.drain();
+
     let capacity = crate::operation_protocol::PENDING_COMMANDS;
     for offset in 0..capacity as u64 {
         let id = 1_000_000 + seed * capacity as u64 + offset;
@@ -395,6 +418,7 @@ pub(super) fn run_range<S: ModelStore>(first: u64, last: u64, length: u64) {
     for (name, count) in [
         ("edit", totals.edits),
         ("fold", totals.folds),
+        ("unsent packet fold", totals.outbox_folds),
         ("undo", totals.undos),
         ("redo", totals.redos),
         ("close", totals.closes),
@@ -422,11 +446,12 @@ pub(super) fn run_range<S: ModelStore>(first: u64, last: u64, length: u64) {
         assert!(count > 0, "SESSION_GRAMMAR_REACHES_{name}");
     }
     println!(
-        "HX_SESSION_MODEL first_seed={first} last_seed={last} seeds={seeds} random_attempts={} primed_transitions={} elapsed_ms={} folds={} restart={} lost_ack={} prepublication_crash={} postpublication_crash={} group_refusal={} largest_group={} handoff={} save={} save_as={} rescue={} cold_open={} collect={} approvals={} transition_approvals={} baseline_lineage={} split_ancestry={} redo_payloads={} ordinary_lease_peak={}",
+        "HX_SESSION_MODEL first_seed={first} last_seed={last} seeds={seeds} random_attempts={} primed_transitions={} elapsed_ms={} folds={} outbox_folds={} restart={} lost_ack={} prepublication_crash={} postpublication_crash={} group_refusal={} largest_group={} handoff={} save={} save_as={} rescue={} cold_open={} collect={} approvals={} transition_approvals={} baseline_lineage={} split_ancestry={} redo_payloads={} ordinary_lease_peak={}",
         seeds * length,
-        seeds * 2,
+        seeds * 5,
         started.elapsed().as_millis(),
         totals.folds,
+        totals.outbox_folds,
         totals.restarts,
         totals.lost_acks,
         totals.before_publish,

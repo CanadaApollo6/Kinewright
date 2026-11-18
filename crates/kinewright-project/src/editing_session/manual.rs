@@ -340,8 +340,11 @@ impl Ja1EditingSession {
                 if let Action::Do { operations, .. } = &message.action {
                     certificate.check(operations)?;
                 }
+                for part in &message.folded {
+                    certificate.check(&part.operations)?;
+                }
                 crate::bundle_commit::BundleCommit::admitted_history(
-                    bundle, &message, &core, &inputs,
+                    bundle, message, &core, &inputs,
                 )?;
             }
             if expected.is_some_and(|identity| {
@@ -639,9 +642,50 @@ struct ManualGroup<'a> {
     next_issuer_sequence: Option<u64>,
     stream: StreamState,
     stage: Option<(AcceptedCut, crate::operation_actor::ManualPreview)>,
+    partial_packet: bool,
 }
 
-impl ManualGroup<'_> {
+impl<'a> ManualGroup<'a> {
+    fn new(
+        bundle: &crate::bundle::ProjectBundle,
+        checkpoint: &'a crate::bundle_records::BranchCheckpoint,
+        authority: &'a ManualAuthority,
+        publisher: crate::operation_protocol::Publisher,
+    ) -> Result<Self, BundleError> {
+        let lease = authority.lease();
+        let stream = checkpoint
+            .stream
+            .clone()
+            .ok_or(BundleError::HistoryChanged)?;
+        let switch_generation = bundle
+            .root()
+            .ok_or(BundleError::HistoryChanged)?
+            .manual_switch_generation;
+        Ok(Self {
+            authority,
+            checkpoint,
+            publisher,
+            lease_matches: lease.state.seed() == stream.seed()
+                && lease.owner_epoch == bundle.store.owner_epoch()
+                && lease.switch_generation == switch_generation
+                && lease.inputs == checkpoint.input_manifest_ref,
+            writable: !bundle.unsettled && bundle.pending_publication.is_none(),
+            next_issuer_sequence: bundle
+                .issuers
+                .get(&lease.issuer)
+                .map(|issuer| issuer.next_sequence),
+            stream,
+            stage: None,
+            partial_packet: false,
+        })
+    }
+    fn discard(&mut self, owner: &crate::ProjectAttachment) -> Result<(), BundleError> {
+        if let Some((cut, preview)) = self.stage.take() {
+            drop(preview);
+            owner.resume(&cut).map_err(crate::bundle::operation_error)?;
+        }
+        Ok(())
+    }
     fn admit(
         &mut self,
         owner: &crate::ProjectAttachment,
@@ -691,6 +735,9 @@ impl ManualGroup<'_> {
         if let Action::Do { operations, .. } = &message.action {
             self.authority.inputs.check(operations)?;
         }
+        for part in &message.folded {
+            self.authority.inputs.check(&part.operations)?;
+        }
         let next = message
             .id
             .sequence
@@ -721,9 +768,10 @@ impl ManualGroup<'_> {
             .stage
             .as_mut()
             .expect("manual publication has a working copy");
-        preview
-            .apply(message.action, message.context)
-            .map_err(crate::bundle::operation_error)?;
+        if let Err(error) = preview.apply_message(message) {
+            self.partial_packet = preview.position() != position;
+            return Err(crate::bundle::operation_error(error));
+        }
         self.stream.record_receipt(receipt.clone());
         self.next_issuer_sequence = Some(next);
         Ok(receipt)
@@ -740,30 +788,7 @@ fn publish_manual_group(
     let lease = authority.lease();
     let branch = bundle.manual_branch_id().clone();
     let checkpoint = bundle.checkpoint(&branch)?;
-    let stream = checkpoint
-        .stream
-        .clone()
-        .ok_or(BundleError::HistoryChanged)?;
-    let switch_generation = bundle
-        .root()
-        .ok_or(BundleError::HistoryChanged)?
-        .manual_switch_generation;
-    let mut group = ManualGroup {
-        authority,
-        checkpoint,
-        publisher,
-        lease_matches: lease.state.seed() == stream.seed()
-            && lease.owner_epoch == bundle.store.owner_epoch()
-            && lease.switch_generation == switch_generation
-            && lease.inputs == checkpoint.input_manifest_ref,
-        writable: !bundle.unsettled && bundle.pending_publication.is_none(),
-        next_issuer_sequence: bundle
-            .issuers
-            .get(&lease.issuer)
-            .map(|issuer| issuer.next_sequence),
-        stream,
-        stage: None,
-    };
+    let mut group = ManualGroup::new(bundle, checkpoint, authority, publisher)?;
     let owner = bundle.attach_core(core)?;
     let mut outcome = ManualHistoryCommit {
         receipts: Vec::with_capacity(messages.len()),
@@ -775,6 +800,18 @@ fn publish_manual_group(
             Err(error) => {
                 outcome.refusal = Some(error);
                 break;
+            }
+        }
+    }
+    if group.partial_packet {
+        // A malformed folded packet can refuse after a sub-batch applied.
+        // Drop the private copy and replay the accepted packets once.
+        group.discard(&owner)?;
+        group = ManualGroup::new(bundle, checkpoint, authority, publisher)?;
+        for accepted in &messages[..outcome.receipts.len()] {
+            if let Err(error) = group.admit(&owner, accepted) {
+                group.discard(&owner)?;
+                return Err(error);
             }
         }
     }
@@ -932,8 +969,72 @@ mod c0_fix1_tests {
                     coalesce_key: "group".into(),
                 })
                 .unwrap();
+            // These publication and process-stop witnesses send distinct packets.
+            let _ = permit.pending().unwrap();
         }
         permit.pending().unwrap()
+    }
+
+    #[test]
+    fn hx_h4_a_refused_folded_packet_publishes_only_prior_packets() {
+        let (temp, mut writer) = owner();
+        let lease = writer
+            .issue_manual_lease("group".into(), "group".into())
+            .unwrap();
+        let authority = writer.manual_authority(lease.clone()).unwrap();
+        let (gui, permit) = replica(&temp, &writer, lease);
+        let change = |track, locked| Operation::SetTrackSyncLock { track, locked };
+        permit
+            .request(Command::Do(change(TrackId(1), false)))
+            .unwrap();
+        let prefix = gui.core().snapshot_identity().unwrap();
+        let first = permit.pending().unwrap();
+        for locked in [true, false] {
+            permit
+                .request(Command::DoBatchCoalesced {
+                    operations: vec![change(TrackId(1), locked)],
+                    coalesce_key: "group".into(),
+                })
+                .unwrap();
+        }
+        permit.close_gesture().unwrap();
+        let messages = permit.pending().unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0], first[0]);
+        let mut refused = messages[1].decode().unwrap();
+        assert_eq!(refused.folded.len(), 1);
+        refused.folded[0].operations[0] = change(TrackId(999), false);
+        refused.tip = refused.chained().unwrap();
+        let refused =
+            serde_json::from_value(serde_json::json!(serde_json::to_string(&refused).unwrap()))
+                .unwrap();
+        let outcome = writer
+            .commit_manual_history_group(
+                &authority,
+                &[messages[0].clone(), refused, messages[2].clone()],
+            )
+            .unwrap();
+        assert_eq!(outcome.receipts.len(), 1);
+        assert!(outcome.refusal.is_some());
+        assert_eq!(writer.core().snapshot_identity().unwrap(), prefix);
+        let pool = crate::operation_history::HistoryPool::new(
+            crate::operation_history::PoolLimits::default(),
+        );
+        let mut loaded =
+            crate::bundle::LoadedBundle::read(&temp.path("project.kinewright"), &pool).unwrap();
+        assert_eq!(
+            loaded.open_manual().unwrap().snapshot_identity().unwrap(),
+            prefix
+        );
+        let retried = writer
+            .commit_manual_history_group(&authority, &messages)
+            .unwrap();
+        assert_eq!(retried.receipts.len(), 3);
+        assert!(retried.refusal.is_none());
+        assert_eq!(
+            writer.core().snapshot_identity().unwrap(),
+            gui.core().snapshot_identity().unwrap()
+        );
     }
 
     #[test]

@@ -476,7 +476,7 @@ fn curve_widget_emits_its_complete_return_to_the_document() {
 }
 
 #[test]
-fn solid_picker_input_is_the_pending_colour_until_it_is_replaced_or_abandoned() {
+fn solid_picker_shows_accepted_colour_until_a_refused_value_is_applied() {
     fn contains(shape: &egui::Shape, desired: kinewright_core::SolidColor) -> bool {
         match shape {
             egui::Shape::Rect(rect) => {
@@ -506,7 +506,7 @@ fn solid_picker_input_is_the_pending_colour_until_it_is_replaced_or_abandoned() 
         .unwrap();
     collect(&mut h.edits);
     assert!(h.edits.waiting_for_ack());
-    assert_eq!(h.edits.desired_solid_color(ClipId(1)), Some(desired));
+    assert_eq!(h.edits.desired_solid_color(ClipId(1)), None);
     let accepted = kinewright_core::SolidColor { r: 0, g: 0, b: 0 };
     let output = h.ctx.run_ui(egui::RawInput::default(), |ui| {
         let mut pending = InspectorEdits::default();
@@ -519,15 +519,22 @@ fn solid_picker_input_is_the_pending_colour_until_it_is_replaced_or_abandoned() 
         );
         assert!(
             pending.operations.is_empty(),
-            "painting requested input does not send"
+            "painting the accepted swatch does not send"
         );
     });
     assert!(
         output
             .shapes
             .iter()
+            .any(|shape| contains(&shape.shape, accepted)),
+        "PICKER_SHOWS_ACCEPTED_COLOUR"
+    );
+    assert!(
+        !output
+            .shapes
+            .iter()
             .any(|shape| contains(&shape.shape, desired)),
-        "PICKER_SHOWS_REQUESTED_COLOUR"
+        "PICKER_HIDES_REFUSED_COLOUR"
     );
     h.acknowledge();
     h.edits.start_next(&h.permit);

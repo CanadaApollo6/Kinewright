@@ -164,9 +164,7 @@ impl BundleRecord for Checkpoint {
                     || stream.seed().attachment_epoch != install.source_position.epoch
                     || (stream.sequence() == 0 && stream.seed().installed != install.source)
                     || stream.receipts().last().is_some_and(|receipt| {
-                        receipt.accepted.epoch != install.source_position.epoch
-                            || receipt.accepted.position.checked_add(1)
-                                != Some(install.source_position.position)
+                        receipt.next_position() != Some(install.source_position)
                     })
                 {
                     return Err(BundleError::Corrupt("install source stream".into()));
@@ -187,22 +185,22 @@ impl BundleRecord for Checkpoint {
                 return Err(BundleError::Corrupt("installed snapshot identity".into()));
             }
             if let Some(last) = stream.receipts().last()
-                && (last.accepted.epoch != self.position.epoch
-                    || last.accepted.position.checked_add(1) != Some(self.position.position)
+                && (last.next_position() != Some(self.position)
                     || self.command_cut.as_ref() != Some(&last.id))
             {
                 return Err(BundleError::Corrupt("checkpoint receipt cut".into()));
             }
-            let mut previous: Option<CommandKey> = None;
+            let mut next = None;
             for receipt in stream.receipts() {
                 if receipt.accepted.epoch != self.position.epoch
-                    || previous.is_some_and(|key| {
-                        key.position.checked_add(1) != Some(receipt.accepted.position)
-                    })
+                    || next.is_some_and(|position| position != receipt.accepted)
                 {
                     return Err(BundleError::Corrupt("checkpoint receipt positions".into()));
                 }
-                previous = Some(receipt.accepted);
+                next =
+                    Some(receipt.next_position().ok_or_else(|| {
+                        BundleError::Corrupt("checkpoint receipt positions".into())
+                    })?);
             }
         }
         Ok(())

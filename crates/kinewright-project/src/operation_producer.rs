@@ -1,8 +1,8 @@
 //! Actor-side bounded outbox. Encode before acceptance, retain shared immutable
 //! bytes afterwards, and advance nothing when admission or the edit is refused.
 use super::{
-    Action, Conflict, Message, PENDING_BYTES, PENDING_COMMANDS, PRODUCER_BUFFER_PEAK,
-    PRODUCER_HEADER_BYTES, Publisher, Receipt, StreamState, hash,
+    Action, Conflict, FoldedBatch, Message, PENDING_BYTES, PENDING_COMMANDS, PRODUCER_BUFFER_PEAK,
+    PRODUCER_HEADER_BYTES, Publisher, Receipt, StreamState, foldable, hash,
 };
 use crate::{
     bundle_records::{HeadId, ObjectRef},
@@ -117,17 +117,27 @@ impl<'de> Deserialize<'de> for EncodedMessage {
     }
 }
 impl EncodedMessage {
-    pub fn decode(&self) -> Result<Message, Conflict> {
+    fn decoded_bound(&self) -> Result<u64, Conflict> {
         let bytes = self.0.raw.get().as_bytes();
         if bytes.len() as u64 > PENDING_BYTES {
             return Err(Conflict::Backpressure);
         }
-        if kinewright_core::undo::payload_memory_bound(bytes).map_err(|_| Conflict::Encoding)?
-            > kinewright_core::undo::DECODED_PAYLOAD_BYTES
-        {
+        let bound =
+            kinewright_core::undo::payload_memory_bound(bytes).map_err(|_| Conflict::Encoding)?;
+        if bound > kinewright_core::undo::DECODED_PAYLOAD_BYTES {
             return Err(Conflict::Backpressure);
         }
-        serde_json::from_slice(bytes).map_err(|_| Conflict::Encoding)
+        Ok(bound)
+    }
+    pub fn decode(&self) -> Result<Message, Conflict> {
+        self.decoded_bound()?;
+        self.decode_checked()
+    }
+    fn decode_checked(&self) -> Result<Message, Conflict> {
+        let message: Message =
+            serde_json::from_str(self.0.raw.get()).map_err(|_| Conflict::Encoding)?;
+        message.validate_fold()?;
+        Ok(message)
     }
     #[must_use]
     pub fn byte_len(&self) -> u64 {
@@ -187,25 +197,79 @@ impl<'a> From<&'a Action> for ActionRef<'a> {
         }
     }
 }
+#[derive(Clone, Copy, Serialize)]
+struct BatchRef<'a> {
+    creation: &'a crate::operation_history::CreationOrigin,
+    operations: &'a [Operation],
+}
+
+#[derive(Default)]
+struct Folded<'a> {
+    previous: &'a [FoldedBatch],
+    last: Option<BatchRef<'a>>,
+}
+impl Folded<'_> {
+    fn is_empty(&self) -> bool {
+        self.previous.is_empty() && self.last.is_none()
+    }
+}
+impl Serialize for Folded<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(
+            self.previous
+                .iter()
+                .map(|part| BatchRef {
+                    creation: &part.creation,
+                    operations: &part.operations,
+                })
+                .chain(self.last),
+        )
+    }
+}
+
 #[derive(Serialize)]
 struct Wire<'a> {
     publisher: Publisher,
-    id: &'a CommandId,
+    id: CommandId,
     sequence: u64,
     predecessor: [u8; 32],
     tip: [u8; 32],
     accepted: CommandKey,
     action: ActionRef<'a>,
     context: &'a CommandContext,
+    #[serde(skip_serializing_if = "Folded::is_empty")]
+    folded: Folded<'a>,
+}
+impl Wire<'_> {
+    fn encoded_len(&self) -> Result<u64, Conflict> {
+        struct Counter(u64);
+        impl std::io::Write for Counter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 = self
+                    .0
+                    .checked_add(bytes.len() as u64)
+                    .ok_or_else(|| std::io::Error::other("message size"))?;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut counter = Counter(0);
+        serde_json::to_writer(&mut counter, self).map_err(|_| Conflict::Encoding)?;
+        Ok(counter.0)
+    }
 }
 struct Pending {
     encoded: EncodedMessage,
     receipt: Receipt,
+    sent: bool,
 }
 pub(crate) struct PreparedMessage {
     pending: Pending,
     next_state: StreamState,
     next_issuer: u64,
+    replace_tail: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProducerError {
@@ -365,10 +429,14 @@ impl Producer {
         self.pending.len()
     }
     #[must_use]
-    pub fn pending(&self) -> Vec<EncodedMessage> {
+    /// Export immutable wire identities to a sender or recovery owner.
+    pub fn pending(&mut self) -> Vec<EncodedMessage> {
         self.pending
-            .iter()
-            .map(|pending| pending.encoded.clone())
+            .iter_mut()
+            .map(|pending| {
+                pending.sent = true;
+                pending.encoded.clone()
+            })
             .collect()
     }
     pub fn execute(
@@ -406,7 +474,16 @@ impl Producer {
                 context.inputs.push(self.lease.inputs.clone());
             }
         }
-        let prepared = self.prepare(self.next_key, ActionRef::from(&action), &context)?;
+        let wire_action = ActionRef::from(&action);
+        let open_gesture = owner
+            .history()
+            .undo()
+            .back()
+            .and_then(kinewright_core::undo::Step::coalesce_key);
+        let prepared = match self.prepare_fold(wire_action, &context, open_gesture)? {
+            Some(prepared) => prepared,
+            None => self.prepare(self.next_key, wire_action, &context)?,
+        };
         let effects = action.execute_with_inputs(context, owner, certificate)?;
         self.commit(prepared);
         self.next_key = owner.history().position();
@@ -421,45 +498,81 @@ impl Producer {
         self.hold.take();
         Ok(())
     }
-    #[allow(
-        clippy::too_many_lines,
-        reason = "one atomic preparation reserves, hashes and encodes the exact accepted packet"
-    )]
+    fn prepare_fold(
+        &self,
+        action: ActionRef<'_>,
+        context: &CommandContext,
+        open_gesture: Option<&str>,
+    ) -> Result<Option<PreparedMessage>, Conflict> {
+        let ActionRef::Do {
+            operations,
+            gesture: Some(key),
+        } = action
+        else {
+            return Ok(None);
+        };
+        let Some(tail) = self.pending.back().filter(|tail| !tail.sent) else {
+            return Ok(None);
+        };
+        if open_gesture != Some(key) || !foldable(context, operations) {
+            return Ok(None);
+        }
+        // The existing stream arena also covers temporary re-encoding. If it
+        // cannot hold the decoded tail, fall back to an ordinary slot.
+        let hold = self.hold.as_ref().ok_or(Conflict::Detached)?;
+        let Ok(decoded_bound) = tail.encoded.decoded_bound() else {
+            return Ok(None);
+        };
+        let Ok(_decoded) = self.arena.reserve(decoded_bound, hold) else {
+            return Ok(None);
+        };
+        let old = tail.encoded.decode_checked()?;
+        let Action::Do {
+            operations: first,
+            gesture: Some(old_key),
+        } = &old.action
+        else {
+            return Ok(None);
+        };
+        if old_key != key
+            || old.context.creation.branch != context.creation.branch
+            || !foldable(&old.context, first)
+        {
+            return Ok(None);
+        }
+        let wire = Wire {
+            publisher: old.publisher,
+            id: old.id,
+            sequence: old.sequence,
+            predecessor: old.predecessor,
+            tip: [0; 32],
+            accepted: old.accepted,
+            action: ActionRef::from(&old.action),
+            context: &old.context,
+            folded: Folded {
+                previous: &old.folded,
+                last: Some(BatchRef {
+                    creation: &context.creation,
+                    operations,
+                }),
+            },
+        };
+        match self.encode(wire, true) {
+            Ok(prepared) => Ok(Some(prepared)),
+            Err(Conflict::Backpressure | Conflict::CommandTooLarge) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     pub(crate) fn prepare(
         &self,
         accepted: CommandKey,
         action: ActionRef<'_>,
         context: &CommandContext,
     ) -> Result<PreparedMessage, Conflict> {
-        struct Counter(u64);
-        impl std::io::Write for Counter {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0 = self
-                    .0
-                    .checked_add(bytes.len() as u64)
-                    .ok_or_else(|| std::io::Error::other("message size"))?;
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
         if self.pending.len() == PENDING_COMMANDS {
             return Err(Conflict::Backpressure);
         }
-        let next_issuer = self
-            .next_issuer
-            .checked_add(1)
-            .ok_or(Conflict::CounterExhausted)?;
-        let id = CommandId {
-            issuer: self.lease.issuer.clone(),
-            sequence: self.next_issuer,
-        };
-        let sequence = self
-            .state
-            .sequence
-            .checked_add(1)
-            .ok_or(Conflict::CounterExhausted)?;
         let publisher = match (
             self.lease.parent_identity,
             self.lease.namespace_name.as_deref(),
@@ -468,40 +581,72 @@ impl Producer {
             (None, None) => Publisher::Portable,
             _ => return Err(Conflict::Detached),
         };
-        let command = hash(
-            b"kinewright/accepted-command/v1\0",
-            &(publisher, &id, accepted, action, context),
-        )?;
-        let tip = hash(
-            b"kinewright/accepted-chain/v1\0",
-            &(self.state.tip, command),
-        )?;
-        let wire = Wire {
-            publisher,
-            id: &id,
-            sequence,
-            predecessor: self.state.tip,
-            tip,
-            accepted,
-            action,
-            context,
+        self.encode(
+            Wire {
+                publisher,
+                id: CommandId {
+                    issuer: self.lease.issuer.clone(),
+                    sequence: self.next_issuer,
+                },
+                sequence: self
+                    .state
+                    .sequence
+                    .checked_add(1)
+                    .ok_or(Conflict::CounterExhausted)?,
+                predecessor: self.state.tip,
+                tip: [0; 32],
+                accepted,
+                action,
+                context,
+                folded: Folded::default(),
+            },
+            false,
+        )
+    }
+
+    fn encode(&self, mut wire: Wire<'_>, replace_tail: bool) -> Result<PreparedMessage, Conflict> {
+        let header = (
+            wire.publisher,
+            &wire.id,
+            wire.accepted,
+            wire.action,
+            wire.context,
+        );
+        let command = if wire.folded.is_empty() {
+            hash(b"kinewright/accepted-command/v1\0", &header)?
+        } else {
+            hash(
+                b"kinewright/folded-manual-command/v1\0",
+                &(header, &wire.folded),
+            )?
         };
-        let mut counter = Counter(0);
-        serde_json::to_writer(&mut counter, &wire).map_err(|_| Conflict::Encoding)?;
-        if counter.0 > PENDING_BYTES {
+        wire.tip = hash(
+            b"kinewright/accepted-chain/v1\0",
+            &(wire.predecessor, command),
+        )?;
+        let encoded_len = wire.encoded_len()?;
+        if encoded_len > PENDING_BYTES {
             return Err(Conflict::CommandTooLarge);
         }
-        if counter.0 > PENDING_BYTES.saturating_sub(self.bytes) {
+        let retained = if replace_tail {
+            self.bytes
+                - self
+                    .pending
+                    .back()
+                    .expect("replaced tail")
+                    .encoded
+                    .byte_len()
+        } else {
+            self.bytes
+        };
+        if encoded_len > PENDING_BYTES.saturating_sub(retained) {
             return Err(Conflict::Backpressure);
         }
-        // Count first so encoding needs exactly one buffer, without geometric
-        // spare capacity or another typed operation list.
-        let length = usize::try_from(counter.0).map_err(|_| Conflict::Backpressure)?;
+        let length = usize::try_from(encoded_len).map_err(|_| Conflict::Backpressure)?;
         let hold = self.hold.as_ref().ok_or(Conflict::Detached)?;
-        let encoding = self.arena.reserve(counter.0, hold)?;
+        let encoding = self.arena.reserve(encoded_len, hold)?;
         let charge = self.arena.reserve(
-            counter
-                .0
+            encoded_len
                 .checked_add(ENCODED_HEADER_BYTES)
                 .ok_or(Conflict::Backpressure)?,
             hold,
@@ -511,35 +656,56 @@ impl Producer {
             .try_reserve_exact(length)
             .map_err(|_| Conflict::Backpressure)?;
         serde_json::to_writer(&mut bytes, &wire).map_err(|_| Conflict::Encoding)?;
+        if replace_tail
+            && kinewright_core::undo::payload_memory_bound(&bytes)
+                .map_err(|_| Conflict::Encoding)?
+                > kinewright_core::undo::DECODED_PAYLOAD_BYTES
+        {
+            return Err(Conflict::CommandTooLarge);
+        }
         let text = String::from_utf8(bytes).map_err(|_| Conflict::Encoding)?;
         let raw = RawValue::from_string(text).map_err(|_| Conflict::Encoding)?;
         let receipt = Receipt {
-            id,
-            sequence,
-            accepted,
-            tip,
+            id: wire.id,
+            sequence: wire.sequence,
+            accepted: wire.accepted,
+            tip: wire.tip,
             command,
+            additional_batches: wire.folded.previous.len() as u64
+                + u64::from(wire.folded.last.is_some()),
         };
+        let next_issuer = self
+            .next_issuer
+            .checked_add(u64::from(!replace_tail))
+            .ok_or(Conflict::CounterExhausted)?;
         let mut next_state = self.state.clone();
-        next_state.sequence = sequence;
-        next_state.tip = tip;
-        if next_state.receipts.len() == PENDING_COMMANDS {
-            next_state.receipts.pop_front();
+        if replace_tail {
+            next_state.replace_tail_receipt(receipt.clone());
+        } else {
+            next_state.record_receipt(receipt.clone());
         }
-        next_state.receipts.push_back(receipt.clone());
         let encoded = EncodedMessage(Arc::new(EncodedPayload {
             raw,
             _charge: Some(charge),
         }));
         drop(encoding);
         Ok(PreparedMessage {
-            pending: Pending { encoded, receipt },
+            pending: Pending {
+                encoded,
+                receipt,
+                sent: false,
+            },
             next_state,
             next_issuer,
+            replace_tail,
         })
     }
     /// Called by the sole actor only after its already-prepared edit succeeds.
     pub(crate) fn commit(&mut self, prepared: PreparedMessage) {
+        if prepared.replace_tail {
+            let previous = self.pending.pop_back().expect("replaced tail");
+            self.bytes -= previous.encoded.byte_len();
+        }
         self.bytes += prepared.pending.encoded.byte_len();
         self.pending.push_back(prepared.pending);
         self.state = prepared.next_state;
