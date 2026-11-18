@@ -10,7 +10,7 @@ use kinewright_core::MediaAsset;
 use kinewright_interchange::{
     Availability, MediaTable, ProbedMedia,
     ir::{Media, Timeline},
-    locator::{Locator, Platform, classify},
+    locator::{Locator, Platform, classify, share_path},
 };
 
 use super::{
@@ -26,9 +26,9 @@ pub(super) fn media(
     base: &Path,
     roots: Vec<PathBuf>,
     options: &ImportOptions,
-    mode: Preparation,
+    mode: Preparation<'_>,
 ) -> Result<(Vec<MediaEntry>, MediaTable), Refusal> {
-    let (mut entries, paths) = initial_entries(&timeline.media, base);
+    let (mut entries, paths) = initial_entries(&timeline.media, base, mode);
     let mut workers = Workers::new(&options.control, options.deadlines);
     let fs_for_stat = Arc::clone(&fs);
     let stats = workers.run(Phase::Stat, paths.paths, move |path, _| {
@@ -47,7 +47,7 @@ pub(super) fn media(
     let mut table = MediaTable {
         entries: entries.iter().map(availability).collect(),
     };
-    if matches!(mode, Preparation::Probe) {
+    if matches!(mode, Preparation::Probe { .. }) {
         probe(fs, &mut workers, &mut entries, &mut table)?;
     }
     for entry in &mut entries {
@@ -71,7 +71,11 @@ impl Paths {
     }
 }
 
-fn initial_entries(media: &[Media], base: &Path) -> (Vec<MediaEntry>, Paths) {
+fn initial_entries(
+    media: &[Media],
+    base: &Path,
+    mode: Preparation<'_>,
+) -> (Vec<MediaEntry>, Paths) {
     let mut paths = Paths::default();
     let entries = media
         .iter()
@@ -87,7 +91,13 @@ fn initial_entries(media: &[Media], base: &Path) -> (Vec<MediaEntry>, Paths) {
                     paths.add(index, &path);
                     (MediaStatus::Missing, Some(path))
                 }
-                Locator::Remote => (MediaStatus::Remote, None),
+                Locator::Remote => approved_share_path(&media.locator, mode).map_or(
+                    (MediaStatus::Remote, None),
+                    |path| {
+                        paths.add(index, &path);
+                        (MediaStatus::Missing, Some(path))
+                    },
+                ),
                 Locator::Invalid if media.locator.is_empty() => (MediaStatus::Missing, None),
                 Locator::Invalid => (MediaStatus::InvalidLocator, None),
             };
@@ -109,6 +119,16 @@ fn initial_entries(media: &[Media], base: &Path) -> (Vec<MediaEntry>, Paths) {
     (entries, paths)
 }
 
+fn approved_share_path(locator: &str, mode: Preparation<'_>) -> Option<PathBuf> {
+    let Preparation::Probe { allowed, platform } = mode else {
+        return None;
+    };
+    let share = share_path(locator, platform)?;
+    allowed
+        .contains(&share.root)
+        .then(|| PathBuf::from(share.path))
+}
+
 fn availability(entry: &MediaEntry) -> Availability {
     match (entry.status, &entry.resolved_path) {
         (MediaStatus::Unprobed, Some(path)) => Availability::Unprobed {
@@ -117,7 +137,7 @@ fn availability(entry: &MediaEntry) -> Availability {
         },
         (MediaStatus::Remote, _) => Availability::Remote,
         (MediaStatus::TimedOut, _) => Availability::TimedOut,
-        _ => Availability::Missing,
+        _ => Availability::Unavailable,
     }
 }
 
@@ -147,7 +167,7 @@ fn probe(
             }
             Some(_) => {
                 entry.status = MediaStatus::Unreadable;
-                Availability::Missing
+                Availability::Unavailable
             }
             None => {
                 entry.status = MediaStatus::TimedOut;

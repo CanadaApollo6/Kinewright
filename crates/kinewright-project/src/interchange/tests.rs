@@ -156,7 +156,7 @@ fn remote_source_roots_and_media_never_reach_the_locator_seam() {
             Arc::clone(&fs),
             locator,
             ImportOptions::default(),
-            Preparation::Probe,
+            Preparation::LOCAL,
         )
         .unwrap_err();
         assert_eq!(refusal.code, RefusalCode::RemotePath, "{locator}");
@@ -168,7 +168,7 @@ fn remote_source_roots_and_media_never_reach_the_locator_seam() {
             Arc::clone(&fs),
             "timeline.otio",
             options,
-            Preparation::Probe,
+            Preparation::LOCAL,
         )
         .unwrap_err();
         assert_eq!(refusal.code, RefusalCode::RemotePath, "{locator}");
@@ -178,7 +178,7 @@ fn remote_source_roots_and_media_never_reach_the_locator_seam() {
         Arc::clone(&fs),
         "timeline.otio",
         ImportOptions::default(),
-        Preparation::Probe,
+        Preparation::LOCAL,
     )
     .unwrap();
     assert_eq!(prepared.record().media.remote, 9);
@@ -237,7 +237,7 @@ fn abandoned_stats_are_replaced_and_offline_ids_are_last() {
         ..ImportOptions::default()
     };
     let (prepared, _) =
-        prepare_with(Arc::new(fs), "timeline.otio", options, Preparation::Probe).unwrap();
+        prepare_with(Arc::new(fs), "timeline.otio", options, Preparation::LOCAL).unwrap();
     for _ in slow {
         did_start.try_recv().unwrap();
         release.send(()).unwrap();
@@ -276,7 +276,7 @@ fn each_probe_deadline_abandons_and_stops_at_the_next_observation() {
             ..ImportOptions::default()
         };
         let (prepared, _) =
-            prepare_with(Arc::new(fs), "timeline.otio", options, Preparation::Probe).unwrap();
+            prepare_with(Arc::new(fs), "timeline.otio", options, Preparation::LOCAL).unwrap();
         did_start.try_recv().unwrap();
         release.send(()).unwrap();
         assert!(did_stop.recv().unwrap());
@@ -297,7 +297,7 @@ fn cancel_discards_preparation_and_prevents_publication() {
     let control = options.control.clone();
     let fs = Arc::new(RecordingFs::new(&["media.mov"]));
     let (prepared, _) =
-        prepare_with(Arc::clone(&fs), "edit.otio", options, Preparation::Probe).unwrap();
+        prepare_with(Arc::clone(&fs), "edit.otio", options, Preparation::LOCAL).unwrap();
     assert_eq!(control.hashed_bytes(), 128);
     control.cancel();
     assert!(matches!(
@@ -311,7 +311,7 @@ fn cancel_discards_preparation_and_prevents_publication() {
         ..ImportOptions::default()
     };
     assert_eq!(
-        prepare_with(fs, "edit.otio", opts, Preparation::Probe)
+        prepare_with(fs, "edit.otio", opts, Preparation::LOCAL)
             .unwrap_err()
             .code,
         RefusalCode::Cancelled
@@ -327,7 +327,7 @@ fn estimated_relink_requires_consent_and_covers_each_source_range() {
         Arc::new(fs),
         "edit.otio",
         ImportOptions::default(),
-        Preparation::Probe,
+        Preparation::LOCAL,
     )
     .unwrap();
     let id = AssetId(1);
@@ -534,7 +534,7 @@ fn lavfi_probe_overrides_estimated_media_and_preserves_av_sync() {
             Arc::new(LavfiFs(NativeLocatorFs { analysis: None })),
             main.to_str().unwrap(),
             ImportOptions::default(),
-            Preparation::Probe,
+            Preparation::LOCAL,
         )
         .unwrap()
         .0;
@@ -669,7 +669,7 @@ fn active_hash_cancellation_reaches_the_worker() {
         stopped,
     });
     let import =
-        std::thread::spawn(|| prepare_with(Arc::new(fs), "edit.otio", options, Preparation::Probe));
+        std::thread::spawn(|| prepare_with(Arc::new(fs), "edit.otio", options, Preparation::LOCAL));
     did_start.recv().unwrap();
     assert_eq!(control.hashed_bytes(), 64);
     control.cancel();
@@ -711,7 +711,7 @@ fn abandoning_the_worker_budget_reports_undispatched_locators_as_timeouts() {
         Arc::clone(&fs),
         "timeline.otio",
         options,
-        Preparation::Probe,
+        Preparation::LOCAL,
     )
     .unwrap();
     for _ in slow {
@@ -768,4 +768,69 @@ fn media_root_walk_does_not_follow_symlinks() {
     .unwrap();
     assert_eq!(inspected.media[0].status, MediaStatus::Missing);
     assert!(inspected.media[0].matches.is_none());
+}
+
+#[test]
+fn approving_one_windows_share_reaches_only_files_under_that_share() {
+    use kinewright_interchange::locator::share_path;
+
+    let references = [
+        r"\\MEDIA\Dailies\one.mov",
+        "file://media/dailies/two%20frames.mov",
+        r"\\?\UNC\Media\Dailies\three.mov",
+        "//media/Dailies/four.mov",
+        r"\\media\Daily\other.mov",
+        r"\\other\dailies\other.mov",
+        r"\\media\dailies\..\Daily\escape.mov",
+        r"\\media\dailies\NUL:stream",
+        "file://media/dailies/%2e%2e/escaped.mov",
+        "file://media/dailies/%5COther%5Cescape.mov",
+        "file://localhost//media/dailies/ambiguous.mov",
+        "https://media/dailies/not-a-share.mov",
+    ];
+    let root = share_path(references[0], Platform::Windows).unwrap().root;
+    assert_eq!(root.as_str(), r"\\media\dailies");
+    let allowed = BTreeSet::from([root]);
+    let input = "timeline.otio";
+
+    for (platform, shares) in [
+        (Platform::Windows, &BTreeSet::new()),
+        (Platform::Unix, &allowed),
+    ] {
+        let fs = Arc::new(RecordingFs::new(&references));
+        let (prepared, _) = prepare_with(
+            Arc::clone(&fs),
+            input,
+            ImportOptions::default(),
+            Preparation::Probe {
+                allowed: shares,
+                platform,
+            },
+        )
+        .unwrap();
+        assert_eq!(prepared.record().media.remote, 12);
+        assert_eq!(*fs.calls.lock().unwrap(), [Call::Open(input.into())]);
+    }
+
+    let fs = Arc::new(RecordingFs::new(&references));
+    let (prepared, _) = prepare_with(
+        Arc::clone(&fs),
+        input,
+        ImportOptions::default(),
+        Preparation::Probe {
+            allowed: &allowed,
+            platform: Platform::Windows,
+        },
+    )
+    .unwrap();
+    assert_eq!(prepared.record().media.online, 4);
+    assert_eq!(prepared.record().media.remote, 8);
+    let calls = fs.calls.lock().unwrap();
+    assert_eq!(calls.first(), Some(&Call::Open(input.into())));
+    assert_eq!(calls.len(), 9);
+    for reference in &references[..4] {
+        let path = PathBuf::from(share_path(reference, Platform::Windows).unwrap().path);
+        assert!(calls.contains(&Call::Stat(path.clone())));
+        assert!(calls.contains(&Call::Probe(path)));
+    }
 }

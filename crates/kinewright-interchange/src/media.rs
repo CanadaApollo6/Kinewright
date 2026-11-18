@@ -28,6 +28,8 @@ pub struct ProbedMedia {
 pub enum Availability {
     /// Let lowering classify the written locator as a remote or an offline file.
     Missing,
+    /// The project layer determined that the local or approved file is offline.
+    Unavailable,
     Remote,
     TimedOut,
     /// Inspection found the file but did not probe or hash it.
@@ -176,7 +178,8 @@ impl Assets {
                 if *availability == Availability::TimedOut {
                     self.counts.timed_out += 1;
                 } else if *availability == Availability::Remote
-                    || locator::classify(&media.locator, Platform::NATIVE) == Locator::Remote
+                    || (*availability == Availability::Missing
+                        && locator::classify(&media.locator, Platform::NATIVE) == Locator::Remote)
                 {
                     self.counts.remote += 1;
                 }

@@ -91,6 +91,7 @@ fn prepare_fixture(path: &Path) -> kinewright_project::interchange::PreparedImpo
         path.to_str().unwrap(),
         PrepareOptions {
             import: ImportOptions::default(),
+            allowed_shares: std::collections::BTreeSet::new(),
             analysis: Arc::new(RefusedMedia),
         },
     )

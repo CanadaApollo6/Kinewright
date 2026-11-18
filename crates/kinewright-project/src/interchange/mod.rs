@@ -30,7 +30,7 @@ use serde::Serialize;
 use self::files::{DirectoryEntry, EntryKind, NativeLocatorFs};
 use crate::bundle::BundleWriteAdmission;
 
-pub use kinewright_interchange::{Refusal, RefusalCode, SitePage, SiteQuery};
+pub use kinewright_interchange::{Refusal, RefusalCode, SitePage, SiteQuery, locator::ShareRoot};
 
 const MAX_MEDIA_ROOTS: usize = 8;
 const MAX_ROOT_ENTRIES: usize = 100_000;
@@ -96,6 +96,8 @@ pub struct ImportOptions {
 
 pub struct PrepareOptions {
     pub import: ImportOptions,
+    /// Windows shares the person explicitly approved for this preparation.
+    pub allowed_shares: BTreeSet<ShareRoot>,
     /// The same authorized media analysis used for ordinary single-file imports.
     pub analysis: Arc<dyn Analysis>,
 }
@@ -129,6 +131,15 @@ pub struct MediaEntry {
     pub relinked_by_name: bool,
     /// The search result is shared by locators with the same missing name.
     pub matches: Option<Arc<[PathBuf]>>,
+}
+
+impl MediaEntry {
+    /// Identify the share associated with this row on systems that can open it.
+    #[must_use]
+    pub fn share_root(&self) -> Option<ShareRoot> {
+        kinewright_interchange::locator::share_path(&self.locator, Platform::NATIVE)
+            .map(|share| share.root)
+    }
 }
 
 #[derive(Debug)]
@@ -185,7 +196,16 @@ pub fn prepare(path: &str, options: PrepareOptions) -> Result<PreparedImport, Re
     let fs = Arc::new(NativeLocatorFs {
         analysis: Some(options.analysis),
     });
-    prepare_with(fs, path, options.import, Preparation::Probe).map(|(prepared, _)| prepared)
+    prepare_with(
+        fs,
+        path,
+        options.import,
+        Preparation::Probe {
+            allowed: &options.allowed_shares,
+            platform: Platform::NATIVE,
+        },
+    )
+    .map(|(prepared, _)| prepared)
 }
 
 /// Read, stat and lower one timeline for the agent. The main timeline bytes
@@ -243,15 +263,24 @@ pub fn commit<T, E>(
 }
 
 #[derive(Clone, Copy)]
-enum Preparation {
-    Probe,
+enum Preparation<'a> {
+    Probe {
+        allowed: &'a BTreeSet<ShareRoot>,
+        platform: Platform,
+    },
     Inspect(Option<SiteQuery>),
 }
 
-impl Preparation {
+impl Preparation<'_> {
+    #[cfg(test)]
+    const LOCAL: Self = Self::Probe {
+        allowed: &BTreeSet::new(),
+        platform: Platform::NATIVE,
+    };
+
     const fn query(self) -> Option<SiteQuery> {
         match self {
-            Self::Probe => None,
+            Self::Probe { .. } => None,
             Self::Inspect(query) => query,
         }
     }
@@ -273,7 +302,7 @@ fn prepare_with(
     fs: Arc<impl ImportFs>,
     path: &str,
     options: ImportOptions,
-    mode: Preparation,
+    mode: Preparation<'_>,
 ) -> Result<(PreparedImport, SitePage), Refusal> {
     let path = local_path(path)?;
     if options.media_roots.len() > MAX_MEDIA_ROOTS {

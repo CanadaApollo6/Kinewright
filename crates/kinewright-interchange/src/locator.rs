@@ -190,6 +190,89 @@ pub fn classify(locator: &str, platform: Platform) -> Locator {
     }
 }
 
+/// The canonical identity of one Windows file share.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ShareRoot(String);
+
+impl ShareRoot {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A normalized UNC pathname and the share whose approval would authorize it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SharePath {
+    pub root: ShareRoot,
+    pub path: String,
+}
+
+/// Recognize a Windows file-share locator without granting access to it.
+#[must_use]
+pub fn share_path(locator: &str, platform: Platform) -> Option<SharePath> {
+    if platform != Platform::Windows {
+        return None;
+    }
+    let (host, tail) = if let Some((scheme, rest)) = locator.split_once(':')
+        && scheme.eq_ignore_ascii_case("file")
+    {
+        let rest = rest.strip_prefix("//")?;
+        let (host, tail) = rest.split_once('/')?;
+        if host.eq_ignore_ascii_case("localhost") || tail.contains(['?', '#', '\\']) {
+            return None;
+        }
+        let LocatorDecode::Path(tail) = decode_path(tail) else {
+            return None;
+        };
+        (host, std::borrow::Cow::Owned(tail))
+    } else {
+        let rest = if let Some(head) = locator.get(..8)
+            && head.eq_ignore_ascii_case(r"\\?\UNC\")
+        {
+            &locator[8..]
+        } else {
+            locator
+                .strip_prefix(r"\\")
+                .or_else(|| locator.strip_prefix("//"))?
+        };
+        let (host, tail) = rest.split_once(['/', '\\'])?;
+        (host, std::borrow::Cow::Borrowed(tail))
+    };
+    if host.is_empty()
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    {
+        return None;
+    }
+    let (share, file) = tail.split_once(['/', '\\'])?;
+    if ["IPC$", "PIPE", "MAILSLOT"]
+        .iter()
+        .any(|name| share.eq_ignore_ascii_case(name))
+        || !valid_share_component(share)
+        || !file.split(['/', '\\']).all(valid_share_component)
+    {
+        return None;
+    }
+    let root = ShareRoot(format!(
+        r"\\{}\{}",
+        host.to_ascii_lowercase(),
+        share.to_ascii_lowercase()
+    ));
+    let path = format!(r"\\{host}\{share}\{}", file.replace('/', "\\"));
+    Some(SharePath { root, path })
+}
+
+fn valid_share_component(component: &str) -> bool {
+    !component.is_empty()
+        && !component.contains(['<', '>', '"', '|', '?', '*'])
+        && !component.chars().any(char::is_control)
+        && !invalid_windows_component(component)
+}
+
 /// Filesystem seam for the project layer. All native I/O belongs to implementations.
 pub trait LocatorFs {
     type Metadata;

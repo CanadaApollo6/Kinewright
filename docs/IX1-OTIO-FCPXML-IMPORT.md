@@ -560,13 +560,15 @@ ending in a space or dot and every DOS device name, regardless of ASCII case. It
 stem before the first dot with trailing spaces removed, including superscript ¹, ² and ³ in
 the numbered COM and LPT names.
 
-*Why remote locators are never statted or probed.* Statting `\\evil.example\s\a.mov`, or a `file:`
+*Why unapproved remote locators stay offline.* Statting `\\evil.example\s\a.mov`, or a `file:`
 URL naming that host, makes Windows authenticate to the host over SMB and send the user's NTLM
 hash. A remote locator's asset is offline with `remote_url`.
 
-*Allowing a share.* In the import dialog the person may allow a listed share. Only then is it
-statted and probed, under the deadlines of §8.2. An agent cannot allow one: `inspect_interchange`
-refuses a remote `path` or root (`remote_path`), and reports remote media without touching it.
+*Allowing a share (ruling 28).* The import dialog shows supported Windows file shares after the
+first preparation. A person may tick Allow for a share root of the form `\\host\share` and run
+preparation again. Its files use the ordinary stat and probe deadlines. Linux presents remote
+rows without an Allow control. Agent inspection never accepts share approval. It refuses remote
+input paths or roots with `remote_path` and reports remote media without touching it.
 
 *Mapped drives and symlinks.* Mapped drive letters and symlinks are local to the OS and are
 treated as local. They are the person's own configuration, and the deadlines bound a hung mount.
@@ -575,9 +577,8 @@ probes and hashes without confirmation.
 
 *No network code (ruling 26).* The dependency closure of the pure interchange crate contains
 no network crate. The project interchange module uses only the `LocatorFs` seam for files and
-`Analysis` for media. A recording double verifies that remote locators reach no call. This
-claim covers the import path. An explicit Allow workflow for shares needs an authorization seam
-consistent with this boundary.
+`Analysis` for media. A recording double verifies that an empty approval set yields no remote calls
+and a single approved share yields calls only under that share. This claim covers the import path.
 
 *Bundles.* `.otiod` is `content.otio` plus `media/`. `.fcpxmld` holds `Info.fcpxml` and locator
 data (tracking shapes, drawings), which is dropped and named. Bundle media is used in place, never
@@ -942,6 +943,9 @@ Lead rulings (2026-11-17):
     locator seam are independently checked (§8.1).
 27. **Shared probe phases.** The existing probe reports cumulative hashed bytes and metadata
     start, with cancellation at either checkpoint. Hashing precedes metadata (§8.2).
+28. **Share approval.** The import dialog can re-prepare with explicitly selected Windows share
+    roots. Other remote locators never reach the import seam. Agent inspection has no approval
+    parameter (§8.1).
 
 Open questions:
 1. **Marker colour switch.** Should `MARKER_COLOR_POLICY` ship as `LabelPrefix` or `Drop`? This is
