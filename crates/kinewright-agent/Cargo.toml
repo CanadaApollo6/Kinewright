@@ -76,7 +76,7 @@ rustix = { version = "=1.1.4", features = ["process", "fs"] }
 # so the gates are on when testing this crate even with default features off.
 kinewright-core = { path = "../kinewright-core", features = ["test-util"] }
 kinewright-media = { path = "../kinewright-media", features = ["test-util"] }
-kinewright-project = { path = "../kinewright-project", features = ["test-util"] }
+kinewright-project = { path = "../kinewright-project", features = ["test-util", "ms2-test-bin-dir"] }
 
 [lints]
 workspace = true

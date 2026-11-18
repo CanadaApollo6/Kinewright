@@ -1,15 +1,47 @@
 #!/usr/bin/env python3
-"""Enforce ruling 34 without removing the app's accessibility dependencies."""
+"""Check the MS2 client dependency boundary and dev-only binary override."""
 
 import argparse
 import fnmatch
+import json
 from pathlib import Path
+import subprocess
 import sys
 import tomllib
 
 SUPERVISOR = "kinewright-media-supervisor"
 MANAGER = "org.freedesktop.systemd1"
 DEPENDENCIES = ("dependencies", "build-dependencies", "dev-dependencies")
+PROJECT = "kinewright-project"
+TEST_BIN_DIR = "ms2-test-bin-dir"
+
+
+def check_test_bin_dir(root):
+    # Inspect Cargo's normalized aliases and inherited dependencies for all
+    # targets, even optional paths that aren't in today's default builds.
+    cargo = subprocess.run(
+        ["cargo", "metadata", "--offline", "--no-deps", "--format-version", "1"],
+        cwd=root, capture_output=True, text=True, check=False,
+    )
+    if cargo.returncode:
+        raise ValueError(f"cargo metadata: {cargo.stderr.strip()}")
+    for package in json.loads(cargo.stdout)["packages"]:
+        name = package["name"]
+        project_aliases = set()
+        for dependency in package["dependencies"]:
+            if dependency["name"] != PROJECT:
+                continue
+            alias = dependency["rename"] or PROJECT
+            project_aliases.add(alias)
+            if dependency["kind"] != "dev" and TEST_BIN_DIR in dependency["features"]:
+                yield f"{name} dependency {alias} enables {TEST_BIN_DIR}"
+        for feature, entries in package["features"].items():
+            for entry in entries:
+                alias, slash, target = entry.partition("/")
+                if ((name == PROJECT and entry == TEST_BIN_DIR)
+                        or (slash and target == TEST_BIN_DIR
+                            and alias.removesuffix("?") in project_aliases)):
+                    yield f"{name} feature {feature} enables {TEST_BIN_DIR}"
 
 
 def dependency_tables(manifest):
@@ -36,6 +68,8 @@ def check(root):
         raise ValueError("workspace has no members")
     shared = workspace.get("dependencies", {})
     errors = []
+    if workspace.get("resolver") not in {"2", "3"}:
+        errors.append("Cargo.toml: MS2 test override requires a resolver that isolates dev features")
     pending = sorted(manifests)
     while pending:
         path = pending.pop()
@@ -74,6 +108,7 @@ def check(root):
     copies = [p["version"] for p in packages if p["name"] == "zbus"]
     if len(copies) != 1:
         errors.append(f"Cargo.lock: expected one zbus package, found {copies}")
+    errors.extend(check_test_bin_dir(root))
     return errors
 
 
@@ -89,7 +124,8 @@ def main():
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
-    print("MS2 client boundary: supervisor-only direct zbus, no app systemd client, one locked zbus")
+    print("MS2 client boundary: supervisor-only direct zbus, no app systemd client, "
+          "one locked zbus, dev-only test binary override")
     return 0
 
 

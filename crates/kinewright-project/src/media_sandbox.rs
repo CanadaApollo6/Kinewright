@@ -54,7 +54,7 @@ mod linux {
         )
     }
 
-    #[cfg(any(test, feature = "test-util"))]
+    #[cfg(any(test, feature = "ms2-test-bin-dir"))]
     fn test_runtime() -> &'static Runtime {
         // Test processes start the real confined runtime from the built
         // workspace binaries. Missing binaries fail loudly, never skip.
@@ -102,9 +102,9 @@ mod linux {
         source: &CertifiedSource,
         cancel: Arc<AtomicBool>,
     ) -> Result<CertifiedProbe, BundleError> {
-        #[cfg(any(test, feature = "test-util"))]
+        #[cfg(any(test, feature = "ms2-test-bin-dir"))]
         let runtime = Some(test_runtime());
-        #[cfg(not(any(test, feature = "test-util")))]
+        #[cfg(not(any(test, feature = "ms2-test-bin-dir")))]
         let runtime = RUNTIME.get();
         probe_with(runtime, source, cancel)
     }

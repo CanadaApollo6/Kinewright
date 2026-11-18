@@ -2470,6 +2470,7 @@ dependencies = [
  "kinewright-media",
  "kinewright-media-client",
  "kinewright-media-ipc",
+ "kinewright-project",
  "libc",
  "rustix 1.1.4",
  "serde",

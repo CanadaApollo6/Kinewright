@@ -11,6 +11,8 @@ repository.workspace = true
 # drive them cross-crate, so they ride the same gate the app already enables
 # on core and media.
 test-util = ["kinewright-media/test-util"]
+# Executable override for confined probe fixtures. Keep on dev edges only.
+ms2-test-bin-dir = []
 storage-heap-profile = []
 
 [dependencies]
@@ -41,6 +43,8 @@ winapi-util = "=0.1.11"
 
 [dev-dependencies]
 dhat = "=0.3.3"
+# Integration tests build the library without cfg(test).
+kinewright-project = { path = ".", features = ["ms2-test-bin-dir"] }
 # The sidecar round-trip tests persist through `TempDirectory`.
 kinewright-media = { path = "../kinewright-media", features = ["test-util"] }
 

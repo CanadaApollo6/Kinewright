@@ -17,6 +17,7 @@ class Boundary(unittest.TestCase):
         self.root = Path(self.temporary.name)
         (self.root / "Cargo.toml").write_text('''[workspace]
 members = ["crates/*"]
+resolver = "3"
 [workspace.dependencies]
 zbus = "=5.19.0"
 bus = { package = "zbus", version = "=5.19.0" }
@@ -24,6 +25,7 @@ bus = { package = "zbus", version = "=5.19.0" }
         (self.root / "Cargo.lock").write_text('[[package]]\nname = "zbus"\nversion = "5.19.0"\n')
         self.app = self.member("kinewright-app")
         self.member("kinewright-media-supervisor", '[dependencies]\nzbus.workspace = true\n')
+        self.project = self.member("kinewright-project", '[features]\nms2-test-bin-dir = []\n')
 
     def member(self, name, dependencies=""):
         directory = self.root / "crates" / name
@@ -34,7 +36,7 @@ bus = { package = "zbus", version = "=5.19.0" }
         return manifest
 
     def run_gate(self):
-        return subprocess.run([sys.executable, str(SCRIPT), "--root", str(self.root)],
+        return subprocess.run([sys.executable, "-I", str(SCRIPT), "--root", str(self.root)],
                               capture_output=True, text=True, check=False)
 
     def test_positive_supervisor_and_accessibility_transitive(self):
@@ -82,6 +84,43 @@ bus = { package = "zbus", version = "=5.19.0" }
         lock = self.root / "Cargo.lock"
         lock.write_text(lock.read_text() + '[[package]]\nname = "zbus"\nversion = "5.13.2"\n')
         self.assertEqual(self.run_gate().returncode, 1)
+
+    def test_dev_dependency_can_enable_test_bin_dir(self):
+        self.app.write_text(self.app.read_text() + '''
+[dev-dependencies]
+kinewright-project = { path = "../kinewright-project", features = ["ms2-test-bin-dir"] }
+''')
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_agent_default_feature_cannot_forward_test_bin_dir(self):
+        self.member("kinewright-agent", '''
+[features]
+default = ["eval-harness"]
+eval-harness = ["dep:project", "project?/ms2-test-bin-dir"]
+[dependencies]
+project = { package = "kinewright-project", path = "../kinewright-project", optional = true }
+''')
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("kinewright-agent feature eval-harness", result.stderr)
+
+    def test_project_feature_cannot_enable_test_bin_dir(self):
+        self.project.write_text(self.project.read_text() + '''
+test-util = ["ms2-test-bin-dir"]
+''')
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("kinewright-project feature test-util", result.stderr)
+
+    def test_normal_dependency_cannot_enable_test_bin_dir(self):
+        self.app.write_text(self.app.read_text() + '''
+[target.'cfg(target_os = "linux")'.dependencies]
+project = { package = "kinewright-project", path = "../kinewright-project", features = ["ms2-test-bin-dir"] }
+''')
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("kinewright-app dependency project", result.stderr)
 
 
 if __name__ == "__main__":
