@@ -171,6 +171,34 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'archive extraction failed' }
           python scripts/ci_shards.py run --plan ci-artifacts/ci-plan.json --index $env:SHARD
           if ($LASTEXITCODE -ne 0) { throw 'test shard failed' }
+      - name: Check that tests left the runner recovery folder empty
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          python - <<'PYTHON'
+          import os
+          from itertools import islice
+          from pathlib import Path
+
+          for variable, suffix in (
+              ("LOCALAPPDATA", "Kinewright/recovery"),
+              ("XDG_STATE_HOME", "kinewright/recovery"),
+              ("HOME", ".local/state/kinewright/recovery"),
+          ):
+              base = Path(os.environ.get(variable, ""))
+              if base.is_absolute():
+                  directory = base / suffix
+                  break
+          else:
+              raise SystemExit("Could not locate the runner's recovery folder")
+
+          try:
+              names = [entry.name for entry in islice(directory.iterdir(), 5)]
+          except FileNotFoundError:
+              names = []
+          if names:
+              raise SystemExit(f"Tests wrote to {directory}: {', '.join(names)}")
+          PYTHON
       - name: Save successfully prepared display input
         if: >-
           !cancelled() && steps.requirements.outputs.display_workload != '' &&
