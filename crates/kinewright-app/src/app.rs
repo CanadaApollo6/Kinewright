@@ -8485,6 +8485,77 @@ pub(crate) mod in1_tests {
         in1_shutdown(&mut app);
     }
 
+    /// Pin today's import refusal and its presentation when IX preparation
+    /// accepts a timeline that exceeds HX's live document budget.
+    #[test]
+    fn ix1_oversized_timeline_open_reports_the_current_history_refusal() {
+        use crate::ix1_tests::{click_text, hostile_locator, layout_text_position, write_edit};
+
+        let directory = TempDirectory::new("ix1-history-limit");
+        let (mut app, _engine) =
+            crate::recovery::with_ja_directory(directory.path("existing-recovery"), || {
+                in1_harness(Document::default())
+            });
+        let existing_project = app.focused().id;
+        let source = directory.path("edit.otio");
+        write_edit(&source, &hostile_locator());
+        let recovery = directory.path("import-recovery");
+        std::fs::create_dir(&recovery).unwrap();
+
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        app.open_interchange(source, &ctx);
+        let expiry = Instant::now() + IN1_APP_DEADLINE;
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 720.0),
+            )),
+            ..Default::default()
+        };
+        let mut draw = |ui: &mut egui::Ui| app.show_interchange(ui.ctx());
+        loop {
+            let output = ctx.run_ui(input(), &mut draw);
+            let painted = crate::theme::painted_text(&output);
+            if painted
+                .iter()
+                .any(|text| text.contains("brought over with changes"))
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < expiry,
+                "import preview did not open: {painted:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = ctx.run_ui(input(), &mut draw);
+        let open = layout_text_position(&output, |text| text == "Open");
+        crate::recovery::with_ja_directory(recovery.clone(), || {
+            let _ = click_text(&ctx, open, egui::PointerButton::Primary, draw);
+        });
+
+        assert!(app.interchange_dialog.is_none(), "the import modal closed");
+        assert_eq!(app.projects.len(), 1, "no imported session was published");
+        assert_eq!(app.focused().id, existing_project);
+        assert!(std::fs::read_dir(&recovery).unwrap().next().is_none());
+        let incident = in1b_route_one(&mut app);
+        assert_eq!(incident.code, IncidentCode::Label(LabelIncident::Project));
+        assert_eq!(
+            incident.observed,
+            "Could not open timeline: Capacity(\"creation sizing\")"
+        );
+        assert_eq!(
+            app.status,
+            "The project could not be opened, created, read, or restored."
+        );
+        assert!(app.error_log_open);
+        let _ = ctx.run_ui(input(), |ui| app.show_error_log(ui.ctx()));
+        let output = ctx.run_ui(input(), |ui| app.show_error_log(ui.ctx()));
+        assert!(crate::theme::painted_text(&output).contains(&app.status));
+        in1_shutdown(&mut app);
+    }
+
     /// `IN1b` §7 item 22 and §9 clause 11's first half, **driven through the
     /// real site**: `open_project` on a project whose media has moved opens
     /// **one** incident, whose `observed` is the joined list, because one open
