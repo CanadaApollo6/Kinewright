@@ -579,6 +579,7 @@ impl<'a, 'input> Parser<'a, 'input> {
         let asset_id = MediaId(self.media.len());
         self.media_ids.insert(id, asset_id);
         self.media.push(Media {
+            ranges_merged: false,
             locator: locator.into(),
             name: text(resource.attribute("name").unwrap_or(id)),
             kind,

@@ -143,6 +143,7 @@ N = faithful, A = approximated (bound stated), Ø = dropped.
 | Start, drop frame | `global_start_time`; DF only in timecode strings | `sequence@tcStart`; `@tcFormat` | rebased to 0; frames exact, NDF display (`timeline_ui.rs:3998`) | A: offset in report; DF labels only |
 | Tracks | `Track.1` kind, stack order, `name` | spine, lanes ±n, clip roles | `Track{kind}` in z order (`model.rs:574`, `:1440`), new `Track.name` (§5.1) | N; A name truncated past 64 B; Ø mixed roles |
 | Clip range | `source_range` − `available_range.start_time` | `@start` − `asset@start` (or `timeMap(@start)`), `@offset`, `@duration` | `Clip.source_range`, `timeline_start` (`model.rs:429-443`); cuts snap to the outgoing clip (§4.2) | N on grid; A: snapped cuts and source ends bounded by §4.2 |
+| Shared media ranges | differing `available_range`s for one locator | origins indexed by asset resource | union of reference and written clip ranges for the offline estimate (§8.3) | A: `media_ranges_merged` counts clips using the union |
 | A/V clip, split edit | paired only by §5.4 | `asset-clip`, `audioStart`/`audioDuration` | linked pair (`model.rs:446-450`), as `media_bin.rs:617` builds | N; A unpaired OTIO split edit (`av_link_unpaired`) |
 | Dual-mono, channel maps, pan | same file, same range on two audio tracks | `audio-channel-source`, `adjust-panner` | one clip kept (§5.4); no clip pan | A `channel_map_dropped`; Ø pan |
 | Gap; disabled | `Gap.1`; `enabled` | `gap`; `@enabled="0"` | empty span; `Clip.enabled` (`model.rs:484-489`) | N for retained space and enabled state inherited from all ancestors; A for the timeline tail (§6.2) |
@@ -532,6 +533,7 @@ A typical import (6–8 rows) is about 1.5 KiB:
   `item_marker_pinned`, `marker_outside_item`, `keyword_rating_dropped`.
 - Content and sources: `effect_dropped`, `title_style_default`, `title_text_truncated`,
   `generator_dropped`, `image_sequence_dropped`, `unknown_item`, `source_clamped`,
+  `media_ranges_merged` (different ranges for one offline locator used a shared origin),
   `source_origin_assumed`.
 
 *Timeline and media scope:* the codes listed in §7.2. `trailing_gap_trimmed` is a timeline row
@@ -652,6 +654,12 @@ counts `source_origin_assumed`.
 - an unknown fingerprint;
 - kind, fps, duration and resolution estimated from the interchange: FCPXML `asset` and `format`,
   or OTIO `available_range`, else the furthest frame used.
+
+When OTIO references to one locator declare different available ranges, the offline estimate uses
+their earliest start and latest end, widened to cover every written clip range (ruling 34).
+In-points are relative to that shared origin. `media_ranges_merged` counts the clips that use
+the combined estimate. A successful probe still supplies the asset's media metadata. FCPXML
+resources use their resource IDs and keep their own origins when their locators match.
 
 These assets take the last ids, as contiguous ranges recorded in the record's `estimated_assets`
 (finding 13). Validation requires all three properties for an asset holding a preserved remote
@@ -1009,6 +1017,8 @@ Lead rulings (2026-11-17):
     dangling reference remains a typed refusal (§3).
 33. **Offline remote media.** Store the written locator as display text and keep an empty
     playback path. Allow or a person's relink replaces that state atomically (§8.1, §8.3).
+34. **Shared media ranges.** Use one offline origin and union for differing OTIO ranges on the
+    same locator, including all written clip ranges (§8.3).
 35. **Written zero durations.** Report `clip_too_short` before layout. Cuts keep ruling 6 for
     positive spans (§4.2).
 

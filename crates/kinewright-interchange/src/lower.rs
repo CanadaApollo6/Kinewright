@@ -491,6 +491,9 @@ impl State {
                         "A clip references an unavailable IR media entry.",
                     ));
                 };
+                if asset.ranges_merged && location.placed.counts_item {
+                    notes.push(Loss::approximation(LossCode::MediaRangesMerged));
+                }
                 let id = self.id();
                 clips::decide(
                     &ClipInput {

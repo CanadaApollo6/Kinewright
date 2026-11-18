@@ -16,6 +16,7 @@ fn seconds(frames: i64, fps: u32) -> Time {
 
 fn media(name: &str, fps: Rational) -> Media {
     Media {
+        ranges_merged: false,
         locator: format!("file:///Media/{name}.mov"),
         name: name.into(),
         kind: MediaKind::Video,

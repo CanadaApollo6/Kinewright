@@ -557,6 +557,7 @@ fn loss_description(code: LossCode) -> &'static str {
         LossCode::UnknownItem => "Unsupported item could not be brought over",
         LossCode::SourceClamped => "Clip trimmed to fit the available source",
         LossCode::SourceOriginAssumed => "Start of the source was estimated",
+        LossCode::MediaRangesMerged => "Different ranges for the same source were combined",
         LossCode::StartRebased => "Timeline start moved to zero",
         LossCode::RateSnapped => "Frame rate mapped to a standard rate",
         LossCode::ResolutionInferred => "Picture size was estimated",

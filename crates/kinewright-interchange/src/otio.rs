@@ -152,6 +152,7 @@ pub fn parse(
         .map(|time| snap_rate(time.rate))
         .transpose()?;
     let root = parser.timeline(node, &path, 0)?;
+    parser.finish_media_ranges()?;
     let fps = if let Some(fps) = options.project_fps.or(hint).map(check_rate).transpose()? {
         fps
     } else {
@@ -177,7 +178,7 @@ pub fn parse(
 struct Parser<'a> {
     budget: Budget,
     media: Vec<Media>,
-    media_ids: BTreeMap<(&'a str, &'a str), MediaId>,
+    media_ids: BTreeMap<(&'a str, &'a str), MediaRanges>,
     notes: Vec<Loss>,
     fractional_values: u32,
 }
@@ -443,6 +444,7 @@ impl<'a> Parser<'a> {
             media_kind,
             fps,
             available,
+            written: source.start..source.end,
         })?;
         let mut clip = Clip::new(media, source.start, span);
         clip.enabled = node.enabled.unwrap_or(true);
@@ -480,7 +482,11 @@ impl<'a> Parser<'a> {
                 ""
             },
         );
-        if let Some(id) = self.media_ids.get(&key) {
+        if let Some(ranges) = self.media_ids.get_mut(&key) {
+            if !input.locator.is_empty() {
+                ranges.include(input.available, input.written);
+            }
+            let id = ranges.id;
             let media = &mut self.media[id.0];
             if media.kind != input.media_kind
                 && media.kind != MediaKind::Image
@@ -488,13 +494,27 @@ impl<'a> Parser<'a> {
             {
                 media.kind = MediaKind::AudioVideo;
             }
-            return Ok(*id);
+            return Ok(id);
         }
         if self.media.len() >= MAX_MEDIA {
             return Err(parse::too_many_items());
         }
         let id = MediaId(self.media.len());
-        self.media_ids.insert(key, id);
+        let start = input.available.as_ref().map(|range| range.start);
+        let duration = input
+            .available
+            .as_ref()
+            .map(|range| range.end.checked_sub(range.start))
+            .transpose()?;
+        self.media_ids.insert(
+            key,
+            MediaRanges {
+                id,
+                available: input.available,
+                written: input.written,
+                merged: false,
+            },
+        );
         self.media.push(Media {
             locator: input.locator.into(),
             name: text(if input.name.is_empty() {
@@ -504,14 +524,28 @@ impl<'a> Parser<'a> {
             }),
             kind: input.media_kind,
             fps: input.fps,
-            start: input.available.as_ref().map(|range| range.start),
-            duration: input
-                .available
-                .map(|range| range.end.checked_sub(range.start))
-                .transpose()?,
+            start,
+            duration,
             resolution: None,
+            ranges_merged: false,
         });
         Ok(id)
+    }
+
+    fn finish_media_ranges(&mut self) -> Result<(), Refusal> {
+        for ranges in self.media_ids.values() {
+            if let Some(available) = &ranges.available
+                && ranges.merged
+            {
+                let media = &mut self.media[ranges.id.0];
+                let origin = available.start.min(ranges.written.start);
+                let end = available.end.max(ranges.written.end);
+                media.start = Some(origin);
+                media.duration = Some(end.checked_sub(origin)?);
+                media.ranges_merged = true;
+            }
+        }
+        Ok(())
     }
 
     fn decorations(&mut self, node: &'a Node, path: &str) -> Result<Decorations, Refusal> {
@@ -610,12 +644,36 @@ impl<'a> Parser<'a> {
     }
 }
 
+struct MediaRanges {
+    id: MediaId,
+    available: Option<Range<Time>>,
+    written: Range<Time>,
+    merged: bool,
+}
+
+impl MediaRanges {
+    fn include(&mut self, available: Option<Range<Time>>, written: Range<Time>) {
+        self.written.start = self.written.start.min(written.start);
+        self.written.end = self.written.end.max(written.end);
+        if let Some(next) = available {
+            if let Some(current) = &mut self.available {
+                self.merged |= *current != next;
+                current.start = current.start.min(next.start);
+                current.end = current.end.max(next.end);
+            } else {
+                self.available = Some(next);
+            }
+        }
+    }
+}
+
 struct MediaInput<'a> {
     locator: &'a str,
     name: &'a str,
     media_kind: MediaKind,
     fps: Option<Rational>,
     available: Option<Range<Time>>,
+    written: Range<Time>,
 }
 
 fn stack_duration(stack: &Stack) -> Result<Time, Refusal> {

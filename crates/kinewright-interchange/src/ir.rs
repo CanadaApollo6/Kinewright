@@ -263,6 +263,8 @@ pub struct Media {
     pub start: Option<Time>,
     pub duration: Option<Time>,
     pub resolution: Option<(u32, u32)>,
+    /// The available ranges for this locator differed and were combined.
+    pub ranges_merged: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

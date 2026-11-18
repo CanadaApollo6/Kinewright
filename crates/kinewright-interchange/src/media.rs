@@ -55,6 +55,7 @@ pub(crate) struct AssetInfo {
     pub origin: Time,
     pub origin_known: bool,
     pub probed: bool,
+    pub ranges_merged: bool,
 }
 
 pub(crate) struct Assets {
@@ -199,6 +200,7 @@ impl Assets {
             origin,
             origin_known: media.start.is_some(),
             probed: matches!(availability, Availability::Probed(_)),
+            ranges_merged: media.ranges_merged && !matches!(availability, Availability::Probed(_)),
         });
         self.pool.push(asset);
         self.counts.assets += 1;

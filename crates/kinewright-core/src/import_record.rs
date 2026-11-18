@@ -64,6 +64,7 @@ pub enum LossCode {
     UnknownItem,
     SourceClamped,
     SourceOriginAssumed,
+    MediaRangesMerged,
     StartRebased,
     RateSnapped,
     ResolutionInferred,

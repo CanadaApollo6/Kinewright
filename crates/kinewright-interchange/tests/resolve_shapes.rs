@@ -142,3 +142,84 @@ proptest::proptest! {
         proptest::prop_assert_eq!(actual_record.dropped, expected_record.dropped + zero_count);
     }
 }
+
+#[test]
+fn differing_otio_reference_ranges_share_the_union_and_keep_their_in_points() {
+    use kinewright_core::TimeCode;
+    let bytes = include_bytes!("fixtures/resolve-shapes/shared-source-ranges.otio");
+    let timeline =
+        otio::parse(bytes, "shared-source-ranges.otio", ParseOptions::default()).unwrap();
+    let (document, record) = lower(&timeline, &MediaTable::default()).unwrap();
+    assert_eq!(document.media_pool.len(), 1);
+    // [84260, 84297) and [36986, 37066) give origin 36986. The first written
+    // clip extends the end to 84300, so the offline asset has 47314 frames.
+    assert_eq!(document.media_pool[0].duration, TimeCode(47_314));
+    let clips = &document.tracks[0].clips;
+    assert_eq!(clips.len(), 3);
+    // The 0.85x in-points round from 37008.099992 - 36986 = 22.099992
+    // and 37036.149992000006 - 36986 = 50.149992000006 on the 24 fps grid.
+    assert_eq!(clips[0].source_range.start, TimeCode(47_274));
+    assert_eq!(clips[1].source_range.start, TimeCode(22));
+    assert_eq!(clips[2].source_range.start, TimeCode(50));
+    assert_eq!(document.duration, TimeCode(78));
+    let row = record
+        .rows
+        .iter()
+        .find(|row| row.code == LossCode::MediaRangesMerged)
+        .unwrap();
+    assert_eq!(row.count, 3);
+    assert_eq!(row.fidelity, kinewright_core::Fidelity::Approximated);
+
+    let online = MediaTable {
+        entries: vec![kinewright_interchange::Availability::Probed(Box::new(
+            kinewright_interchange::ProbedMedia {
+                path: "shared.wav".into(),
+                kind: kinewright_core::MediaKind::Audio,
+                fps: kinewright_core::Rational::new(24, 1).unwrap(),
+                duration: TimeCode(50_000),
+                resolution: None,
+                source_fingerprint: kinewright_core::MediaSourceFingerprint {
+                    content_sha256: Some("a".repeat(64)),
+                    byte_len: Some(640),
+                },
+                color_description: kinewright_core::ColorDescription::default(),
+                relinked_by_name: false,
+            },
+        ))],
+    };
+    let (verified, verified_record) = lower(&timeline, &online).unwrap();
+    assert_eq!(verified.media_pool[0].duration, TimeCode(50_000));
+    assert_eq!(verified.tracks[0].clips, document.tracks[0].clips);
+    assert!(
+        !verified_record
+            .rows
+            .iter()
+            .any(|row| row.code == LossCode::MediaRangesMerged)
+    );
+}
+
+#[test]
+fn fcpxml_resources_sharing_a_locator_keep_distinct_origins() {
+    use kinewright_core::TimeCode;
+    let bytes = br#"<fcpxml version="1.13">
+      <resources><format id="f" frameDuration="1/24s"/>
+        <asset id="a" start="100/24s" duration="20/24s" format="f" hasVideo="1">
+          <media-rep kind="original-media" src="shared.mov"/>
+        </asset>
+        <asset id="b" start="200/24s" duration="40/24s" format="f" hasVideo="1">
+          <media-rep kind="original-media" src="shared.mov"/>
+        </asset>
+      </resources>
+      <project><sequence format="f"><spine>
+        <asset-clip ref="a" start="103/24s" duration="5/24s"/>
+        <asset-clip ref="b" start="207/24s" duration="5/24s"/>
+      </spine></sequence></project>
+    </fcpxml>"#;
+    let timeline = fcpxml::parse(bytes, "shared.fcpxml", ParseOptions::default()).unwrap();
+    let (document, _) = lower(&timeline, &MediaTable::default()).unwrap();
+    let clips = &document.tracks[0].clips;
+    assert_eq!(document.media_pool.len(), 2);
+    assert_eq!(clips[0].source_range, TimeCode(3)..TimeCode(8));
+    assert_eq!(clips[1].source_range, TimeCode(7)..TimeCode(12));
+    assert_ne!(clips[0].asset, clips[1].asset);
+}

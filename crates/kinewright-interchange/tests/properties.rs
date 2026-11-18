@@ -133,6 +133,7 @@ fn time(frames: i64, rate: u32) -> Time {
 
 fn media(name: &str, fps: Rational, kind: MediaKind) -> Media {
     Media {
+        ranges_merged: false,
         locator: format!("file:///Media/{name}"),
         name: name.into(),
         fps: Some(fps),
