@@ -26,6 +26,7 @@ use kinewright_media::{LutAssetImport, LutStore};
 
 use crate::{
     app::KinewrightApp,
+    display_text::{DETAIL_CHARS, ROW_CHARS, copyable_label, display_text},
     project::session_index_by_id,
     theme::{self, color, space, type_size},
 };
@@ -1541,7 +1542,9 @@ impl KinewrightApp {
                 });
                 ui.label("The replacement was probed successfully, but the original bytes cannot be verified.");
                 ui.add_space(space::TWO);
-                ui.label(format!("Use {}?", pending.candidate.path.display()));
+                let path = pending.candidate.path.to_string_lossy();
+                copyable_label(ui, display_text(&["Use ", &path, "?"], ROW_CHARS), &path)
+                    .on_hover_ui(|ui| { ui.label(display_text(&[&path], DETAIL_CHARS)); });
                 ui.add_space(space::TWO);
                 ui.horizontal(|ui| {
                     if ui
@@ -3424,6 +3427,42 @@ mod tests {
                 value: kinewright_core::ParamValue::Integer(1),
             }
         );
+    }
+
+    #[test]
+    fn ix1_relink_confirmation_bounds_the_candidate_path_before_layout() {
+        use crate::app::in1_tests::{in1_harness, in1_shutdown};
+        use crate::ix1_tests::{
+            RecordingMedia, assert_locator_layout, assert_locator_tooltip, hostile_locator,
+            layout_text_position,
+        };
+
+        let locator = hostile_locator();
+        let path = PathBuf::from(&locator);
+        let probed = RecordingMedia::default()
+            .probe(Path::new("candidate.mov"))
+            .unwrap();
+        let (mut app, _engine) = in1_harness(Document::default());
+        app.pending_legacy_relink = Some(PendingLegacyRelink {
+            session_id: app.focused().id,
+            asset_id: AssetId(1),
+            expected_revision: TimelineRevision(0),
+            candidate: build_relink_candidate(path.clone(), &probed),
+            asset_name: "Source".to_owned(),
+        });
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut draw = |ui: &mut egui::Ui| app.show_legacy_relink_confirmation(ui.ctx());
+        let _ = ctx.run_ui(egui::RawInput::default(), &mut draw);
+        let output = ctx.run_ui(egui::RawInput::default(), &mut draw);
+        assert_locator_layout(&output, 160);
+        let at = layout_text_position(&output, |text| text.contains(r"\u{202e}tail"));
+        assert_locator_tooltip(&ctx, at, draw);
+        assert_eq!(
+            app.pending_legacy_relink.as_ref().unwrap().candidate.path,
+            path
+        );
+        in1_shutdown(&mut app);
     }
 
     #[test]

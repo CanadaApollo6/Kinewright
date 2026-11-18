@@ -895,7 +895,12 @@ impl KinewrightApp {
             let voice = &mut self.focused_mut().studio.voice;
             ui.label("Spoken note");
             if !voice.message.is_empty() {
-                ui.small(&voice.message);
+                use crate::display_text::{ROW_CHARS, copyable_label, display_text};
+                copyable_label(
+                    ui,
+                    egui::RichText::new(display_text(&[&voice.message], ROW_CHARS)).small(),
+                    &voice.message,
+                );
             }
             match &voice.state {
                 State::Recording(_) => {
@@ -1149,6 +1154,22 @@ impl KinewrightApp {
         };
         self.keep_voice_editor()
     }
+}
+
+#[cfg(test)]
+#[test]
+fn ix1_voice_capture_message_bounds_the_kept_recording_path_before_layout() {
+    use crate::app::in1_tests::{in1_harness, in1_shutdown};
+    use crate::ix1_tests::{assert_locator_layout, hostile_locator};
+
+    let (mut app, _engine) = in1_harness(kinewright_core::Document::default());
+    let locator = hostile_locator();
+    app.focused_mut().studio.voice.message = format!("Capture kept at {locator}. Try again.");
+    let ctx = egui::Context::default();
+    crate::theme::install(&ctx);
+    let output = ctx.run_ui(egui::RawInput::default(), |ui| app.voice_controls(ui));
+    assert_locator_layout(&output, 160);
+    in1_shutdown(&mut app);
 }
 
 #[cfg(all(test, target_os = "linux"))]

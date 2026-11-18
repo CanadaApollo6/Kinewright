@@ -902,9 +902,8 @@ pub(crate) fn incident_panel_rows<'a>(
 
 /// Paint one card and report what the person pressed.
 ///
-/// Untested by design (IN1 §5.3 rule 23): every assertion lives on
-/// [`incident_card`], and the placement of the card in the Media panel is not
-/// proven at all.
+/// Card content comes from [`incident_card`]. Bound the displayed details here
+/// so the incident log and its copy actions retain the original evidence.
 pub(crate) fn show_incident_card(ui: &mut egui::Ui, view: &IncidentCardView) -> Option<CardPress> {
     let mut pressed = None;
     theme::card_frame(false).show(ui, |ui| {
@@ -933,7 +932,9 @@ pub(crate) fn show_incident_card(ui: &mut egui::Ui, view: &IncidentCardView) -> 
         for (key, value) in &view.details {
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(color::TEXT_MUTED, *key);
-                ui.label(value);
+                let text =
+                    crate::display_text::display_text(&[value], crate::display_text::DETAIL_CHARS);
+                crate::display_text::copyable_label(ui, text, value);
             });
         }
         ui.add_space(space::ONE);
@@ -1179,6 +1180,27 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn ix1_incident_detail_bounds_an_offline_locator_before_layout() {
+        let locator = crate::ix1_tests::hostile_locator();
+        let mut log = IncidentLog::default();
+        let Observed::Opened(id) = log.observe(IncidentObservation::plain(
+            IncidentCode::Label(LabelIncident::MediaIncomplete),
+            IncidentSubject::Project,
+            format!("Missing media after open: Source ({locator})"),
+            TimelineRevision(1),
+        )) else {
+            panic!("the missing-media observation opens an incident");
+        };
+        let view = incident_card(log.get(id).unwrap(), false, &CardLoadedFlags::default());
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show_incident_card(ui, &view);
+        });
+        crate::ix1_tests::assert_locator_layout(&output, 1024);
+    }
 
     /// `IN2B` §3 rule 14: recency buckets pin exactly over `(stamp, now)`,
     /// and a stamp at or ahead of now reads "just now" rather than a

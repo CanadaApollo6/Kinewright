@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, Mutex, mpsc},
 };
 
+use eframe::egui;
 use kinewright_core::{
     Analysis, AssetId, ColorDescription, Document, MediaAsset, MediaAvailabilityKind,
     MediaAvailabilityStatus, MediaError, MediaEvent, MediaKind, MediaSourceFingerprint, Playback,
@@ -221,6 +222,103 @@ impl Analysis for RecordingMedia {
     fn visual_asset_results(&self) -> crossbeam_channel::Receiver<VisualAssetResult> {
         crossbeam_channel::never()
     }
+}
+
+pub(crate) fn hostile_locator() -> String {
+    let (head, tail) = ("file://unapproved.invalid/source/\n", "\u{202e}tail.mov");
+    let bytes = 8 * 1024 * 1024;
+    format!(
+        "{head}{}{tail}",
+        "x".repeat(bytes - head.len() - tail.len())
+    )
+}
+
+pub(crate) fn assert_locator_layout(output: &egui::FullOutput, limit: usize) {
+    let painted = crate::theme::painted_text(output);
+    let longest = painted.iter().map(|text| text.chars().count()).max();
+    assert!(
+        longest.is_some_and(|n| n <= limit),
+        "longest galley {longest:?}, limit {limit}"
+    );
+    assert!(
+        painted
+            .iter()
+            .any(|text| text.contains(r"\u{202e}tail") && text.contains('…')),
+        "the bounded locator reached the layout"
+    );
+    assert!(
+        painted
+            .iter()
+            .all(|text| !text.contains(['\n', '\u{202e}']))
+    );
+}
+
+pub(crate) fn layout_text_position(
+    output: &egui::FullOutput,
+    text_matches: impl Fn(&str) -> bool,
+) -> egui::Pos2 {
+    fn find(shape: &egui::epaint::Shape, matches: &impl Fn(&str) -> bool) -> Option<egui::Pos2> {
+        match shape {
+            egui::epaint::Shape::Text(text) if matches(text.galley.text()) => {
+                Some(text.pos + text.galley.size() * 0.5)
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                shapes.iter().find_map(|shape| find(shape, matches))
+            }
+            _ => None,
+        }
+    }
+    output
+        .shapes
+        .iter()
+        .find_map(|shape| find(&shape.shape, &text_matches))
+        .expect("the text was laid out")
+}
+
+pub(crate) fn click_text(
+    ctx: &egui::Context,
+    at: egui::Pos2,
+    button: egui::PointerButton,
+    mut draw: impl FnMut(&mut egui::Ui),
+) -> egui::FullOutput {
+    let input = |pressed| egui::RawInput {
+        events: vec![
+            egui::Event::PointerMoved(at),
+            egui::Event::PointerButton {
+                pos: at,
+                button,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ],
+        ..Default::default()
+    };
+    let _ = ctx.run_ui(input(true), &mut draw);
+    ctx.run_ui(input(false), draw)
+}
+
+pub(crate) fn assert_locator_tooltip(
+    ctx: &egui::Context,
+    at: egui::Pos2,
+    mut draw: impl FnMut(&mut egui::Ui),
+) {
+    ctx.global_style_mut(|style| {
+        style.interaction.tooltip_delay = 0.0;
+        style.interaction.show_tooltips_only_when_still = false;
+    });
+    let input = egui::RawInput {
+        events: vec![egui::Event::PointerMoved(at)],
+        ..Default::default()
+    };
+    let _ = ctx.run_ui(input, &mut draw);
+    let output = ctx.run_ui(egui::RawInput::default(), draw);
+    assert_locator_layout(&output, 1024);
+    assert!(
+        crate::theme::painted_text(&output)
+            .iter()
+            .any(|text| { text.chars().count() > 160 && text.contains(r"\u{202e}tail") }),
+        "the tooltip laid out the longer text"
+    );
 }
 
 pub(crate) fn write_edit(path: &Path, reference: &str) {

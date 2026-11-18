@@ -1881,9 +1881,8 @@ impl KinewrightApp {
     }
 
     fn show_interchange(&mut self, ctx: &egui::Context) {
-        use crate::interchange_ui::{
-            ImportAction, ROW_CHARS, display_text, import_status, show_report,
-        };
+        use crate::display_text::{ROW_CHARS, display_text};
+        use crate::interchange_ui::{ImportAction, import_status, show_report};
         use kinewright_project::interchange::{CommitImportError, commit};
         if let Some(dialog) = &mut self.interchange_dialog {
             match dialog.show(ctx) {
@@ -4223,7 +4222,15 @@ impl KinewrightApp {
                             self.show_thread_rail = !self.show_thread_rail;
                         }
                         ui.separator();
-                        ui.colored_label(color::TEXT_MUTED, &self.status);
+                        let text = crate::display_text::display_text(
+                            &[&self.status],
+                            crate::display_text::ROW_CHARS,
+                        );
+                        crate::display_text::copyable_label(
+                            ui,
+                            egui::RichText::new(text).color(color::TEXT_MUTED),
+                            &self.status,
+                        );
                     });
                 });
             });
@@ -8008,6 +8015,32 @@ pub(crate) mod in1_tests {
         assert!(app.error_log_open, "and the window pops open");
         assert_eq!(app.error_log.count_with_source("Incident"), 1);
         assert_eq!(incident.subject.label(), "Bus 3");
+        in1_shutdown(&mut app);
+    }
+
+    #[test]
+    fn ix1_saved_project_missing_media_status_bounds_the_locator_before_layout() {
+        use crate::ix1_tests::{assert_locator_layout, hostile_locator, prepare_edit, write_edit};
+        let (mut app, _engine) = in1_harness(Document::default());
+        let temporary = TempDirectory::new("ix1-open-status");
+        let source = temporary.path("edit.otio");
+        let locator = hostile_locator();
+        write_edit(&source, &locator);
+        let prepared = prepare_edit(&source, Arc::new(kinewright_core::RefusedMedia));
+        let document = kinewright_project::interchange::commit(prepared, |_, document, _| {
+            Ok::<_, ()>(document)
+        })
+        .unwrap();
+        let path = temporary.path("saved.kinewright");
+        std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+
+        app.open_project(&path);
+        assert!(app.status.starts_with("Opened "));
+        assert!(app.status.contains(&locator));
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| app.app_top_bar(ui));
+        assert_locator_layout(&output, 160);
         in1_shutdown(&mut app);
     }
 
@@ -15396,11 +15429,13 @@ mod in2b_tests {
 
         let temp = TempDirectory::new("in2b-h8-startup");
         let project_path = temp.path("edit.kinewright");
+        let locator = crate::ix1_tests::hostile_locator();
+        let local = locator.strip_prefix("file://unapproved.invalid/").unwrap();
         let mut document = Document::default();
         document.media_pool.push(MediaAsset {
             remote_locator: None,
             id: AssetId(1),
-            path: temp.path("nowhere.mov"),
+            path: PathBuf::from(local),
             name: "gone.mov".to_owned(),
             duration: TimeCode(30),
             fps: Rational::new(30, 1).expect("30 fps"),
@@ -15422,6 +15457,11 @@ mod in2b_tests {
         .expect("the project file writes");
         let engine = Arc::new(FfmpegMediaEngine::new().expect("the test engine starts"));
         let mut app = KinewrightApp::new(engine.clone(), Some(project_path));
+        assert!(app.status.contains(local));
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| app.app_top_bar(ui));
+        crate::ix1_tests::assert_locator_layout(&output, 160);
         app.route_incidents();
         {
             let log = app
