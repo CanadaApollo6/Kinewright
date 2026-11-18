@@ -157,7 +157,9 @@ fn cut_score_cli_scores_supported_studio_save_without_writing() {
     use kinewright_media::test_support::workspace_target_dir;
     use kinewright_project::{
         bundle::{BundleWriteAdmission, ProjectBundle},
-        operation_history::{HistoryPool, PoolLimits},
+        bundle_records::BatchId,
+        operation_actor::Core,
+        operation_history::{CreationOrigin, HistoryPool, PoolLimits, Role},
         owned_inputs::OwnedInputManifest,
     };
     fn snapshot(root: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
@@ -211,7 +213,16 @@ fn cut_score_cli_scores_supported_studio_save_without_writing() {
         entries: vec![entry],
     };
     let inputs = bundle.admit_inputs(&manifest).unwrap().reference;
-    let core = kinewright_project::operation_actor::Core::for_test(doc).unwrap();
+    let core = Core::spawn(
+        &pool,
+        Role::Ordinary,
+        CreationOrigin {
+            branch: bundle.manual_branch_id().to_owned(),
+            batch: BatchId::fresh().unwrap(),
+        },
+        doc,
+    )
+    .unwrap();
     bundle.save(&core, &inputs).unwrap();
     drop(pins);
     drop(bundle);
