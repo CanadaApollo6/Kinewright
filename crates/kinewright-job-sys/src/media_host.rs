@@ -61,33 +61,7 @@ pub fn observe_boundary(
         unobservable: Vec::new(),
         smaps: None,
     };
-    match bounded(format!("{base}/status")) {
-        Ok(bytes) => {
-            let status = std::str::from_utf8(&bytes).map_err(io::Error::other)?;
-            for (key, expected) in [
-                ("NoNewPrivs:", "1"),
-                ("Seccomp:", "2"),
-                ("CapInh:", "0000000000000000"),
-                ("CapPrm:", "0000000000000000"),
-                ("CapEff:", "0000000000000000"),
-                ("CapBnd:", "0000000000000000"),
-                ("CapAmb:", "0000000000000000"),
-            ] {
-                if status
-                    .lines()
-                    .find_map(|line| line.strip_prefix(key))
-                    .map(str::trim)
-                    != Some(expected)
-                {
-                    return Err(invalid("observed media boundary is not installed"));
-                }
-            }
-        }
-        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-            observation.unobservable.push("status");
-        }
-        Err(error) => return Err(error),
-    }
+    verify_status(bounded(format!("{base}/status")))?;
     for namespace in ["user", "mnt", "net", "pid"] {
         match fs::read_link(format!("{base}/ns/{namespace}")) {
             Ok(child) => {
@@ -138,6 +112,30 @@ pub fn observe_boundary(
     }
     media_scope::verify_child(shim.pid(), payload)?;
     Ok(observation)
+}
+
+fn verify_status(observed: io::Result<Vec<u8>>) -> io::Result<()> {
+    let bytes = observed?;
+    let status = std::str::from_utf8(&bytes).map_err(io::Error::other)?;
+    for (key, expected) in [
+        ("NoNewPrivs:", "1"),
+        ("Seccomp:", "2"),
+        ("CapInh:", "0000000000000000"),
+        ("CapPrm:", "0000000000000000"),
+        ("CapEff:", "0000000000000000"),
+        ("CapBnd:", "0000000000000000"),
+        ("CapAmb:", "0000000000000000"),
+    ] {
+        if status
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .map(str::trim)
+            != Some(expected)
+        {
+            return Err(invalid("observed media boundary is not installed"));
+        }
+    }
+    Ok(())
 }
 
 pub fn resident_bytes(process: &ProcessHandle) -> io::Result<u64> {
@@ -422,4 +420,18 @@ pub fn memory_profile(process: &ProcessHandle, smaps: &mut File) -> io::Result<M
         return Err(invalid("memory observation identity changed"));
     }
     Ok(profile)
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn required_status_permission_denied_refuses_startup() {
+        let denied = io::ErrorKind::PermissionDenied.into();
+        assert_eq!(
+            verify_status(Err(denied)).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
 }
