@@ -1,0 +1,37 @@
+[package]
+name = "kinewright-interchange-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+kinewright-interchange = { path = ".." }
+libfuzzer-sys = "=0.4.13"
+
+[[bin]]
+name = "fuzz_otio"
+path = "fuzz_targets/fuzz_otio.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_fcpxml"
+path = "fuzz_targets/fuzz_fcpxml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_locator"
+path = "fuzz_targets/fuzz_locator.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
+resolver = "3"
