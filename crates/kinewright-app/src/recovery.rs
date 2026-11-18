@@ -8,10 +8,8 @@
 //! `JournalCommand` JSON line per accepted Core change. A trailing newline is
 //! the commit marker for each line.
 //!
-//! Startup scans the whole directory and offers every found journal for
-//! restore or discard individually - a crash with several projects open
-//! loses none of them, and a journal can never replay into the wrong
-//! project because its identity travels in its own header. A journal that
+//! Startup offers readable journals individually and groups unreadable files
+//! for discard. Each journal carries its own project identity. A journal that
 //! would collide with an undecided pending file allocates a suffixed name
 //! instead: pending crash data is never truncated by a new session.
 //!
@@ -354,7 +352,7 @@ struct RecoveryReport {
 enum Inspection {
     Missing,
     Recoverable(RecoveryReport),
-    Unusable(Damage),
+    Unusable,
 }
 
 fn parse_journal(bytes: &[u8]) -> Result<ParsedJournal, Damage> {
@@ -443,25 +441,18 @@ fn complete_line(bytes: &[u8], start: usize) -> Option<(&[u8], usize)> {
 }
 
 fn inspect_bytes(bytes: &[u8]) -> Inspection {
-    let parsed = match parse_journal(bytes) {
-        Ok(parsed) => parsed,
-        Err(damage) => return Inspection::Unusable(damage),
+    let Ok(parsed) = parse_journal(bytes) else {
+        return Inspection::Unusable;
     };
     replay(parsed)
 }
 
+#[cfg(test)]
 fn inspect_path(path: &Path) -> Inspection {
     match fs::read(path) {
         Ok(bytes) => inspect_bytes(&bytes),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Inspection::Missing,
-        Err(error) => Inspection::Unusable(Damage {
-            offset: 0,
-            ignored_bytes: fs::metadata(path)
-                .ok()
-                .and_then(|metadata| usize::try_from(metadata.len()).ok())
-                .unwrap_or_default(),
-            reason: format!("the recovery journal could not be read: {error}"),
-        }),
+        Err(_) => Inspection::Unusable,
     }
 }
 
@@ -473,20 +464,13 @@ fn replay(parsed: ParsedJournal) -> Inspection {
         branch: kinewright_project::bundle_records::BranchId::fresh().expect("OS randomness"),
         batch: kinewright_project::bundle_records::BatchId::fresh().expect("OS randomness"),
     };
-    let core = match Core::spawn(
+    let Ok(core) = Core::spawn(
         &pool,
         kinewright_project::operation_history::Role::Ordinary,
         origin,
         parsed.initial_document.clone(),
-    ) {
-        Ok(core) => core,
-        Err(error) => {
-            return Inspection::Unusable(Damage {
-                offset: MAGIC.len(),
-                ignored_bytes: parsed.byte_len.saturating_sub(MAGIC.len()),
-                reason: format!("the initial recovery snapshot was rejected: {error}"),
-            });
-        }
+    ) else {
+        return Inspection::Unusable;
     };
     let project_path = parsed.project_path;
     let mut document = parsed.initial_document;
@@ -747,7 +731,7 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[allow(clippy::large_enum_variant)]
 enum PendingState {
     Recoverable(RecoveryReport),
-    Unusable(Damage),
+    Unusable,
 }
 
 /// One journal found on disk at startup, awaiting a restore/discard decision.
@@ -793,6 +777,12 @@ pub(crate) fn recovery_unavailable_observation(
     observation
 }
 
+enum PendingAction {
+    Restore(usize),
+    Discard(usize),
+    DiscardUnreadable,
+}
+
 /// What one `show_dialog` frame decided and rendered.
 pub(crate) struct RecoveryDialogOutcome {
     /// The restore the person chose, if any.
@@ -821,6 +811,7 @@ pub(crate) struct Recovery {
     path: PathBuf,
     recorder: Option<Recorder>,
     pending: Vec<PendingJournal>,
+    pending_page: usize,
     runtime_error: Arc<Mutex<Option<String>>>,
     #[cfg(test)]
     test_directory: Option<kinewright_media::test_support::TempDirectory>,
@@ -859,6 +850,7 @@ impl Recovery {
             path: PathBuf::new(),
             recorder: None,
             pending: vec![],
+            pending_page: 0,
             runtime_error: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             test_directory: None,
@@ -942,6 +934,7 @@ impl Recovery {
             directory: Some(directory),
             recorder: None,
             pending,
+            pending_page: 0,
             runtime_error,
             #[cfg(test)]
             test_directory: None,
@@ -1095,15 +1088,8 @@ impl Recovery {
         self.attach(core, project_path);
     }
 
-    /// Render the startup decisions - one row per found journal - and return
-    /// a restore request when the user picks one. The pending file survives
-    /// until `consume_pending` confirms the restore landed, so a failed
-    /// restore can still be recovered at the next launch.
-    ///
-    /// One frame fn past clippy's 100 lines: the two damage/unavailable
-    /// renders plus their first-render edging live here rather than split
-    /// across helpers a frame would call once each.
-    #[allow(clippy::too_many_lines)]
+    /// Render startup decisions. A restored file stays pending until the app
+    /// confirms the restore landed.
     pub(crate) fn show_dialog(&mut self, ctx: &egui::Context) -> RecoveryDialogOutcome {
         let mut outcome = RecoveryDialogOutcome {
             restore: None,
@@ -1114,84 +1100,124 @@ impl Recovery {
             self.pending.clear();
             return outcome;
         }
-        let mut restore: Option<usize> = None;
-        let mut discard: Option<usize> = None;
-        if !self.pending.is_empty() {
-            let damage_rendered = &mut outcome.damage_rendered;
-            egui::Window::new("Recover unsaved work?")
+        if !self.pending.is_empty()
+            && let Some(window) = egui::Window::new("Recover unsaved work?")
                 .collapsible(false)
                 .resizable(false)
+                .vscroll(true)
                 .show(ctx, |ui| {
-                    ui.label("Kinewright closed unexpectedly with unsaved work.");
-                    for (index, entry) in self.pending.iter().enumerate() {
-                        ui.separator();
-                        ui.label(
-                            egui::RichText::new(pending_project_label(
-                                entry.project_path.as_deref(),
-                            ))
-                            .font(theme::semibold(type_size::BODY)),
-                        );
-                        match &entry.state {
-                            PendingState::Recoverable(report) => {
-                                ui.label(format!(
-                                    "{} journaled command{} can be restored.",
-                                    report.recovered_commands,
-                                    if report.recovered_commands == 1 {
-                                        ""
-                                    } else {
-                                        "s"
-                                    }
-                                ));
-                                if let Some(damage) = &report.damage {
-                                    let description = damage_description(damage);
-                                    ui.colored_label(egui::Color32::YELLOW, &description);
-                                    if damage_rendered.is_none() {
-                                        *damage_rendered = Some(description);
-                                    }
-                                }
-                            }
-                            PendingState::Unusable(damage) => {
-                                ui.colored_label(
-                                    egui::Color32::YELLOW,
-                                    "This journal's initial snapshot is unavailable.",
-                                );
-                                let description = damage_description(damage);
-                                ui.label(&description);
-                                if damage_rendered.is_none() {
-                                    *damage_rendered = Some(description);
-                                }
-                            }
-                        }
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add_enabled(
-                                    matches!(entry.state, PendingState::Recoverable(_)),
-                                    egui::Button::new("Restore"),
-                                )
-                                .clicked()
-                            {
-                                restore = Some(index);
-                            }
-                            if ui.button("Discard").clicked() {
-                                discard = Some(index);
-                            }
-                        });
+                    self.show_pending(ui, &mut outcome.damage_rendered)
+                })
+        {
+            match window.inner.flatten() {
+                Some(PendingAction::Restore(index)) => {
+                    outcome.restore = pending_restore_request(&self.pending[index]);
+                }
+                Some(PendingAction::Discard(index)) => {
+                    if self.remove_pending(&self.pending[index]) {
+                        self.pending.remove(index);
                     }
-                });
-        }
-
-        outcome.unavailable_rendered = self.show_unavailable(ctx);
-
-        if let Some(index) = discard {
-            if self.remove_pending(&self.pending[index]) {
-                self.pending.remove(index);
+                }
+                Some(PendingAction::DiscardUnreadable) => {
+                    let mut pending = std::mem::take(&mut self.pending);
+                    pending.retain(|entry| {
+                        !matches!(entry.state, PendingState::Unusable)
+                            || !self.remove_pending(entry)
+                    });
+                    self.pending = pending;
+                }
+                None => {}
             }
-            return outcome;
         }
-        if let Some(index) = restore {
-            outcome.restore = pending_restore_request(&self.pending[index]);
-        }
+        outcome.unavailable_rendered = self.show_unavailable(ctx);
         outcome
+    }
+
+    fn show_pending(
+        &mut self,
+        ui: &mut egui::Ui,
+        damage_rendered: &mut Option<String>,
+    ) -> Option<PendingAction> {
+        const PAGE_SIZE: usize = 6;
+
+        ui.label("Kinewright closed unexpectedly with unsaved work.");
+        let readable = self
+            .pending
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let PendingState::Recoverable(report) = &entry.state else {
+                    return None;
+                };
+                Some((index, entry, report))
+            });
+        let readable_count = readable.clone().count();
+        let unreadable = self.pending.len() - readable_count;
+        let last_page = readable_count.saturating_sub(1) / PAGE_SIZE;
+        self.pending_page = self.pending_page.min(last_page);
+
+        let mut action = None;
+        for (index, entry, report) in readable.skip(self.pending_page * PAGE_SIZE).take(PAGE_SIZE) {
+            ui.separator();
+            ui.label(
+                egui::RichText::new(pending_project_label(entry.project_path.as_deref()))
+                    .font(theme::semibold(type_size::BODY)),
+            );
+            let commands = report.recovered_commands;
+            let plural = if commands == 1 { "" } else { "s" };
+            ui.label(format!(
+                "{commands} journaled command{plural} can be restored."
+            ));
+            if let Some(damage) = &report.damage {
+                let description = damage_description(damage);
+                ui.colored_label(egui::Color32::YELLOW, &description);
+                if damage_rendered.is_none() {
+                    *damage_rendered = Some(description);
+                }
+            }
+            ui.horizontal(|ui| {
+                if ui.button("Restore").clicked() {
+                    action = Some(PendingAction::Restore(index));
+                }
+                if ui.button("Discard").clicked() {
+                    action = Some(PendingAction::Discard(index));
+                }
+            });
+        }
+        if last_page > 0 {
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(self.pending_page > 0, egui::Button::new("Previous"))
+                    .clicked()
+                {
+                    self.pending_page -= 1;
+                }
+                ui.label(format!(
+                    "Page {} of {}",
+                    self.pending_page + 1,
+                    last_page + 1
+                ));
+                if ui
+                    .add_enabled(self.pending_page < last_page, egui::Button::new("Next"))
+                    .clicked()
+                {
+                    self.pending_page += 1;
+                }
+            });
+        }
+        if unreadable > 0 {
+            ui.separator();
+            let plural = if unreadable == 1 { "" } else { "s" };
+            let description = format!("{unreadable} recovery file{plural} can't be read.");
+            ui.colored_label(egui::Color32::YELLOW, &description);
+            if damage_rendered.is_none() {
+                *damage_rendered = Some(description);
+            }
+            if ui.button("Discard unreadable files").clicked() {
+                action = Some(PendingAction::DiscardUnreadable);
+            }
+        }
+        action
     }
 
     pub(crate) fn show_unavailable(&mut self, ctx: &egui::Context) -> Option<String> {
@@ -1433,7 +1459,10 @@ fn scan_directory(directory: &Path) -> Vec<PendingJournal> {
                     inspect_bytes(&bytes),
                     Some(kinewright_media::sha256_bytes(&bytes)),
                 ),
-                Err(_) => (inspect_path(&path), None),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    (Inspection::Missing, None)
+                }
+                Err(_) => (Inspection::Unusable, None),
             };
             let journal_path = directory.join(name);
             match inspection {
@@ -1445,12 +1474,12 @@ fn scan_directory(directory: &Path) -> Vec<PendingJournal> {
                     journal_path,
                     state: PendingState::Recoverable(report),
                 }),
-                Inspection::Unusable(damage) => Some(PendingJournal {
+                Inspection::Unusable => Some(PendingJournal {
                     directory: Some(owner.clone()),
                     sha256,
                     project_path: None,
                     journal_path,
-                    state: PendingState::Unusable(damage),
+                    state: PendingState::Unusable,
                 }),
             }
         })
@@ -1460,7 +1489,7 @@ fn scan_directory(directory: &Path) -> Vec<PendingJournal> {
 fn pending_project_label(project_path: Option<&Path>) -> String {
     project_path.and_then(Path::file_name).map_or_else(
         || "Unsaved project".to_owned(),
-        |name| name.to_string_lossy().into_owned(),
+        |name| bounded_recovery_text(&name.to_string_lossy(), 100),
     )
 }
 
@@ -1489,11 +1518,20 @@ pub(crate) fn partial_restore_notice(damage: &Damage, journal: &Path) -> String 
     )
 }
 
+fn bounded_recovery_text(text: &str, limit: usize) -> String {
+    let mut chars = text.chars();
+    let mut label: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() {
+        label.push('…');
+    }
+    label
+}
+
 fn damage_description(damage: &Damage) -> String {
     format!(
         "Recovery stopped at byte {}: {}. {} trailing byte{} were ignored.",
         damage.offset,
-        damage.reason,
+        bounded_recovery_text(&damage.reason, 160),
         damage.ignored_bytes,
         if damage.ignored_bytes == 1 { "" } else { "s" }
     )
@@ -1923,7 +1961,7 @@ mod tests {
             let inspection = inspect_bytes(&bytes[..cut]);
             if cut < header_end {
                 assert!(
-                    matches!(inspection, Inspection::Unusable(_)),
+                    matches!(inspection, Inspection::Unusable),
                     "cut {cut} should not have a complete initial snapshot"
                 );
                 continue;
@@ -2316,6 +2354,77 @@ mod tests {
         assert!(!journal_path.exists());
     }
 
+    #[test]
+    fn the_recovery_prompt_groups_and_discards_only_unreadable_journals() {
+        fn button_center(shape: &egui::epaint::Shape) -> Option<egui::Pos2> {
+            match shape {
+                egui::epaint::Shape::Text(text)
+                    if text.galley.text() == "Discard unreadable files" =>
+                {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(button_center),
+                _ => None,
+            }
+        }
+
+        let dir = TestDirectory::new("unreadable-group");
+        let readable = dir.0.join("readable.journal");
+        let good = encoded_journal(&Document::default(), &[]);
+        fs::write(&readable, &good).unwrap();
+        let unreadable =
+            ["old.journal", "empty.journal", "bad.journal"].map(|name| dir.0.join(name));
+        for (path, bytes) in unreadable.iter().zip([b"OLD\n".as_slice(), b"", b"bad\n"]) {
+            fs::write(path, bytes).unwrap();
+        }
+        let mut recovery = Recovery::read_only();
+        recovery.pending = scan_directory(&dir.0);
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut frame = |events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 700.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    recovery.show_dialog(ui.ctx());
+                },
+            )
+        };
+        let _ = frame(vec![]);
+        let _ = frame(vec![]);
+        let output = frame(vec![]);
+        let labels = crate::theme::painted_text(&output);
+        let count = |label| labels.iter().filter(|item| item.as_str() == label).count();
+        assert_eq!(count("Unsaved project"), 1);
+        assert_eq!(count("3 recovery files can't be read."), 1);
+        assert_eq!(count("Restore"), 1);
+        assert_eq!(count("Discard"), 1);
+        assert_eq!(count("Discard unreadable files"), 1);
+        let target = output
+            .shapes
+            .iter()
+            .find_map(|shape| button_center(&shape.shape))
+            .expect("the bulk discard button was painted");
+        let click = |pressed| egui::Event::PointerButton {
+            pos: target,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let _ = frame(vec![egui::Event::PointerMoved(target), click(true)]);
+        let _ = frame(vec![click(false)]);
+        assert_eq!(recovery.pending.len(), 1);
+        assert_eq!(recovery.pending[0].journal_path, readable);
+        assert_eq!(fs::read(&readable).unwrap(), good);
+        assert!(unreadable.iter().all(|path| !path.exists()));
+    }
+
     /// Item 23: both recovery modals note damage-only. The constructors
     /// shape code/subject/tag/transient; the headless dialog reports
     /// damage renders — and a clean prompt reports none, because the
@@ -2357,6 +2466,7 @@ mod tests {
             path: PathBuf::from("recovery").join("active.journal"),
             recorder: None,
             pending: Vec::new(),
+            pending_page: 0,
             runtime_error: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             test_directory: None,
@@ -2404,19 +2514,13 @@ mod tests {
             Some("Recovery stopped at byte 12: torn. 4 trailing bytes were ignored."),
         );
 
-        // An unusable journal reports its damage string too.
+        // An unreadable journal contributes only to the aggregate label.
         let mut unusable = idle();
-        unusable
-            .pending
-            .push(pending(PendingState::Unusable(Damage {
-                offset: 0,
-                ignored_bytes: 1,
-                reason: "no snapshot".to_owned(),
-            })));
+        unusable.pending.push(pending(PendingState::Unusable));
         let outcome = drive(&mut unusable);
         assert_eq!(
             outcome.damage_rendered.as_deref(),
-            Some("Recovery stopped at byte 0: no snapshot. 1 trailing byte were ignored."),
+            Some("1 recovery file can't be read.")
         );
 
         // A broken runtime reports its message.
@@ -2580,11 +2684,7 @@ pub(crate) fn g04_gui_lost_authority() {
         sha256: Some(kinewright_media::sha256_bytes(&before)),
         journal_path: journal.clone(),
         project_path: Some(project.clone()),
-        state: PendingState::Unusable(Damage {
-            offset: 0,
-            ignored_bytes: 0,
-            reason: "preserved older journal".into(),
-        }),
+        state: PendingState::Unusable,
     });
     recovery.checkpoint_owned(&core, Some(&project), Some(lost));
     assert_eq!(
