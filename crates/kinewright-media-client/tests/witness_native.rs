@@ -510,6 +510,7 @@ fn loss_fixture() {
 )]
 fn watchdog_disabled_primary_app_and_supervisor_loss() {
     let _deadline = deadline::test();
+    deadline::report_with(kinewright_media_client::diagnostics);
     #[cfg(feature = "slow-tests")]
     for stage in ["before-ready", "decode"] {
         for loss in ["app", "supervisor"] {
@@ -542,6 +543,7 @@ fn watchdog_disabled_primary_app_and_supervisor_loss() {
 )]
 fn watchdog_disabled_degraded_app_and_supervisor_loss() {
     let _deadline = deadline::test();
+    deadline::report_with(kinewright_media_client::diagnostics);
     #[cfg(feature = "slow-tests")]
     for stage in ["before-ready", "decode"] {
         for loss in ["app", "supervisor"] {
@@ -556,6 +558,7 @@ fn watchdog_disabled_degraded_app_and_supervisor_loss() {
 )]
 fn watchdog_disabled_spawner_abort_and_payload_prearm_race() {
     let _deadline = deadline::test();
+    deadline::report_with(kinewright_media_client::diagnostics);
     #[cfg(feature = "slow-tests")]
     for stage in ["before-shim-arm", "decode"] {
         assert!(support::loss(true, stage, "spawner"));
@@ -571,6 +574,7 @@ fn watchdog_disabled_spawner_abort_and_payload_prearm_race() {
 )]
 fn cancellation_deadline_and_revocation_discard_partial_results() {
     let _deadline = deadline::test();
+    deadline::report_with(kinewright_media_client::diagnostics);
     #[cfg(feature = "slow-tests")]
     for loss in ["cancel", "deadline", "authority"] {
         assert!(support::loss(true, "decode", loss));

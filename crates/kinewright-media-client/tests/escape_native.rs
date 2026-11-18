@@ -211,6 +211,7 @@ fn escape_fixture() {
 )]
 fn full_stack_escapes_are_killed_and_canaries_unchanged() {
     let _deadline = deadline::test();
+    deadline::report_with(kinewright_media_client::diagnostics);
     #[cfg(feature = "slow-tests")]
     {
         use support::{attack, killed, workspace};

@@ -315,6 +315,19 @@ jobs:
           python3 scripts/slow_tests.py fast || exit 1
           cargo clippy --workspace --all-targets -- -D warnings || exit 1
 
+      # MS2 diagnostics: a probe that never answers left no kernel trace in the
+      # job log. On failure or timeout, print the kernel's AppArmor, audit and
+      # seccomp lines and the helper profile's state. Diagnostics only.
+      - name: MS2 kernel diagnostics on failure
+        if: failure() || cancelled()
+        timeout-minutes: 2
+        run: |
+          sudo journalctl -k --no-pager -o short-monotonic 2>/dev/null |
+            grep -iE 'apparmor|audit|seccomp|kinewright' | tail -n 100 || true
+          sudo dmesg 2>/dev/null | grep -iE 'apparmor|audit|seccomp|kinewright' | tail -n 100 || true
+          sudo aa-status 2>/dev/null | grep -iE 'kinewright|profiles are|processes' || true
+          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns || true
+
   linux-slow:
     name: Linux slow tier
     runs-on: ubuntu-24.04
@@ -407,3 +420,16 @@ jobs:
           # Runs exactly the tests in ci/slow-tests.txt with every crate's
           # `slow-tests` feature on, and fails unless all of them ran and passed.
           python3 scripts/slow_tests.py slow || exit 1
+
+      # MS2 diagnostics: a probe that never answers left no kernel trace in the
+      # job log. On failure or timeout, print the kernel's AppArmor, audit and
+      # seccomp lines and the helper profile's state. Diagnostics only.
+      - name: MS2 kernel diagnostics on failure
+        if: failure() || cancelled()
+        timeout-minutes: 2
+        run: |
+          sudo journalctl -k --no-pager -o short-monotonic 2>/dev/null |
+            grep -iE 'apparmor|audit|seccomp|kinewright' | tail -n 100 || true
+          sudo dmesg 2>/dev/null | grep -iE 'apparmor|audit|seccomp|kinewright' | tail -n 100 || true
+          sudo aa-status 2>/dev/null | grep -iE 'kinewright|profiles are|processes' || true
+          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns || true

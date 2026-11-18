@@ -73,6 +73,7 @@ fn expectation() -> &'static str {
 #[test]
 fn ms2_apparmor_userns_gate_refuses_without_the_profile_and_admits_with_it() {
     let _deadline = deadline::test();
+    deadline::report_with(kinewright_media_client::diagnostics);
     let expected = expectation();
     let directory = Directory(
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -141,6 +142,7 @@ fn ms2_apparmor_userns_gate_refuses_without_the_profile_and_admits_with_it() {
 #[test]
 fn blocked_probe_phase_fails_with_its_name() {
     let _deadline = deadline::test();
+    deadline::report_with(kinewright_media_client::diagnostics);
     if std::env::var_os("KW_MS2_PROBE_DEADLINE_FIXTURE").is_some() {
         let (_sender, stalled) = std::sync::mpsc::channel::<()>();
         during(PROBE_PHASE, Duration::from_millis(50), || {
@@ -158,9 +160,15 @@ fn blocked_probe_phase_fails_with_its_name() {
         .output()
         .expect("run the blocked probe phase fixture");
     assert_eq!(output.status.code(), Some(124), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains(&format!("MS2_TEST_DEADLINE {PROBE_PHASE}")),
+        stderr.contains(&format!("MS2_TEST_DEADLINE {PROBE_PHASE}")),
+        "{output:?}"
+    );
+    // The dump names what is known: the client's view and this process tree.
+    assert!(stderr.contains("MS2_CLIENT_VIEW"), "{output:?}");
+    assert!(
+        stderr.contains("MS2_TEST_PROCESS depth=0 pid=") && stderr.contains(" seccomp="),
         "{output:?}"
     );
 }

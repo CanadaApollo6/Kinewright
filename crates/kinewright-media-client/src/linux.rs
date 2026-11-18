@@ -21,6 +21,7 @@ mod actor;
 mod admission;
 mod controller;
 mod worker;
+pub use worker::diagnostics;
 
 pub const ACTIVE_PROBES: usize = 2;
 /// Queue bound (ruling 35): 32 requests behind two slots. The queue deadline

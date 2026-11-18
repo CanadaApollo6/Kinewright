@@ -277,6 +277,7 @@ fn rss_fixture() {
 )]
 fn degraded_rss_polling_records_overshoot_and_quarantines_source() {
     let _deadline = deadline::test();
+    deadline::report_with(kinewright_media_client::diagnostics);
     #[cfg(feature = "slow-tests")]
     support::repeated();
 }

@@ -23,6 +23,92 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Diagnostics only: which step each live probe is in, so a stalled test can
+/// say which reply it waits for. Bounded and lock-free; carries no authority.
+static WAITING: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+const PHASES: [&str; 13] = [
+    "launch",
+    "supervisor CreateScope reply",
+    "supervisor VerifyScope reply",
+    "helper Forked",
+    "helper Boundary",
+    "helper Ready",
+    "helper ProbeResult",
+    "helper Complete",
+    "helper close EOF",
+    "cleanup: shim exit",
+    "cleanup: session members reaped",
+    "cleanup: shim reaped",
+    "cleanup: scope empty",
+];
+#[derive(Clone, Copy)]
+enum Phase {
+    Launch,
+    CreateScope,
+    VerifyScope,
+    Forked,
+    Boundary,
+    Ready,
+    ProbeResult,
+    Complete,
+    CloseEof,
+    ShimExit,
+    Members,
+    Reaped,
+    ScopeEmpty,
+}
+/// Writes one claimed `WAITING` slot: `shim pid << 8 | phase`.
+#[derive(Clone, Copy)]
+struct Tracer(Option<&'static AtomicU64>, u32);
+impl Tracer {
+    fn set(self, phase: Phase) {
+        if let Some(slot) = self.0 {
+            slot.store(u64::from(self.1) << 8 | phase as u64, Ordering::Release);
+        }
+    }
+}
+/// The lease's claim on a `WAITING` slot, cleared on drop.
+struct Trace(Tracer);
+impl Trace {
+    fn claim(shim: u32) -> Self {
+        let value = u64::from(shim) << 8;
+        let slot = WAITING.iter().find(|slot| {
+            slot.compare_exchange(0, value, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        });
+        Self(Tracer(slot, shim))
+    }
+    fn set(&self, phase: Phase) {
+        self.0.set(phase);
+    }
+}
+impl Drop for Trace {
+    fn drop(&mut self) {
+        if let Some(slot) = self.0.0 {
+            slot.store(0, Ordering::Release);
+        }
+    }
+}
+/// Every live probe's shim pid and the step it is in (test diagnostics).
+#[must_use]
+pub fn diagnostics() -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from("MS2_CLIENT_VIEW");
+    for slot in &WAITING {
+        let value = slot.load(Ordering::Acquire);
+        if value != 0 {
+            let phase = usize::try_from(value & 0xff).unwrap_or(usize::MAX);
+            let _ = write!(
+                out,
+                " [shim={} waiting={}]",
+                value >> 8,
+                PHASES.get(phase).unwrap_or(&"?")
+            );
+        }
+    }
+    out
+}
+
 #[derive(Default)]
 pub(super) struct Shared {
     pub cancel: AtomicBool,
@@ -72,6 +158,7 @@ struct Lease {
     _root: Root,
     complete: bool,
     reaped: bool,
+    trace: Trace,
     #[cfg(feature = "slow-tests")]
     shim_smaps: Option<File>,
 }
@@ -125,6 +212,9 @@ pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
     let observed_pin = Arc::clone(&pin);
     let shared = Arc::new(Shared::default());
     let observed_shared = Arc::clone(&shared);
+    let trace = Trace::claim(pin.pid());
+    trace.set(Phase::Launch);
+    let tracer = trace.0;
     let mut lease = Lease {
         child,
         pin,
@@ -135,6 +225,7 @@ pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
         _root: root,
         complete: false,
         reaped: false,
+        trace,
         #[cfg(feature = "slow-tests")]
         shim_smaps: None,
     };
@@ -164,6 +255,7 @@ pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
                 generation,
                 cancelled: false,
                 traffic: ProbeSession::new(1, generation, selected),
+                tracer,
             };
             let result = lease.probe(
                 &Settings {
@@ -211,6 +303,7 @@ impl Lease {
     }
     fn join_scope(&mut self, limits: Limits, fallback: &mut bool) -> Result<(), Failure> {
         let bad = || Failure::Sandbox(Error::ProtocolViolation);
+        self.trace.set(Phase::CreateScope);
         match self
             .controller
             .call(Message::CreateScope {
@@ -242,6 +335,7 @@ impl Lease {
         }
         self.owned_group().map_err(|_| bad())?;
         let scope = self.scope.ok_or_else(bad)?;
+        self.trace.set(Phase::VerifyScope);
         match self
             .controller
             .call(Message::VerifyScope { scope })
@@ -291,7 +385,7 @@ impl Lease {
         release
             .write_all(&[1])
             .map_err(|_| Failure::Sandbox(Error::Crashed))?;
-        let forked = protocol.receive()?;
+        let forked = protocol.receive(Phase::Forked)?;
         if (forked.request, forked.generation) != (1, 1) {
             return Err(bad());
         }
@@ -305,7 +399,7 @@ impl Lease {
             .store(payload.start(), Ordering::Relaxed);
         protocol.shared.payload.store(pid, Ordering::Release);
         protocol.send(Message::EnterBoundary {})?;
-        let boundary = protocol.receive()?;
+        let boundary = protocol.receive(Phase::Boundary)?;
         if boundary.request != 1 || boundary.generation != generation {
             return Err(bad());
         }
@@ -328,14 +422,14 @@ impl Lease {
             return Err(bad());
         }
         protocol.send(Message::ConfirmBoundary {})?;
-        let ready = protocol.receive()?;
+        let ready = protocol.receive(Phase::Ready)?;
         protocol.traffic.accept(ready).map_err(Failure::Sandbox)?;
         protocol.shared.ready.store(true, Ordering::Release);
         protocol.send(Message::Probe {
             video: settings.selected[0],
             audio: settings.selected[1],
         })?;
-        let result_frame = protocol.receive()?;
+        let result_frame = protocol.receive(Phase::ProbeResult)?;
         let result = protocol
             .traffic
             .accept(result_frame)
@@ -346,7 +440,7 @@ impl Lease {
             .shared
             .incomplete_reply
             .store(true, Ordering::Release);
-        let complete = protocol.receive()?;
+        let complete = protocol.receive(Phase::Complete)?;
         if !matches!(complete.message, Message::Complete {}) {
             return Err(bad());
         }
@@ -400,12 +494,14 @@ impl Lease {
         if force {
             let _ = self.pin.kill();
         }
+        self.trace.set(Phase::ShimExit);
         while !media_host::exited(&self.pin).unwrap_or(false) {
             if Instant::now() >= end {
                 let _ = self.pin.kill();
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+        self.trace.set(Phase::Members);
         loop {
             if let Ok(members) = media_host::session_members(&self.pin) {
                 for process in &members {
@@ -421,6 +517,7 @@ impl Lease {
             std::thread::sleep(Duration::from_millis(10));
         }
         let mut success = false;
+        self.trace.set(Phase::Reaped);
         while !self.reaped {
             match self.child.wait() {
                 Ok(status) => {
@@ -436,6 +533,7 @@ impl Lease {
                 Err(_) => std::thread::sleep(Duration::from_millis(10)),
             }
         }
+        self.trace.set(Phase::ScopeEmpty);
         if let Some(group) = self.group.as_mut() {
             while !group.empty().unwrap_or(false) {
                 std::thread::sleep(Duration::from_millis(10));
@@ -512,12 +610,14 @@ struct Protocol<'a> {
     generation: u64,
     cancelled: bool,
     traffic: ProbeSession,
+    tracer: Tracer,
 }
 impl Protocol<'_> {
     fn send(&mut self, message: Message) -> Result<(), Failure> {
         send(self.command, self.generation, message)
     }
-    fn receive(&mut self) -> Result<Frame, Failure> {
+    fn receive(&mut self, phase: Phase) -> Result<Frame, Failure> {
+        self.tracer.set(phase);
         let mut reader = Interruptible {
             file: self.response,
             command: self.command,
@@ -541,6 +641,7 @@ impl Protocol<'_> {
     }
     fn close(&mut self) -> Result<(), Failure> {
         self.send(Message::Close {})?;
+        self.tracer.set(Phase::CloseEof);
         let mut extra = [0];
         let mut reader = Interruptible {
             file: self.response,

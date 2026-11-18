@@ -186,6 +186,7 @@ fn run_case(case: &str) {
 )]
 fn runtime_png_automatic_admission_closes_and_cleans() {
     let _deadline = deadline::test();
+    deadline::report_with(kinewright_media_client::diagnostics);
     run_case("automatic");
 }
 #[test]
@@ -195,6 +196,7 @@ fn runtime_png_automatic_admission_closes_and_cleans() {
 )]
 fn runtime_png_degraded_admission_closes_and_cleans() {
     let _deadline = deadline::test();
+    deadline::report_with(kinewright_media_client::diagnostics);
     run_case("degraded");
 }
 
@@ -205,6 +207,7 @@ fn runtime_png_degraded_admission_closes_and_cleans() {
 )]
 fn runtime_releases_both_slots_during_bus_disconnect() {
     let _deadline = deadline::test();
+    deadline::report_with(kinewright_media_client::diagnostics);
     if !Command::new("systemctl")
         .args(["--user", "show", "--property=Version"])
         .output()
