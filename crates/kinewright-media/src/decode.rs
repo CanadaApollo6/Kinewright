@@ -57,7 +57,8 @@ pub(crate) fn probe_path_observed(
     if !observer.observe(ProbeEvent::MetadataStarted) {
         return Err(MediaError::Cancelled);
     }
-    let input = media_input(path)?;
+    let probe_io = ProbeIo::new(path, observer);
+    let input = probe_io.open(path)?;
     let video = input.streams().best(ffmpeg::media::Type::Video);
     let audio = input.streams().best(ffmpeg::media::Type::Audio);
 
@@ -85,7 +86,7 @@ pub(crate) fn probe_path_observed(
             path,
             stream.index(),
             normalized_start(stream.start_time()),
-            observer,
+            &probe_io,
         )?;
         let rate = select_video_rate(path, &stream, &timing)?;
         let rotation = stream_rotation(&stream).map_err(|error| {
@@ -132,7 +133,7 @@ pub(crate) fn probe_path_observed(
             // of crushing full-range stills with a limited expansion.
             let color_description = color_description_from_decoder(
                 &decoder,
-                negotiated_pixel_format(path, stream.index(), observer),
+                negotiated_pixel_format(path, stream.index(), &probe_io),
             );
             (
                 Rational::default(),
@@ -142,7 +143,7 @@ pub(crate) fn probe_path_observed(
                 MediaKind::Image,
             )
         } else {
-            let negotiated_pixel_format = negotiated_pixel_format(path, stream.index(), observer);
+            let negotiated_pixel_format = negotiated_pixel_format(path, stream.index(), &probe_io);
             let color_description =
                 color_description_from_decoder(&decoder, negotiated_pixel_format);
             let stream_duration =
@@ -235,12 +236,9 @@ pub(crate) fn color_description_from_decoder(
 fn negotiated_pixel_format(
     path: &Path,
     stream_index: usize,
-    observer: &dyn ProbeObserver,
+    probe_io: &ProbeIo<'_>,
 ) -> Option<ffmpeg::format::Pixel> {
-    if observer.cancelled() {
-        return None;
-    }
-    let mut input = media_input(path).ok()?;
+    let mut input = probe_io.open(path).ok()?;
     let mut decoder = {
         let stream = input
             .streams()
@@ -250,11 +248,8 @@ fn negotiated_pixel_format(
     };
 
     let mut frame = ffmpeg::frame::Video::empty();
-    for (stream, packet) in input.packets() {
-        if observer.cancelled() {
-            return None;
-        }
-        if stream.index() != stream_index {
+    while let Some(packet) = probe_io.packet(&mut input).ok()? {
+        if packet.stream() != stream_index {
             continue;
         }
         decoder.send_packet(&packet).ok()?;
@@ -711,21 +706,15 @@ fn analyze_video_packets(
     path: &Path,
     stream_index: usize,
     stream_start: i64,
-    observer: &dyn ProbeObserver,
+    probe_io: &ProbeIo<'_>,
 ) -> Result<VideoPacketTiming, MediaError> {
-    if observer.cancelled() {
-        return Err(MediaError::Cancelled);
-    }
-    let mut input = media_input(path)?;
+    let mut input = probe_io.open(path)?;
     let mut reference_duration = None;
     let mut duration_variable = false;
     let mut pictures = Vec::new();
     let mut packet_count = 0_u64;
-    for (stream, packet) in input.packets() {
-        if observer.cancelled() {
-            return Err(MediaError::Cancelled);
-        }
-        if stream.index() != stream_index {
+    while let Some(packet) = probe_io.packet(&mut input)? {
+        if packet.stream() != stream_index {
             continue;
         }
         packet_count = packet_count.saturating_add(1);
@@ -865,6 +854,78 @@ struct ReaderStop {
     path: std::path::PathBuf,
 }
 
+struct ProbeIo<'a> {
+    observer: &'a dyn ProbeObserver,
+    restore: Option<RestoreReaderStop>,
+}
+
+struct RestoreReaderStop(Option<ReaderStop>);
+
+impl Drop for RestoreReaderStop {
+    fn drop(&mut self) {
+        READER_STOP.set(self.0.take());
+    }
+}
+
+impl<'a> ProbeIo<'a> {
+    fn new(path: &Path, observer: &'a dyn ProbeObserver) -> Self {
+        let restore = observer.interrupt_flag().map(|stop| {
+            let previous = READER_STOP.replace(Some(reader_stop(path, stop)));
+            RestoreReaderStop(previous)
+        });
+        Self { observer, restore }
+    }
+
+    fn open(&self, path: &Path) -> Result<ffmpeg::format::context::Input, MediaError> {
+        if self.observer.cancelled() {
+            return Err(MediaError::Cancelled);
+        }
+        let result = if self.restore.is_some() {
+            interruptible_input(path)
+        } else {
+            media_input(path)
+        };
+        if self.observer.cancelled() {
+            return Err(MediaError::Cancelled);
+        }
+        result
+    }
+
+    fn packet(
+        &self,
+        input: &mut ffmpeg::format::context::Input,
+    ) -> Result<Option<ffmpeg::Packet>, MediaError> {
+        next_probe_packet(|| self.observer.cancelled(), |packet| packet.read(input))
+    }
+}
+
+fn next_probe_packet(
+    cancelled: impl Fn() -> bool,
+    mut read: impl FnMut(&mut ffmpeg::Packet) -> Result<(), ffmpeg::Error>,
+) -> Result<Option<ffmpeg::Packet>, MediaError> {
+    let mut packet = ffmpeg::Packet::empty();
+    loop {
+        if cancelled() {
+            return Err(MediaError::Cancelled);
+        }
+        match read(&mut packet) {
+            Ok(()) => return Ok(Some(packet)),
+            Err(ffmpeg::Error::Eof) => return Ok(None),
+            Err(_) => {}
+        }
+    }
+}
+
+fn reader_stop(path: &Path, stop: Arc<std::sync::atomic::AtomicBool>) -> ReaderStop {
+    #[cfg(not(test))]
+    let _ = path;
+    ReaderStop {
+        stop,
+        #[cfg(test)]
+        path: path.to_path_buf(),
+    }
+}
+
 /// Amendment R43 (RS-1): libavformat's `AVIOInterruptCB`, called before each
 /// real read of the file (open, stream probing, seek, packet read): true
 /// ends that IO with `AVERROR_EXIT`.
@@ -887,12 +948,12 @@ fn reader_input(
     path: &Path,
     stop: &Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<ffmpeg::format::context::Input, MediaError> {
+    READER_STOP.set(Some(reader_stop(path, Arc::clone(stop))));
+    interruptible_input(path)
+}
+
+fn interruptible_input(path: &Path) -> Result<ffmpeg::format::context::Input, MediaError> {
     crate::quiet_ffmpeg_log();
-    READER_STOP.set(Some(ReaderStop {
-        stop: Arc::clone(stop),
-        #[cfg(test)]
-        path: path.to_path_buf(),
-    }));
     crate::locator::before_decoder_open()?;
     ffmpeg::format::input_with_interrupt(path, reader_interrupted).map_err(|error| {
         #[cfg(test)]
@@ -4414,6 +4475,78 @@ mod tests {
             (120..=140).contains(&alpha),
             "half alpha must survive decode, got {alpha}"
         );
+    }
+
+    #[test]
+    fn cancelling_an_observed_probe_interrupts_ffmpeg_open() {
+        use std::{
+            sync::atomic::{AtomicBool, Ordering},
+            time::Duration,
+        };
+
+        struct Observer(Arc<AtomicBool>);
+        impl ProbeObserver for Observer {
+            fn observe(&self, _: ProbeEvent) -> bool {
+                !self.cancelled()
+            }
+            fn cancelled(&self) -> bool {
+                self.0.load(Ordering::Acquire)
+            }
+            fn interrupt_flag(&self) -> Option<Arc<AtomicBool>> {
+                Some(Arc::clone(&self.0))
+            }
+        }
+
+        crate::initialize_ffmpeg().unwrap();
+        let fixture = crate::test_support::GeneratedMedia::ffmpeg(
+            "ix1-probe-interrupt",
+            &["-f", "lavfi", "-i", "sine=sample_rate=48000", "-t", "0.1"],
+            "wav",
+        );
+        let path = fixture.path();
+        interrupt_seam::arm(path, interrupt_seam::Mode::Interruptible);
+        let flag = Arc::new(AtomicBool::new(false));
+        let worker_flag = Arc::clone(&flag);
+        let result = std::thread::scope(|scope| {
+            let worker =
+                scope.spawn(move || probe_path_observed(path, AssetId(1), &Observer(worker_flag)));
+            let entered = interrupt_seam::wait_entered(path, Duration::from_secs(2));
+            flag.store(true, Ordering::Release);
+            interrupt_seam::poke();
+            (entered, worker.join().unwrap())
+        });
+        let interrupts = interrupt_seam::interrupts(path);
+        let exits = interrupt_seam::exits(path);
+        interrupt_seam::disarm(path);
+        assert!(result.0, "the probe must install the FFmpeg callback");
+        assert_eq!(result.1.unwrap_err(), MediaError::Cancelled);
+        assert!(interrupts > 0);
+        assert!(exits > 0);
+        assert_eq!(
+            Arc::strong_count(&flag),
+            1,
+            "the callback flag must be released"
+        );
+    }
+
+    #[test]
+    fn probe_packet_reader_observes_cancel_between_repeated_read_failures() {
+        use std::cell::Cell;
+
+        let attempts = Cell::new(0);
+        let result = next_probe_packet(
+            || attempts.get() == 4,
+            |_| {
+                let attempt = attempts.get() + 1;
+                attempts.set(attempt);
+                if attempt > 4 {
+                    return Err(ffmpeg::Error::Eof);
+                }
+                Err(ffmpeg::Error::InvalidData)
+            },
+        );
+        assert_eq!(attempts.get(), 4);
+        assert!(matches!(result, Err(MediaError::Cancelled)));
     }
 
     #[test]

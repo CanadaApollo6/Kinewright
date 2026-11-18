@@ -253,7 +253,7 @@ pub(super) enum Phase {
 }
 
 pub(super) struct Ticket {
-    stop: AtomicBool,
+    stop: Arc<AtomicBool>,
     control: PrepareControl,
     deadlines: MediaDeadlines,
     state: Mutex<State>,
@@ -272,7 +272,7 @@ impl Ticket {
             Phase::Probe => deadlines.hash_stall,
         };
         Self {
-            stop: AtomicBool::new(false),
+            stop: Arc::new(AtomicBool::new(false)),
             control,
             deadlines,
             state: Mutex::new(State {
@@ -317,6 +317,10 @@ impl Ticket {
 impl ProbeObserver for Ticket {
     fn observe(&self, event: ProbeEvent) -> bool {
         self.update(Some(event))
+    }
+
+    fn interrupt_flag(&self) -> Option<Arc<AtomicBool>> {
+        Some(Arc::clone(&self.stop))
     }
 
     fn cancelled(&self) -> bool {

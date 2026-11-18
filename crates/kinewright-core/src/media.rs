@@ -2238,6 +2238,12 @@ pub trait ProbeObserver {
     fn cancelled(&self) -> bool {
         false
     }
+
+    /// A shared latch the native I/O callback can check during an open or read.
+    /// Observers with an external supervisor set it when the probe is stopped.
+    fn interrupt_flag(&self) -> Option<Arc<std::sync::atomic::AtomicBool>> {
+        None
+    }
 }
 
 impl ProbeObserver for () {

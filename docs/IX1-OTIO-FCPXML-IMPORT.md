@@ -604,7 +604,8 @@ source or bundle call produces `io_timeout`; stalled media results produce `medi
 Cancel returns while any blocked operating-system calls finish under the abandonment cap.
 These deadlines are configurable with the stated defaults. The same probe events drive hashing
 progress and cancellation. After abandonment the next observer checkpoint stops the probe.
-Metadata packet reads also check cancellation without restarting the metadata deadline.
+Ruling 30 uses the playback reader's FFmpeg interrupt callback during an observed probe.
+Packet reads check cancellation between retries without restarting the metadata deadline.
 
 A worker past its deadline is abandoned, and its result is discarded. The thread itself
 ends when the call returns. Replace an abandoned stat worker so other locators can still
@@ -798,7 +799,8 @@ Named cases:
 **Media-dependent rows.** Probing, `source_clamped`, `source_origin_assumed`, A/V sync and
 `media_timeout` are proven by the lavfi fixtures, never by the corpus, whose files come without
 media. The timeout cases use a `LocatorFs` double that blocks source opens, reads, directory
-enumeration, entry metadata, media stats and probes.
+enumeration, entry metadata, media stats and probes. Separate probe witnesses hold the FFmpeg
+input interrupt callback and cancel a packet reader between repeated failures.
 
 **Corpus (correction 1).** The lead downloads openly licensed public timelines into an untracked
 directory and treats them as untrusted input. "Real" excludes test-suite fixtures, such as the OTIO
@@ -953,6 +955,8 @@ Lead rulings (2026-11-17):
     parameter (§8.1).
 29. **Bounded filesystem work.** Source reads and bundle enumeration use the same
     deadlines, cancellation and worker caps as media-root searches (§8.2).
+30. **Probe interruption.** Observed probes use the reader interrupt callback for FFmpeg
+    input and check cancellation between packet retries (§8.2).
 
 Open questions:
 1. **Marker colour switch.** Should `MARKER_COLOR_POLICY` ship as `LabelPrefix` or `Drop`? This is
