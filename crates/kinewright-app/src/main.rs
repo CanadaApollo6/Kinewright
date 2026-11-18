@@ -95,6 +95,8 @@ fn check_bundle_admission(
     media: &std::path::Path,
     session_parent: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::process::CommandExt;
+
     use kinewright_project::{
         bundle_records::{BatchId, BranchId},
         editing_session::Ja1EditingSession,
@@ -104,6 +106,18 @@ fn check_bundle_admission(
         storage_budget::StorageLimits,
     };
 
+    let session_parent = session_parent.canonicalize()?;
+    // The sandbox takes its temporary mount root from TMPDIR. Set it for
+    // this process on exec, before the probe runtime starts any threads.
+    if std::env::temp_dir() != session_parent {
+        return Err(std::process::Command::new(std::env::current_exe()?)
+            .arg("--check-bundle-admission")
+            .arg(media)
+            .arg(&session_parent)
+            .env("TMPDIR", &session_parent)
+            .exec()
+            .into());
+    }
     media_sandbox::configure_media_sandbox_beside_executable()?;
     let history = HistoryPool::new(PoolLimits::default());
     let core = Core::spawn(
@@ -117,7 +131,7 @@ fn check_bundle_admission(
     )?;
     // The diagnostic uses a headless edit store under session_parent. It
     // never creates an App project session or starts a recovery journal.
-    let mut session = Ja1EditingSession::new(session_parent, &core, StorageLimits::default())?;
+    let mut session = Ja1EditingSession::new(&session_parent, &core, StorageLimits::default())?;
     let (asset, _) = session.import_owned_media(media)?;
     println!("Admitted {}", asset.name);
     Ok(())
