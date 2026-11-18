@@ -1853,13 +1853,13 @@ impl KinewrightApp {
         };
         match crate::interchange_ui::classify_open_path(&path) {
             crate::interchange_ui::OpenPath::Project => self.open_project(&path),
-            crate::interchange_ui::OpenPath::Timeline { otio } => {
-                self.open_interchange(path, otio, ctx);
+            crate::interchange_ui::OpenPath::Timeline => {
+                self.open_interchange(path, ctx);
             }
         }
     }
 
-    pub(crate) fn open_interchange(&mut self, path: PathBuf, otio: bool, ctx: &egui::Context) {
+    pub(crate) fn open_interchange(&mut self, path: PathBuf, ctx: &egui::Context) {
         if self.interchange_dialog.is_some() || !self.ja1_destination_change() {
             return;
         }
@@ -1871,7 +1871,7 @@ impl KinewrightApp {
             .lut_publisher
             .legacy_media(grant, Arc::new(Document::default()));
         self.interchange_dialog = Some(crate::interchange_ui::ImportDialog::new(
-            path, otio, analysis, ctx,
+            path, analysis, ctx,
         ));
     }
 

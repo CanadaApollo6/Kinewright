@@ -79,10 +79,10 @@ impl KinewrightApp {
     /// the media column is optional, not a prerequisite for getting footage in.
     pub(crate) fn import_dropped_files(&mut self, ctx: &egui::Context) {
         for path in dropped_paths(ctx) {
-            if let crate::interchange_ui::OpenPath::Timeline { otio } =
-                crate::interchange_ui::classify_open_path(&path)
+            if crate::interchange_ui::classify_open_path(&path)
+                == crate::interchange_ui::OpenPath::Timeline
             {
-                self.open_interchange(path, otio, ctx);
+                self.open_interchange(path, ctx);
                 continue;
             }
             if crate::media_workflow::is_cube_lut_path(&path) {

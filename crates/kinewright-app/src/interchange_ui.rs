@@ -7,7 +7,9 @@ use std::{
 };
 
 use eframe::egui;
-use kinewright_core::{Analysis, Document, ImportRecord, LossBound, LossCode, Rational};
+use kinewright_core::{
+    Analysis, Document, ImportRecord, InterchangeFormat, LossBound, LossCode, Rational,
+};
 use kinewright_project::interchange::{
     ImportOptions, MediaEntry, MediaStatus, PrepareControl, PrepareOptions, PreparedImport,
     Refusal, RefusalCode, ShareRoot, prepare,
@@ -78,23 +80,18 @@ pub(crate) fn display_text(parts: &[&str], limit: usize) -> String {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum OpenPath {
     Project,
-    Timeline { otio: bool },
+    Timeline,
 }
 
 pub(crate) fn classify_open_path(path: &Path) -> OpenPath {
     let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
         return OpenPath::Project;
     };
-    if ["otio", "otiod"]
+    if ["otio", "otiod", "fcpxml", "fcpxmld"]
         .iter()
         .any(|suffix| extension.eq_ignore_ascii_case(suffix))
     {
-        OpenPath::Timeline { otio: true }
-    } else if ["fcpxml", "fcpxmld"]
-        .iter()
-        .any(|suffix| extension.eq_ignore_ascii_case(suffix))
-    {
-        OpenPath::Timeline { otio: false }
+        OpenPath::Timeline
     } else {
         OpenPath::Project
     }
@@ -119,7 +116,6 @@ pub(crate) struct ImportDialog {
     allowed: BTreeSet<ShareRoot>,
     share_choices: Vec<ShareRoot>,
     timeline_choices: Vec<String>,
-    otio: bool,
     overrides: Option<(u32, u32, u32, u32)>,
     folder_picker: Option<mpsc::Receiver<Option<PathBuf>>>,
     state: Preparation,
@@ -128,12 +124,7 @@ pub(crate) struct ImportDialog {
 }
 
 impl ImportDialog {
-    pub(crate) fn new(
-        source: PathBuf,
-        otio: bool,
-        analysis: Arc<dyn Analysis>,
-        ctx: &egui::Context,
-    ) -> Self {
+    pub(crate) fn new(source: PathBuf, analysis: Arc<dyn Analysis>, ctx: &egui::Context) -> Self {
         let mut dialog = Self {
             source,
             analysis,
@@ -141,7 +132,6 @@ impl ImportDialog {
             allowed: BTreeSet::new(),
             share_choices: Vec::new(),
             timeline_choices: Vec::new(),
-            otio,
             overrides: None,
             folder_picker: None,
             state: Preparation::Refused(Refusal::new(
@@ -222,17 +212,22 @@ impl ImportDialog {
     fn finish_preparation(&mut self, result: Result<PreparedImport, Refusal>) {
         match result {
             Ok(prepared) => {
-                let document = prepared.document();
-                if self.otio
-                    && self.options.project_fps.is_none()
-                    && self.options.resolution.is_none()
-                {
-                    self.overrides = Some((
+                if prepared.record().format == InterchangeFormat::Otio {
+                    let document = prepared.document();
+                    let (width, height) = document.resolution;
+                    let defaults = (
                         document.fps.numerator(),
                         document.fps.denominator(),
-                        document.resolution.0,
-                        document.resolution.1,
-                    ));
+                        width,
+                        height,
+                    );
+                    if self.options.project_fps.is_none() && self.options.resolution.is_none() {
+                        self.overrides = Some(defaults);
+                    } else {
+                        self.overrides.get_or_insert(defaults);
+                    }
+                } else {
+                    self.overrides = None;
                 }
                 self.share_choices = prepared
                     .media()
@@ -248,7 +243,7 @@ impl ImportDialog {
                 if !refusal.timelines.is_empty() {
                     self.timeline_choices.clone_from(&refusal.timelines);
                 }
-                if self.otio && refusal.code == RefusalCode::ProjectRateRequired {
+                if refusal.code == RefusalCode::ProjectRateRequired {
                     self.overrides.get_or_insert((24, 1, 0, 0));
                 }
                 self.state = Preparation::Refused(refusal);
@@ -863,14 +858,17 @@ mod tests {
         prepared
     }
 
-    fn painted_dialog(ctx: &egui::Context, dialog: &mut ImportDialog) -> Vec<String> {
+    fn draw_dialog(ctx: &egui::Context, dialog: &mut ImportDialog) -> egui::FullOutput {
         let _ = ctx.run_ui(input(), |ui| {
             assert!(matches!(dialog.show(ui.ctx()), ImportAction::Wait));
         });
-        let output = ctx.run_ui(input(), |ui| {
+        ctx.run_ui(input(), |ui| {
             assert!(matches!(dialog.show(ui.ctx()), ImportAction::Wait));
-        });
-        crate::theme::painted_text(&output)
+        })
+    }
+
+    fn painted_dialog(ctx: &egui::Context, dialog: &mut ImportDialog) -> Vec<String> {
+        crate::theme::painted_text(&draw_dialog(ctx, dialog))
     }
 
     fn with_key(key: egui::Key) -> egui::RawInput {
@@ -900,11 +898,11 @@ mod tests {
         );
         assert_eq!(
             classify_open_path(Path::new("edit.fcpxml")),
-            OpenPath::Timeline { otio: false }
+            OpenPath::Timeline
         );
         assert_eq!(
             classify_open_path(Path::new("edit.fcpxmld")),
-            OpenPath::Timeline { otio: false }
+            OpenPath::Timeline
         );
         assert_eq!(
             classify_open_path(Path::new("edit.kinewright")),
@@ -924,8 +922,8 @@ mod tests {
             );
         });
         for path in [file, bundle, main] {
-            assert_eq!(classify_open_path(&path), OpenPath::Timeline { otio: true });
-            let mut dialog = ImportDialog::new(path, true, Arc::new(RefusedMedia), &ctx);
+            assert_eq!(classify_open_path(&path), OpenPath::Timeline);
+            let mut dialog = ImportDialog::new(path, Arc::new(RefusedMedia), &ctx);
             settle(&mut dialog);
             assert_eq!(ready(&dialog).name(), "Reel Two");
             assert_eq!(ready(&dialog).record().items, 1);
@@ -945,7 +943,7 @@ mod tests {
         let backend = RecordingMedia::holding(ProbeHold::new(start_tx, release_rx, finish_tx));
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
-        let mut dialog = ImportDialog::new(file, true, Arc::new(backend), &ctx);
+        let mut dialog = ImportDialog::new(file, Arc::new(backend), &ctx);
         start_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let painted = painted_dialog(&ctx, &mut dialog);
         assert!(
@@ -977,7 +975,7 @@ mod tests {
         crate::theme::install(&ctx);
         let first = root.join("take.mov");
         std::fs::write(&first, b"mock probe input").unwrap();
-        let mut dialog = ImportDialog::new(file, true, Arc::new(RecordingMedia::default()), &ctx);
+        let mut dialog = ImportDialog::new(file, Arc::new(RecordingMedia::default()), &ctx);
         settle(&mut dialog);
         assert_eq!(ready(&dialog).media()[0].status, MediaStatus::Missing);
         dialog.locate_folder(&root, &ctx);
@@ -1029,7 +1027,7 @@ mod tests {
         write_edit(&path, remote);
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
-        let mut dialog = ImportDialog::new(path, true, Arc::new(RefusedMedia), &ctx);
+        let mut dialog = ImportDialog::new(path, Arc::new(RefusedMedia), &ctx);
         settle(&mut dialog);
         let prepared = ready(&dialog);
         let expected_status = import_status(prepared.name(), prepared.record());
@@ -1067,6 +1065,107 @@ mod tests {
     }
 
     #[test]
+    fn ix1_dialog_uses_otio_rate_refusal_even_with_a_final_cut_extension() {
+        let directory = TempDirectory::new("ix1-otio-content");
+        let path = directory.path("edit.fcpxml");
+        write_edit(&path, "missing.wav");
+        let mut timeline: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        timeline
+            .as_object_mut()
+            .unwrap()
+            .remove("global_start_time");
+        timeline["tracks"]["children"][0]["kind"] = "Audio".into();
+        std::fs::write(&path, serde_json::to_vec(&timeline).unwrap()).unwrap();
+
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        assert_eq!(classify_open_path(&path), OpenPath::Timeline);
+        let mut dialog = ImportDialog::new(path, Arc::new(RefusedMedia), &ctx);
+        settle(&mut dialog);
+        assert!(matches!(&dialog.state, Preparation::Refused(refusal)
+            if refusal.code == RefusalCode::ProjectRateRequired));
+        let painted = painted_dialog(&ctx, &mut dialog);
+        assert!(painted.iter().any(|text| text == "Frames per second"));
+        assert!(painted.iter().any(|text| text == "Width and height"));
+
+        dialog.overrides = Some((25, 1, 640, 360));
+        let output = draw_dialog(&ctx, &mut dialog);
+        let at = output
+            .shapes
+            .iter()
+            .find_map(|shape| apply_settings_center(&shape.shape))
+            .expect("Apply settings is visible");
+        for pressed in [true, false] {
+            let mut click = input();
+            click.events = vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            let _ = ctx.run_ui(click, |ui| {
+                assert!(matches!(dialog.show(ui.ctx()), ImportAction::Wait));
+            });
+        }
+        settle(&mut dialog);
+        let _ = painted_dialog(&ctx, &mut dialog);
+        let mut action = ImportAction::Wait;
+        let _ = ctx.run_ui(with_key(egui::Key::Enter), |ui| {
+            action = dialog.show(ui.ctx());
+        });
+        let ImportAction::Open(prepared) = action else {
+            panic!("Open did not return the prepared timeline");
+        };
+        assert_eq!(prepared.record().format, InterchangeFormat::Otio);
+        assert_eq!(prepared.document().fps, Rational::new(25, 1).unwrap());
+        assert_eq!(prepared.document().resolution, (640, 360));
+    }
+
+    fn apply_settings_center(shape: &egui::epaint::Shape) -> Option<egui::Pos2> {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == "Apply settings" => {
+                Some(text.pos + text.galley.size() * 0.5)
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(apply_settings_center),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn ix1_dialog_uses_final_cut_controls_even_with_an_otio_extension() {
+        let directory = TempDirectory::new("ix1-fcpxml-content");
+        let path = directory.path("edit.otio");
+        std::fs::write(
+            &path,
+            r#"<fcpxml version="1.13">
+          <resources>
+            <format id="f" frameDuration="1/24s" width="1920" height="1080"/>
+            <asset id="a" duration="1s" hasVideo="1">
+              <media-rep kind="original-media" src="missing.mov"/>
+            </asset>
+          </resources>
+          <library><event><project name="Final Cut edit">
+            <sequence format="f"><spine><asset-clip ref="a" duration="1s"/></spine></sequence>
+          </project></event></library>
+        </fcpxml>"#,
+        )
+        .unwrap();
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        assert_eq!(classify_open_path(&path), OpenPath::Timeline);
+        let mut dialog = ImportDialog::new(path, Arc::new(RefusedMedia), &ctx);
+        settle(&mut dialog);
+        assert_eq!(ready(&dialog).record().format, InterchangeFormat::Fcpxml);
+        let painted = painted_dialog(&ctx, &mut dialog);
+        assert!(painted.iter().any(|text| text == "24/1 fps · 1920 × 1080"));
+        assert!(!painted.iter().any(|text| text == "Apply settings"));
+    }
+
+    #[test]
     fn ix1_dialog_and_saved_report_bound_hostile_file_text_before_layout() {
         let directory = TempDirectory::new("ix1-hostile-text");
         let path = directory.path("edit.otio");
@@ -1090,7 +1189,7 @@ mod tests {
 
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
-        let mut dialog = ImportDialog::new(path, true, Arc::new(RefusedMedia), &ctx);
+        let mut dialog = ImportDialog::new(path, Arc::new(RefusedMedia), &ctx);
         settle(&mut dialog);
         assert!(dialog.share_choices.is_empty());
         assert_eq!(ready(&dialog).media()[0].locator, locator);
@@ -1153,7 +1252,7 @@ mod tests {
         let input = directory.path("edit.otio");
         std::fs::write(&input, b"{invalid json").unwrap();
         let ctx = egui::Context::default();
-        let mut dialog = ImportDialog::new(input, true, Arc::new(RefusedMedia), &ctx);
+        let mut dialog = ImportDialog::new(input, Arc::new(RefusedMedia), &ctx);
         settle(&mut dialog);
         let Preparation::Refused(refusal) = &dialog.state else {
             panic!("malformed source was not refused");

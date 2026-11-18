@@ -692,11 +692,12 @@ unchanged, so clip lengths do not move and `survive_clip_edit` has nothing to do
 *Opening.* File > Open… (`choose_project`, `app.rs:1836`) gains a "Timeline (OTIO, FCPXML)" filter.
 A bundle opens through its `content.otio` or `Info.fcpxml`, or by dropping it.
 `import_dropped_files` (`media_bin.rs:69`) routes these files and bundles to the interchange path,
-as it already routes `.cube` (`media_bin.rs:79`).
+as it already routes `.cube` (`media_bin.rs:79`). The extension routes the file to the import
+dialog. The reader's result determines its format and controls.
 
 *The import dialog* is modal. It shows:
 - the source and a timeline picker;
-- fps and resolution (editable for OTIO);
+- fps and resolution, with editable fields when the reader identifies OTIO or requires a rate;
 - the totals, with item rows and timeline/media rows in two groups;
 - unverified rows labelled, and omitted codes listed by name;
 - the media table: online, missing, timed-out, and remote shares with an **Allow** tick;
@@ -1032,6 +1033,8 @@ Lead rulings (2026-11-17):
     Only shares within the host and share name limits can be offered for approval (§8.1, §9).
 37. **Retimed generator anchors.** Map the timing of attached items and decorations while
     keeping the generator's timeline span as a gap (§3).
+38. **Reader-selected controls.** Route Open and drop by extension, then use the reader's format
+    or rate-required refusal to decide which settings can be edited (§9).
 
 Open questions:
 1. **Marker colour switch.** Should `MARKER_COLOR_POLICY` ship as `LabelPrefix` or `Drop`? This is
