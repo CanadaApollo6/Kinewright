@@ -391,6 +391,13 @@ impl Lease {
         }
         self.owned_group().map_err(|_| bad())?;
         let group = self.group.as_ref().ok_or_else(bad)?;
+        #[cfg(feature = "slow-tests")]
+        if self.seams.scope == Some(super::ScopeSeam::AttachedReportedFailed) {
+            // Attached and owned, then reported failed: the fallback shape of
+            // a reply lost after attach, with the scope held by this lease.
+            *fallback = true;
+            return Err(Failure::Sandbox(Error::SandboxUnavailable));
+        }
         media_scope::verify_controls(group, limits.private_memory).map_err(|_| bad())?;
         let members = group.members().map_err(|_| bad())?;
         if members.len() != 1
@@ -584,7 +591,10 @@ impl Lease {
         #[cfg(feature = "slow-tests")]
         self.await_hosted_removal();
         #[cfg(feature = "slow-tests")]
-        let broken = self.seams.scope == Some(super::ScopeSeam::PersistentError);
+        let broken = matches!(
+            self.seams.scope,
+            Some(super::ScopeSeam::PersistentError | super::ScopeSeam::AttachedReportedFailed)
+        );
         #[cfg(not(feature = "slow-tests"))]
         let broken = false;
         if let Some(group) = self.group.as_mut() {

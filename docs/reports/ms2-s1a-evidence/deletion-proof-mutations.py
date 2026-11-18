@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[3]
 OUT = Path(__file__).with_suffix(".json")
 LINUX = "crates/kinewright-job-sys/src/linux.rs"
 WORKER = "crates/kinewright-media-client/src/linux/worker.rs"
+ACTOR = "crates/kinewright-media-client/src/linux/actor.rs"
 HEAVY = ["flock", "-o", "/tmp/kinewright-cargo-heavy.lock", "env", "CARGO_BUILD_JOBS=4", "nice", "-n", "10", "timeout", "600"]
 JOB_SYS_UNIT = ["cargo", "test", "--locked", "-p", "kinewright-job-sys", "--lib", "deletion_proof_tests"]
 GUARDIAN = ["cargo", "test", "--locked", "-p", "kinewright-agent", "--features", "slow-tests",
@@ -52,6 +53,12 @@ CASES = [
     ("nlink-only", LINUX, CLIENT + ["runtime_scope_proof_holds_when_a_removed_scope_keeps_two_links"],
      lambda t: replace(t, "CgroupEvents::Removed => Ok(true),", "CgroupEvents::Removed => Ok(self.links? == 0),")),
 ]
+CASES.append(
+    # The degraded fallback relaunches a run whose cleanup is unproven.
+    ("fallback-unproven-guard", ACTOR, CLIENT + ["runtime_unproven_fallback_is_not_relaunched"],
+     lambda t: replace(t, "&& done.fallback\n                            && !unproven\n",
+                     "&& done.fallback\n")),
+)
 if (ROOT / WORKER).read_text(encoding="utf-8").count("SCOPE_PROOF_ERRORS"):
     CASES.append(
         # The cleanup loop keeps polling a persistent error for ever.

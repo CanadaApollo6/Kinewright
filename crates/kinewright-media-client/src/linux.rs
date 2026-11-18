@@ -91,6 +91,11 @@ pub enum ScopeSeam {
     /// Every emptiness proof of the helper scope answers an error, as a
     /// retained descriptor that the kernel or manager broke would.
     PersistentError,
+    /// The shim is attached to its scope and the lease owns that cgroup, but
+    /// the run then takes the scope fallback, as `ScopeCreateFailed` with the
+    /// scope id does when the manager's reply is lost after attach. Every
+    /// emptiness proof of that scope then errors as with `PersistentError`.
+    AttachedReportedFailed,
 }
 impl Config {
     #[must_use]
@@ -212,6 +217,8 @@ struct Status {
     contained: AtomicBool,
     #[cfg(feature = "slow-tests")]
     observed_rss: std::sync::atomic::AtomicU64,
+    #[cfg(feature = "slow-tests")]
+    launches: std::sync::atomic::AtomicU32,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Snapshot {
@@ -231,6 +238,8 @@ pub struct WitnessSnapshot {
     pub incomplete_reply: bool,
     pub contained: bool,
     pub observed_rss: u64,
+    /// Helper launches since start, relaunches included.
+    pub launches: u32,
 }
 pub struct Runtime {
     sender: SyncSender<actor::Command>,
@@ -330,6 +339,7 @@ impl Runtime {
             incomplete_reply: self.status.incomplete_reply.load(Ordering::Acquire),
             contained: self.status.contained.load(Ordering::Acquire),
             observed_rss: self.status.observed_rss.load(Ordering::Acquire),
+            launches: self.status.launches.load(Ordering::Acquire),
         }
     }
     #[cfg(feature = "slow-tests")]

@@ -118,11 +118,9 @@ fn runtime_fixture() {
         config
     };
     #[cfg(feature = "slow-tests")]
-    if case == "persistent-error" {
-        let config = config.scope_seam(kinewright_media_client::ScopeSeam::PersistentError);
-        unproven_cleanup(config, &png);
+    let Some(config) = unproven_case(&case, config, &png) else {
         return;
-    }
+    };
     let runtime = Runtime::start(config).unwrap();
     let sampler = ms2_diag::sample("runtime_native");
     let result = runtime.probe(Request {
@@ -191,6 +189,50 @@ fn unproven_cleanup(config: Config, png: &Path) {
         assert!(*elapsed < Duration::from_secs(4), "{elapsed:?}");
     }
     assert_eq!((first.2, second.2, held), (1, 2, 2));
+    assert_eq!(shutdown, Err(MediaSandboxError::Crashed));
+}
+/// Runs the unproven-cleanup cases; any other case gets its config back.
+#[cfg(feature = "slow-tests")]
+fn unproven_case(case: &std::ffi::OsStr, config: Config, png: &Path) -> Option<Config> {
+    use kinewright_media_client::ScopeSeam;
+    if case == "attached-failed" {
+        unproven_fallback(config.scope_seam(ScopeSeam::AttachedReportedFailed), png);
+    } else if case == "persistent-error" {
+        unproven_cleanup(config.scope_seam(ScopeSeam::PersistentError), png);
+    } else {
+        return Some(config);
+    }
+    None
+}
+/// The scope is attached and then reported failed, and every emptiness
+/// proof errors. The run is unproven, so the degraded fallback must not
+/// relaunch it: one launch, one slot kept, a failure inside the cleanup
+/// budget plus the error bound, and close reports the cleanup failure.
+#[cfg(feature = "slow-tests")]
+fn unproven_fallback(config: Config, png: &Path) {
+    use kinewright_media_ipc::MediaSandboxError;
+    let runtime = Runtime::start(config).unwrap();
+    let started = Instant::now();
+    let result = runtime.probe(Request {
+        source: Box::new(Input(File::open(png).unwrap())),
+        video: None,
+        audio: None,
+        cancel: Arc::new(AtomicBool::new(false)),
+        explicit_retry: false,
+    });
+    let elapsed = started.elapsed();
+    let launches = runtime.witness().launches;
+    let held = runtime.snapshot().active;
+    let shutdown = runtime.shutdown();
+    println!(
+        "MS2_UNPROVEN_FALLBACK result={:?} elapsed={elapsed:?} launches={launches} held={held} shutdown={shutdown:?}",
+        result.as_ref().err()
+    );
+    assert_eq!(launches, 1, "an unproven fallback run was relaunched");
+    assert_eq!(held, 1);
+    assert!(result.is_err());
+    // REAP_BUDGET (2 s) plus SCOPE_PROOF_ERRORS (500 ms).
+    assert!(elapsed < Duration::from_millis(2500), "{elapsed:?}");
     assert_eq!(shutdown, Err(MediaSandboxError::Crashed));
 }
 /// Runs one fixture case in a child and returns its relayed `MS2_` lines.
@@ -359,5 +401,29 @@ fn runtime_scope_proof_error_keeps_the_reservation() {
     assert!(
         relayed.contains("MS2_UNPROVEN_CLEANUP"),
         "the unproven cleanup case did not report:\n{relayed}"
+    );
+}
+
+/// A run whose scope was attached and then reported failed takes the
+/// degraded fallback, but its cleanup could not prove the scope empty: the
+/// request must get its failure instead of a degraded relaunch.
+#[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn runtime_unproven_fallback_is_not_relaunched() {
+    let _deadline = deadline::test();
+    ms2_diag::install(kinewright_media_client::diagnostics);
+    if !ms2_diag::user_manager() {
+        println!(
+            "MS2_NATIVE_NOT_RUN binary=runtime_native test=runtime_unproven_fallback_is_not_relaunched reason=no_user_manager"
+        );
+        return;
+    }
+    let relayed = run_case("attached-failed");
+    assert!(
+        relayed.contains("MS2_UNPROVEN_FALLBACK"),
+        "the unproven fallback case did not report:\n{relayed}"
     );
 }

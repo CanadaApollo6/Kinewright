@@ -277,7 +277,14 @@ impl Actor {
                     continue;
                 }
                 let mut result = match done {
-                    Ok(done) if job.cause.is_none() && done.fallback && !request.degraded => {
+                    // A fallback run whose scope emptiness is unproven keeps
+                    // its slot and gets its failure, like the retry below.
+                    Ok(done)
+                        if job.cause.is_none()
+                            && done.fallback
+                            && !unproven
+                            && !request.degraded =>
+                    {
                         request.degraded = true;
                         self.queue.continue_with(request, &self.status, now);
                         continue;
@@ -416,6 +423,8 @@ impl Actor {
                 scope_seam: self.config.scope_seam,
             };
             if let Ok(running) = worker::start(launch) {
+                #[cfg(feature = "slow-tests")]
+                self.status.launches.fetch_add(1, Ordering::AcqRel);
                 self.active.push(Job::launched(item, running, now));
             } else {
                 let failure = Failure::Sandbox(Error::SandboxUnavailable);
