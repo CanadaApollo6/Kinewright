@@ -632,7 +632,9 @@ def main(argv: list[str]) -> int:
             sys.exit("--os must be linux or windows")
         return verify_fast(log, os_name)
     if command == "fast":
-        code, log = run_cargo(["cargo", "test", "--workspace", *extra])
+        # --no-fail-fast: one run reports every failing test binary, not
+        # only the first.
+        code, log = run_cargo(["cargo", "test", "--workspace", "--no-fail-fast", *extra])
         if code != 0:
             print(f"cargo test --workspace exited {code}")
             return code
@@ -641,7 +643,7 @@ def main(argv: list[str]) -> int:
         entries = read_manifest()
         names = [path for _, path, _, _ in entries]
         cargo = [
-            "cargo", "test", "--workspace",
+            "cargo", "test", "--workspace", "--no-fail-fast",
             "--features", feature_list(entries),
             "--lib", "--bins", "--tests",
             *extra,
