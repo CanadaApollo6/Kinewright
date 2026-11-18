@@ -16,7 +16,10 @@ use kinewright_project::interchange::{
 };
 
 use crate::{
-    display_text::{DETAIL_CHARS, ROW_CHARS, display_text},
+    display_text::{
+        DETAIL_CHARS, ROW_CHARS, copyable_label, display_text, display_text_end,
+        display_text_with_prefix,
+    },
     theme::{self, color, space, type_size},
 };
 
@@ -227,11 +230,7 @@ impl ImportDialog {
         let response = egui::Modal::new(egui::Id::new("import-timeline")).show(ctx, |ui| {
             let height = dialog_width_and_height(ui);
             ui.heading("Import timeline");
-            let source = self.source.to_string_lossy();
-            ui.add(egui::Label::new(display_text(&[&source], ROW_CHARS)).truncate())
-                .on_hover_ui(|ui| {
-                    ui.label(display_text(&[&source], DETAIL_CHARS));
-                });
+            show_source_path(ui, &self.source);
             ui.separator();
             egui::ScrollArea::vertical()
                 .max_height(height)
@@ -275,6 +274,7 @@ impl ImportDialog {
         if !matches!(self.state, Preparation::Running(_)) {
             self.show_options(ui);
         }
+        let mut choose_folder = false;
         match &self.state {
             Preparation::Running(_) => {
                 ui.horizontal(|ui| {
@@ -283,7 +283,10 @@ impl ImportDialog {
                     if bytes == 0 {
                         ui.label("Reading timeline and checking media…");
                     } else {
-                        ui.label(format!("Checking media contents · {bytes} bytes read"));
+                        ui.label(format!(
+                            "Checking media contents · {bytes} {} read",
+                            if bytes == 1 { "byte" } else { "bytes" }
+                        ));
                     }
                 });
                 return;
@@ -291,14 +294,21 @@ impl ImportDialog {
             Preparation::Ready(prepared) => {
                 let document = prepared.document();
                 ui.label(format!(
-                    "{}/{} fps · {} × {}",
-                    document.fps.numerator(),
-                    document.fps.denominator(),
+                    "{} · {} × {}",
+                    rate_text(document.fps),
                     document.resolution.0,
                     document.resolution.1,
                 ));
                 show_totals(ui, prepared.record());
                 show_media(ui, prepared.media(), &mut self.selected_media);
+                if prepared.media().iter().any(can_locate_media) {
+                    choose_folder = ui
+                        .add_enabled(
+                            self.options.media_roots.len() < 8 && self.folder_picker.is_none(),
+                            egui::Button::new("Locate folder…"),
+                        )
+                        .clicked();
+                }
                 show_record_notes(ui, prepared.record());
             }
             Preparation::Refused(refusal) => show_refusal(ui, refusal),
@@ -313,13 +323,7 @@ impl ImportDialog {
                 }
             });
         }
-        if ui
-            .add_enabled(
-                self.options.media_roots.len() < 8 && self.folder_picker.is_none(),
-                egui::Button::new("Locate folder…"),
-            )
-            .clicked()
-        {
+        if choose_folder {
             self.choose_folder(ui.ctx());
         }
 
@@ -444,6 +448,68 @@ fn dialog_width_and_height(ui: &mut egui::Ui) -> f32 {
     (window.height() * 0.58).min(460.0)
 }
 
+fn show_source_path(ui: &mut egui::Ui, path: &Path) {
+    let full = path.to_string_lossy();
+    let name = path
+        .file_name()
+        .map_or_else(|| path.as_os_str(), |name| name);
+    let name = name.to_string_lossy();
+    let width = ui.available_width();
+    let file = fit_label(ui, &egui::TextStyle::Body, width, |limit| {
+        display_text(&[&name], limit)
+    });
+    ui.label(file).on_hover_ui(|ui| {
+        ui.label(display_text(&[&full], DETAIL_CHARS));
+    });
+    if let Some(folder) = path
+        .parent()
+        .filter(|folder| !folder.as_os_str().is_empty())
+    {
+        let folder = folder.to_string_lossy();
+        let text = fit_label(ui, &egui::TextStyle::Body, width, |limit| {
+            display_text_end(&folder, limit)
+        });
+        ui.weak(text).on_hover_ui(|ui| {
+            ui.label(display_text(&[&full], DETAIL_CHARS));
+        });
+    }
+}
+
+fn fit_label(
+    ui: &mut egui::Ui,
+    style: &egui::TextStyle,
+    width: f32,
+    text: impl Fn(usize) -> String,
+) -> String {
+    let full = text(ROW_CHARS);
+    if text_width(ui, &full, style) <= width {
+        return full;
+    }
+    let mut result = text(1);
+    let (mut low, mut high) = (2, ROW_CHARS);
+    while low < high {
+        let limit = usize::midpoint(low, high);
+        let candidate = text(limit);
+        if text_width(ui, &candidate, style) <= width {
+            result = candidate;
+            low = limit + 1;
+        } else {
+            high = limit;
+        }
+    }
+    result
+}
+
+fn text_width(ui: &mut egui::Ui, text: &str, style: &egui::TextStyle) -> f32 {
+    let font = style.resolve(ui.style());
+    ui.fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap(text.into(), font, egui::Color32::PLACEHOLDER)
+            .size()
+            .x
+    })
+}
+
 fn primary_button(text: &str) -> egui::Button<'_> {
     egui::Button::new(text)
         .fill(color::ACCENT_WASH)
@@ -458,16 +524,72 @@ fn technical_name(value: impl serde::Serialize) -> String {
 }
 
 fn show_refusal(ui: &mut egui::Ui, refusal: &Refusal) {
-    let parts = if let Some(at) = &refusal.at {
-        [at.as_str(), ": ", &refusal.message]
-    } else {
-        ["", "", &refusal.message]
+    let message = match (refusal.code, refusal.message.as_str()) {
+        (RefusalCode::Malformed, "The OTIO JSON is malformed.")
+        | (
+            RefusalCode::UnsupportedContainer,
+            "The OTIO file has no supported timeline container.",
+        ) => "This file is not a readable OpenTimelineIO timeline.",
+        (
+            RefusalCode::Malformed,
+            "The FCPXML document is malformed." | "The FCPXML file is not UTF-8.",
+        )
+        | (RefusalCode::UnsupportedContainer, "The XML root is not FCPXML.") => {
+            "This file is not a readable Final Cut timeline."
+        }
+        _ => refusal.message.as_str(),
     };
-    ui.colored_label(color::STATUS_WARNING, display_text(&parts, ROW_CHARS))
-        .on_hover_ui(|ui| {
-            ui.label(display_text(&parts, DETAIL_CHARS));
+    let location = refusal
+        .at
+        .as_deref()
+        .filter(|at| !matches!(*at, "" | "/"))
+        .map_or_else(String::new, |at| {
+            if let Some(pointer) = at.strip_prefix('/') {
+                format!(
+                    "At {}: ",
+                    pointer
+                        .replace('/', " › ")
+                        .replace("~1", "/")
+                        .replace("~0", "~")
+                )
+            } else if let Some((line, column)) = at.split_once(':') {
+                format!("At line {line}, column {column}: ")
+            } else {
+                format!("At {at}: ")
+            }
         });
-    ui.small(technical_name(refusal.code));
+    let parts = [location.as_str(), message];
+    let code = technical_name(refusal.code);
+    let label = egui::RichText::new(display_text(&parts, ROW_CHARS)).color(color::STATUS_WARNING);
+    copyable_label(ui, label, &format!("{refusal}\nCode: {code}")).on_hover_ui(|ui| {
+        ui.label(display_text(&parts, DETAIL_CHARS));
+        ui.small(format!("Code: {code}"));
+    });
+}
+
+fn rate_text(fps: Rational) -> String {
+    let numerator = fps.numerator();
+    let denominator = fps.denominator();
+    if denominator == 1 {
+        format!("{numerator} fps")
+    } else {
+        let rate = f64::from(numerator) / f64::from(denominator);
+        let decimal = format!("{rate:.3}");
+        format!(
+            "{} fps ({numerator}/{denominator})",
+            decimal.trim_end_matches('0').trim_end_matches('.')
+        )
+    }
+}
+
+fn frame_count(value: impl Into<i128>) -> String {
+    let value = value.into();
+    let noun = if value == 1 || value == -1 {
+        "frame"
+    } else {
+        "frames"
+    };
+    format!("{value} {noun}")
 }
 
 pub(crate) fn import_status(timeline: &str, record: &ImportRecord) -> String {
@@ -479,8 +601,9 @@ pub(crate) fn import_status(timeline: &str, record: &ImportRecord) -> String {
 }
 
 fn show_totals(ui: &mut egui::Ui, record: &ImportRecord) {
+    let noun = if record.exact == 1 { "item" } else { "items" };
     ui.label(format!(
-        "{} items kept exactly · {} brought over with changes · {} could not be brought over",
+        "{} {noun} kept exactly · {} brought over with changes · {} could not be brought over",
         record.exact, record.approximated, record.dropped,
     ));
 }
@@ -501,15 +624,18 @@ fn show_record_notes(ui: &mut egui::Ui, record: &ImportRecord) {
         ui.separator();
         ui.label(egui::RichText::new(title).font(theme::semibold(type_size::BODY)));
         for row in rows {
-            ui.label(format!("{} · {}", row.count, loss_description(row.code)));
             let code = technical_name(row.code);
-            ui.small(&code);
+            show_reason_row(
+                ui,
+                &format!("{} · {}", row.count, loss_description(row.code)),
+                &code,
+            );
             if row.unverified {
                 ui.label("Unverified against the original editor");
             }
             if let Some(bound) = row.bound {
                 let text = match bound {
-                    LossBound::Frames(value) => format!("Largest change: {value} frames"),
+                    LossBound::Frames(value) => format!("Largest change: {}", frame_count(value)),
                     LossBound::TenthDb(value) => {
                         format!("Largest change: {}.{} dB", value / 10, value % 10)
                     }
@@ -544,11 +670,15 @@ fn show_record_notes(ui: &mut egui::Ui, record: &ImportRecord) {
     if !record.omitted_codes.is_empty() {
         ui.collapsing("Additional details omitted from the saved report", |ui| {
             for &code in &record.omitted_codes {
-                ui.label(loss_description(code));
-                ui.small(technical_name(code));
+                show_reason_row(ui, loss_description(code), &technical_name(code));
             }
         });
     }
+}
+
+fn show_reason_row(ui: &mut egui::Ui, text: &str, code: &str) {
+    let code = format!("Code: {code}");
+    copyable_label(ui, text, &format!("{text}\n{code}")).on_hover_text(code);
 }
 
 fn loss_description(code: LossCode) -> &'static str {
@@ -616,6 +746,71 @@ fn loss_description(code: LossCode) -> &'static str {
     }
 }
 
+fn can_locate_media(entry: &MediaEntry) -> bool {
+    matches!(entry.status, MediaStatus::Missing | MediaStatus::Ambiguous)
+        && !entry.locator.is_empty()
+}
+
+// Return the scheme and authority together so eliding a path cannot change its
+// apparent host. An authority that cannot fit stays in the detail and tooltip.
+fn locator_address(locator: &str) -> Option<&str> {
+    let start = &locator[..locator.floor_char_boundary(locator.len().min(ROW_CHARS * 4))];
+    let after_prefix = start
+        .get(..8)
+        .filter(|prefix| prefix.eq_ignore_ascii_case(r"\\?\UNC\"))
+        .map(|_| &start[8..])
+        .or_else(|| start.strip_prefix(r"\\"))
+        .or_else(|| start.strip_prefix("//"))
+        .or_else(|| start.split_once("://").map(|(_, tail)| tail))?;
+    let host_end = after_prefix.find(['/', '\\', '?', '#']);
+    if host_end == Some(0) || after_prefix.is_empty() {
+        return None;
+    }
+    if host_end.is_none() && start.len() < locator.len() {
+        // Treat an oversized authority as the full locator so the row omits it.
+        return Some(locator);
+    }
+    let end = start.len() - after_prefix.len() + host_end.unwrap_or(after_prefix.len());
+    Some(&start[..end])
+}
+
+fn locator_row(ui: &mut egui::Ui, prefix: &str, locator: &str, name: Option<&str>) -> String {
+    let (style, padding) = if name.is_some() {
+        (egui::TextStyle::Button, 2.0 * ui.spacing().button_padding.x)
+    } else {
+        (egui::TextStyle::Body, 0.0)
+    };
+    let width = ui.available_width() - padding;
+    let fallback = || {
+        name.map_or_else(
+            || "Remote location".into(),
+            |name| display_text(&[prefix, name], ROW_CHARS),
+        )
+    };
+    let Some(address) = locator_address(locator) else {
+        return match name {
+            Some(name) if !locator.is_empty() => fit_label(ui, &style, width, |limit| {
+                display_text(&[prefix, name, " · ", locator], limit)
+            }),
+            Some(_) => fallback(),
+            None => display_text(&[locator], ROW_CHARS),
+        };
+    };
+    let key = [prefix, address];
+    let Some(required) = display_text_with_prefix(&key, &["…"], ROW_CHARS) else {
+        return fallback();
+    };
+    if text_width(ui, &required, &style) > width {
+        return fallback();
+    }
+    let tail = &locator[address.len()..];
+    let parts = match name {
+        Some(name) => [tail, " (", name, ")"],
+        None => [tail, "", "", ""],
+    };
+    display_text_with_prefix(&key, &parts, ROW_CHARS).unwrap_or_else(fallback)
+}
+
 fn show_media(ui: &mut egui::Ui, media: &[MediaEntry], selection: &mut Option<usize>) {
     if media.is_empty() {
         return;
@@ -633,18 +828,18 @@ fn show_media(ui: &mut egui::Ui, media: &[MediaEntry], selection: &mut Option<us
                 for index in range {
                     let entry = &media[index];
                     let status = match entry.status {
-                        MediaStatus::Online if entry.relinked_by_name => "Found by file name",
-                        MediaStatus::Online | MediaStatus::Unprobed => "Online",
-                        MediaStatus::Missing => "Missing",
-                        MediaStatus::Ambiguous => "Missing · several matches",
-                        MediaStatus::InvalidLocator => "Invalid location",
-                        MediaStatus::Unreadable => "Could not be read",
-                        MediaStatus::Remote => "Remote · offline",
-                        MediaStatus::TimedOut => "Timed out",
+                        MediaStatus::Remote => "Remote",
+                        MediaStatus::Missing | MediaStatus::Ambiguous => "Missing",
+                        MediaStatus::InvalidLocator
+                        | MediaStatus::Unreadable
+                        | MediaStatus::TimedOut => "Offline",
+                        MediaStatus::Online | MediaStatus::Unprobed => "Found",
                     };
-                    let text = display_text(
-                        &[status, " · ", &entry.name, " · ", &entry.locator],
-                        ROW_CHARS,
+                    let text = locator_row(
+                        ui,
+                        &format!("{status} · "),
+                        &entry.locator,
+                        Some(&entry.name),
                     );
                     if ui
                         .add(egui::Button::selectable(*selection == Some(index), text).truncate())
@@ -666,7 +861,9 @@ fn show_media(ui: &mut egui::Ui, media: &[MediaEntry], selection: &mut Option<us
                 DETAIL_CHARS,
             ));
         }
-        if let Some(matches) = &entry.matches {
+        if entry.status == MediaStatus::Ambiguous
+            && let Some(matches) = &entry.matches
+        {
             ui.label("Several files have this name. The source stays offline until you pick one.");
             egui::ScrollArea::vertical()
                 .id_salt("import-match-list")
@@ -710,16 +907,21 @@ pub(crate) fn show_report(ctx: &egui::Context, document: &Document) -> bool {
                         show_totals(ui, record);
                         show_remote_locations(ui, document, record);
                         show_record_notes(ui, record);
+                        let noun = if record.media.online == 1 {
+                            "file"
+                        } else {
+                            "files"
+                        };
                         ui.label(format!(
-                            "{} media online · {} offline",
+                            "{} media {noun} online · {} offline",
                             record.media.online, record.media.offline
                         ));
                         ui.collapsing("Source details", |ui| {
                             let format = format!("{:?} ", record.format);
                             ui.label(display_text(&[&format, &record.format_version], ROW_CHARS));
                             ui.label(format!(
-                                "Start offset: {} frames",
-                                record.start_offset_frames
+                                "Start offset: {}",
+                                frame_count(record.start_offset_frames)
                             ));
                             ui.small(display_text(
                                 &["SHA-256 ", &record.source_sha256],
@@ -761,10 +963,15 @@ fn show_remote_locations(ui: &mut egui::Ui, document: &Document, record: &Import
             locators.len(),
             |ui, range| {
                 for &locator in &locators[range] {
-                    ui.add(egui::Label::new(display_text(&[locator], ROW_CHARS)).truncate())
-                        .on_hover_ui(|ui| {
-                            ui.label(display_text(&[locator], DETAIL_CHARS));
-                        });
+                    let text = locator_row(ui, "", locator, None);
+                    ui.add(
+                        egui::Label::new(text)
+                            .truncate()
+                            .show_tooltip_when_elided(false),
+                    )
+                    .on_hover_ui(|ui| {
+                        ui.label(display_text(&[locator], DETAIL_CHARS));
+                    });
                 }
             },
         );
@@ -923,6 +1130,11 @@ mod tests {
         let mut dialog = ImportDialog::new(file, Arc::new(RecordingMedia::default()), &ctx);
         settle(&mut dialog);
         assert_eq!(ready(&dialog).media()[0].status, MediaStatus::Missing);
+        assert!(
+            painted_dialog(&ctx, &mut dialog)
+                .iter()
+                .any(|line| line == "Locate folder…")
+        );
         dialog.locate_folder(&root, &ctx);
         settle(&mut dialog);
         let unique = &ready(&dialog).media()[0];
@@ -930,11 +1142,12 @@ mod tests {
         assert!(unique.relinked_by_name);
         assert_eq!(unique.resolved_path.as_deref(), Some(first.as_path()));
         dialog.selected_media = Some(0);
+        let painted = painted_dialog(&ctx, &mut dialog);
         assert!(
-            painted_dialog(&ctx, &mut dialog)
-                .iter()
-                .any(|line| line.contains("Found by file name"))
+            painted.iter().any(|line| line.starts_with("Found · ")),
+            "{painted:?}"
         );
+        assert!(!painted.iter().any(|line| line == "Locate folder…"));
 
         let nested = directory.path("other-media");
         std::fs::create_dir(&nested).unwrap();
@@ -953,7 +1166,9 @@ mod tests {
         dialog.selected_media = Some(0);
         let painted = painted_dialog(&ctx, &mut dialog);
         assert!(
-            painted.iter().any(|line| line.contains("several matches")),
+            painted.iter().any(|line| line.starts_with("Missing · "))
+                && painted.iter().any(|line| line.starts_with("Several files"))
+                && painted.iter().any(|line| line == "Locate folder…"),
             "{painted:?}"
         );
         for path in [&first, &other] {
@@ -1106,8 +1321,29 @@ mod tests {
         settle(&mut dialog);
         assert_eq!(ready(&dialog).record().format, InterchangeFormat::Fcpxml);
         let painted = painted_dialog(&ctx, &mut dialog);
-        assert!(painted.iter().any(|text| text == "24/1 fps · 1920 × 1080"));
+        assert!(painted.iter().any(|text| text == "24 fps · 1920 × 1080"));
         assert!(!painted.iter().any(|text| text == "Apply settings"));
+    }
+
+    #[test]
+    fn ix1_fractional_rate_shows_the_decimal_and_exact_rate() {
+        let directory = TempDirectory::new("ix1-fractional-rate");
+        let path = directory.path("edit.fcpxml");
+        let timeline =
+            include_str!("../../kinewright-interchange/tests/fixtures/anchors-and-retime.fcpxml")
+                .replace("1/25s", "1001/24000s");
+        std::fs::write(&path, timeline).unwrap();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut dialog = ImportDialog::new(path, Arc::new(RefusedMedia), &ctx);
+        settle(&mut dialog);
+        let painted = painted_dialog(&ctx, &mut dialog);
+        assert!(
+            painted
+                .iter()
+                .any(|line| line == "23.976 fps (24000/1001) · 1920 × 1080"),
+            "{painted:?}"
+        );
     }
 
     #[test]
@@ -1157,7 +1393,7 @@ mod tests {
         assert!(
             painted
                 .iter()
-                .filter(|line| line.contains("Remote · offline"))
+                .filter(|line| line.starts_with("Remote · "))
                 .all(|line| line.chars().count() <= 160)
         );
 
@@ -1250,20 +1486,185 @@ mod tests {
     fn ix1_a_malformed_timeline_shows_the_typed_refusal_in_the_modal() {
         let directory = TempDirectory::new("ix1-refusal");
         let input = directory.path("edit.otio");
-        std::fs::write(&input, b"{invalid json").unwrap();
         let ctx = egui::Context::default();
+        for (bytes, expected) in [
+            (
+                "{invalid json",
+                "This file is not a readable OpenTimelineIO timeline.",
+            ),
+            ("<fcpxml", "This file is not a readable Final Cut timeline."),
+        ] {
+            std::fs::write(&input, bytes).unwrap();
+            let mut dialog = ImportDialog::new(input.clone(), Arc::new(RefusedMedia), &ctx);
+            settle(&mut dialog);
+            assert!(matches!(&dialog.state, Preparation::Refused(refusal)
+                if refusal.code == RefusalCode::Malformed));
+            let painted = painted_dialog(&ctx, &mut dialog);
+            assert!(
+                painted.iter().any(|line| line.ends_with(expected)),
+                "{painted:?}"
+            );
+            assert!(
+                !painted.iter().any(|line| line.starts_with("/:")
+                    || line == "malformed"
+                    || line == "Locate folder…"),
+                "{painted:?}"
+            );
+        }
+        std::fs::write(&input, "<other/>").unwrap();
         let mut dialog = ImportDialog::new(input, Arc::new(RefusedMedia), &ctx);
         settle(&mut dialog);
-        let Preparation::Refused(refusal) = &dialog.state else {
-            panic!("malformed source was not refused");
-        };
-        let message = refusal.to_string();
-        assert_eq!(refusal.code, RefusalCode::Malformed);
+        let painted = painted_dialog(&ctx, &mut dialog);
+        assert!(!painted.iter().any(|line| line == "Locate folder…"));
+
+        dialog.state = Preparation::Refused(
+            Refusal::new(RefusalCode::Malformed, "A duration is negative.").at("/tracks/2/clips/5"),
+        );
         let painted = painted_dialog(&ctx, &mut dialog);
         assert!(
-            painted.iter().any(|line| line == "malformed"),
+            painted
+                .iter()
+                .any(|line| line == "At tracks › 2 › clips › 5: A duration is negative."),
             "{painted:?}"
         );
-        assert!(painted.iter().any(|line| line == &message), "{painted:?}");
+    }
+
+    #[test]
+    fn ix1_import_header_keeps_the_file_name_and_end_of_the_folder() {
+        let directory = TempDirectory::new("ix1-header");
+        let folder = directory.path(&"W".repeat(180)).join("delivery");
+        let path = folder.join(format!("edit-{}.otio", "W".repeat(180)));
+        let ctx = egui::Context::default();
+        let mut dialog = ImportDialog::new(path, Arc::new(RefusedMedia), &ctx);
+        settle(&mut dialog);
+        let painted = painted_dialog(&ctx, &mut dialog);
+        assert!(
+            painted.windows(2).any(|lines| {
+                lines[0].starts_with("edit-")
+                    && Path::new(&lines[0])
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("otio"))
+                    && lines[0].contains('…')
+                    && lines[1].starts_with('…')
+                    && lines[1].ends_with("delivery")
+                    && lines.iter().all(|line| line.chars().count() <= ROW_CHARS)
+            }),
+            "{painted:?}"
+        );
+    }
+
+    #[test]
+    fn ix1_report_notes_show_frame_counts_and_put_codes_in_hover_and_copy() {
+        use crate::ix1_tests::{click_text, layout_text_position, prepare_edit};
+        use kinewright_core::{Fidelity, LossRow};
+
+        let directory = TempDirectory::new("ix1-note-text");
+        let path = directory.path("edit.otio");
+        write_edit(&path, "missing.mov");
+        let prepared = prepare_edit(&path, Arc::new(RefusedMedia));
+        let mut record = prepared.record().clone();
+        record.rows = vec![LossRow {
+            code: LossCode::CutSnapped,
+            fidelity: Fidelity::Approximated,
+            count: 1,
+            bound: Some(LossBound::Frames(1)),
+            unverified: false,
+            names: Vec::new(),
+            at: Vec::new(),
+        }];
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        ctx.global_style_mut(|style| {
+            style.interaction.tooltip_delay = 0.0;
+            style.interaction.show_tooltips_only_when_still = false;
+        });
+        let draw = |ui: &mut egui::Ui| show_record_notes(ui, &record);
+        let output = ctx.run_ui(input(), draw);
+        let painted = crate::theme::painted_text(&output);
+        assert_eq!(
+            (
+                painted.iter().any(|line| line == "Largest change: 1 frame"),
+                painted.iter().any(|line| line.contains("cut_snapped")),
+            ),
+            (true, false),
+            "{painted:?}",
+        );
+
+        let at = layout_text_position(&output, |line| line == "1 · Cut moved to a nearby frame");
+        let mut hover = input();
+        hover.events.push(egui::Event::PointerMoved(at));
+        let _ = ctx.run_ui(hover, draw);
+        let hovered = ctx.run_ui(input(), draw);
+        assert!(
+            crate::theme::painted_text(&hovered)
+                .iter()
+                .any(|line| line == "Code: cut_snapped")
+        );
+
+        let _ = click_text(&ctx, at, egui::PointerButton::Secondary, draw);
+        let menu = ctx.run_ui(input(), draw);
+        let copy = layout_text_position(&menu, |line| line == "Copy full text");
+        let copied = click_text(&ctx, copy, egui::PointerButton::Primary, draw);
+        assert!(copied.platform_output.commands.iter().any(|command| {
+            matches!(command, egui::OutputCommand::CopyText(text) if text.contains("cut_snapped"))
+        }));
+
+        record.rows[0].bound = Some(LossBound::Frames(2));
+        let output = ctx.run_ui(input(), |ui| show_record_notes(ui, &record));
+        assert!(
+            crate::theme::painted_text(&output)
+                .iter()
+                .any(|line| line == "Largest change: 2 frames")
+        );
+    }
+
+    #[test]
+    fn ix1_media_rows_show_one_state_and_keep_the_complete_remote_host() {
+        let host = "a".repeat(100);
+        let remote = format!("file://{host}/{}/camera.mov", "deep/".repeat(40));
+        let media: Vec<_> = [
+            (MediaStatus::Remote, "Remote", remote.as_str()),
+            (MediaStatus::Missing, "Missing", "take-1.mov"),
+            (MediaStatus::Ambiguous, "Missing", "take-2.mov"),
+            (MediaStatus::InvalidLocator, "Offline", "take-3.mov"),
+            (MediaStatus::Unreadable, "Offline", "take-4.mov"),
+            (MediaStatus::TimedOut, "Offline", "take-5.mov"),
+            (MediaStatus::Online, "Found", "take-6.mov"),
+            (MediaStatus::Unprobed, "Found", "take-7.mov"),
+        ]
+        .into_iter()
+        .map(|(status, name, locator)| MediaEntry {
+            name: format!("{name} source"),
+            locator: locator.into(),
+            status,
+            resolved_path: None,
+            relinked_by_name: status == MediaStatus::Online,
+            matches: None,
+        })
+        .collect();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let painted: Vec<_> = media
+            .chunks(4)
+            .flat_map(|chunk| {
+                let output = ctx.run_ui(input(), |ui| show_media(ui, chunk, &mut None));
+                crate::theme::painted_text(&output)
+            })
+            .collect();
+        assert!(
+            painted.iter().any(|line| line.starts_with("Remote · ")
+                && line.contains(&host)
+                && line.chars().count() <= ROW_CHARS),
+            "{painted:?}"
+        );
+        for (index, state) in [
+            "Missing", "Missing", "Offline", "Offline", "Offline", "Found", "Found",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let expected = format!("{state} · {state} source · take-{}.mov", index + 1);
+            assert!(painted.iter().any(|line| line == &expected), "{painted:?}");
+        }
     }
 }

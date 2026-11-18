@@ -12,38 +12,27 @@ fn display_escape(value: char) -> Option<std::char::EscapeUnicode> {
     .then(|| value.escape_unicode())
 }
 
-pub(crate) fn display_text(parts: &[&str], limit: usize) -> String {
-    fn append(output: &mut String, input: impl Iterator<Item = char>, limit: usize) -> bool {
-        let mut remaining = limit;
-        for value in input {
-            let escape = display_escape(value);
-            let width = escape.as_ref().map_or(1, ExactSizeIterator::len);
-            if width > remaining {
-                return false;
-            }
-            remaining -= width;
-            if let Some(escape) = escape {
-                output.extend(escape);
-            } else {
-                output.push(value);
-            }
+fn append(output: &mut String, input: impl Iterator<Item = char>, limit: usize) -> bool {
+    let mut remaining = limit;
+    for value in input {
+        let escape = display_escape(value);
+        let width = escape.as_ref().map_or(1, ExactSizeIterator::len);
+        if width > remaining {
+            return false;
         }
-        true
+        remaining -= width;
+        if let Some(escape) = escape {
+            output.extend(escape);
+        } else {
+            output.push(value);
+        }
     }
+    true
+}
 
-    let chars = || parts.iter().flat_map(|part| part.chars());
-    let mut output = String::new();
-    if append(&mut output, chars(), limit) {
-        return output;
-    }
-    let head = (limit - 1) / 2;
-    let tail = limit - 1 - head;
-    output.clear();
-    append(&mut output, chars(), head);
-    output.push('…');
-
-    let mut remaining = tail;
-    let suffix: Vec<_> = chars()
+fn append_suffix(output: &mut String, input: impl DoubleEndedIterator<Item = char>, limit: usize) {
+    let mut remaining = limit;
+    let suffix: Vec<_> = input
         .rev()
         .take_while(|&value| {
             let width = display_escape(value).map_or(1, |escape| escape.len());
@@ -54,8 +43,56 @@ pub(crate) fn display_text(parts: &[&str], limit: usize) -> String {
             true
         })
         .collect();
-    append(&mut output, suffix.into_iter().rev(), tail);
+    append(output, suffix.into_iter().rev(), limit);
+}
+
+pub(crate) fn display_text(parts: &[&str], limit: usize) -> String {
+    let chars = || parts.iter().flat_map(|part| part.chars());
+    let mut output = String::new();
+    if append(&mut output, chars(), limit) {
+        return output;
+    }
+    let head = (limit - 1) / 2;
+    let tail = limit - 1 - head;
+    output.clear();
+    append(&mut output, chars(), head);
+    output.push('…');
+    append_suffix(&mut output, chars(), tail);
     output
+}
+
+pub(crate) fn display_text_end(text: &str, limit: usize) -> String {
+    let mut output = String::new();
+    if !append(&mut output, text.chars(), limit) {
+        output.clear();
+        output.push('…');
+        append_suffix(&mut output, text.chars(), limit - 1);
+    }
+    output
+}
+
+/// Bound the text while keeping the complete prefix, or decline to show it.
+pub(crate) fn display_text_with_prefix(
+    prefix: &[&str],
+    tail: &[&str],
+    limit: usize,
+) -> Option<String> {
+    let mut output = String::new();
+    if !append(
+        &mut output,
+        prefix.iter().flat_map(|part| part.chars()),
+        limit,
+    ) {
+        return None;
+    }
+    let remaining = limit - output.chars().count();
+    if tail.iter().any(|part| !part.is_empty()) {
+        if remaining == 0 {
+            return None;
+        }
+        output.push_str(&display_text(tail, remaining));
+    }
+    Some(output)
 }
 
 /// Keep the original available to copy from a shortened label's context menu.
