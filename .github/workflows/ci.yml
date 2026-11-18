@@ -98,7 +98,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-latest]
+        os: [ubuntu-24.04, windows-2022]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -168,7 +168,7 @@ jobs:
     needs: minimal-ffmpeg
     uses: ./.github/workflows/ci-tests.yml
     with:
-      os: windows-latest
+      os: windows-2022
       ffmpeg-key: ${{ needs.minimal-ffmpeg.outputs.windows-key }}
       tier: fast
       shards: '[0,1,2,3,4,5,6,7]'
@@ -196,7 +196,7 @@ jobs:
     needs: minimal-ffmpeg
     uses: ./.github/workflows/ci-tests.yml
     with:
-      os: windows-latest
+      os: windows-2022
       ffmpeg-key: ${{ needs.minimal-ffmpeg.outputs.windows-key }}
       tier: slow
       shards: '[0,1,2,3,4,5,6,7]'
@@ -211,7 +211,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-latest]
+        os: [ubuntu-24.04, windows-2022]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:

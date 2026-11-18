@@ -20,7 +20,7 @@ buildable here after provisioning FFmpeg and the native desktop libraries:
   the isolated fixture tools separately with the command below.
 
 Windows FFmpeg/GPU-dependent CI remains in `.github/workflows/ci.yml` on
-`windows-latest`. Linux CI runs the same workspace commands on `ubuntu-latest`.
+`windows-2022`. Linux CI runs the same workspace commands on `ubuntu-latest`.
 CI has a fast tier (every non-docs push) and a slow tier (push to `main`, manual
 run, or `[slow-tier]` in the head commit message); the slow tests are listed in
 `ci/slow-tests.txt` and gated by each crate's `slow-tests` feature. Kani runs in
