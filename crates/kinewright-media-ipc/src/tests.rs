@@ -243,7 +243,7 @@ fn explicit_stream_selection_cannot_be_replaced_or_widened() {
             time_base: [1, 48_000],
             timestamp_origin: 0,
             duration: 48_000,
-            average_frame_rate: [0, 0],
+            average_frame_rate: [0, 1],
         });
         result.kind = Kind::AudioVideo;
         result.audio_stream = Some(1);
@@ -273,3 +273,6 @@ fn explicit_stream_selection_cannot_be_replaced_or_widened() {
         );
     }
 }
+
+#[path = "probe_property_tests.rs"]
+mod probe_property;

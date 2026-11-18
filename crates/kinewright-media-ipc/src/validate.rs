@@ -38,11 +38,16 @@ impl ValidatedProbe {
             {
                 return Err(bad);
             }
-            if stream.kind == StreamKind::Video && result.kind != Kind::Image {
-                let [n, d] = stream.average_frame_rate;
-                if n <= 0 || d <= 0 || i64::from(n) > i64::from(d) * 4096 {
-                    return Err(bad);
+            let rate = stream.average_frame_rate;
+            let valid = match (stream.kind, result.kind, rate) {
+                (StreamKind::Audio, _, rate) => rate == [0, 1],
+                (StreamKind::Video, Kind::Image, [0, 1]) => true,
+                (StreamKind::Video, _, [n, d]) => {
+                    n > 0 && d > 0 && valid_fps(n.unsigned_abs(), d.unsigned_abs())
                 }
+            };
+            if !valid {
+                return Err(bad);
             }
         }
         let selected = |id: Option<u32>, kind| {
@@ -67,10 +72,7 @@ impl ValidatedProbe {
             return Err(bad);
         }
         let [n, d] = result.fps;
-        if n == 0
-            || d == 0
-            || u64::from(n) > u64::from(d) * 4096
-            || gcd(n, d) != 1
+        if !valid_fps(n, d)
             || result.duration_frames <= 0
             || i128::from(result.duration_frames) * i128::from(d) > 604_800 * i128::from(n)
             || result.color.confidence_basis_points > 10_000
@@ -100,11 +102,9 @@ impl ValidatedProbe {
         {
             return Err(bad);
         }
-        if result.kind == Kind::Image {
-            if result.duration_frames != 1 {
-                return Err(bad);
-            }
-        } else if !(1..=SEVEN_DAYS_US).contains(&result.duration_microseconds) {
+        if !(1..=SEVEN_DAYS_US).contains(&result.duration_microseconds)
+            || (result.kind == Kind::Image && result.duration_frames != 1)
+        {
             return Err(bad);
         }
         match (video, result.resolution) {
@@ -118,6 +118,10 @@ impl ValidatedProbe {
         Ok(Self(result))
     }
 }
+fn valid_fps(n: u32, d: u32) -> bool {
+    n > 0 && d > 0 && u64::from(n) <= u64::from(d) * 4096 && gcd(n, d) == 1
+}
+
 fn gcd(mut a: u32, mut b: u32) -> u32 {
     while b != 0 {
         (a, b) = (b, a % b);

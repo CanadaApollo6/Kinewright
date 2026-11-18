@@ -94,28 +94,29 @@ pub fn probe(
     let streams = input
         .format
         .streams()
-        .map(|s| Stream {
-            index: u32::try_from(s.index()).unwrap_or(u32::MAX),
-            kind: if s.parameters().medium() == ffmpeg::media::Type::Video {
-                StreamKind::Video
+        .map(|s| {
+            let (kind, rate) = if s.parameters().medium() == ffmpeg::media::Type::Video {
+                (StreamKind::Video, stream_fps(s.avg_frame_rate()))
             } else {
-                StreamKind::Audio
-            },
-            time_base: [s.time_base().numerator(), s.time_base().denominator()],
-            timestamp_origin: if s.start_time() == i64::MIN {
-                0
-            } else {
-                s.start_time()
-            },
-            duration: s.duration().max(0),
-            average_frame_rate: [
-                s.avg_frame_rate().numerator(),
-                s.avg_frame_rate().denominator(),
-            ],
+                (StreamKind::Audio, [0, 1])
+            };
+            Stream {
+                index: u32::try_from(s.index()).unwrap_or(u32::MAX),
+                kind,
+                time_base: [s.time_base().numerator(), s.time_base().denominator()],
+                timestamp_origin: if s.start_time() == i64::MIN {
+                    0
+                } else {
+                    s.start_time()
+                },
+                duration: s.duration().max(0),
+                average_frame_rate: rate,
+            }
         })
         .collect();
     let mut fps = Rational::default();
-    let mut duration = metadata::duration_us_to_frames(input.format.duration(), fps);
+    let mut duration_microseconds = input.format.duration();
+    let mut duration = metadata::duration_us_to_frames(duration_microseconds, fps);
     let mut resolution = None;
     let mut color = ColorDescription::unknown();
     let mut retained_video = None;
@@ -168,11 +169,16 @@ pub fn probe(
             }
             kind = Kind::Image;
             duration = 1;
+            // A still occupies one frame on the probe's nominal grid. File
+            // demuxers may report no duration for it.
+            let divisor = i64::from(fps.numerator());
+            duration_microseconds =
+                (1_000_000 * i64::from(fps.denominator()) + divisor - 1) / divisor;
         } else {
             fps = rate.ok_or(Error::UnsupportedMedia)?;
             duration = metadata::timestamp_to_grid_ceil(stream_duration, time_base, fps);
             if duration <= 0 {
-                duration = metadata::duration_us_to_frames(input.format.duration(), fps);
+                duration = metadata::duration_us_to_frames(duration_microseconds, fps);
             }
         }
         let (w, h) = rotation.display_dimensions(frame.width(), frame.height());
@@ -191,7 +197,7 @@ pub fn probe(
     input.check()?;
     let result = ProbeResult {
         streams,
-        duration_microseconds: input.format.duration(),
+        duration_microseconds,
         video_stream: video.and_then(|v| u32::try_from(v).ok()),
         audio_stream: audio.and_then(|a| u32::try_from(a).ok()),
         duration_frames: duration,
@@ -220,6 +226,18 @@ pub fn probe(
             _input: input,
         },
     })
+}
+
+fn stream_fps(rate: ffmpeg::Rational) -> [i32; 2] {
+    let [n, d] = [rate.numerator(), rate.denominator()];
+    if n == 0 && d >= 0 {
+        [0, 1]
+    } else if n > 0 && d > 0 {
+        let reduced = rate.reduce();
+        [reduced.numerator(), reduced.denominator()]
+    } else {
+        [n, d]
+    }
 }
 
 #[cfg(test)]

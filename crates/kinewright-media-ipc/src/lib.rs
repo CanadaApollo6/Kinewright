@@ -11,7 +11,7 @@ pub use validate::{ProbeSession, ValidatedProbe};
 pub const MAX_FRAME: usize = 65_536;
 pub const HEADER_BYTES: usize = 40;
 // Exact build protocol. Incompatible builds refuse rather than negotiate.
-const BUILD: [u8; 16] = *b"KW-MS2-PROBE-001";
+const BUILD: [u8; 16] = *b"KW-MS2-PROBE-002";
 const MAGIC: [u8; 4] = *b"KWMP";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -41,6 +41,7 @@ pub struct Stream {
     pub time_base: [i32; 2],
     pub timestamp_origin: i64,
     pub duration: i64,
+    /// Reduced FPS, or [0, 1] for audio and still streams without a rate.
     pub average_frame_rate: [i32; 2],
 }
 

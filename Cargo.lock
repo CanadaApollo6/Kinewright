@@ -2443,6 +2443,7 @@ name = "kinewright-media-ipc"
 version = "0.1.0"
 dependencies = [
  "kinewright-core",
+ "proptest",
  "serde",
  "serde_json",
 ]

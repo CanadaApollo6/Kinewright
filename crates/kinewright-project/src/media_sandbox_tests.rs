@@ -193,10 +193,18 @@ fn admit_through_the_helper((name, bytes, kind, resolution): Case) {
     let source = admitted.playback_source();
     let confined = super::probe(&source, Arc::new(AtomicBool::new(false))).unwrap();
     let mut retired = source.probe(Arc::new(AtomicBool::new(false))).unwrap();
-    // The wire carries an unknown stream duration (AV_NOPTS) as 0; no
-    // host consumer reads stream durations.
+    // Compare the probes after expressing absent metadata in the wire's
+    // canonical form. Stills occupy one frame of the nominal 30 fps grid.
+    if kind == MediaKind::Image {
+        retired.duration_microseconds = 33_334;
+    }
     for stream in &mut retired.streams {
         stream.duration = stream.duration.max(0);
+        if stream.kind == kinewright_media::owned_io::StreamKind::Audio
+            || stream.average_frame_rate.0 == 0
+        {
+            stream.average_frame_rate = (0, 1);
+        }
     }
     assert_eq!(
         confined, retired,
