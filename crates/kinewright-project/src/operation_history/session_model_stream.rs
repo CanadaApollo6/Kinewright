@@ -39,7 +39,7 @@ fn message<S: ModelStore>(session: &mut Session<S>, id: u64, choice: u64) -> Mes
             // Native approvals are committed synchronously. GUI hand edits
             // may queue; native task consent never lives in an unacked GUI
             // suffix which would need an approval rebind after restart.
-            session.drain(false, false);
+            session.drain();
             let reference = session.store.blob(
                 format!("Do consent {id}").as_bytes(),
                 RecordKind::OwnedEvidence,
@@ -101,7 +101,7 @@ fn message<S: ModelStore>(session: &mut Session<S>, id: u64, choice: u64) -> Mes
         },
     };
     if matches!(action, Action::Undo | Action::Redo) && (choice >> 8).is_multiple_of(2) {
-        session.drain(false, false);
+        session.drain();
         let direction = if matches!(action, Action::Undo) {
             Direction::Undo
         } else {
@@ -125,6 +125,30 @@ fn message<S: ModelStore>(session: &mut Session<S>, id: u64, choice: u64) -> Mes
         approval,
         transition,
     }
+}
+
+fn prime_group<S: ModelStore>(session: &mut Session<S>, seed: u64, state: &mut u64) {
+    let capacity = crate::operation_protocol::PENDING_COMMANDS;
+    for offset in 0..capacity as u64 {
+        let id = 1_000_000 + seed * capacity as u64 + offset;
+        session.send(Message {
+            id,
+            action: Action::Close,
+            creation: origin(id + 2),
+            approval: None,
+            transition: None,
+        });
+    }
+    assert_eq!(
+        session.pending.len(),
+        capacity,
+        "GROUP_PRIMER_FILLS_THE_COUNT_WINDOW"
+    );
+    let choice = random(state);
+    let width = 1 + usize::try_from(choice % capacity as u64).unwrap();
+    let point = usize::try_from((choice >> 16) % capacity as u64).unwrap();
+    session.group(width, GroupFault::RefuseAt(point));
+    session.drain();
 }
 
 fn run_seed<S: ModelStore>(seed: u64, length: u64) -> Coverage {
@@ -153,6 +177,7 @@ fn run_seed<S: ModelStore>(seed: u64, length: u64) -> Coverage {
     let mut session = Session::new(S::default());
     prime_redo_payload(&mut session, seed);
     let mut state = seed;
+    prime_group(&mut session, seed, &mut state);
     for index in 0..length {
         context.attempt = index + 1;
         let id = seed * (length + 1) + index;
@@ -161,31 +186,34 @@ fn run_seed<S: ModelStore>(seed: u64, length: u64) -> Coverage {
         let synchronous = input.approval.is_some() || input.transition.is_some();
         session.send(input);
         if synchronous {
-            session.drain(false, false);
+            session.drain();
         }
+        let width = 1 + usize::try_from((choice >> 32) % 64).unwrap();
+        let point = usize::try_from((choice >> 48) % 64).unwrap();
         match (choice >> 16) % 12 {
-            0 => session.drain(true, false),
-            1 => session.drain(false, true),
+            0 => session.group(width, GroupFault::LoseAcknowledgement),
+            1 => session.group(width, GroupFault::StopBeforeRoot(point)),
             2 => session.restart(false),
             3 => session.restart(true),
             4 => session.save(false),
             5 => session.save(true),
             6 => session.install_checkpoint(usize::from(choice & 1 != 0)),
             7 => {
-                session.drain(false, false);
+                session.drain();
                 let root = session.store.cold_root();
                 session.cold_open(&root.snapshot);
                 session.coverage.opens += 1;
                 session.assert_equal();
             }
             8 => session.collect(),
-            9 => session.drain(false, false),
+            9 => session.group(width, GroupFault::RefuseAt(point)),
+            10 => session.group(width, GroupFault::StopAfterRoot),
             _ => {}
         }
         session.assert_acknowledged();
     }
     context.attempt = length + 1;
-    session.drain(false, false);
+    session.drain();
     session.collect();
     eprintln!(
         "HX_SESSION_SEED_COMPLETE seed={seed} random_attempts={length} elapsed_ms={}",
@@ -221,7 +249,7 @@ fn title_message<S: ModelStore>(
         session.accepted.contains_key(&id),
         "IMPLICIT_TITLE_SESSION_ACCEPTED {context} id={id}"
     );
-    session.drain(false, false);
+    session.drain();
     session.assert_acknowledged();
 }
 
@@ -375,6 +403,12 @@ pub(super) fn run_range<S: ModelStore>(first: u64, last: u64, length: u64) {
         ("restart", totals.restarts),
         ("lost ack", totals.lost_acks),
         ("pre-publication crash", totals.before_publish),
+        ("post-publication crash", totals.after_publish),
+        ("group refusal", totals.group_refusals),
+        (
+            "group width greater than one",
+            totals.largest_group.saturating_sub(1),
+        ),
         ("handoff", totals.handoffs),
         ("Save", totals.saves),
         ("Save As", totals.save_as),
@@ -388,7 +422,7 @@ pub(super) fn run_range<S: ModelStore>(first: u64, last: u64, length: u64) {
         assert!(count > 0, "SESSION_GRAMMAR_REACHES_{name}");
     }
     println!(
-        "HX_SESSION_MODEL first_seed={first} last_seed={last} seeds={seeds} random_attempts={} primed_transitions={} elapsed_ms={} folds={} restart={} lost_ack={} prepublication_crash={} handoff={} save={} save_as={} rescue={} cold_open={} collect={} approvals={} transition_approvals={} baseline_lineage={} split_ancestry={} redo_payloads={} ordinary_lease_peak={}",
+        "HX_SESSION_MODEL first_seed={first} last_seed={last} seeds={seeds} random_attempts={} primed_transitions={} elapsed_ms={} folds={} restart={} lost_ack={} prepublication_crash={} postpublication_crash={} group_refusal={} largest_group={} handoff={} save={} save_as={} rescue={} cold_open={} collect={} approvals={} transition_approvals={} baseline_lineage={} split_ancestry={} redo_payloads={} ordinary_lease_peak={}",
         seeds * length,
         seeds * 2,
         started.elapsed().as_millis(),
@@ -396,6 +430,9 @@ pub(super) fn run_range<S: ModelStore>(first: u64, last: u64, length: u64) {
         totals.restarts,
         totals.lost_acks,
         totals.before_publish,
+        totals.after_publish,
+        totals.group_refusals,
+        totals.largest_group,
         totals.handoffs,
         totals.saves,
         totals.save_as,

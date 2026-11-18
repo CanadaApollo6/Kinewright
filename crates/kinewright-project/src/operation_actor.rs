@@ -30,6 +30,7 @@ use std::{
 mod prepare;
 #[path = "operation_actor_producer.rs"]
 mod producer;
+pub(crate) use prepare::ManualPreview;
 use prepare::PrepareRequest;
 pub use prepare::PreparedUpdate;
 pub use producer::ManualPermit;
@@ -299,6 +300,7 @@ enum Message {
     ),
     Retire(TypeId, AcceptedCut, Sender<Result<(), Error>>),
     Prepare(Box<PrepareRequest>),
+    PreviewManual(TypeId, AcceptedCut, Sender<Result<ManualPreview, Error>>),
     Selection(
         TypeId,
         AcceptedCut,
@@ -1085,6 +1087,9 @@ impl State {
                     let _ = reply.send(result);
                 }
                 Message::Prepare(request) => self.prepare_update(&request),
+                Message::PreviewManual(authority, cut, reply) => {
+                    let _ = reply.send(self.preview_manual(authority, cut));
+                }
                 Message::Selection(authority, cut, snapshot, reply) => {
                     let result = self.prepare_selection(authority, cut, *snapshot);
                     let _ = reply.send(result);

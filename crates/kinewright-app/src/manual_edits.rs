@@ -85,6 +85,8 @@ pub(crate) struct ManualEdits {
     pub(crate) before_send: Option<Box<dyn FnOnce() + Send>>,
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) after_send: Option<Box<dyn FnOnce() + Send>>,
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) backpressure_refusals: usize,
 }
 impl ManualEdits {
     pub(crate) fn submit(
@@ -339,6 +341,10 @@ impl ManualEdits {
                     }),
                 ) => {
                     // Only acknowledgement can cure this refusal. A newer gesture value wins.
+                    #[cfg(all(test, target_os = "linux"))]
+                    {
+                        self.backpressure_refusals += 1;
+                    }
                     if action.latest.is_none() {
                         action.latest = Some(flight.command);
                     }

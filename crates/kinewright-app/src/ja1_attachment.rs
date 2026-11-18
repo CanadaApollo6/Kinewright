@@ -1172,6 +1172,10 @@ impl Ja1Attachment {
             || reply.status.message.clone(),
             |error| error.message.clone(),
         );
+        if reply.manual_unattempted.is_some() {
+            self.message
+                .push_str(" Retry to resend the retained hand edits.");
+        }
         let manual_failed = reply
             .error
             .as_ref()

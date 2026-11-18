@@ -888,6 +888,10 @@ pub struct HostReply {
     pub manual_lease: Option<kinewright_project::operation_protocol::Lease>,
     pub manual_inputs: Option<kinewright_project::owned_inputs::OwnedInputManifest>,
     pub manual_ack: Vec<kinewright_project::operation_protocol::Receipt>,
+    /// When present, `error` refused the message at `manual_ack.len()`.
+    /// This counts the messages after it that the host did not attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_unattempted: Option<usize>,
     pub activation: Option<HostActivation>,
     pub status: HostStatus,
     pub saved: Option<HostSaveReport>,

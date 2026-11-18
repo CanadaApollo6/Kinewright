@@ -2,10 +2,11 @@
 use super::{Action, RETENTION_LOST_TEXT};
 use eframe::egui;
 use kinewright_agent::writer_host::{
-    HostChoiceKind, HostClient, HostCommand, HostConfig, HostOrigin, HostReply, HostSnapshot,
-    HostSourceBinding, HostStatus, SessionRoots, SourceServer,
+    HostChoiceKind, HostClient, HostCommand, HostConfig, HostError, HostOrigin, HostReply,
+    HostSnapshot, HostSourceBinding, HostStatus, SessionRoots, SourceServer,
 };
 use kinewright_project::operation_actor::AcceptedCut;
+use kinewright_project::operation_protocol::EncodedMessage;
 use kinewright_project::{
     bundle::BundleError, bundle_records::ObjectRef, editing_session::Ja1EditingSession,
     source_boundary::BorrowedSourceDescriptor,
@@ -624,13 +625,9 @@ impl HostAttachment {
                 .pending()
                 .map_err(|e| BundleError::Identity(e.to_string()))?;
             if !messages.is_empty() {
-                let reply = self
-                    .client
-                    .request(HostCommand::CommitHistory {
-                        client: self.manual_client.clone(),
-                        messages,
-                    })
-                    .map_err(host_error)?;
+                let reply =
+                    request_manual_history(&self.client, self.manual_client.clone(), messages)
+                        .map_err(host_error)?;
                 self.accept_manual_ack(&reply, owner)?;
                 self.accept_status(reply.status);
                 if let Some(error) = reply.error {
@@ -1074,10 +1071,7 @@ impl HostAttachment {
                     if let Some(stale) = stale {
                         let _ = stale.join();
                     }
-                    client.request(HostCommand::CommitHistory {
-                        client: identity,
-                        messages,
-                    })
+                    request_manual_history(&client, identity, messages)
                 }));
             }
         }
@@ -1427,11 +1421,36 @@ impl HostAttachment {
     }
 }
 
+fn request_manual_history(
+    client: &HostClient,
+    identity: String,
+    messages: Vec<EncodedMessage>,
+) -> Result<HostReply, HostError> {
+    let sent = messages.len();
+    let reply = client.request(HostCommand::CommitHistory {
+        client: identity,
+        messages,
+    })?;
+    let acknowledged = reply.manual_ack.len();
+    let valid = match (reply.error.is_some(), reply.manual_unattempted) {
+        (false, None) => acknowledged == sent,
+        (true, Some(unattempted)) => sent.checked_sub(acknowledged + 1) == Some(unattempted),
+        (true, None) => acknowledged == 0,
+        (false, Some(_)) => false,
+    };
+    if !valid {
+        return Err(HostError::Protocol("invalid manual history reply".into()));
+    }
+    // Only the receipt prefix is removed by acknowledge_manual. The refused
+    // command and its original suffix stay in the outbox for Retry/recovery.
+    Ok(reply)
+}
+
 #[allow(
     clippy::needless_pass_by_value,
     reason = "map_err consumes the owned transport error at this boundary"
 )]
-fn host_error(error: kinewright_agent::writer_host::HostError) -> BundleError {
+fn host_error(error: HostError) -> BundleError {
     BundleError::Identity(error.to_string())
 }
 

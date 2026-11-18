@@ -491,6 +491,7 @@ impl BundleCommit {
             identity,
             owner: None,
             root_sha256: None,
+            seals: Vec::new(),
         });
         let view = install
             .as_ref()
@@ -1517,7 +1518,19 @@ impl PreparedBranchPublication {
         }
         barrier(bundle, CommitBarrier::B3)?;
         let (next_admission, _encoded_root) = self.encode_root(bundle)?;
-        let published = publish_root_from_admission(bundle, &next_admission, None)?;
+        let published = match publish_root_from_admission(bundle, &next_admission, None) {
+            Ok(published) => published,
+            Err(error) => {
+                if bundle.publication_state == crate::bundle::PublicationState::Unknown
+                    && let Some(pending) = &mut bundle.pending_publication
+                {
+                    // Either root may still be authoritative. Its incoming
+                    // graph stays pinned until the original attempt settles.
+                    pending.seals = self.seals;
+                }
+                return Err(error);
+            }
+        };
         self.adopt(bundle, next_admission, published, None)
     }
     fn adopt(

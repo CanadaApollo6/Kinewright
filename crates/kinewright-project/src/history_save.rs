@@ -4,7 +4,7 @@
 use crate::{
     operation_actor::{
         AcceptedCut, ActorIdentity, Attachment, ChangeId, CommandContext, Core, Error,
-        ManualPermit, PreparedUpdate,
+        ManualPermit, ManualPreview, PreparedUpdate,
     },
     operation_history::{SnapshotIdentity, ValidatedOwnerSnapshot},
     operation_inputs::ManualInputs,
@@ -232,6 +232,9 @@ impl ProjectAttachment {
     ) -> Result<PreparedUpdate, Error> {
         self.authority
             .prepare(&ProjectHistoryProof, *cut, action, context)
+    }
+    pub(crate) fn preview_manual(&self, cut: AcceptedCut) -> Result<ManualPreview, Error> {
+        self.authority.preview_manual(&ProjectHistoryProof, cut)
     }
     pub(crate) fn prepare_reinstall(
         &self,

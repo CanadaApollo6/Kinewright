@@ -63,6 +63,7 @@ au3_fixtures au3_delivery_audio_verification_measures_the_written_file crates/ki
 au3_fixtures au3_encoded_fixtures_land_within_the_loudness_and_true_peak_budgets crates/kinewright-media/tests/au3_fixtures.rs any  # 102/128
 
 # kinewright_app
+kinewright_app ja1_attachment::manual_value_tests::hx_h4_strict_drag_saves_all_sub_batches crates/kinewright-app/src/manual_value_tests.rs linux-only # Heavy exposure and sync-lock drags through the real writer
 kinewright_app preview_ui::mo2_tests::new_mo2_combined_transform_real_program_drags crates/kinewright-app/src/preview_ui.rs any  # 21/20
 kinewright_app solo_ui::tests::new_mo2_solo_control_argument_matrix crates/kinewright-app/src/solo_ui.rs any  # 26/12
 

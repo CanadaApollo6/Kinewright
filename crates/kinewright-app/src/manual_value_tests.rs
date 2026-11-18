@@ -15,6 +15,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "../../kinewright-core/tests/support/undo_fixture.rs"]
+mod undo_fixture;
+
 struct Fixture {
     app: KinewrightApp,
     _engine: Arc<kinewright_media::FfmpegMediaEngine>,
@@ -25,8 +28,6 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let temp = TempDirectory::new_in(&workspace_target_dir(), "manual-final-value");
-        let path = temp.path("p.kinewright");
         let mut document = Document {
             tracks: vec![Track {
                 id: TrackId(1),
@@ -60,6 +61,12 @@ impl Fixture {
         }
         .apply(&mut document)
         .unwrap();
+        Self::with_document(document)
+    }
+
+    fn with_document(document: Document) -> Self {
+        let temp = TempDirectory::new_in(&workspace_target_dir(), "manual-final-value");
+        let path = temp.path("p.kinewright");
         let before = Arc::new(document);
         let core = Core::for_test(Arc::clone(&before)).unwrap();
         let mut owner = Ja1EditingSession::activate(
@@ -250,6 +257,254 @@ fn curve(count: i64, value: i64) -> Operation {
                 .collect(),
         },
     }
+}
+
+fn root_generation(path: &std::path::Path) -> u64 {
+    let root: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    root["studio"]["generation"].as_u64().unwrap()
+}
+
+#[test]
+fn hx_h4_one_publication_per_request() {
+    use kinewright_agent::writer_host::HostCommand;
+    use kinewright_project::operation_protocol::PENDING_COMMANDS;
+
+    let f = Fixture::with_document(undo_fixture::heavy());
+    let host = f.attachment().host.as_ref().unwrap();
+    let path = f.temp.path("p.kinewright");
+    let mut counts = Vec::new();
+    for size in [1, PENDING_COMMANDS] {
+        for _ in 0..size {
+            f.gate().permit.close_gesture().unwrap();
+        }
+        let messages = f.gate().permit.pending().unwrap();
+        assert_eq!(messages.len(), size);
+        let before = root_generation(&path);
+        let start = Instant::now();
+        let reply = host
+            .client
+            .request(HostCommand::CommitHistory {
+                client: host.manual_identity_for_test(),
+                messages,
+            })
+            .unwrap();
+        let elapsed = start.elapsed();
+        let count = root_generation(&path) - before;
+        println!("HX_H4_REQUEST size={size} publications={count} wall={elapsed:?}");
+        assert!(reply.error.is_none(), "{:?}", reply.error);
+        assert_eq!(reply.manual_ack.len(), size);
+        f.attachment()
+            .owner
+            .acknowledge_manual(&f.gate().permit, reply.manual_ack)
+            .unwrap();
+        counts.push(count);
+    }
+    assert_eq!(counts, [1, 1], "HX_H4_ONE_ROOT_PER_REQUEST");
+}
+
+#[test]
+fn hx_h4_refused_message_leaves_only_the_durable_prefix() {
+    use kinewright_agent::writer_host::HostCommand;
+
+    let f = Fixture::new();
+    let attachment = f.attachment();
+    let host = attachment.host.as_ref().unwrap();
+    let path = f.temp.path("p.kinewright");
+    let request = |messages| {
+        host.client
+            .request(HostCommand::CommitHistory {
+                client: host.manual_identity_for_test(),
+                messages,
+            })
+            .unwrap()
+    };
+    let mut identities = Vec::new();
+    for value in 1..=4 {
+        f.gate()
+            .permit
+            .request(Command::DoBatchCoalesced {
+                operations: vec![param(value)],
+                coalesce_key: "prefix".into(),
+            })
+            .unwrap();
+        identities.push(attachment.owner.core().snapshot_identity().unwrap());
+    }
+    let messages = f.gate().permit.pending().unwrap();
+    let before = root_generation(&path);
+    let zero = request(vec![messages[1].clone(), messages[0].clone()]);
+    assert_eq!(zero.error.unwrap().code, "history_conflict");
+    assert_eq!(zero.manual_unattempted, Some(1));
+    assert!(zero.manual_ack.is_empty());
+    assert_eq!(root_generation(&path), before);
+
+    let prefix = request(vec![
+        messages[0].clone(),
+        messages[1].clone(),
+        messages[3].clone(),
+        messages[2].clone(),
+    ]);
+    assert_eq!(prefix.error.unwrap().code, "history_conflict");
+    assert_eq!(prefix.manual_unattempted, Some(1));
+    assert_eq!(prefix.manual_ack.len(), 2);
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        loaded.open_manual().unwrap().snapshot_identity().unwrap(),
+        identities[1]
+    );
+    assert_eq!(
+        loaded.root().unwrap().generation,
+        before + 1,
+        "HX_H4_ATOMIC_PREFIX"
+    );
+    drop(loaded);
+
+    let mixed = request(messages);
+    assert!(mixed.error.is_none(), "{:?}", mixed.error);
+    assert_eq!(mixed.manual_unattempted, None);
+    assert_eq!(mixed.manual_ack.len(), 4);
+    assert_eq!(mixed.manual_ack[..2], prefix.manual_ack);
+    assert_eq!(
+        root_generation(&path),
+        before + 2,
+        "HX_H4_RETRY_PUBLISHES_ONLY_NEW"
+    );
+}
+
+#[test]
+fn hx_h4_app_retry_resends_the_unattempted_edits() {
+    use kinewright_agent::writer_host::HostCommand;
+
+    let mut f = Fixture::new();
+    for value in 1..=4 {
+        f.gate()
+            .permit
+            .request(Command::DoBatchCoalesced {
+                operations: vec![param(value)],
+                coalesce_key: "retained".into(),
+            })
+            .unwrap();
+    }
+    let originals = f.gate().permit.pending().unwrap();
+    let host = f.attachment().host.as_ref().unwrap();
+    let reply = host
+        .client
+        .request(HostCommand::CommitHistory {
+            client: host.manual_identity_for_test(),
+            messages: vec![
+                originals[0].clone(),
+                originals[2].clone(),
+                originals[3].clone(),
+            ],
+        })
+        .unwrap();
+    assert_eq!(reply.manual_unattempted, Some(1));
+    let attachment = f.app.focused_mut().ja1.as_mut().unwrap();
+    assert!(attachment.accept_host_reply(reply).is_err());
+    assert_eq!(f.gate().permit.pending().unwrap(), originals[1..]);
+    f.release();
+    f.app.start_ja1(Action::Retry);
+    f.until(|f| {
+        !f.attachment().read_only()
+            && f.gate().permit.pending().unwrap().is_empty()
+            && !f.attachment().is_dirty()
+    });
+    assert_eq!(f.scalar(), 4);
+    let mut cold = LoadedBundle::read(
+        &f.temp.path("p.kinewright"),
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        cold.open_manual()
+            .unwrap()
+            .export_history()
+            .unwrap()
+            .history()
+            .document
+            .clip(ClipId(1))
+            .unwrap()
+            .effects[0]
+            .parameters["exposure_milli_stops"],
+        ParamValue::Integer(4),
+    );
+}
+
+fn strict_drag(control: &str, operation: impl Fn(i64) -> Operation) -> usize {
+    let mut f = Fixture::with_document(undo_fixture::heavy());
+    f.release();
+    let before = Arc::clone(&f.before);
+    let interval = Duration::from_millis(39);
+    let mut accepted = 0;
+    let mut sent = Instant::now();
+    for value in 0..120 {
+        let previous = f.attachment().owner.core().change_id().unwrap().position;
+        sent = Instant::now();
+        f.app
+            .send_operations_coalesced(vec![operation(value)], f.key.clone());
+        f.attempt();
+        let current = f.attachment().owner.core().change_id().unwrap().position;
+        if current.position == previous.position + 1 && !f.edits().waiting_for_ack() {
+            accepted += 1;
+        }
+        if value < 119 {
+            while sent.elapsed() < interval {
+                f.tick();
+                std::thread::park_timeout(Duration::from_millis(1));
+            }
+        }
+    }
+    println!("HX_H4_DRAG_SENT {control} accepted={accepted}/120");
+    f.finish();
+    println!(
+        "HX_H4_DRAG {control} accepted={accepted}/120 last_ack={:?}",
+        sent.elapsed()
+    );
+    assert_eq!(
+        f.edits().backpressure_refusals,
+        0,
+        "HX_H4_NO_BACKPRESSURE {control}"
+    );
+    let mut expected = (*before).clone();
+    operation(119).apply(&mut expected).unwrap();
+    assert_eq!(*f.app.focused().document, expected, "HX_H4_DRAG_FINAL");
+    let mut loaded = LoadedBundle::read(
+        &f.temp.path("p.kinewright"),
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let cold = loaded.open_manual().unwrap().export_history().unwrap();
+    assert_eq!(*cold.history().document, expected, "HX_H4_DRAG_COLD");
+    drop(cold);
+    drop(loaded);
+    f.app.undo();
+    f.finish();
+    assert_eq!(*f.app.focused().document, *before, "HX_H4_DRAG_UNDO");
+    accepted
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn hx_h4_strict_drag_saves_all_sub_batches() {
+    let exposure = strict_drag("exposure", param);
+    let sync_lock = strict_drag("sync-lock", |value| Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: value % 2 == 0,
+    });
+    assert_eq!([exposure, sync_lock], [120, 120], "HX_H4_NO_BACKPRESSURE");
 }
 
 #[test]

@@ -79,7 +79,7 @@ struct Pending {
     authority: u64,
     resources: BTreeSet<Resource>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Root {
     snapshot: ObjectRef,
     stream: StreamState,
@@ -97,6 +97,9 @@ struct Coverage {
     restarts: usize,
     lost_acks: usize,
     before_publish: usize,
+    after_publish: usize,
+    group_refusals: usize,
+    largest_group: usize,
     handoffs: usize,
     saves: usize,
     save_as: usize,
@@ -120,6 +123,9 @@ impl Coverage {
         self.restarts += other.restarts;
         self.lost_acks += other.lost_acks;
         self.before_publish += other.before_publish;
+        self.after_publish += other.after_publish;
+        self.group_refusals += other.group_refusals;
+        self.largest_group = self.largest_group.max(other.largest_group);
         self.handoffs += other.handoffs;
         self.saves += other.saves;
         self.save_as += other.save_as;
@@ -131,6 +137,14 @@ impl Coverage {
         self.redo_payloads += other.redo_payloads;
         self.ordinary_lease_peak = self.ordinary_lease_peak.max(other.ordinary_lease_peak);
     }
+}
+#[derive(Clone, Copy)]
+enum GroupFault {
+    None,
+    RefuseAt(usize),
+    StopBeforeRoot(usize),
+    StopAfterRoot,
+    LoseAcknowledgement,
 }
 struct Session<S> {
     gui_pool: HistoryPool,
@@ -241,14 +255,45 @@ impl<S: ModelStore> Session<S> {
             ),
         }
     }
-    fn drain(&mut self, lose_ack: bool, crash_before_publish: bool) {
-        while let Some(pending) = self.pending.front() {
+    fn drain(&mut self) {
+        while !self.pending.is_empty() {
+            self.group(
+                crate::operation_protocol::PENDING_COMMANDS,
+                GroupFault::None,
+            );
+        }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one modeled group checks every admission and publication boundary"
+    )]
+    fn group(&mut self, limit: usize, fault: GroupFault) {
+        use crate::operation_protocol::Conflict;
+        let attempted = self.pending.len().min(limit);
+        if attempted == 0 {
+            return;
+        }
+        self.coverage.largest_group = self.coverage.largest_group.max(attempted);
+        let before = self.store.root();
+        let mut root = before.clone();
+        root.stream
+            .validate()
+            .expect("OPENED_STREAM_HAS_A_VALID_BOUNDED_RECEIPT_WINDOW");
+        let mut prefix = Vec::with_capacity(attempted);
+        for (index, pending) in self.pending.iter().take(attempted).enumerate() {
             let message = &pending.message;
             let id = message_id(message);
-            let mut root = self.store.root();
-            root.stream
-                .validate()
-                .expect("OPENED_STREAM_HAS_A_VALID_BOUNDED_RECEIPT_WINDOW");
+            if matches!(fault, GroupFault::RefuseAt(at) if at % attempted == index) {
+                let mut refused = message.clone();
+                refused.tip[0] ^= 1;
+                assert!(matches!(
+                    root.stream.lookup(&refused),
+                    Err(Conflict::Chain | Conflict::CommandIdentity)
+                ));
+                self.coverage.group_refusals += 1;
+                break;
+            }
             if root
                 .stream
                 .lookup(message)
@@ -290,49 +335,73 @@ impl<S: ModelStore> Session<S> {
                     "SHADOW_ACCOUNTS_FOR_EACH_GUI_TRANSITION"
                 );
                 root.stream = root.stream.advanced(message, effects.accepted).unwrap().0;
-                root.snapshot = self.store.save(&self.writer.capture().unwrap());
-                if crash_before_publish {
-                    self.coverage.before_publish += 1;
-                    self.writer = self
-                        .store
-                        .load(&self.store.root().snapshot, &self.writer_pool)
-                        .open()
-                        .unwrap();
-                    break;
-                }
-                self.store.publish(&root);
             }
-            if lose_ack {
-                self.coverage.lost_acks += 1;
+            prefix.push((id, root.stream.lookup(message).unwrap().unwrap().clone()));
+            if matches!(fault, GroupFault::StopBeforeRoot(at) if at % attempted == index) {
                 break;
             }
-            let committed = self.store.root();
-            let receipt = committed
-                .stream
-                .lookup(message)
-                .unwrap()
-                .expect("ACK_FOLLOWS_ATOMIC_ROOT_AND_RECEIPT_PUBLICATION")
-                .clone();
-            for observed in committed.stream.receipts() {
-                let observed_id = observed.id.sequence - 1;
-                if let Some(previous) = self
-                    .published_receipts
-                    .insert(observed_id, observed.clone())
-                {
-                    assert_eq!(
-                        previous, *observed,
-                        "RESTART_NEVER_REAPPLIES_A_RECEIPTED_MESSAGE"
-                    );
-                }
+        }
+        if root.stream.sequence() != before.stream.sequence() {
+            root.snapshot = self.store.save(&self.writer.capture().unwrap());
+        }
+        if matches!(fault, GroupFault::StopBeforeRoot(_)) {
+            self.coverage.before_publish += 1;
+            assert_eq!(
+                self.store.cold_root(),
+                before,
+                "STOP_BEFORE_ROOT_EXPOSES_NONE"
+            );
+            self.cold_open(&before.snapshot);
+            self.assert_acknowledged();
+            return;
+        }
+        if root != before {
+            self.store.publish(&root);
+        }
+        let committed = self.store.root();
+        assert_eq!(committed, root, "NO_INTERMEDIATE_GROUP_ROOT");
+        for observed in committed.stream.receipts() {
+            let observed_id = observed.id.sequence - 1;
+            if let Some(previous) = self
+                .published_receipts
+                .insert(observed_id, observed.clone())
+            {
+                assert_eq!(
+                    previous, *observed,
+                    "RESTART_NEVER_REAPPLIES_A_RECEIPTED_MESSAGE"
+                );
             }
-            self.acknowledged.insert(id, receipt);
-            self.pending.pop_front();
+        }
+        if matches!(fault, GroupFault::StopAfterRoot) {
+            self.coverage.after_publish += 1;
+            assert_eq!(
+                self.store.cold_root(),
+                root,
+                "STOP_AFTER_ROOT_EXPOSES_WHOLE_PREFIX"
+            );
+            self.cold_open(&root.snapshot);
+        }
+        if matches!(
+            fault,
+            GroupFault::LoseAcknowledgement | GroupFault::StopAfterRoot
+        ) {
+            self.coverage.lost_acks += 1;
+        } else {
+            for (id, receipt) in prefix {
+                let pending = self.pending.pop_front().unwrap();
+                assert_eq!(id, message_id(&pending.message));
+                assert_eq!(
+                    committed.stream.lookup(&pending.message).unwrap(),
+                    Some(&receipt),
+                    "ACK_FOLLOWS_ATOMIC_ROOT_AND_RECEIPT_PUBLICATION"
+                );
+                self.acknowledged.insert(id, receipt);
+            }
         }
         self.assert_acknowledged();
         if self.pending.is_empty() {
-            let root = self.store.root();
             assert_eq!(
-                (root.stream.sequence(), root.stream.tip()),
+                (committed.stream.sequence(), committed.stream.tip()),
                 (self.gui_stream.sequence(), self.gui_stream.tip()),
                 "DRAINED_REPLICAS_HAVE_THE_SAME_SEQUENCE_AND_CHAIN"
             );
@@ -413,10 +482,10 @@ impl<S: ModelStore> Session<S> {
         }
         self.coverage.restarts += 1;
         self.coverage.handoffs += usize::from(handoff);
-        self.drain(false, false);
+        self.drain();
     }
     fn save(&mut self, save_as: bool) {
-        self.drain(false, false);
+        self.drain();
         if save_as {
             self.copy_destination();
             self.install(&self.store.root().snapshot);
@@ -429,7 +498,7 @@ impl<S: ModelStore> Session<S> {
         self.coverage.save_as += usize::from(save_as);
     }
     fn install_checkpoint(&mut self, selected: usize) {
-        self.drain(false, false);
+        self.drain();
         if self.checkpoints.is_empty() {
             self.save(false);
         }
@@ -861,7 +930,7 @@ fn queued_payload_after_gui_fold<S: ModelStore>() {
     );
     session.collect();
     session.store.assert_exists(&resource);
-    session.drain(false, false);
+    session.drain();
     session.collect();
     session.store.assert_absent(&resource);
 }

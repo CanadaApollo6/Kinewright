@@ -25,7 +25,7 @@ mod durable;
 mod manual;
 mod owned_media;
 mod release;
-pub use manual::{ManualAuthority, ManualRecoveryEndpoint};
+pub use manual::{ManualAuthority, ManualHistoryCommit, ManualRecoveryEndpoint};
 mod recovery;
 mod retained_work;
 pub use retained_work::{

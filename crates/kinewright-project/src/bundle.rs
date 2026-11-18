@@ -911,6 +911,7 @@ pub(crate) struct PendingPublication {
     pub(crate) identity: crate::operation_history::SnapshotIdentity,
     pub(crate) owner: Option<PublicationOwner>,
     pub(crate) root_sha256: Option<String>,
+    pub(crate) seals: Vec<SealedObject>,
 }
 
 impl ProjectBundle {
@@ -1625,6 +1626,7 @@ impl ProjectBundle {
             identity,
             owner: None,
             root_sha256: None,
+            seals: Vec::new(),
         });
         // The local immutable holder remains live through every synchronous IO.
         // Once IO returns, sealed objects plus the fixed tag preserve the exact

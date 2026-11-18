@@ -168,84 +168,67 @@ impl Ja1EditingSession {
         authority: &ManualAuthority,
         accepted: &EncodedMessage,
     ) -> Result<(Receipt, Option<BundleSaveReport>), BundleError> {
-        self.require_local_writer()?;
-        let lease = &authority.lease;
-        let message = accepted.decode().map_err(protocol)?;
-        // Lookup comes first; a retired issuer must still get its saved receipt.
-        if let Some(receipt) = self.manual_receipt(accepted)? {
-            let core = self.core.clone();
-            let bundle = self.active_bundle_mut()?;
-            let checkpoint = bundle.checkpoint(bundle.manual_branch_id())?;
-            let matching = checkpoint
-                .stream
-                .as_ref()
-                .and_then(|state| state.receipts().last())
-                .is_some_and(|last| last.id == receipt.id)
-                && bundle
-                    .pending_publication
-                    .as_ref()
-                    .is_some_and(|pending| pending.identity == checkpoint.identity);
-            if matching {
-                bundle.reconcile_command(&core)?;
-            }
-            if !bundle.unsettled {
-                let checkpoint = bundle.checkpoint(bundle.manual_branch_id())?;
-                let identity = checkpoint.identity;
-                let position = checkpoint.position;
-                if let Some(association) = &mut self.association {
-                    association.saved = Some(identity.to_string());
-                    association.saved_position = Some(position);
-                }
-            }
-            return Ok((receipt, None));
+        let mut outcome =
+            self.commit_manual_history_group(authority, std::slice::from_ref(accepted))?;
+        if let Some(refusal) = outcome.refusal {
+            return Err(refusal);
         }
-        let core = self.core.clone();
+        let receipt = outcome.receipts.pop().ok_or(BundleError::HistoryChanged)?;
+        Ok((receipt, outcome.report))
+    }
+
+    pub fn commit_manual_history_group(
+        &mut self,
+        authority: &ManualAuthority,
+        messages: &[EncodedMessage],
+    ) -> Result<ManualHistoryCommit, BundleError> {
+        self.require_local_writer()?;
+        if messages.len() > crate::operation_protocol::PENDING_COMMANDS
+            || messages
+                .iter()
+                .try_fold(0_u64, |bytes, message| {
+                    bytes.checked_add(message.byte_len())
+                })
+                .is_none_or(|bytes| bytes > crate::operation_protocol::PENDING_BYTES)
+        {
+            return Err(BundleError::Capacity("manual ingress"));
+        }
+        if messages.is_empty() {
+            return Ok(ManualHistoryCommit::default());
+        }
+        let publisher = self.manual_publisher()?;
+        let core = &self.core;
         let bundle = self
             .destination
             .as_mut()
             .ok_or(BundleError::HistoryChanged)?
             .bundle_mut()?;
-        let checkpoint = bundle.checkpoint(bundle.manual_branch_id())?;
-        if lease.state.seed()
-            != checkpoint
-                .stream
-                .as_ref()
-                .ok_or(BundleError::HistoryChanged)?
-                .seed()
-            || lease.owner_epoch != bundle.store.owner_epoch()
-            || lease.switch_generation
-                != bundle
-                    .root()
-                    .ok_or(BundleError::HistoryChanged)?
-                    .manual_switch_generation
-            || message.id.issuer != lease.issuer
-            || lease.inputs != checkpoint.input_manifest_ref
+        // A prior request may have replaced the root before the acknowledgement
+        // was lost. Resolve its exact candidate before consulting the stream.
+        if bundle.unsettled
+            && bundle.pending_publication.as_ref().is_some_and(|pending| {
+                pending.core.actor_identity() == core.actor_identity()
+                    && matches!(
+                        pending.owner,
+                        Some(crate::bundle::PublicationOwner::Update { .. })
+                    )
+            })
         {
-            return Err(BundleError::HistoryChanged);
+            bundle.reconcile_command(core)?;
         }
-        // The host retains this certificate while the lease is live, including
-        // its pin. Admission also validates the precise operation payload here.
-        if let Action::Do { operations, .. } = &message.action {
-            authority.inputs.check(operations)?;
-        }
-        let result = bundle.with_person_publication(|bundle| {
-            crate::bundle_commit::BundleCommit::admitted_history(
-                bundle,
-                &message,
-                &core,
-                &lease.inputs,
-            )
+        let outcome = bundle.with_person_publication(|bundle| {
+            publish_manual_group(bundle, core, authority, publisher, messages)
         })?;
-        if let Some(report) = &result.1 {
-            let association = self
-                .association
-                .as_mut()
-                .ok_or(BundleError::HistoryChanged)?;
-            association.saved = Some(report.history_sha256.clone());
-            association.saved_position = Some(report.position);
+        if !bundle.unsettled && !outcome.receipts.is_empty() {
+            let checkpoint = bundle.checkpoint(bundle.manual_branch_id())?;
+            if let Some(association) = &mut self.association {
+                association.saved = Some(checkpoint.identity.to_string());
+                association.saved_position = Some(checkpoint.position);
+            }
         }
-        Ok(result)
+        Ok(outcome)
     }
+
     pub fn command_receipt(
         &self,
         envelope: &crate::receipts::CommandEnvelope,
@@ -638,6 +621,188 @@ impl Ja1EditingSession {
             .manual_switch_generation)
     }
 }
+/// A published or previously saved receipt for each accepted message, followed
+/// by at most one refusal. The request's remaining messages were untouched.
+#[derive(Default)]
+pub struct ManualHistoryCommit {
+    pub receipts: Vec<Receipt>,
+    pub refusal: Option<BundleError>,
+    pub report: Option<BundleSaveReport>,
+}
+
+struct ManualGroup<'a> {
+    authority: &'a ManualAuthority,
+    checkpoint: &'a crate::bundle_records::BranchCheckpoint,
+    publisher: crate::operation_protocol::Publisher,
+    lease_matches: bool,
+    writable: bool,
+    next_issuer_sequence: Option<u64>,
+    stream: StreamState,
+    stage: Option<(AcceptedCut, crate::operation_actor::ManualPreview)>,
+}
+
+impl ManualGroup<'_> {
+    fn admit(
+        &mut self,
+        owner: &crate::ProjectAttachment,
+        accepted: &EncodedMessage,
+    ) -> Result<Receipt, BundleError> {
+        let message = accepted.decode().map_err(protocol)?;
+        if message.publisher != self.publisher {
+            return Err(BundleError::Identity(
+                "accepted command belongs to a different native publisher namespace".into(),
+            ));
+        }
+        // Check saved receipts before checking current issuer authority. Keep
+        // the original window available as new commands advance the preview.
+        let base_stream = self
+            .checkpoint
+            .stream
+            .as_ref()
+            .ok_or(BundleError::HistoryChanged)?;
+        if message.sequence <= base_stream.sequence() {
+            return base_stream
+                .lookup(&message)
+                .map_err(protocol)?
+                .cloned()
+                .ok_or(BundleError::HistoryChanged);
+        }
+        if let Some(receipt) = self.stream.lookup(&message).map_err(protocol)? {
+            return Ok(receipt.clone());
+        }
+        if !self.writable {
+            return Err(BundleError::Unsettled);
+        }
+        let lease = self.authority.lease();
+        if !self.lease_matches
+            || message.id.issuer != lease.issuer
+            || Some(message.id.sequence) != self.next_issuer_sequence
+            || message.context.creation.branch != self.checkpoint.branch_id
+            || message.context.approval.is_some()
+            || message.context.transition.is_some()
+            || message
+                .context
+                .inputs
+                .iter()
+                .any(|reference| reference != &lease.inputs)
+        {
+            return Err(BundleError::HistoryChanged);
+        }
+        if let Action::Do { operations, .. } = &message.action {
+            self.authority.inputs.check(operations)?;
+        }
+        let next = message
+            .id
+            .sequence
+            .checked_add(1)
+            .ok_or(BundleError::Capacity("issuer sequence"))?;
+        let position = self
+            .stage
+            .as_ref()
+            .map_or(self.checkpoint.position, |(_, preview)| preview.position());
+        let receipt = StreamState::new_receipt(&message, position).map_err(protocol)?;
+        if self.stage.is_none() {
+            let cut = owner
+                .freeze_published(
+                    self.checkpoint.identity,
+                    self.checkpoint.position,
+                    self.checkpoint.revision,
+                )
+                .map_err(crate::bundle::operation_error)?;
+            match owner.preview_manual(cut) {
+                Ok(preview) => self.stage = Some((cut, preview)),
+                Err(error) => {
+                    owner.resume(&cut).map_err(crate::bundle::operation_error)?;
+                    return Err(crate::bundle::operation_error(error));
+                }
+            }
+        }
+        let (_, preview) = self
+            .stage
+            .as_mut()
+            .expect("manual publication has a working copy");
+        preview
+            .apply(message.action, message.context)
+            .map_err(crate::bundle::operation_error)?;
+        self.stream.record_receipt(receipt.clone());
+        self.next_issuer_sequence = Some(next);
+        Ok(receipt)
+    }
+}
+
+fn publish_manual_group(
+    bundle: &mut crate::bundle::ProjectBundle,
+    core: &crate::operation_actor::Core,
+    authority: &ManualAuthority,
+    publisher: crate::operation_protocol::Publisher,
+    messages: &[EncodedMessage],
+) -> Result<ManualHistoryCommit, BundleError> {
+    let lease = authority.lease();
+    let branch = bundle.manual_branch_id().clone();
+    let checkpoint = bundle.checkpoint(&branch)?;
+    let stream = checkpoint
+        .stream
+        .clone()
+        .ok_or(BundleError::HistoryChanged)?;
+    let switch_generation = bundle
+        .root()
+        .ok_or(BundleError::HistoryChanged)?
+        .manual_switch_generation;
+    let mut group = ManualGroup {
+        authority,
+        checkpoint,
+        publisher,
+        lease_matches: lease.state.seed() == stream.seed()
+            && lease.owner_epoch == bundle.store.owner_epoch()
+            && lease.switch_generation == switch_generation
+            && lease.inputs == checkpoint.input_manifest_ref,
+        writable: !bundle.unsettled && bundle.pending_publication.is_none(),
+        next_issuer_sequence: bundle
+            .issuers
+            .get(&lease.issuer)
+            .map(|issuer| issuer.next_sequence),
+        stream,
+        stage: None,
+    };
+    let owner = bundle.attach_core(core)?;
+    let mut outcome = ManualHistoryCommit {
+        receipts: Vec::with_capacity(messages.len()),
+        ..ManualHistoryCommit::default()
+    };
+    for accepted in messages {
+        match group.admit(&owner, accepted) {
+            Ok(receipt) => outcome.receipts.push(receipt),
+            Err(error) => {
+                outcome.refusal = Some(error);
+                break;
+            }
+        }
+    }
+    if let Some((cut, preview)) = group.stage {
+        match preview.finish() {
+            Ok(Some(update)) => {
+                outcome.report = Some(crate::bundle_commit::BundleCommit::publish_update(
+                    bundle,
+                    core,
+                    cut,
+                    update,
+                    &lease.inputs,
+                    &branch,
+                    Some(group.stream),
+                    true,
+                    None,
+                )?);
+            }
+            Ok(None) => owner.resume(&cut).map_err(crate::bundle::operation_error)?,
+            Err(error) => {
+                owner.resume(&cut).map_err(crate::bundle::operation_error)?;
+                return Err(crate::bundle::operation_error(error));
+            }
+        }
+    }
+    Ok(outcome)
+}
+
 pub struct ManualRecoveryEndpoint {
     attachment: crate::ProjectAttachment,
     core: crate::operation_actor::Core,
@@ -705,6 +870,11 @@ mod c0_fix1_tests {
 
     fn owner() -> (TempDirectory, Ja1EditingSession) {
         let temp = TempDirectory::new_in(&workspace_target_dir(), "owner-manual-protocol");
+        let owner = owner_at(&temp.path("project.kinewright"));
+        (temp, owner)
+    }
+
+    fn owner_at(path: &std::path::Path) -> Ja1EditingSession {
         let core = Core::for_test(Document {
             tracks: vec![Track {
                 id: TrackId(1),
@@ -715,15 +885,11 @@ mod c0_fix1_tests {
             ..Document::default()
         })
         .unwrap();
-        let mut owner = Ja1EditingSession::activate(
-            &temp.path("project.kinewright"),
-            BundleWriteAdmission::new_document(),
-            &core,
-            None,
-        )
-        .unwrap();
+        let mut owner =
+            Ja1EditingSession::activate(path, BundleWriteAdmission::new_document(), &core, None)
+                .unwrap();
         owner.save_active().unwrap();
-        (temp, owner)
+        owner
     }
     fn replica(
         temp: &TempDirectory,
@@ -753,6 +919,206 @@ mod c0_fix1_tests {
             )
             .unwrap();
         (replica, permit)
+    }
+
+    fn group_messages(permit: &ManualPermit) -> Vec<EncodedMessage> {
+        for locked in [false, true, false] {
+            permit
+                .request(Command::DoBatchCoalesced {
+                    operations: vec![Operation::SetTrackSyncLock {
+                        track: TrackId(1),
+                        locked,
+                    }],
+                    coalesce_key: "group".into(),
+                })
+                .unwrap();
+        }
+        permit.pending().unwrap()
+    }
+
+    #[test]
+    fn hx_h4_publication_failure_returns_no_receipts_and_retries() {
+        use crate::io_observer::{fail_once, observe};
+        for failure in ["capacity", "root_rename_io", "root_parent_sync"] {
+            let (temp, mut writer) = owner();
+            let lease = writer
+                .issue_manual_lease("group".into(), "group".into())
+                .unwrap();
+            let authority = writer.manual_authority(lease.clone()).unwrap();
+            let (gui, permit) = replica(&temp, &writer, lease);
+            let messages = group_messages(&permit);
+            let before = writer.core().change_id().unwrap();
+            let path = temp.path("project.kinewright");
+            let root = std::fs::read(&path).unwrap();
+            let result = if failure == "capacity" {
+                let store = writer.store().unwrap();
+                let limits = store.limits();
+                let usage = store.usage().unwrap();
+                let mut available = limits.metadata_bytes
+                    - usage.metadata_bytes
+                    - (usage.decoded_bytes - usage.decoder_bytes);
+                let mut held = Vec::new();
+                while available > 0 {
+                    let bytes = available.min(limits.decoded_record_bytes);
+                    held.push(store.reserve_probe(bytes).unwrap());
+                    available -= bytes;
+                }
+                let result = writer.commit_manual_history_group(&authority, &messages);
+                drop(held);
+                assert!(
+                    matches!(
+                        result,
+                        Err(BundleError::Capacity("metadata and decoded bytes"))
+                    ),
+                    "{:?}",
+                    result.as_ref().err()
+                );
+                result
+            } else {
+                let result = fail_once(failure, || {
+                    writer.commit_manual_history_group(&authority, &messages)
+                });
+                assert!(matches!(result, Err(BundleError::DurabilityUnknown)));
+                assert!(
+                    !writer
+                        .active_bundle()
+                        .unwrap()
+                        .pending_publication
+                        .as_ref()
+                        .unwrap()
+                        .seals
+                        .is_empty()
+                );
+                result
+            };
+            assert!(
+                result.is_err(),
+                "FAILED_GROUP_ACKNOWLEDGES_NOTHING {failure}"
+            );
+            assert_eq!(writer.core().change_id().unwrap(), before, "{failure}");
+            let committed = failure == "root_parent_sync";
+            assert_eq!(
+                std::fs::read(&path).unwrap() != root,
+                committed,
+                "{failure}"
+            );
+
+            let (retried, trace) =
+                observe(|| writer.commit_manual_history_group(&authority, &messages));
+            let retried = retried.unwrap();
+            assert!(retried.refusal.is_none(), "{:?}", retried.refusal);
+            assert_eq!(retried.receipts.len(), messages.len());
+            assert_eq!(
+                trace
+                    .events
+                    .iter()
+                    .filter(|event| event.operation == "root_rename")
+                    .count(),
+                usize::from(!committed),
+                "RETRY_PUBLISHES_ONLY_AN_ABSENT_GROUP {failure}"
+            );
+            assert_eq!(
+                writer.core().export_history().unwrap(),
+                gui.core().export_history().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn hx_h4_process_stop_around_root_replace() {
+        use crate::operation_history::{HistoryPool, PoolLimits};
+        const CHILD: &str = "KINEWRIGHT_HX_H4_CRASH_FIXTURE";
+        const STOP: i32 = 86;
+        if let Some(root) = std::env::var_os(CHILD) {
+            let root = std::path::PathBuf::from(root);
+            let path = root.join("project.kinewright");
+            let mut writer = owner_at(&path);
+            let lease = writer
+                .issue_manual_lease("group".into(), "group".into())
+                .unwrap();
+            let authority = writer.manual_authority(lease.clone()).unwrap();
+            let gui_temp = TempDirectory::new_in(&root, "gui");
+            let (gui, permit) = replica(&gui_temp, &writer, lease.clone());
+            let messages = group_messages(&permit);
+            let expected = gui.core().snapshot_identity().unwrap();
+            let plan = serde_json::to_vec(&(lease, &messages, expected)).unwrap();
+            std::fs::write(root.join("request.json"), plan).unwrap();
+            let barrier = if root.join("after").exists() {
+                "root_rename"
+            } else {
+                "root_rename_attempt"
+            };
+            crate::io_observer::at_barrier(
+                barrier,
+                || std::process::exit(STOP),
+                || {
+                    let _ = writer.commit_manual_history_group(&authority, &messages);
+                },
+            );
+            panic!("GROUP_CRASH_HOOK_MUST_FIRE {barrier}");
+        }
+
+        for after in [false, true] {
+            let temp = TempDirectory::new_in(&workspace_target_dir(), "manual-group-crash");
+            if after {
+                std::fs::write(temp.path("after"), []).unwrap();
+            }
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "editing_session::manual::c0_fix1_tests::hx_h4_process_stop_around_root_replace"])
+                .env(CHILD, temp.root())
+                .output()
+                .unwrap();
+            assert_eq!(child.status.code(), Some(STOP), "{child:?}");
+            let (lease, messages, expected): (
+                Lease,
+                Vec<EncodedMessage>,
+                crate::operation_history::SnapshotIdentity,
+            ) = serde_json::from_slice(&std::fs::read(temp.path("request.json")).unwrap()).unwrap();
+            let path = temp.path("project.kinewright");
+            let pool = HistoryPool::new(PoolLimits::default());
+            let mut reopened = Ja1EditingSession::open(&path, &pool).unwrap();
+            let (_, checkpoint) = reopened.manual_checkpoint().unwrap();
+            let stream = checkpoint.stream.as_ref().unwrap();
+            let last = messages.last().unwrap().decode().unwrap();
+            assert_eq!(
+                stream.sequence(),
+                if after {
+                    last.sequence
+                } else {
+                    lease.state.sequence()
+                }
+            );
+            assert_eq!(
+                stream.tip(),
+                if after { last.tip } else { lease.state.tip() }
+            );
+            assert_eq!(
+                stream.receipts().count(),
+                if after { messages.len() } else { 0 }
+            );
+            assert_eq!(
+                reopened.core().snapshot_identity().unwrap(),
+                if after { expected } else { lease.snapshot }
+            );
+
+            if !after {
+                // Restarted owners replay absent messages through the original
+                // namespace and chain proof before rotating GUI authority.
+                reopened
+                    .reconcile_manual_chain("group", &messages, Some(expected))
+                    .unwrap();
+            }
+            let authority = reopened.manual_authority(lease).unwrap();
+            let root = std::fs::read(&path).unwrap();
+            let reply = reopened
+                .commit_manual_history_group(&authority, &messages)
+                .unwrap();
+            assert!(reply.refusal.is_none(), "{:?}", reply.refusal);
+            assert!(reply.report.is_none(), "COLD_RECEIPTS_DO_NOT_REPUBLISH");
+            assert_eq!(reply.receipts.len(), messages.len());
+            assert_eq!(std::fs::read(&path).unwrap(), root);
+            assert_eq!(reopened.core().snapshot_identity().unwrap(), expected);
+        }
     }
     #[test]
     fn handover_pool_refusal_preserves_the_live_source_and_retries_after_release() {

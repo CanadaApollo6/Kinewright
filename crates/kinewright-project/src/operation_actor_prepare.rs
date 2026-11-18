@@ -5,7 +5,7 @@ use super::{
     Event, HistoryError, Message, ObjectRef, Sender, SnapshotIdentity, State, TimelineRevision,
     TypeId,
 };
-use crate::operation_history::{PreparedOwner, Resource};
+use crate::operation_history::{CreationSizing, OwnerHistory, PreparedOwner, Resource};
 use crate::operation_protocol::Action;
 
 pub struct PreparedUpdate {
@@ -17,6 +17,83 @@ pub struct PreparedUpdate {
     effects: Effects,
     event: Event,
     batch: Option<crate::bundle_records::BatchId>,
+}
+
+/// One creation-sized working copy for the entire unpublished manual prefix.
+pub(crate) struct ManualPreview {
+    owner: OwnerHistory,
+    before: ChangeId,
+    revision: TimelineRevision,
+    generation: u64,
+    sizing: CreationSizing,
+    bounds: kinewright_core::undo::RoleBounds,
+    effects: Option<Effects>,
+}
+impl ManualPreview {
+    pub(crate) fn position(&self) -> CommandKey {
+        self.owner.history().position()
+    }
+
+    pub(crate) fn apply(&mut self, action: Action, context: CommandContext) -> Result<(), Error> {
+        let revision = next_revision(self.revision, changes_timeline(&action, &self.owner))?;
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(Error::CounterExhausted)?;
+        // OwnerHistory applies each command atomically, including its ledger
+        // and command boundaries. A refusal leaves the previous prefix intact.
+        self.effects = Some(action.execute(context, &mut self.owner)?);
+        self.generation = generation;
+        self.revision = revision;
+        Ok(())
+    }
+
+    pub(crate) fn finish(mut self) -> Result<Option<PreparedUpdate>, Error> {
+        let Some(effects) = self.effects.take() else {
+            return Ok(None);
+        };
+        let position = self.position();
+        let event = prepared_event(&self.owner, self.revision);
+        Ok(Some(PreparedUpdate {
+            before: self.before,
+            revision: self.revision,
+            generation: self.generation,
+            position,
+            owner: self.owner.seal_preview(self.sizing, self.bounds)?,
+            effects,
+            event,
+            batch: None,
+        }))
+    }
+}
+
+fn changes_timeline(action: &Action, owner: &OwnerHistory) -> bool {
+    match action {
+        Action::Undo => !owner.history().undo().is_empty(),
+        Action::Redo => !owner.history().redo().is_empty(),
+        Action::Close => false,
+        Action::Do { .. } => true,
+    }
+}
+
+fn next_revision(revision: TimelineRevision, changed: bool) -> Result<TimelineRevision, Error> {
+    if changed {
+        Ok(TimelineRevision(
+            revision.0.checked_add(1).ok_or(Error::CounterExhausted)?,
+        ))
+    } else {
+        Ok(revision)
+    }
+}
+
+fn prepared_event(owner: &OwnerHistory, revision: TimelineRevision) -> Event {
+    Event::DocumentChanged {
+        doc: Arc::clone(owner.history().document()),
+        revision,
+        last_op: None,
+        journal_command: None,
+        token: None,
+    }
 }
 impl PreparedUpdate {
     pub(crate) fn accepted_batch(&self) -> Option<&crate::bundle_records::BatchId> {
@@ -74,6 +151,15 @@ enum Preparation {
     Reinstall,
 }
 impl<P: 'static> Attachment<P> {
+    pub(crate) fn preview_manual(
+        &self,
+        _proof: &P,
+        cut: AcceptedCut,
+    ) -> Result<ManualPreview, Error> {
+        self.core
+            .call(|reply| Message::PreviewManual(TypeId::of::<P>(), cut, reply))?
+    }
+
     pub(crate) fn freeze_published(
         &self,
         _proof: &P,
@@ -223,6 +309,25 @@ impl<P: 'static> Attachment<P> {
     }
 }
 impl State {
+    pub(super) fn preview_manual(
+        &self,
+        authority: TypeId,
+        cut: AcceptedCut,
+    ) -> Result<ManualPreview, Error> {
+        self.check_cut(authority, cut)?;
+        self.check_drained()?;
+        let current = self.history()?;
+        Ok(ManualPreview {
+            owner: current.private_preview()?,
+            before: cut.change,
+            revision: self.revision,
+            generation: self.generation,
+            sizing: current.creation_sizing(),
+            bounds: current.history().bounds(),
+            effects: None,
+        })
+    }
+
     pub(super) fn prepare_selection(
         &self,
         authority: TypeId,
@@ -278,22 +383,11 @@ impl State {
             .into());
         }
         let current = self.history()?;
-        let changed = match action {
-            Action::Undo => !current.history().undo().is_empty(),
-            Action::Redo => !current.history().redo().is_empty(),
-            Action::Close => false,
-            Action::Do { .. } => true,
-        };
-        let revision = if changed || matches!(kind, Preparation::Install | Preparation::Reinstall) {
-            TimelineRevision(
-                self.revision
-                    .0
-                    .checked_add(1)
-                    .ok_or(Error::CounterExhausted)?,
-            )
-        } else {
-            self.revision
-        };
+        let revision = next_revision(
+            self.revision,
+            changes_timeline(action, current)
+                || matches!(kind, Preparation::Install | Preparation::Reinstall),
+        )?;
         let generation = self
             .generation
             .checked_add(1)
@@ -326,13 +420,7 @@ impl State {
             preview.prepare_peer_install(current)?;
         }
         let position = preview.history().position();
-        let event = Event::DocumentChanged {
-            doc: Arc::clone(preview.history().document()),
-            revision,
-            last_op: None,
-            journal_command: None,
-            token: None,
-        };
+        let event = prepared_event(&preview, revision);
         let owner = preview.seal_preview(current.creation_sizing(), current.history().bounds())?;
         Ok(PreparedUpdate {
             before: cut.change,

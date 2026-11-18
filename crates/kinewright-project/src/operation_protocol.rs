@@ -360,27 +360,40 @@ impl StreamState {
         if let Some(receipt) = self.lookup(message)? {
             return Ok((self.clone(), receipt.clone()));
         }
+        let receipt = Self::new_receipt(message, accepted)?;
+        let mut next = self.clone();
+        next.record_receipt(receipt.clone());
+        Ok((next, receipt))
+    }
+
+    /// The caller has checked the chain with `lookup` and still has to
+    /// apply this command before recording its receipt.
+    pub(crate) fn new_receipt(
+        message: &Message,
+        accepted: CommandKey,
+    ) -> Result<Receipt, Conflict> {
         if message.accepted != accepted {
             return Err(Conflict::AcceptedKey);
         }
-        let receipt = Receipt {
+        Ok(Receipt {
             id: message.id.clone(),
             sequence: message.sequence,
             accepted,
             tip: message.tip,
             command: message.digest()?,
-        };
-        let mut next = self.clone();
-        next.sequence = message.sequence;
-        next.tip = message.tip;
-        next.receipts.push_back(receipt.clone());
+        })
+    }
+
+    pub(crate) fn record_receipt(&mut self, receipt: Receipt) {
+        self.sequence = receipt.sequence;
+        self.tip = receipt.tip;
+        self.receipts.push_back(receipt);
         // A producer has at most 64 unacknowledged messages. It cannot advance
         // past this window with an older message still pending. Other native
         // and spending receipts keep their independent retention rules.
-        if next.receipts.len() > PENDING_COMMANDS {
-            next.receipts.pop_front();
+        if self.receipts.len() > PENDING_COMMANDS {
+            self.receipts.pop_front();
         }
-        Ok((next, receipt))
     }
     pub fn receipts(&self) -> impl Iterator<Item = &Receipt> {
         self.receipts.iter()

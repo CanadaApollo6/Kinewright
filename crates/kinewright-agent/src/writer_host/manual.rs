@@ -276,22 +276,23 @@ impl HostCommandOwner {
                 HostRefusal::new("manual_lease", "this client has no manual editor lease")
             })?;
         let authority = self.manual.take().expect("verified manual client");
-        let outcome: Result<(), HostError> = (|| {
-            for message in messages {
-                let (receipt, report) = self
-                    .owner_mut()?
-                    .commit_manual_history(&authority, message)?;
-                if let Some(report) = report {
-                    self.saved(&report, reply, false)?;
-                }
-                reply.manual_ack.push(receipt);
-            }
-            Ok(())
-        })();
+        let outcome = self.owner_mut().and_then(|owner| {
+            owner
+                .commit_manual_history_group(&authority, messages)
+                .map_err(HostError::from)
+        });
         self.manual = Some(authority);
-        outcome?;
-        if !messages.is_empty() {
+        let outcome = outcome?;
+        if let Some(report) = outcome.report {
+            self.saved(&report, reply, false)?;
+        }
+        reply.manual_ack = outcome.receipts;
+        if !reply.manual_ack.is_empty() {
             self.prepared_owned_media = None;
+        }
+        if let Some(refusal) = outcome.refusal {
+            reply.manual_unattempted = Some(messages.len() - reply.manual_ack.len() - 1);
+            return Err(refusal.into());
         }
         self.message = "Accepted manual history is durably saved.".into();
         Ok(())
