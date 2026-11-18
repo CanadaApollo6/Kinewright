@@ -227,7 +227,7 @@ fn facts() -> String {
          cgroup_controllers=[{}] user_service_controllers=[{}] user_service_subtree=[{}] \
          user_manager={} rlimit_as={} rlimit_nproc={} rlimit_nofile={} cpus={} loadavg=[{}] \
          restrict_userns={} max_user_namespaces={} ptrace_scope={} privileged_reads={} \
-         fds={}\n",
+         scope_deletion={} fds={}\n",
         read("/proc/sys/kernel/osrelease"),
         command("getconf", &["GNU_LIBC_VERSION"]),
         landlock_abi(),
@@ -251,7 +251,79 @@ fn facts() -> String {
         } else {
             "no-sudo"
         },
+        scope_deletion(),
         own_fds(),
+    )
+}
+
+/// What a transient user scope looks like through descriptors held across
+/// its removal, as the client's cleanup sees its helper scope: the
+/// directory's link count before and after, and the `cgroup.events` read.
+/// The probe scope runs `sh -c 'read _'` and ends when its stdin closes; the
+/// manager then removes it, as it removes a helper scope once the shim exits.
+fn scope_deletion() -> String {
+    use std::{io::Read as _, os::unix::fs::MetadataExt};
+    if !user_manager() {
+        return "no_user_manager".into();
+    }
+    let unit = format!("kinewright-diag-{}.scope", std::process::id());
+    let spawned = Command::new("systemd-run")
+        .args(["--user", "--scope", "--quiet", "--collect"])
+        .arg(format!("--unit={unit}"))
+        .args(["--", "sh", "-c", "read _"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(error) => return format!("<{error}>"),
+    };
+    let bound = Instant::now() + Duration::from_secs(5);
+    let joined = loop {
+        let cgroup = std::fs::read_to_string(format!("/proc/{}/cgroup", child.id()));
+        let path = cgroup.ok().and_then(|cgroup| {
+            cgroup
+                .lines()
+                .find_map(|line| line.strip_prefix("0::"))
+                .filter(|path| path.ends_with(&unit))
+                .map(|path| format!("/sys/fs/cgroup{path}"))
+        });
+        if path.is_some() || Instant::now() >= bound || matches!(child.try_wait(), Ok(Some(_))) {
+            break path;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let held = joined.as_ref().map(|path| {
+        (
+            std::fs::File::open(path),
+            std::fs::File::open(format!("{path}/cgroup.events")),
+        )
+    });
+    drop(child.stdin.take());
+    let status = child.wait();
+    let (Some(path), Some((Ok(directory), Ok(mut events)))) = (joined, held) else {
+        return format!("<probe scope not joined: {status:?}>");
+    };
+    let nlink = |directory: &std::fs::File| {
+        directory.metadata().map_or_else(
+            |error| format!("<{error}>"),
+            |meta| meta.nlink().to_string(),
+        )
+    };
+    let live = nlink(&directory);
+    while Path::new(&path).exists() && Instant::now() < bound {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let removed = !Path::new(&path).exists();
+    let mut text = String::new();
+    let read = events.read_to_string(&mut text).map_or_else(
+        |error| format!("errno{}", error.raw_os_error().unwrap_or(0)),
+        |_| text.lines().next().unwrap_or("").replace(' ', ":"),
+    );
+    format!(
+        "[live_nlink:{live} removed:{removed} deleted_nlink:{} events:{read}]",
+        nlink(&directory)
     )
 }
 
@@ -304,6 +376,14 @@ impl Samples {
         }
     }
     fn render(&self, out: &mut String) {
+        if self.waiting.is_none() && !self.recent.iter().any(Sample::waiting) {
+            let _ = writeln!(
+                out,
+                "MS2_DIAG sample label={} kind=last-waiting none: every sample saw the client in \
+                 cleanup or idle",
+                self.label
+            );
+        }
         let mut previous: HashMap<u32, &str> = HashMap::new();
         let kept = self
             .waiting
@@ -434,6 +514,9 @@ fn logs(out: &mut String) {
             continue;
         };
         let lines: Vec<&str> = text.lines().collect();
+        if lines.is_empty() {
+            let _ = writeln!(out, "MS2_DIAG stderr log={} empty", log.display());
+        }
         for line in &lines[lines.len().saturating_sub(40)..] {
             let _ = writeln!(out, "MS2_DIAG stderr log={} {line}", log.display());
         }
@@ -593,11 +676,16 @@ fn describe(pid: u32, depth: usize, mut privileged: HashMap<String, String>) -> 
             .join("|")
     });
     let tasks = entry("tasks", &|| direct_tasks(&base));
+    let cgroup = read(&format!("{base}/cgroup"));
+    let cgroup = cgroup
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .unwrap_or(&cgroup);
     format!(
         "pid={pid} depth={depth} ppid={} comm={comm} state={} cpu_ticks={}+{} threads={} \
          seccomp={} filters={} nnp={} vm_peak_kb={} vm_size_kb={} rss_kb={} sig_pending={} \
-         syscall=[{syscall}] wchan={wchan} stack=[{stack}] tasks=[{tasks}] ns=[{namespaces}] \
-         fds=[{fds}]",
+         cgroup={cgroup} held_cgroups=[{}] syscall=[{syscall}] wchan={wchan} stack=[{stack}] \
+         tasks=[{tasks}] ns=[{namespaces}] fds=[{fds}]",
         field(1),
         field(0),
         field(11),
@@ -610,7 +698,45 @@ fn describe(pid: u32, depth: usize, mut privileged: HashMap<String, String>) -> 
         status_field("VmSize:"),
         status_field("VmRSS:"),
         status_field("ShdPnd:"),
+        held_cgroups(&base),
     )
+}
+
+/// Each cgroup directory the process holds open, with the link count the
+/// kernel reports for it through that descriptor: a removed cgroup the
+/// client still waits on shows here with its `(deleted)` path.
+fn held_cgroups(base: &str) -> String {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(entries) = std::fs::read_dir(format!("{base}/fd")) else {
+        return "<unreadable>".into();
+    };
+    let mut held: Vec<(u32, String)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let target = std::fs::read_link(entry.path()).ok()?;
+            let target = target.to_str()?;
+            let directory = target.strip_suffix(" (deleted)").unwrap_or(target);
+            if !directory.starts_with("/sys/fs/cgroup/") || directory.contains("/cgroup.") {
+                return None;
+            }
+            let number = entry.file_name().to_str()?.parse().ok()?;
+            let nlink = std::fs::metadata(entry.path()).map_or_else(
+                |error| format!("<{error}>"),
+                |meta| meta.nlink().to_string(),
+            );
+            let deleted = if target.ends_with(" (deleted)") {
+                ":deleted"
+            } else {
+                ""
+            };
+            Some((number, format!("{number}:nlink={nlink}{deleted}")))
+        })
+        .collect();
+    held.sort_by_key(|(number, _)| *number);
+    held.into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Descriptor number and target, as this process may read them.

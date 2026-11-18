@@ -340,7 +340,8 @@ jobs:
 
       # MS2 diagnostics: a probe that never answers left no kernel trace in the
       # job log. On failure or timeout, print the kernel's AppArmor, audit and
-      # seccomp lines and the helper profile's state. Diagnostics only.
+      # seccomp lines, the helper profile's state and the user manager's lines
+      # for the helper scopes. Diagnostics only.
       - name: MS2 kernel diagnostics on failure
         if: failure() || cancelled()
         timeout-minutes: 2
@@ -350,6 +351,7 @@ jobs:
           sudo dmesg 2>/dev/null | grep -iE 'apparmor|audit|seccomp|kinewright' | tail -n 100 || true
           sudo aa-status 2>/dev/null | grep -iE 'kinewright|profiles are|processes' || true
           cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns || true
+          journalctl --user --no-pager -o short-monotonic -n 60 -u 'kinewright-media-*' 2>/dev/null || true
 
   linux-slow:
     name: Linux slow tier
@@ -469,7 +471,8 @@ jobs:
 
       # MS2 diagnostics: a probe that never answers left no kernel trace in the
       # job log. On failure or timeout, print the kernel's AppArmor, audit and
-      # seccomp lines and the helper profile's state. Diagnostics only.
+      # seccomp lines, the helper profile's state and the user manager's lines
+      # for the helper scopes. Diagnostics only.
       - name: MS2 kernel diagnostics on failure
         if: failure() || cancelled()
         timeout-minutes: 2
@@ -479,3 +482,4 @@ jobs:
           sudo dmesg 2>/dev/null | grep -iE 'apparmor|audit|seccomp|kinewright' | tail -n 100 || true
           sudo aa-status 2>/dev/null | grep -iE 'kinewright|profiles are|processes' || true
           cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns || true
+          journalctl --user --no-pager -o short-monotonic -n 60 -u 'kinewright-media-*' 2>/dev/null || true
