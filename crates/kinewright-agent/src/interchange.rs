@@ -1,4 +1,4 @@
-use kinewright_core::{LossCode, Rational};
+use kinewright_core::{ImportRecord, LossCode, Rational, TimelineRevision};
 use kinewright_project::interchange::{
     ImportOptions, InterchangeInspection, Refusal, RefusalCode, SiteQuery, inspect,
 };
@@ -7,9 +7,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{
-    EmptyArgs, error_structured, read_only_annotations, schema_object, success_structured,
-};
+use super::{error_structured, read_only_annotations, schema_object, success_structured};
 
 const INSPECT_BYTES: usize = 6 * 1024;
 const MISSING_LIMIT: usize = 8;
@@ -27,6 +25,12 @@ pub(super) struct InspectArgs {
     after: Option<u32>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReportArgs {
+    index: Option<u32>,
+}
+
 pub(super) fn tools() -> [Tool; 2] {
     [
         Tool::new(
@@ -37,11 +41,33 @@ pub(super) fn tools() -> [Tool; 2] {
         .with_annotations(read_only_annotations()),
         Tool::new(
             "get_import_report",
-            "Read the persisted interchange import records at the current timeline revision. The records describe the original import and include item totals, media counts and omitted loss codes.",
-            schema_object::<EmptyArgs>(),
+            "Read one persisted interchange import record at the current timeline revision. The optional zero-based index counts from oldest to newest. Omit it for the newest record.",
+            schema_object::<ReportArgs>(),
         )
         .with_annotations(read_only_annotations()),
     ]
+}
+
+pub(super) fn import_report(
+    args: &ReportArgs,
+    revision: TimelineRevision,
+    records: &[ImportRecord],
+) -> CallToolResult {
+    let count = records.len();
+    let index = args
+        .index
+        .map_or_else(|| count.checked_sub(1), |index| usize::try_from(index).ok());
+    let record = index.and_then(|index| records.get(index));
+    if args.index.is_some() && record.is_none() {
+        return refusal_reply(Refusal::new(
+            RefusalCode::NotFound,
+            "The requested import record does not exist.",
+        ));
+    }
+    success_structured(
+        "Interchange import report",
+        json!({"revision": revision, "count": count, "index": index, "record": record}),
+    )
 }
 
 pub(super) fn inspect_timeline(args: InspectArgs) -> CallToolResult {
@@ -379,9 +405,109 @@ mod tests {
         let records = invoke(&service, "get_import_report", json!({}))
             .structured_content
             .unwrap();
-        assert_eq!(records["records"], json!([expected]));
+        assert_eq!(records["record"], expected);
+        assert_eq!(records["count"], 1);
+        assert_eq!(records["index"], 0);
         assert_eq!(records["revision"], 0);
     }
+    #[test]
+    fn ix1_pages_maximal_import_records_under_the_reply_budget() {
+        use kinewright_core::{
+            DOCUMENT_MAX_IMPORT_RECORDS, Document, Fidelity, IMPORT_RECORD_MAX_BYTES,
+            InterchangeFormat, LossRow, LossSite, MediaCounts,
+        };
+
+        let maximal = |index| {
+            let mut record = ImportRecord {
+                format: InterchangeFormat::Otio,
+                format_version: "Timeline.1".into(),
+                source_name: format!("edit-{index}.otio"),
+                source_sha256: ImportRecord::hash_source(b"source"),
+                start_offset_frames: 0,
+                items: 1,
+                exact: 0,
+                approximated: 0,
+                dropped: 1,
+                media: MediaCounts::default(),
+                estimated_assets: Vec::new(),
+                retimed_source_end_drift_frames: None,
+                rows: vec![LossRow {
+                    code: LossCode::EffectDropped,
+                    fidelity: Fidelity::Dropped,
+                    count: 1,
+                    bound: None,
+                    unverified: false,
+                    names: Vec::new(),
+                    at: vec![LossSite {
+                        source: String::new(),
+                        frame: 0,
+                        clip: None,
+                    }],
+                }],
+                omitted_codes: Vec::new(),
+            };
+            let needed = IMPORT_RECORD_MAX_BYTES - serde_json::to_vec(&record).unwrap().len();
+            record.rows[0].at[0].source = "x".repeat(needed);
+            assert_eq!(
+                serde_json::to_vec(&record).unwrap().len(),
+                IMPORT_RECORD_MAX_BYTES
+            );
+            record
+        };
+        let document = Document {
+            imported_from: (0..DOCUMENT_MAX_IMPORT_RECORDS).map(maximal).collect(),
+            ..Document::default()
+        };
+        let core = Core::spawn(document).unwrap();
+        let service = KinewrightMcp::new(
+            core,
+            Arc::new(RefusedMedia),
+            Arc::new(RefusedMedia),
+            ConfirmationBroker::default(),
+        );
+        let dispatch = |arguments: Value| {
+            service
+                .call_exposed_blocking(
+                    CallToolRequestParams::new("invoke_capability").with_arguments(
+                        json!({"name":"get_import_report","arguments":arguments})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    ),
+                )
+                .unwrap()
+        };
+        let newest = dispatch(json!({}));
+        assert!(reply_bytes(&newest) <= INSPECT_BYTES);
+        let newest = newest.structured_content.unwrap();
+        assert_eq!(newest["index"], 15);
+        assert_eq!(newest["count"], 16);
+        assert_eq!(newest["record"]["source_name"], "edit-15.otio");
+        for index in 0..16 {
+            let response = dispatch(json!({"index":index}));
+            assert!(reply_bytes(&response) <= INSPECT_BYTES);
+            let response = response.structured_content.unwrap();
+            assert_eq!(response["index"], index);
+            assert_eq!(
+                response["record"]["source_name"],
+                format!("edit-{index}.otio")
+            );
+        }
+        let out_of_range = dispatch(json!({"index":16}));
+        assert_eq!(out_of_range.is_error, Some(true));
+        assert_eq!(
+            out_of_range.structured_content.unwrap()["code"],
+            "not_found"
+        );
+        let empty = import_report(&ReportArgs { index: None }, TimelineRevision(1), &[]);
+        assert_eq!(
+            empty.structured_content.unwrap(),
+            json!({
+                "revision": 1, "count": 0, "index": null, "record": null,
+            })
+        );
+    }
+
     fn write_inspection_fixture(path: &Path) {
         let clip = json!({
             "OTIO_SCHEMA": "Clip.1",

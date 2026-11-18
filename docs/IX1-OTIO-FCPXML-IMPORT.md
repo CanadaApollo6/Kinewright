@@ -686,8 +686,10 @@ There are two read-only registry capabilities, reached through `invoke_capabilit
     lavfi fixtures prove them (§12).
   - With `code`, it pages up to 64 sites of that code from `after`.
   - Responses are ≤ 6 KiB, about 2 KiB typical.
-- **`get_import_report {}`** returns `{revision, records}`. IX1 writes at most one record (≤ 4
-  KiB, about 1.5 KiB typical).
+- **`get_import_report { index?: u32 }`** returns `{revision, count, index, record}`, with one
+  record per response and a 6 KiB response bound. Indexes start at zero and follow insertion order.
+  Omit the index for the newest record. An empty document returns `count: 0` with null index and
+  record. An out-of-range index returns `not_found`.
 
 *Refusals* carry a typed `code` and one sentence: `not_found`, `remote_path`,
 `unsupported_container`, `unsupported_format_version`, `too_large`, `too_deep`, `too_many_items`,
@@ -709,7 +711,9 @@ agent reads `get_import_report`.
   All 64 generated operations expose it through `get_capability`, and the registry's `apply_edit_plan`
   row also gains 34 B. The internal registry grows by 2,210 B.
 
-The slice measures both in the M36 ledger.
+The slice measures both in the M36 ledger. Paging `get_import_report` (ruling 31) then adds
+98 B to the internal registry. Its input schema adds 111 B and its description sheds 13 B.
+The served tool list remains 5,660 B.
 
 ## 11. Parsers and untrusted input
 
@@ -860,6 +864,9 @@ an offline asset or a `remote_path` refusal.
 - **Relink (finding 8).** Relinking an estimated asset writes the candidate's kind, duration and
   resolution. Relink refuses a candidate whose kind does not suit the asset's tracks or whose
   duration falls short.
+- **Report paging (ruling 31).** A document with 16 maximal records yields at most 6 KiB per
+  reply. The newest and explicitly indexed records, an empty document and an invalid index all
+  exercise their distinct replies.
 - **Hand-edited record (finding 8).** A project with an oversized or inconsistent record is refused
   on load.
 - **Imported dissolve (finding 7).** A timeline-UI test trims and moves an imported dissolve. The
@@ -957,6 +964,7 @@ Lead rulings (2026-11-17):
     deadlines, cancellation and worker caps as media-root searches (§8.2).
 30. **Probe interruption.** Observed probes use the reader interrupt callback for FFmpeg
     input and check cancellation between packet retries (§8.2).
+31. **Report paging.** Each call returns one persisted import record, within 6 KiB (§10).
 
 Open questions:
 1. **Marker colour switch.** Should `MARKER_COLOR_POLICY` ship as `LabelPrefix` or `Drop`? This is

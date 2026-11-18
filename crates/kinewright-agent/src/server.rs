@@ -1548,14 +1548,12 @@ impl KinewrightMcp {
                 )?))
             }
             "get_import_report" => {
-                let _args: EmptyArgs = decode_args("get_import_report", arguments)?;
+                let args = decode_args("get_import_report", arguments)?;
                 let (revision, document) = self.snapshot()?;
-                Ok(success_structured(
-                    format!(
-                        "{} interchange import record(s)",
-                        document.imported_from.len()
-                    ),
-                    serde_json::json!({"revision": revision, "records": document.imported_from}),
+                Ok(interchange::import_report(
+                    &args,
+                    revision,
+                    &document.imported_from,
                 ))
             }
             "get_timeline_state" => {
@@ -29460,15 +29458,15 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (2_006_996, 5_660),
+            (2_007_094, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_851_598,
+            registry_metrics.input_schema_bytes, 1_851_709,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 129_943,
+            registry_metrics.description_bytes, 129_930,
             "registry={registry_metrics:?}"
         );
         assert_eq!(

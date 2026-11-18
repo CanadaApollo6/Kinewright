@@ -147,6 +147,11 @@ served by the runtime. The M36 regression test records:
 | Internal capability registry (2026-11-17, IX1 Track.name) | 153 | 2,005,164 B | 1,850,602 B | 129,437 B |
 | Internal capability registry (2026-11-17, IX1 stage 2a) | 155 | 2,006,996 B | 1,851,598 B | 129,943 B |
 | Served MCP runtime (2026-11-17, IX1 stage 2a) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-11-17, IX1 paged import report) | 155 | 2,007,094 B | 1,851,709 B | 129,930 B |
+| Served MCP runtime (2026-11-17, IX1 paged import report) | 7 | 5,660 B | 3,510 B | 998 B |
+
+Paging `get_import_report` adds 111 B to its input schema and removes 13 B from its description.
+The registry's serialized size rises by 98 B, and the served tool list is unchanged.
 
 IN1 Part A adds two capabilities, `get_incidents` and `resolve_incident`,
 reached through `invoke_capability` and served as no tool: the registry grows
