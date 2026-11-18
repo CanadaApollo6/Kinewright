@@ -29,6 +29,7 @@ pub(super) struct Shared {
     pub payload: AtomicU32,
     pub payload_start: AtomicU64,
     pub ready: AtomicBool,
+    pub native_clean: AtomicBool,
     #[cfg(feature = "slow-tests")]
     pub incomplete_reply: AtomicBool,
     #[cfg(feature = "slow-tests")]
@@ -177,13 +178,7 @@ pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
                 &mut protocol,
                 &mut fallback,
             );
-            let successful_protocol = result.is_ok();
-            let status = lease.cleanup(!successful_protocol, end);
-            let result = if successful_protocol && !status {
-                Err(Failure::Sandbox(Error::Crashed))
-            } else {
-                result
-            };
+            let result = lease.finish(result, &shared, end);
             Done { result, fallback }
         })?;
     Ok(Running {
@@ -389,6 +384,18 @@ impl Lease {
         drop(observation);
         Ok(result)
     }
+    fn finish(&mut self, result: Outcome, shared: &Shared, end: Instant) -> Outcome {
+        let orderly = result.is_ok();
+        let success = self.cleanup(!orderly, end);
+        shared.native_clean.store(true, Ordering::Release);
+        self.release_scope();
+        if orderly && !success {
+            Err(Failure::Sandbox(Error::Crashed))
+        } else {
+            result
+        }
+    }
+
     fn cleanup(&mut self, force: bool, end: Instant) -> bool {
         if force {
             let _ = self.pin.kill();
@@ -434,17 +441,14 @@ impl Lease {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
-        if let Some(scope) = self.scope {
-            loop {
-                match self.controller.call(Message::StopScope { scope }) {
-                    Ok(Message::ScopeStopped { scope: actual }) if actual == scope => break,
-                    _ if media_host::exited(&self.controller.pin).unwrap_or(false) => break,
-                    _ => std::thread::sleep(Duration::from_millis(100)),
-                }
-            }
-        }
         self.complete = self.reaped;
         success
+    }
+
+    fn release_scope(&mut self) {
+        if let Some(scope) = self.scope.take() {
+            self.controller.release_scope(scope);
+        }
     }
 }
 impl Drop for Lease {
@@ -452,6 +456,7 @@ impl Drop for Lease {
         if !self.complete {
             self.cleanup(true, Instant::now());
         }
+        self.release_scope();
     }
 }
 fn send(writer: &mut File, generation: u64, message: Message) -> Result<(), Failure> {

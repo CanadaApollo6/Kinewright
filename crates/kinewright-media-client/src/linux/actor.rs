@@ -96,6 +96,7 @@ struct Actor {
     generation: u64,
     supervisor_generation: u64,
     controller: Option<Controller>,
+    scope_failure: Option<Error>,
     active: Vec<Job>,
     queue: Queue,
     closed: bool,
@@ -120,6 +121,7 @@ impl Actor {
             generation: 1,
             supervisor_generation: 1,
             controller,
+            scope_failure: None,
             active: Vec::with_capacity(ACTIVE_PROBES),
             queue: Queue::new(Instant::now()),
             closed: false,
@@ -129,9 +131,19 @@ impl Actor {
     fn supervisor_health(&mut self) {
         if self.controller.as_ref().is_some_and(|value| {
             value.finished() || media_host::exited(&value.handle.pin).unwrap_or(true)
-        }) {
-            self.controller = None;
+        }) && let Some(controller) = self.controller.take()
+        {
+            if controller.scope_cleanup_pending() {
+                self.scope_failure = Some(if controller.finished() {
+                    controller.shutdown().err().unwrap_or(Error::Crashed)
+                } else {
+                    Error::Crashed
+                });
+            }
             for job in &mut self.active {
+                if job.running.shared.native_clean.load(Ordering::Acquire) {
+                    continue;
+                }
                 job.cause.get_or_insert(Failure::Sandbox(Error::Crashed));
                 let _ = job.running.pin.kill();
             }
@@ -229,17 +241,32 @@ impl Actor {
         // cleanup. An absent manager still has a live lifecycle supervisor.
         if self.controller.is_none()
             && self.active.is_empty()
-            && !self.queue.is_empty()
+            && (self.scope_failure.is_some() || !self.queue.is_empty())
             && self.available
             && !self.closed
             && let Some(next) = self.supervisor_generation.checked_add(1)
         {
             self.supervisor_generation = next;
             self.controller = Controller::start(&self.config.supervisor, next).ok();
+            if let Some(cause) = self.scope_failure.take() {
+                let ready = self.controller.is_some();
+                eprintln!(
+                    "MS2_SUPERVISOR_RESTART generation={next} scope_cleanup={cause:?} ready={ready}"
+                );
+            }
         }
     }
     fn admit(&mut self) {
         self.queue.expire(&self.status, Instant::now());
+        // Decode slots are released after native cleanup. New scope creates
+        // wait for the bounded stop/restart path to make a scope record available.
+        if self
+            .controller
+            .as_ref()
+            .is_some_and(Controller::scope_cleanup_pending)
+        {
+            return;
+        }
         while self.active.len() < ACTIVE_PROBES {
             // A supervisor restart may have consumed its bounded handshake time.
             let now = Instant::now();
@@ -377,12 +404,17 @@ impl Actor {
         self.status
             .paused
             .store(self.queue.circuit.paused(), Ordering::Release);
-        if self.closed && self.active.is_empty() && self.queue.is_empty() {
-            if let Some(value) = self.controller.take() {
-                value.shutdown();
-            }
+        if self.closed
+            && self.active.is_empty()
+            && self.queue.is_empty()
+            && !self
+                .controller
+                .as_ref()
+                .is_some_and(Controller::scope_cleanup_pending)
+        {
+            let supervisor = self.controller.take().map_or(Ok(()), Controller::shutdown);
             if let Some(reply) = self.close_reply.take() {
-                let _ = reply.send(Ok(()));
+                let _ = reply.send(self.scope_failure.map_or(supervisor, Err));
             }
         }
     }

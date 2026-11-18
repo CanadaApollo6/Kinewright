@@ -17,7 +17,11 @@ impl Bus {
         // autolaunch fallback can turn absence into another connection route.
         let address = std::env::var("DBUS_SESSION_BUS_ADDRESS")
             .map_err(|_| zbus::Error::Failure("session manager unavailable".into()))?;
-        let connection = Builder::address(address.as_str())?
+        Self::connect_address(&address)
+    }
+
+    pub(super) fn connect_address(address: &str) -> zbus::Result<Self> {
+        let connection = Builder::address(address)?
             .method_timeout(Duration::from_secs(2))
             .build()?;
         let daemon = Proxy::new(
@@ -33,6 +37,11 @@ impl Bus {
         drop(daemon);
         Ok(Self(connection))
     }
+    #[cfg(feature = "slow-tests")]
+    pub fn disconnect(self) -> zbus::Result<()> {
+        self.0.close()
+    }
+
     fn manager(&self) -> zbus::Result<Proxy<'_>> {
         Proxy::new(&self.0, DESTINATION, ROOT, MANAGER)
     }

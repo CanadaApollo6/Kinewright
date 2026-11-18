@@ -206,23 +206,29 @@ impl Service {
         bus.reset(&record.unit).map_err(io::Error::other)?;
         Ok(true)
     }
-    fn stop(&mut self, id: u32) -> Message {
+    fn stop(&mut self, id: u32, reconnect: impl FnOnce() -> zbus::Result<Bus>) -> Message {
         let Some(index) = self.records.iter().position(|record| record.id == id) else {
             return Message::Failed {
                 error: Error::ProtocolViolation,
             };
         };
         let deadline = Instant::now() + Duration::from_secs(3);
+        let mut reconnect = Some(reconnect);
         loop {
             match self.stop_record(index) {
                 Ok(true) => {
                     self.records.remove(index);
                     return Message::ScopeStopped { scope: id };
                 }
-                Err(_) => {
-                    return Message::Failed {
-                        error: Error::SandboxUnavailable,
-                    };
+                Err(error) => {
+                    if let Some(connect) = reconnect.take() {
+                        self.bus = connect().ok();
+                    } else {
+                        eprintln!("MS2_SCOPE_STOP {id}: {error}");
+                        return Message::Failed {
+                            error: Error::SandboxUnavailable,
+                        };
+                    }
                 }
                 Ok(false) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(10));
@@ -235,24 +241,39 @@ impl Service {
             }
         }
     }
-    fn shutdown(&mut self) {
-        // Keep ownership until every native scope is empty, even when the app
-        // socket disappears. This loop admits no new work and creates no units.
-        while !self.records.is_empty() {
-            let mut retry = false;
-            for index in (0..self.records.len()).rev() {
-                if matches!(self.stop_record(index), Ok(true)) {
-                    self.records.remove(index);
-                } else {
-                    retry = true;
-                }
-            }
-            if retry {
-                self.bus = Bus::connect().ok();
-                std::thread::sleep(Duration::from_millis(100));
+    fn shutdown(&mut self) -> Result<(), Error> {
+        let mut failure = None;
+        // At most two retained records, each with the same bounded recovery
+        // used during service. An empty unit is collectible by systemd.
+        for index in (0..self.records.len()).rev() {
+            let id = self.records[index].id;
+            if let Message::Failed { error } = self.stop(id, Bus::connect) {
+                failure = Some(error);
             }
         }
+        failure.map_or(Ok(()), Err)
     }
+
+    #[cfg(feature = "slow-tests")]
+    fn disconnect_for_test(&mut self, directory: &std::path::Path) -> io::Result<bool> {
+        use std::{
+            fs::File,
+            io::{Read, Write},
+        };
+        let bus = self
+            .bus
+            .take()
+            .ok_or_else(|| io::Error::other("no primary bus"))?;
+        bus.disconnect().map_err(io::Error::other)?;
+        File::options()
+            .write(true)
+            .open(directory.join("disconnected"))?
+            .write_all(&[1])?;
+        let mut token = [0];
+        File::open(directory.join("reconnect"))?.read_exact(&mut token)?;
+        Ok(token == [0])
+    }
+
     fn serve(&mut self, socket: &mut UnixStream) -> io::Result<()> {
         let initial = if self.bus.is_some() {
             Message::Ready {}
@@ -270,6 +291,8 @@ impl Service {
                 message: initial,
             },
         )?;
+        #[cfg(feature = "slow-tests")]
+        let mut disconnect = std::env::var_os("KW_MS2_SCOPE_TEST_DISCONNECT");
         let mut last = 1;
         let mut traffic = ProbeSession::new(1, self.generation, [None, None]);
         loop {
@@ -283,7 +306,25 @@ impl Service {
             let message = match frame.message {
                 Message::CreateScope { pid, memory_bytes } => self.create(pid, memory_bytes),
                 Message::VerifyScope { scope } => self.verify(scope),
-                Message::StopScope { scope } => self.stop(scope),
+                Message::StopScope { scope } => {
+                    let reconnect = Bus::connect;
+                    #[cfg(feature = "slow-tests")]
+                    let force_unavailable = match disconnect.take() {
+                        Some(directory) => {
+                            self.disconnect_for_test(std::path::Path::new(&directory))?
+                        }
+                        None => false,
+                    };
+                    #[cfg(feature = "slow-tests")]
+                    let reconnect = || {
+                        if force_unavailable {
+                            Bus::connect_address("unix:path=/proc/self/kinewright-ms2-no-bus")
+                        } else {
+                            reconnect()
+                        }
+                    };
+                    self.stop(scope, reconnect)
+                }
                 _ => return Err(io::Error::other("non-lifecycle supervisor command")),
             };
             write_frame(
@@ -310,9 +351,11 @@ pub fn run() -> io::Result<()> {
     };
     let result = service.serve(&mut socket);
     let _ = socket.shutdown(Shutdown::Both);
-    service.shutdown();
+    let cleanup = service
+        .shutdown()
+        .map_err(|error| io::Error::other(format!("scope cleanup failed: {error:?}")));
     match result {
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(()),
-        other => other,
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => cleanup,
+        other => other.and(cleanup),
     }
 }

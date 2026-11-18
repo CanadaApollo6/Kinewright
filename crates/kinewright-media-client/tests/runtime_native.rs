@@ -10,6 +10,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "slow-tests")]
+#[path = "support/bus_cleanup.rs"]
+mod bus_cleanup;
+
 struct OwnedChild(Child);
 impl Drop for OwnedChild {
     fn drop(&mut self) {
@@ -81,6 +85,11 @@ fn runtime_fixture() {
             .success()
     );
     let binaries = bin_dir().canonicalize().unwrap();
+    #[cfg(feature = "slow-tests")]
+    if case == "bus-cleanup" || case == "bus-restart" {
+        bus_cleanup::exercise(&directory.0, &binaries, &png, case == "bus-restart");
+        return;
+    }
     let runtime = Runtime::start(Config::new(
         binaries.join("kinewright-media-helper"),
         binaries.join("kinewright-media-supervisor"),
@@ -108,7 +117,8 @@ fn runtime_fixture() {
         (0, 0)
     );
 }
-fn run_case(degraded: bool) {
+fn run_case(case: &str) {
+    let degraded = case == "degraded";
     let mut bus = if degraded {
         Some(OwnedChild(
             Command::new("/usr/bin/dbus-daemon")
@@ -133,10 +143,7 @@ fn run_case(degraded: bool) {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .args(["--exact", "runtime_fixture", "--nocapture"])
-        .env(
-            "KW_RUNTIME_FIXTURE",
-            if degraded { "degraded" } else { "automatic" },
-        )
+        .env("KW_RUNTIME_FIXTURE", case)
         .stdin(Stdio::null())
         // The child's own libtest headers must not interleave with this
         // test's output; only its evidence lines are relayed below.
@@ -175,7 +182,7 @@ fn run_case(degraded: bool) {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn runtime_png_automatic_admission_closes_and_cleans() {
-    run_case(false);
+    run_case("automatic");
 }
 #[test]
 #[cfg_attr(
@@ -183,5 +190,25 @@ fn runtime_png_automatic_admission_closes_and_cleans() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn runtime_png_degraded_admission_closes_and_cleans() {
-    run_case(true);
+    run_case("degraded");
+}
+
+#[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn runtime_releases_both_slots_during_bus_disconnect() {
+    if !Command::new("systemctl")
+        .args(["--user", "show", "--property=Version"])
+        .output()
+        .is_ok_and(|result| result.status.success())
+    {
+        println!(
+            "MS2_NATIVE_NOT_RUN binary=runtime_native test=runtime_releases_both_slots_during_bus_disconnect reason=no_user_manager"
+        );
+        return;
+    }
+    run_case("bus-cleanup");
+    run_case("bus-restart");
 }

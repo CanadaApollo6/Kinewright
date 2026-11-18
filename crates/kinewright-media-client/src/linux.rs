@@ -19,13 +19,13 @@ mod controller;
 mod worker;
 
 pub const ACTIVE_PROBES: usize = 2;
-/// Queue bound (ruling 35): 32 requests behind two slots. Each launch ends
-/// within its 5 s deadline, 250 ms grace and 2 s native cleanup, so a full
-/// queue reaches a slot within 16 × 7.25 s = 116 s; `QUEUE_WAIT` covers that.
+/// Queue bound (ruling 35): 32 requests behind two slots. The queue deadline
+/// is independent of launch timing and still applies while cleanup is pending.
 pub const PENDING_PROBES: usize = 32;
 pub const QUEUE_WAIT: Duration = Duration::from_secs(120);
 const INITIAL_DEADLINE: Duration = Duration::from_secs(5);
 const CANCEL_GRACE: Duration = Duration::from_millis(250);
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(15);
 const TICK: Duration = Duration::from_millis(100);
 
 /// The actor owns this capability until native cleanup, independently of the
@@ -199,7 +199,7 @@ impl Runtime {
         if !valid || STARTED.swap(true, Ordering::AcqRel) {
             return Err(MediaSandboxError::SandboxUnavailable);
         }
-        let (sender, receiver) = mpsc::sync_channel(PENDING_PROBES);
+        let (sender, receiver) = mpsc::sync_channel(PENDING_PROBES + 1);
         let status = Arc::new(Status::default());
         // The actor writes status while the app reads it; this is real shared
         // process-lifetime observation, separate from each source capability.
@@ -250,14 +250,23 @@ impl Runtime {
         unwind.armed = false;
         result
     }
-    /// Close admission and wait for all native cleanup, keeping the spawner
-    /// thread itself alive until process exit.
+    /// Close admission and wait up to 15 seconds for native cleanup.
+    /// On timeout the spawner retains any process that still needs cleanup.
     pub fn shutdown(&self) -> Result<(), MediaSandboxError> {
         let (reply, receiver) = mpsc::sync_channel(1);
+        // Probe ingress reserves one channel entry for this close command.
         self.sender
-            .send(actor::Command::Close(reply))
-            .map_err(|_| MediaSandboxError::Crashed)?;
-        receiver.recv().map_err(|_| MediaSandboxError::Crashed)?
+            .try_send(actor::Command::Close(reply))
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => MediaSandboxError::ResourceLimit,
+                mpsc::TrySendError::Disconnected(_) => MediaSandboxError::Crashed,
+            })?;
+        receiver
+            .recv_timeout(SHUTDOWN_WAIT)
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => MediaSandboxError::TimedOut,
+                mpsc::RecvTimeoutError::Disconnected => MediaSandboxError::Crashed,
+            })?
     }
     #[cfg(feature = "slow-tests")]
     #[must_use]
@@ -326,7 +335,7 @@ mod tests {
     }
     #[test]
     fn producer_reserves_the_global_pending_cap_before_the_actor_receives() {
-        let (sender, receiver) = mpsc::sync_channel(PENDING_PROBES);
+        let (sender, receiver) = mpsc::sync_channel(PENDING_PROBES + 1);
         let runtime = Runtime {
             sender,
             status: Arc::new(Status::default()),
