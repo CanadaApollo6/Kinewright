@@ -1922,7 +1922,7 @@ pub enum MediaError {
     OwnedMediaOperationUnavailable,
     #[error("media operation is not implemented")]
     NotImplemented,
-    #[error("export was cancelled")]
+    #[error("media operation was cancelled")]
     Cancelled,
     /// The managed renderer cannot prove that a decoder's native format is a
     /// supported integer source surface. This remains structured so proof
@@ -2223,6 +2223,24 @@ pub trait Playback: Send + Sync {
     }
 }
 
+/// Progress checkpoints in the shared media probe, in the order they occur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeEvent {
+    HashedBytes(u64),
+    MetadataStarted,
+}
+
+/// A probe calls the observer synchronously. Returning false requests cancellation.
+pub trait ProbeObserver {
+    fn observe(&self, event: ProbeEvent) -> bool;
+}
+
+impl ProbeObserver for () {
+    fn observe(&self, _: ProbeEvent) -> bool {
+        true
+    }
+}
+
 pub trait Analysis: Send + Sync {
     /// Inspect a media file and return its project metadata.
     ///
@@ -2230,6 +2248,21 @@ pub trait Analysis: Send + Sync {
     ///
     /// Returns a media error when the file cannot be probed.
     fn probe(&self, path: &Path) -> Result<MediaAsset, MediaError>;
+
+    /// Inspect through the shared probe and report checkpoints when supported.
+    ///
+    /// # Errors
+    ///
+    /// Returns the probe's error or a typed cancellation when an observer stops
+    /// a probe that reports checkpoints.
+    fn probe_observed(
+        &self,
+        path: &Path,
+        _observer: &dyn ProbeObserver,
+    ) -> Result<MediaAsset, MediaError> {
+        self.probe(path)
+    }
+
     /// Inspect whether the source path is currently available and, when the
     /// file can be read, compare its fingerprint with the imported identity.
     /// Stateful media backends should override this to return verified,

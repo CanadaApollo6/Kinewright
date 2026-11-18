@@ -584,13 +584,17 @@ copied.
 *Probe path (correction 2).* Probes use the entry point `import_media` already uses,
 `Analysis::probe` (`crates/kinewright-agent/src/server.rs:2476`). IX1 adds no probe path of its
 own. When MS2's confined admission lands, import probes go through it like every other admission.
-The probe hashes SHA-256 eagerly (`crates/kinewright-media/src/decode.rs:46-47`), so every imported
-asset is verified, as M41 requires.
+The shared probe hashes SHA-256 before reading media metadata, so every imported asset is verified,
+as M41 requires. Ruling 27 adds an observer to the same implementation. It reports cumulative
+hashed bytes and the start of metadata. Either checkpoint can cancel the probe.
 
 *Workers and deadlines.* Stats and probes run on at most 4 workers, each under a deadline:
 - a stat must answer within 2 s;
-- a probe must open the file and read its metadata within 10 s;
-- hashing must make progress at least every 10 s.
+- the shared probe must finish its metadata phase within 10 s of its start event;
+- hashing must make progress at least every 10 s, starting at dispatch.
+
+These deadlines are configurable with the stated defaults. The same probe events drive hashing
+progress and cancellation. After abandonment the next observer checkpoint stops the probe.
 
 A worker past its deadline is abandoned, and its result is discarded. The thread itself
 ends when the call returns. Replace an abandoned stat worker so other locators can still
@@ -911,6 +915,9 @@ Lead rulings (2026-11-17):
 14. **Gapped subtrees.** Count all their items as dropped (§5.2).
 15. **Anchors beside nests.** Size lane blocks for concurrent anchors (§5.1).
 16. **Stuck stats.** Replace expired stat workers up to the abandonment cap (§8.2).
+
+27. **Shared probe phases.** The existing probe reports cumulative hashed bytes and metadata
+    start, with cancellation at either checkpoint. Hashing precedes metadata (§8.2).
 
 Open questions:
 1. **Marker colour switch.** Should `MARKER_COLOR_POLICY` ship as `LabelPrefix` or `Drop`? This is

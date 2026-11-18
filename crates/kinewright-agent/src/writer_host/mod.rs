@@ -2791,6 +2791,14 @@ impl kinewright_core::Analysis for LazyHostMedia {
     ) -> Result<kinewright_core::MediaAsset, kinewright_core::MediaError> {
         kinewright_core::Analysis::probe(self.get()?.as_ref(), path)
     }
+
+    fn probe_observed(
+        &self,
+        path: &Path,
+        observer: &dyn kinewright_core::ProbeObserver,
+    ) -> Result<kinewright_core::MediaAsset, kinewright_core::MediaError> {
+        kinewright_core::Analysis::probe_observed(self.get()?.as_ref(), path, observer)
+    }
     fn thumbnail_at(
         &self,
         t: kinewright_core::TimeCode,

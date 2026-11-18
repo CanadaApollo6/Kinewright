@@ -4,7 +4,8 @@ use ffmpeg_next as ffmpeg;
 use kinewright_core::{
     AssetId, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
     ColorRange, ColorSourceError, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint,
-    FrameTexture, MediaAsset, MediaError, MediaKind, Rational, RgbaImage, TimeCode,
+    FrameTexture, MediaAsset, MediaError, MediaKind, ProbeEvent, ProbeObserver, Rational,
+    RgbaImage, TimeCode,
 };
 
 use crate::{
@@ -12,7 +13,7 @@ use crate::{
     conversion::{Conversion, TransferTable, alpha_table, select_conversion},
     frame::{CachedFrame, WorkingFrame, managed_pixel_error},
     sched::KeptFrames,
-    sha256::source_fingerprint,
+    sha256::source_fingerprint_observed,
 };
 
 const AV_TIME_BASE: i64 = 1_000_000;
@@ -42,9 +43,20 @@ impl VideoRotation {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaError> {
-    let source_fingerprint = source_fingerprint(path)?;
+    probe_path_observed(path, id, &())
+}
+
+#[allow(clippy::too_many_lines)]
+pub(crate) fn probe_path_observed(
+    path: &Path,
+    id: AssetId,
+    observer: &dyn ProbeObserver,
+) -> Result<MediaAsset, MediaError> {
+    let source_fingerprint = source_fingerprint_observed(path, observer)?;
+    if !observer.observe(ProbeEvent::MetadataStarted) {
+        return Err(MediaError::Cancelled);
+    }
     let input = media_input(path)?;
     let video = input.streams().best(ffmpeg::media::Type::Video);
     let audio = input.streams().best(ffmpeg::media::Type::Audio);
@@ -4378,6 +4390,44 @@ mod tests {
             (120..=140).contains(&alpha),
             "half alpha must survive decode, got {alpha}"
         );
+    }
+
+    #[test]
+    fn observed_probe_hashes_before_metadata_and_cancels_at_either_checkpoint() {
+        use std::cell::RefCell;
+
+        struct Observer {
+            events: RefCell<Vec<ProbeEvent>>,
+            stop: ProbeEvent,
+        }
+        impl ProbeObserver for Observer {
+            fn observe(&self, event: ProbeEvent) -> bool {
+                self.events.borrow_mut().push(event);
+                event != self.stop
+            }
+        }
+
+        let directory = crate::test_support::TempDirectory::new("probe-observed");
+        let path = directory.path("not-media");
+        let chunk = 1024 * 1024;
+        std::fs::write(&path, vec![42; chunk + 1]).unwrap();
+        let expected = [
+            ProbeEvent::HashedBytes(0),
+            ProbeEvent::HashedBytes(chunk as u64),
+            ProbeEvent::HashedBytes(chunk as u64 + 1),
+            ProbeEvent::MetadataStarted,
+        ];
+        for last in [1, 3] {
+            let observer = Observer {
+                events: RefCell::default(),
+                stop: expected[last],
+            };
+            assert_eq!(
+                probe_path_observed(&path, AssetId(1), &observer).unwrap_err(),
+                MediaError::Cancelled,
+            );
+            assert_eq!(observer.events.into_inner(), expected[..=last]);
+        }
     }
 
     /// MO1 R30: a still-probe failure is the existing `Backend` incident —
