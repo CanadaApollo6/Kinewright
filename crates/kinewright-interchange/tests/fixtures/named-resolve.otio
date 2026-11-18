@@ -1,0 +1,59 @@
+{
+  "OTIO_SCHEMA": "Timeline.1",
+  "name": "Reel 2",
+  "tracks": {
+    "OTIO_SCHEMA": "Stack.1",
+    "name": "tracks",
+    "children": [
+      {
+        "OTIO_SCHEMA": "Track.1",
+        "name": "V1",
+        "kind": "Video",
+        "children": [
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "Interview \"A\"",
+            "metadata": {
+              "reel": "A"
+            },
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 23.976024627685547,
+                "value": 86400
+              },
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 23.976024627685547,
+                "value": 24
+              }
+            },
+            "media_reference": {
+              "OTIO_SCHEMA": "ExternalReference.1",
+              "target_url": "file:///Media/Interview \"A\".mov",
+              "available_range": {
+                "OTIO_SCHEMA": "TimeRange.1",
+                "start_time": {
+                  "OTIO_SCHEMA": "RationalTime.1",
+                  "rate": 23.976024627685547,
+                  "value": 86400
+                },
+                "duration": {
+                  "OTIO_SCHEMA": "RationalTime.1",
+                  "rate": 23.976024627685547,
+                  "value": 144
+                }
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "global_start_time": {
+    "OTIO_SCHEMA": "RationalTime.1",
+    "rate": 23.976024627685547,
+    "value": 86400
+  }
+}

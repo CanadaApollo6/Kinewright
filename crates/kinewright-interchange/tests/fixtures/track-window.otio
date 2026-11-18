@@ -1,0 +1,104 @@
+{
+  "OTIO_SCHEMA": "Timeline.1",
+  "name": "Window",
+  "tracks": {
+    "OTIO_SCHEMA": "Stack.1",
+    "name": "tracks",
+    "children": [
+      {
+        "OTIO_SCHEMA": "Track.1",
+        "name": "V1",
+        "kind": "Video",
+        "children": [
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "Red",
+            "metadata": {
+              "reel": "A"
+            },
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 24,
+                "value": 0
+              },
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 24,
+                "value": 24
+              }
+            },
+            "media_reference": {
+              "OTIO_SCHEMA": "ExternalReference.1",
+              "target_url": "file:///Media/Red.mov",
+              "available_range": {
+                "OTIO_SCHEMA": "TimeRange.1",
+                "start_time": {
+                  "OTIO_SCHEMA": "RationalTime.1",
+                  "rate": 24,
+                  "value": 0
+                },
+                "duration": {
+                  "OTIO_SCHEMA": "RationalTime.1",
+                  "rate": 24,
+                  "value": 144
+                }
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "name": "Blue",
+            "metadata": {
+              "reel": "A"
+            },
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 24,
+                "value": 0
+              },
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 24,
+                "value": 24
+              }
+            },
+            "media_reference": {
+              "OTIO_SCHEMA": "ExternalReference.1",
+              "target_url": "file:///Media/Blue.mov",
+              "available_range": {
+                "OTIO_SCHEMA": "TimeRange.1",
+                "start_time": {
+                  "OTIO_SCHEMA": "RationalTime.1",
+                  "rate": 24,
+                  "value": 0
+                },
+                "duration": {
+                  "OTIO_SCHEMA": "RationalTime.1",
+                  "rate": 24,
+                  "value": 144
+                }
+              }
+            }
+          }
+        ],
+        "source_range": {
+          "OTIO_SCHEMA": "TimeRange.1",
+          "start_time": {
+            "OTIO_SCHEMA": "RationalTime.1",
+            "rate": 24,
+            "value": 24
+          },
+          "duration": {
+            "OTIO_SCHEMA": "RationalTime.1",
+            "rate": 24,
+            "value": 24
+          }
+        }
+      }
+    ]
+  }
+}

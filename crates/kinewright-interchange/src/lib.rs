@@ -2,6 +2,9 @@
 
 pub mod ir;
 pub mod locator;
+pub mod otio;
+mod otio_syntax;
+mod parse;
 mod refusal;
 mod time;
 
