@@ -535,7 +535,7 @@ references, the agent's `path` and each `media_roots` entry.
   - a drive-letter path or `\\?\<drive>:\` on Windows;
   - a `/…` path on Unix, but not `//…`;
   - a relative path, resolved under the document or bundle root (`.otiod` writes
-    `media/<name>`; FCPXML may write `./Media/x.mov`).
+    `media/<name>`; on Unix, FCPXML may write `./Media/x.mov`).
 - **Remote:**
   - a `file:` URL with any other host;
   - `\\host\share`, `\\?\UNC\…`, `\\.\…`, and every other `\\?\` form;
@@ -546,6 +546,10 @@ For a `file:` URL, apply the host rule first, percent-decode the path and classi
 decoded native path before any filesystem call (ruling 9). A URL with encoded separators
 (`%2F` or `%5C`, case-insensitive) is remote. A decoded path beginning with `//` or two
 backslashes is remote, including `file://localhost//host/share/a.mov`.
+On Windows, drive-relative paths are invalid. The local-path check rejects every component
+ending in a space or dot and every DOS device name, regardless of ASCII case. It tests the
+stem before the first dot with trailing spaces removed, including superscript ¹, ² and ³ in
+the numbered COM and LPT names.
 
 *Why remote locators are never statted or probed.* Statting `\\evil.example\s\a.mov`, or a `file:`
 URL naming that host, makes Windows authenticate to the host over SMB and send the user's NTLM

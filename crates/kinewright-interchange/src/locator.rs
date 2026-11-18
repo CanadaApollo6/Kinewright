@@ -50,6 +50,29 @@ fn drive_path(path: &str) -> bool {
     matches!(path.as_bytes(), [letter, b':', sep, ..] if letter.is_ascii_alphabetic() && separator(*sep))
 }
 
+fn invalid_windows_component(component: &str) -> bool {
+    if component.ends_with([' ', '.']) {
+        return true;
+    }
+    let stem = component
+        .split_once('.')
+        .map_or(component, |(stem, _)| stem)
+        .trim_end_matches(' ');
+    if ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
+        .iter()
+        .any(|name| stem.eq_ignore_ascii_case(name))
+    {
+        return true;
+    }
+    stem.split_at_checked(3).is_some_and(|(prefix, digit)| {
+        (prefix.eq_ignore_ascii_case("COM") || prefix.eq_ignore_ascii_case("LPT"))
+            && matches!(
+                digit,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+    })
+}
+
 fn native_path(mut path: String, platform: Platform, decoded_file_url: bool) -> Locator {
     let bytes = path.as_bytes();
     let verbatim_drive = !decoded_file_url
@@ -72,6 +95,9 @@ fn native_path(mut path: String, platform: Platform, decoded_file_url: bool) -> 
             && !drive_path(&path)
             && (path.starts_with(['/', '\\']) || path.as_bytes().get(1) == Some(&b':'))
         {
+            return Locator::Invalid;
+        }
+        if path.split(['/', '\\']).any(invalid_windows_component) {
             return Locator::Invalid;
         }
         verbatim_drive || drive_path(&path)
@@ -118,7 +144,9 @@ enum LocatorDecode {
 /// Classify locators before constructing a native filesystem argument.
 #[must_use]
 pub fn classify(locator: &str, platform: Platform) -> Locator {
-    if platform == Platform::Windows && drive_path(locator) {
+    if platform == Platform::Windows
+        && matches!(locator.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic())
+    {
         return native_path(locator.into(), platform, false);
     }
     let Some((scheme, rest)) = locator.split_once(':').filter(|(scheme, _)| {
@@ -293,5 +321,82 @@ mod tests {
             classify(r"Media\..\file.mov", Platform::Windows),
             Locator::Invalid
         );
+    }
+
+    #[test]
+    fn windows_non_file_components_are_invalid() {
+        for component in [
+            "con.mov",
+            "PrN",
+            "aUx .wav",
+            "NUL.mov",
+            "cOm1.data",
+            "COM9",
+            "COM¹",
+            "LPT2",
+            "lPt9",
+            "lPt².mp4",
+            "LPT³",
+            "CONIN$.mov",
+            "conout$",
+            "part. ",
+            "part ",
+            "part.",
+            ".",
+        ] {
+            for locator in [
+                format!(r"C:\Media\{component}"),
+                format!(r"\\?\C:\{component}\media.mov"),
+            ] {
+                assert_eq!(
+                    classify(&locator, Platform::Windows),
+                    Locator::Invalid,
+                    "{locator}"
+                );
+            }
+        }
+        for locator in [
+            "file:///C:/Media/NUL.mov",
+            "file:///C:/Nu%4C%20.mov/clip.mov",
+            "file:///C:/Media/clip.mov%20",
+            "file:///C:/Media/clip.mov.",
+        ] {
+            assert_eq!(
+                classify(locator, Platform::Windows),
+                Locator::Invalid,
+                "{locator}"
+            );
+            assert!(
+                matches!(classify(locator, Platform::Unix), Locator::Local(_)),
+                "{locator}"
+            );
+        }
+        for locator in [
+            r"C:\Media\COM0.mov",
+            "file:///C:/LPT10/clip.mov",
+            r"\\?\C:\AUXiliary\clip.mov",
+        ] {
+            assert!(
+                matches!(classify(locator, Platform::Windows), Locator::Local(_)),
+                "{locator}"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_drive_relative_locators_are_invalid() {
+        for locator in [
+            r"C:media\x.mov",
+            "c:media/x.mov",
+            "C:",
+            "file:C:media/x.mov",
+        ] {
+            assert_eq!(
+                classify(locator, Platform::Windows),
+                Locator::Invalid,
+                "{locator}"
+            );
+        }
+        assert_eq!(classify(r"C:media\x.mov", Platform::Unix), Locator::Remote);
     }
 }

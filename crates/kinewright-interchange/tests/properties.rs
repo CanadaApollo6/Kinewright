@@ -204,6 +204,33 @@ proptest! {
     #![proptest_config(Config { cases: 256, failure_persistence: None, ..Config::default() })]
 
     #[test]
+    fn windows_reserved_components_never_classify_as_local(
+        prefix in "[a-zA-Z0-9_-]{1,16}",
+        leaf in "[a-zA-Z0-9_-]{1,16}",
+        extension in "[a-zA-Z0-9]{1,8}",
+        device in prop::sample::select(vec![
+            "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+            "COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³",
+        ]),
+        lower_case in any::<bool>(),
+    ) {
+        use kinewright_interchange::locator::{Locator, Platform, classify};
+
+        let stem = if lower_case { device.to_ascii_lowercase() } else { device.into() };
+        for locator in [
+            format!(r"D:\{prefix}\{stem}  .{extension}\{leaf}.mov"),
+            format!("file:///D:/{prefix}/{stem}.{extension}"),
+            format!("file:///D:/{prefix}%20/{leaf}.mov"),
+            format!(r"D:\{prefix}.\{leaf}.mov"),
+            format!(r"D:{prefix}\{leaf}.mov"),
+        ] {
+            prop_assert_eq!(classify(&locator, Platform::Windows), Locator::Invalid, "{}", locator);
+        }
+    }
+
+    #[test]
     fn mixed_rates_keep_abutting_cuts_and_the_admitted_bound(
         rate_index in 0_usize..4, project_index in 0_usize..3,
         leading in 0_i64..120, a_duration in 30_i64..160, b_duration in 30_i64..160,
