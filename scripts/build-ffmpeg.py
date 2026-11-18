@@ -351,8 +351,12 @@ def build(profile, no_binary_cache=False):
     prefix = ROOT / 'third_party' / {'libraries': 'ffmpeg', 'recorder': 'ffmpeg-recorder',
                                     'testgen': 'ffmpeg-testgen'}[profile]
     marker = prefix / '.build-key'
-    if not no_binary_cache and marker.exists() and marker.read_text() == key:
-        print(f'{profile}: local/cache reuse {key}', flush=True)
+    # A CI consumer reuses binaries by the exact key its producer exported. Its
+    # runner can be a newer image of the same label, with another compiler patch
+    # level, so its own fingerprint is not the one the binaries were built under.
+    expected = os.environ.get('KINEWRIGHT_FFMPEG_PRODUCER_KEY') or key
+    if not no_binary_cache and marker.exists() and marker.read_text() == expected:
+        print(f'{profile}: local/cache reuse {expected}', flush=True)
         return
     ensure_nasm()
     scratch = ROOT / 'target' / 'ffmpeg-build'

@@ -162,8 +162,12 @@ then invokes the same builder. It moves upstream MSVC import `.lib` files from
 keys the binary cache and local `.build-key`: source hash, configure vectors,
 compiler/linker/assembler binary identities and full versions (including MSVC `/Bv`),
 dependency pkg-config versions/flags, build flags, host ABI, builder/profile/setup
-scripts and CI action. Producers export exact Linux/Windows keys; consumers verify
-markers against that same toolchain/dependency fingerprint. No fallback keys exist.
+scripts and CI action. Producers export exact Linux/Windows keys; a CI consumer
+restores by that key and verifies the marker against it
+(`KINEWRIGHT_FFMPEG_PRODUCER_KEY`), not against its own toolchain: during a runner
+image rollout a consumer can run on a newer image than its producer, and it must
+reuse the producer's binaries instead of rebuilding inside a test shard. Local
+builds and release jobs verify against their own fingerprint. No fallback keys exist.
 
 Binary cache writes require a successful canonical-repository **push**; PR jobs
 never write, and fork PRs/fork repositories never restore these caches. Each job
