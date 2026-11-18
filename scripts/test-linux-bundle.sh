@@ -110,9 +110,19 @@ for variable in XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS; do
 done
 fixture="$repo_root/crates/kinewright-agent/tests/fixtures/te1/talking-head.wav"
 cd -- "$smoke_dir"
-admission="$("${smoke_env[@]}" "$bundle_dir/Kinewright" --check-bundle-admission "$fixture" "$smoke_dir")"
+session_dir="$smoke_dir/session"
+mkdir -- "$session_dir"
+# A file cannot host the probe's mount root. The diagnostic must use SESSION_DIR.
+: > "$smoke_dir/tmp-is-file"
+admission="$("${smoke_env[@]}" TMPDIR="$smoke_dir/tmp-is-file" \
+    "$bundle_dir/Kinewright" --check-bundle-admission "$fixture" "$session_dir")"
 if [[ "$admission" != "Admitted ${fixture##*/}" ]]; then
     echo "Kinewright did not confirm admission of ${fixture##*/}: $admission" >&2
+    exit 1
+fi
+unexpected="$(find "$smoke_dir" -mindepth 1 -maxdepth 1 ! -name session ! -name tmp-is-file -print -quit)"
+if [[ -n "$unexpected" ]]; then
+    echo "Bundle admission wrote outside SESSION_DIR: $unexpected" >&2
     exit 1
 fi
 printf '%s\n' "$admission"
