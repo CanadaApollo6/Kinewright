@@ -38,6 +38,7 @@ use kinewright_core::{
 use kinewright_project::canonical_project_identity;
 #[cfg(not(test))]
 use kinewright_project::default_recovery_directory;
+use kinewright_project::legacy_io::{JournalIdentity, LockedJournal, journal_removal_contended};
 use kinewright_project::operation_actor::Core;
 use kinewright_project::{JOURNAL_MAGIC as MAGIC, RecoveryDirectoryRefusal, allocate_journal_path};
 use serde::{Deserialize, Serialize};
@@ -146,41 +147,6 @@ struct JournalWriter {
     sync_each_record: bool,
 }
 
-/// A journal under its lock. It unlocks before the close: the lock belongs to
-/// the open file description, which a child that another thread is forking
-/// or spawning holds a copy of until its `exec`. A bare close would keep the
-/// journal locked through that window, and a discard at once after the
-/// recorder ends would be refused as if a recorder still lived.
-struct LockedJournal(File);
-
-impl LockedJournal {
-    fn lock(file: File) -> Result<Self, String> {
-        kinewright_project::legacy_io::lock_journal(&file).map_err(|e| e.to_string())?;
-        Ok(Self(file))
-    }
-}
-
-impl std::ops::Deref for LockedJournal {
-    type Target = File;
-    fn deref(&self) -> &File {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for LockedJournal {
-    fn deref_mut(&mut self) -> &mut File {
-        &mut self.0
-    }
-}
-
-impl Drop for LockedJournal {
-    fn drop(&mut self) {
-        // Windows recorders hold no lock; they deny deletion by share mode.
-        #[cfg(unix)]
-        let _ = self.0.unlock();
-    }
-}
-
 impl JournalWriter {
     #[cfg(test)]
     fn create(
@@ -253,7 +219,8 @@ impl JournalWriter {
                 "could not create recovery journal {}: {error}",
                 path.display()
             )
-        })?)?;
+        })?)
+        .map_err(|error| error.to_string())?;
         // G5: new headers persist the absolute canonical identity, so the
         // takeover scan never has to guess which spelling a relative header
         // meant — legacy relative headers stay readable but never claim.
@@ -574,6 +541,7 @@ enum RecorderControl {
 }
 
 struct Recorder {
+    identity: JournalIdentity,
     control: Sender<RecorderControl>,
     worker: Option<JoinHandle<()>>,
 }
@@ -628,12 +596,14 @@ impl Recorder {
             authority,
             directory,
         )?;
+        let identity = writer.file.identity().map_err(|error| error.to_string())?;
         let (control, controls) = unbounded();
         let worker = thread::Builder::new()
             .name("kinewright-recovery".to_owned())
             .spawn(move || recorder_loop(writer, &events, &controls, &runtime_error))
             .map_err(|error| format!("could not start recovery recorder: {error}"))?;
         Ok(Self {
+            identity,
             control,
             worker: Some(worker),
         })
@@ -875,6 +845,12 @@ pub(crate) fn at_close<T>(
     run()
 }
 
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    static AFTER_RECORDER_STOP: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
+}
+
 impl Recovery {
     pub(crate) fn read_only() -> Self {
         Self {
@@ -1067,6 +1043,7 @@ impl Recovery {
                 }
             }
         }
+        self.retire_active();
         let directory = self
             .directory_owner
             .as_ref()
@@ -1090,10 +1067,19 @@ impl Recovery {
             .path
             .file_name()
             .map_or_else(PathBuf::new, |name| io_directory.join(name));
-        let target = allocate_journal_path(&io_directory, project_path, &current, &reserved);
-        let target = directory_path.join(target.file_name().expect("allocated journal filename"));
-        self.stop_active();
-        self.remove_journal();
+        // A refused retirement leaves the old name occupied. Allocate another
+        // journal so the next baseline can record while the old file is held.
+        let current = if current.try_exists().unwrap_or(true) {
+            Path::new("")
+        } else {
+            &current
+        };
+        let target = allocate_journal_path(&io_directory, project_path, current, &reserved);
+        let target = self
+            .directory
+            .as_deref()
+            .expect("admitted journal directory path")
+            .join(target.file_name().expect("allocated journal filename"));
         self.path = target;
         self.authority = writer;
         *lock_unpoisoned(&self.runtime_error) = None;
@@ -1371,10 +1357,8 @@ impl Recovery {
         if matches!(entry.state, PendingState::Unchecked(_)) {
             return false;
         }
-        let result = (|| -> Result<(), String> {
+        let result = (|| -> Result<bool, String> {
             use std::io::Read as _;
-            let project = entry.project_path.as_deref();
-            let _owner = self.writer_for(project)?;
             let directory = entry
                 .directory
                 .as_ref()
@@ -1382,19 +1366,13 @@ impl Recovery {
             let path = directory
                 .io_path()
                 .join(entry.journal_path.file_name().ok_or("journal filename")?);
-            if !fs::symlink_metadata(&path)
-                .map_err(|e| e.to_string())?
-                .is_file()
-            {
-                return Err("journal is not a regular file".into());
-            }
-            let mut file = LockedJournal::lock(
-                OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&path)
-                    .map_err(|e| e.to_string())?,
-            )?;
+            let mut file = match LockedJournal::open_for_removal(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
+                Err(error) if journal_removal_contended(&error) => return Ok(false),
+                Err(error) => return Err(error.to_string()),
+            };
+            let _owner = self.writer_for(entry.project_path.as_deref())?;
             let mut bytes = vec![];
             file.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
             if entry.sha256.as_deref() != Some(&kinewright_media::sha256_bytes(&bytes)) {
@@ -1403,19 +1381,14 @@ impl Recovery {
                         .into(),
                 );
             }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt as _;
-                let opened = file.metadata().map_err(|e| e.to_string())?;
-                let current = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-                if opened.dev() != current.dev() || opened.ino() != current.ino() {
-                    return Err("journal file identity changed".into());
-                }
+            match file.unlink(&path) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+                Err(error) if journal_removal_contended(&error) => Ok(false),
+                result => result.map_err(|e| e.to_string()),
             }
-            fs::remove_file(&path).map_err(|e| e.to_string())
         })();
         match result {
-            Ok(()) => true,
+            Ok(gone) => gone,
             Err(error) => {
                 *lock_unpoisoned(&self.runtime_error) = Some(error);
                 false
@@ -1428,9 +1401,19 @@ impl Recovery {
         target.pending.append(&mut self.pending);
     }
 
-    fn stop_active(&mut self) {
-        if let Some(mut recorder) = self.recorder.take() {
-            recorder.shutdown();
+    fn stop_active(&mut self) -> Option<Recorder> {
+        let mut recorder = self.recorder.take()?;
+        recorder.shutdown();
+        Some(recorder)
+    }
+
+    fn retire_active(&mut self) {
+        if let Some(recorder) = self.stop_active() {
+            #[cfg(all(test, target_os = "linux"))]
+            if let Some(hook) = AFTER_RECORDER_STOP.take() {
+                hook();
+            }
+            self.remove_journal(&recorder.identity);
         }
     }
 
@@ -1462,8 +1445,7 @@ impl Recovery {
         }) {
             hook();
         }
-        self.stop_active();
-        self.remove_journal();
+        self.retire_active();
         if let Some(writer) = self.authority.take() {
             let _ = writer.release();
         }
@@ -1489,12 +1471,12 @@ impl Recovery {
     }
     /// Studio uses the bundle's owner. Preserve any legacy journal for explicit recovery.
     pub(crate) fn stop_for_studio(&mut self) {
-        self.stop_active();
+        drop(self.stop_active());
         self.authority = None;
         self.path = PathBuf::new();
     }
 
-    fn remove_journal(&self) {
+    fn remove_journal(&self, original: &JournalIdentity) {
         if self.path.as_os_str().is_empty() {
             return;
         }
@@ -1508,26 +1490,30 @@ impl Recovery {
         if let Some(directory) = &self.directory_owner
             && let Some(name) = self.path.file_name()
         {
-            remove_file_best_effort(&directory.io_path().join(name), &self.runtime_error);
+            let path = directory.io_path().join(name);
+            let result = LockedJournal::open_for_removal(&path).and_then(|file| {
+                if file.matches_identity(original)? {
+                    file.unlink(&path)
+                } else {
+                    Ok(false)
+                }
+            });
+            if let Err(error) = result
+                && error.kind() != io::ErrorKind::NotFound
+                && !journal_removal_contended(&error)
+            {
+                *lock_unpoisoned(&self.runtime_error) = Some(format!(
+                    "could not remove recovery journal {}: {error}",
+                    self.path.display()
+                ));
+            }
         }
     }
 }
 
 impl Drop for Recovery {
     fn drop(&mut self) {
-        self.stop_active();
-        self.remove_journal();
-    }
-}
-
-fn remove_file_best_effort(path: &Path, runtime_error: &Mutex<Option<String>>) {
-    if let Err(error) = fs::remove_file(path)
-        && error.kind() != io::ErrorKind::NotFound
-    {
-        *lock_unpoisoned(runtime_error) = Some(format!(
-            "could not remove recovery journal {}: {error}",
-            path.display()
-        ));
+        self.retire_active();
     }
 }
 
@@ -2526,6 +2512,229 @@ mod tests {
             .iter()
             .find_map(|shape| center(&shape.shape, label))
             .unwrap_or_else(|| panic!("missing painted label {label:?}"))
+    }
+
+    #[cfg(target_os = "linux")]
+    struct JournalPause {
+        entered: Receiver<()>,
+        release: Sender<()>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl JournalPause {
+        const TIMEOUT: Duration = Duration::from_secs(30);
+
+        fn new() -> (Self, impl Fn() + Send + 'static) {
+            let (announce, entered) = crossbeam_channel::bounded(0);
+            let (release, resume) = crossbeam_channel::bounded(0);
+            (Self { entered, release }, move || {
+                announce
+                    .send_timeout((), Self::TIMEOUT)
+                    .expect("the test awaits the hook");
+                resume
+                    .recv_timeout(Self::TIMEOUT)
+                    .expect("the test releases the hook");
+            })
+        }
+
+        fn wait(&self) {
+            self.entered
+                .recv_timeout(Self::TIMEOUT)
+                .expect("the journal reached the hook");
+        }
+
+        fn resume(&self) {
+            self.release
+                .send_timeout((), Self::TIMEOUT)
+                .expect("the journal is paused");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn click_journal_discard(recovery: &mut Recovery) {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut frame = |events| recovery_frame(&ctx, recovery, events);
+        let _ = frame(vec![]);
+        let _ = frame(vec![]);
+        let target = painted_label_center(&frame(vec![]), "Discard");
+        let click = |pressed| egui::Event::PointerButton {
+            pos: target,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let _ = frame(vec![egui::Event::PointerMoved(target), click(true)]);
+        let _ = frame(vec![click(false)]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recorder_cleanup_cannot_free_a_name_held_by_discard() {
+        let dir = TestDirectory::new("discard-holds-journal");
+        let core = Core::for_test(Document::default()).unwrap();
+        let mut a = Recovery::start_attached_in(dir.0.clone(), &core, None);
+        let path = dir.0.join("unsaved-1.journal");
+        assert_eq!(a.journal_path(), path);
+        let original = fs::read(&path).unwrap();
+        let mut b = Recovery::read_only();
+        b.capture_pending_for_test(&path);
+
+        let (stopped, after_stop) = JournalPause::new();
+        let (checked, before_unlink) = JournalPause::new();
+        thread::scope(|scope| {
+            let a = scope.spawn(move || {
+                AFTER_RECORDER_STOP.set(Some(Box::new(after_stop)));
+                a.close();
+            });
+            stopped.wait();
+            let b_worker = scope.spawn(move || {
+                kinewright_project::io_observer::at_barrier(
+                    "journal_before_unlink",
+                    before_unlink,
+                    || click_journal_discard(&mut b),
+                );
+                b
+            });
+            checked.wait();
+            stopped.resume();
+            a.join().unwrap();
+            let after_cleanup = fs::read(&path);
+            let c = JournalWriter::create(&path, None, &Document::default());
+            checked.resume();
+            let b = b_worker.join().unwrap();
+
+            assert_eq!(
+                after_cleanup.ok().as_deref(),
+                Some(original.as_slice()),
+                "HX_T5_A_LEAVES_B_LOCKED_JOURNAL"
+            );
+            assert!(c.is_err(), "C cannot create A's name while B holds it");
+            assert!(b.pending.is_empty());
+            assert!(!path.exists(), "B removed A's file");
+            let _successor = JournalWriter::create(&path, None, &Document::default()).unwrap();
+            let successor = fs::read(&path).unwrap();
+            drop(b);
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                successor,
+                "B leaves C's later journal"
+            );
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn discard_keeps_its_row_while_recorder_cleanup_holds_the_journal() {
+        let dir = TestDirectory::new("cleanup-holds-journal");
+        let core = Core::for_test(Document::default()).unwrap();
+        let mut a = Recovery::start_attached_in(dir.0.clone(), &core, None);
+        let path = dir.0.join("unsaved-1.journal");
+        let original = fs::read(&path).unwrap();
+        let mut b = Recovery::read_only();
+        b.capture_pending_for_test(&path);
+
+        let (checked, before_unlink) = JournalPause::new();
+        thread::scope(|scope| {
+            let a = scope.spawn(move || {
+                kinewright_project::io_observer::at_barrier(
+                    "journal_before_unlink",
+                    before_unlink,
+                    || a.close(),
+                );
+            });
+            checked.wait();
+            click_journal_discard(&mut b);
+            let during_cleanup = fs::read(&path);
+            checked.resume();
+            a.join().unwrap();
+
+            assert_eq!(b.pending.len(), 1, "B's refused discard keeps the row");
+            assert_eq!(during_cleanup.unwrap(), original);
+            assert!(!path.exists(), "A removes its own journal");
+            click_journal_discard(&mut b);
+            assert!(
+                b.pending.is_empty(),
+                "an already gone journal clears silently"
+            );
+            assert!(lock_unpoisoned(&b.runtime_error).is_none());
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn delayed_recorder_cleanup_leaves_a_successor_at_the_same_name() {
+        let dir = TestDirectory::new("cleanup-sees-successor");
+        let core = Core::for_test(Document::default()).unwrap();
+        let mut a = Recovery::start_attached_in(dir.0.clone(), &core, None);
+        let path = dir.0.join("unsaved-1.journal");
+        let mut b = Recovery::read_only();
+        b.capture_pending_for_test(&path);
+
+        let (stopped, after_stop) = JournalPause::new();
+        thread::scope(|scope| {
+            let a = scope.spawn(move || {
+                AFTER_RECORDER_STOP.set(Some(Box::new(after_stop)));
+                a.close();
+            });
+            stopped.wait();
+            click_journal_discard(&mut b);
+            let successor = Document {
+                resolution: (800, 600),
+                ..Document::default()
+            };
+            drop(JournalWriter::create(&path, None, &successor).unwrap());
+            let bytes = fs::read(&path).unwrap();
+            stopped.resume();
+            a.join().unwrap();
+
+            assert!(b.pending.is_empty());
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                bytes,
+                "A's late cleanup leaves C's file"
+            );
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn checkpoint_records_to_a_fresh_name_if_retirement_is_contended() {
+        let dir = TestDirectory::new("checkpoint-held-journal");
+        let core = Core::for_test(Document::default()).unwrap();
+        let mut recovery = Recovery::start_attached_in(dir.0.clone(), &core, None);
+        let old = dir.0.join("unsaved-1.journal");
+        let original = fs::read(&old).unwrap();
+
+        let (stopped, after_stop) = JournalPause::new();
+        let worker = thread::spawn(move || {
+            AFTER_RECORDER_STOP.set(Some(Box::new(after_stop)));
+            recovery.checkpoint(&core, None);
+            (recovery, core)
+        });
+        stopped.wait();
+        let _other_owner = LockedJournal::open_for_removal(&old).unwrap();
+        stopped.resume();
+        let (recovery, core) = worker.join().unwrap();
+
+        assert_eq!(fs::read(&old).unwrap(), original);
+        assert_eq!(recovery.journal_path(), dir.0.join("unsaved-2.journal"));
+        let command = representative_commands().into_iter().next().unwrap();
+        assert!(matches!(
+            core.request(command.into()).unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        recovery
+            .recorder
+            .as_ref()
+            .expect("the new baseline records")
+            .flush()
+            .unwrap();
+        assert!(lock_unpoisoned(&recovery.runtime_error).is_none());
+        let Inspection::Recoverable(report) = inspect_path(recovery.journal_path()) else {
+            panic!("the new baseline journal can be replayed");
+        };
+        assert_eq!(report.recovered_commands, 1);
     }
 
     #[test]
