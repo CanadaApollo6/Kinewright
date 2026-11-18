@@ -184,7 +184,8 @@ pub(crate) fn color_description_from_decoder(
     decoder: &ffmpeg::codec::decoder::Video,
     negotiated_pixel_format: Option<ffmpeg::format::Pixel>,
 ) -> ColorDescription {
-    let (primaries, transfer, matrix, range) = crate::owned_io::decoder_colour_numbers(decoder);
+    let (primaries, transfer, matrix, range) =
+        kinewright_media_input::color::decoder_colour_numbers(decoder);
     let primaries = map_color_primaries(primaries);
     let transfer = map_color_transfer(transfer);
     let matrix = map_color_matrix(matrix);

@@ -195,17 +195,11 @@ fn metadata_bounds_and_actual_domain_consumer() {
     let mut bad = probe();
     bad.color.confidence_basis_points = 10001;
     cases.push(bad);
-    let mut bad = probe();
-    bad.color.primaries = kinewright_core::ColorPrimaries::Other("forged".into());
-    cases.push(bad);
-    let mut bad = probe();
-    bad.color.matrix = kinewright_core::ColorMatrix::Other("bt470bg\0forged".into());
-    cases.push(bad);
     for case in cases {
         assert!(ValidatedProbe::new(case).is_err());
     }
     let mut jpeg = probe();
-    jpeg.color.matrix = kinewright_core::ColorMatrix::Other("bt470bg".into());
+    jpeg.color.matrix = kinewright_core::ColorMatrix::Bt470Bg;
     assert!(ValidatedProbe::new(jpeg).is_ok());
 }
 
@@ -242,19 +236,38 @@ fn traffic_is_charged_before_payload_is_allocated_or_read() {
 }
 
 #[test]
-fn framing_caps_decoded_text_before_metadata_can_be_consumed() {
+fn framing_rejects_unlisted_color_tags() {
+    for field in [
+        "primaries",
+        "transfer",
+        "matrix",
+        "range",
+        "white_point",
+        "bit_depth",
+        "provenance",
+    ] {
+        let mut message = serde_json::to_value(Message::ProbeResult {
+            result: Box::new(probe()),
+        })
+        .unwrap();
+        message["result"]["color"][field] = serde_json::json!("unlisted");
+        assert!(
+            read_frame(&mut payload(&serde_json::to_vec(&message).unwrap()).as_slice()).is_err(),
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn json_caps_decoded_text_before_metadata_can_be_consumed() {
     for (text, accepted) in [
         ("x".repeat(256), true),
         ("x".repeat(257), false),
         ("é".repeat(128), true),
         ("é".repeat(129), false),
     ] {
-        let mut result = probe();
-        result.color.primaries = kinewright_core::ColorPrimaries::Other(text);
-        let bytes = encoded(Message::ProbeResult {
-            result: Box::new(result),
-        });
-        assert_eq!(read_frame(&mut bytes.as_slice()).is_ok(), accepted);
+        let bytes = serde_json::to_vec(&text).unwrap();
+        assert_eq!(json::check(&bytes).is_ok(), accepted);
     }
 }
 

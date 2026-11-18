@@ -1,4 +1,4 @@
-//! The format and decoder policy from the pinned FFmpeg build profile.
+//! The format and decoder policy from the pinned `FFmpeg` build profile.
 use std::{ffi::CString, sync::LazyLock};
 
 #[derive(serde::Deserialize)]

@@ -266,10 +266,7 @@ fn confined_still_probe_inspects_and_closes() {
         assert_eq!(result.kind, kinewright_media_ipc::Kind::Image);
         assert_eq!(result.duration_frames, 1);
         if extension == "jpg" {
-            assert_eq!(
-                result.color.matrix,
-                kinewright_core::ColorMatrix::Other("bt470bg".into())
-            );
+            assert_eq!(result.color.matrix, kinewright_core::ColorMatrix::Bt470Bg);
         }
     }
 }

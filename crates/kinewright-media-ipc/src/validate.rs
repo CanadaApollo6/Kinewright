@@ -76,28 +76,6 @@ impl ValidatedProbe {
             || result.duration_frames <= 0
             || i128::from(result.duration_frames) * i128::from(d) > 604_800 * i128::from(n)
             || result.color.confidence_basis_points > 10_000
-            || matches!(
-                result.color.primaries,
-                kinewright_core::ColorPrimaries::Other(ref tag) if !["smpte428", "ebu3213"].contains(&tag.as_str())
-            )
-            || matches!(
-                result.color.transfer,
-                kinewright_core::ColorTransfer::Other(ref tag) if !["smpte240m", "log_sqrt", "iec61966_2_4", "bt1361_ecg", "bt2020_10", "bt2020_12", "smpte428"].contains(&tag.as_str())
-            )
-            || matches!(result.color.matrix, kinewright_core::ColorMatrix::Other(ref tag) if !["bt470bg", "fcc", "smpte2085", "ipt_c2", "ycgco_re", "ycgco_ro"].contains(&tag.as_str()))
-            || matches!(result.color.range, kinewright_core::ColorRange::Other(_))
-            || matches!(
-                result.color.white_point,
-                kinewright_core::ColorWhitePoint::Other(_)
-            )
-            || matches!(
-                result.color.provenance,
-                kinewright_core::ColorProvenance::Other(_)
-            )
-            || matches!(
-                result.color.bit_depth,
-                kinewright_core::ColorBitDepth::Other(_)
-            )
             || matches!(result.color.bit_depth, kinewright_core::ColorBitDepth::Integer(n) if !(1..=32).contains(&n))
         {
             return Err(bad);

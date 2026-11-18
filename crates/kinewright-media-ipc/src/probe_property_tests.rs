@@ -1,8 +1,5 @@
 use super::*;
-use kinewright_core::{
-    ColorBitDepth, ColorMatrix, ColorPrimaries, ColorProvenance, ColorRange, ColorTransfer,
-    ColorWhitePoint,
-};
+use kinewright_core::ColorBitDepth;
 use proptest::prelude::*;
 
 fn probe_kind(kind: Kind) -> ProbeResult {
@@ -117,46 +114,6 @@ fn assert_table(result: &ProbeResult) {
     if let kinewright_core::ColorBitDepth::Integer(bits) = result.color.bit_depth {
         assert!((1..=32).contains(&bits));
     }
-    if let ColorPrimaries::Other(tag) = &result.color.primaries {
-        assert!(["smpte428", "ebu3213"].contains(&tag.as_str()));
-    }
-    if let ColorTransfer::Other(tag) = &result.color.transfer {
-        assert!(
-            [
-                "smpte240m",
-                "log_sqrt",
-                "iec61966_2_4",
-                "bt1361_ecg",
-                "bt2020_10",
-                "bt2020_12",
-                "smpte428",
-            ]
-            .contains(&tag.as_str())
-        );
-    }
-    if let ColorMatrix::Other(tag) = &result.color.matrix {
-        assert!(
-            [
-                "bt470bg",
-                "fcc",
-                "smpte2085",
-                "ipt_c2",
-                "ycgco_re",
-                "ycgco_ro"
-            ]
-            .contains(&tag.as_str())
-        );
-    }
-    assert!(!matches!(result.color.range, ColorRange::Other(_)));
-    assert!(!matches!(
-        result.color.white_point,
-        ColorWhitePoint::Other(_)
-    ));
-    assert!(!matches!(
-        result.color.provenance,
-        ColorProvenance::Other(_)
-    ));
-    assert!(!matches!(result.color.bit_depth, ColorBitDepth::Other(_)));
 }
 
 proptest! {
@@ -172,15 +129,6 @@ proptest! {
         for kind in [Kind::Image, Kind::Video, Kind::Audio, Kind::AudioVideo] {
             let sample = probe_kind(kind);
             assert_table(ValidatedProbe::new(sample.clone()).unwrap().metadata());
-            let mutations: &[fn(&mut ProbeResult)] = &[
-                |probe| probe.color.primaries = ColorPrimaries::Other("unlisted".into()),
-                |probe| probe.color.transfer = ColorTransfer::Other("unlisted".into()),
-                |probe| probe.color.matrix = ColorMatrix::Other("unlisted".into()),
-                |probe| probe.color.range = ColorRange::Other("unlisted".into()),
-                |probe| probe.color.white_point = ColorWhitePoint::Other("unlisted".into()),
-                |probe| probe.color.bit_depth = ColorBitDepth::Other("unlisted".into()),
-                |probe| probe.color.provenance = ColorProvenance::Other("unlisted".into()),
-            ];
             let check = |mutate: &dyn Fn(&mut ProbeResult)| {
                 let mut candidate = sample.clone();
                 mutate(&mut candidate);
@@ -188,9 +136,6 @@ proptest! {
                     assert_table(accepted.metadata());
                 }
             };
-            for mutate in mutations {
-                check(mutate);
-            }
             check(&|p| {
                 p.streams.resize_with(count, || sample.streams[0].clone());
                 for (index, stream) in p.streams.iter_mut().enumerate() {

@@ -24,10 +24,12 @@ pub(crate) fn color_description_from_decoder(
     decoder: &ffmpeg::codec::decoder::Video,
     negotiated_pixel_format: Option<ffmpeg::format::Pixel>,
 ) -> ColorDescription {
-    let primaries = map_color_primaries(decoder.color_primaries());
-    let transfer = map_color_transfer(decoder.color_transfer_characteristic());
-    let matrix = map_color_matrix(decoder.color_space());
-    let range = map_color_range(decoder.color_range());
+    let (primaries, transfer, matrix, range) =
+        kinewright_media_input::color::decoder_colour_numbers(decoder);
+    let primaries = map_color_primaries(primaries);
+    let transfer = map_color_transfer(transfer);
+    let matrix = map_color_matrix(matrix);
+    let range = map_color_range(range);
     let bit_depth = negotiated_pixel_format
         .map(bit_depth_from_pixel)
         .filter(|depth| !matches!(depth, ColorBitDepth::Unknown))
@@ -79,82 +81,84 @@ fn color_metadata_coverage(
     (provenance, confidence_basis_points)
 }
 
-fn map_color_primaries(value: ffmpeg::color::Primaries) -> ColorPrimaries {
-    use ffmpeg::color::Primaries;
+fn map_color_primaries(value: u32) -> ColorPrimaries {
+    use ffmpeg::ffi::AVColorPrimaries as Native;
 
     match value {
-        Primaries::Reserved0 | Primaries::Unspecified | Primaries::Reserved => {
-            ColorPrimaries::Unknown
+        value if value == Native::AVCOL_PRI_BT709 as u32 => ColorPrimaries::Bt709,
+        value if value == Native::AVCOL_PRI_BT2020 as u32 => ColorPrimaries::Bt2020,
+        value if value == Native::AVCOL_PRI_BT470M as u32 => ColorPrimaries::Bt470M,
+        value if value == Native::AVCOL_PRI_BT470BG as u32 => ColorPrimaries::Bt470Bg,
+        value if value == Native::AVCOL_PRI_SMPTE170M as u32 => ColorPrimaries::Smpte170M,
+        value if value == Native::AVCOL_PRI_SMPTE240M as u32 => ColorPrimaries::Smpte240M,
+        value if value == Native::AVCOL_PRI_SMPTE431 as u32 => ColorPrimaries::DciP3,
+        value if value == Native::AVCOL_PRI_SMPTE432 as u32 => ColorPrimaries::DisplayP3,
+        value if value == Native::AVCOL_PRI_FILM as u32 => ColorPrimaries::Film,
+        value if value == Native::AVCOL_PRI_SMPTE428 as u32 => ColorPrimaries::Smpte428,
+        value if value == Native::AVCOL_PRI_EBU3213 as u32 => ColorPrimaries::Ebu3213,
+        _ => ColorPrimaries::Unknown,
+    }
+}
+
+fn map_color_transfer(value: u32) -> ColorTransfer {
+    use ffmpeg::ffi::AVColorTransferCharacteristic as Native;
+
+    match value {
+        value if value == Native::AVCOL_TRC_BT709 as u32 => ColorTransfer::Bt709,
+        value if value == Native::AVCOL_TRC_GAMMA22 as u32 => ColorTransfer::Gamma22,
+        value if value == Native::AVCOL_TRC_GAMMA28 as u32 => ColorTransfer::Gamma28,
+        value if value == Native::AVCOL_TRC_SMPTE170M as u32 => ColorTransfer::Smpte170M,
+        value if value == Native::AVCOL_TRC_LINEAR as u32 => ColorTransfer::Linear,
+        value if value == Native::AVCOL_TRC_LOG as u32 => ColorTransfer::Log,
+        value if value == Native::AVCOL_TRC_IEC61966_2_1 as u32 => ColorTransfer::Srgb,
+        value if value == Native::AVCOL_TRC_SMPTE2084 as u32 => ColorTransfer::Smpte2084,
+        value if value == Native::AVCOL_TRC_ARIB_STD_B67 as u32 => ColorTransfer::AribStdB67,
+        value if value == Native::AVCOL_TRC_SMPTE240M as u32 => ColorTransfer::Smpte240M,
+        value if value == Native::AVCOL_TRC_LOG_SQRT as u32 => ColorTransfer::LogSqrt,
+        value if value == Native::AVCOL_TRC_IEC61966_2_4 as u32 => ColorTransfer::Iec61966TwoFour,
+        value if value == Native::AVCOL_TRC_BT1361_ECG as u32 => ColorTransfer::Bt1361Ecg,
+        value if value == Native::AVCOL_TRC_BT2020_10 as u32 => ColorTransfer::Bt2020Ten,
+        value if value == Native::AVCOL_TRC_BT2020_12 as u32 => ColorTransfer::Bt2020Twelve,
+        value if value == Native::AVCOL_TRC_SMPTE428 as u32 => ColorTransfer::Smpte428,
+        _ => ColorTransfer::Unknown,
+    }
+}
+
+fn map_color_matrix(value: u32) -> ColorMatrix {
+    use ffmpeg::ffi::AVColorSpace as Native;
+
+    match value {
+        value if value == Native::AVCOL_SPC_RGB as u32 => ColorMatrix::Rgb,
+        value if value == Native::AVCOL_SPC_BT709 as u32 => ColorMatrix::Bt709,
+        value if value == Native::AVCOL_SPC_BT470BG as u32 => ColorMatrix::Bt470Bg,
+        value if value == Native::AVCOL_SPC_BT2020_NCL as u32 => ColorMatrix::Bt2020Ncl,
+        value if value == Native::AVCOL_SPC_BT2020_CL as u32 => ColorMatrix::Bt2020Cl,
+        value if value == Native::AVCOL_SPC_SMPTE170M as u32 => ColorMatrix::Smpte170M,
+        value if value == Native::AVCOL_SPC_SMPTE240M as u32 => ColorMatrix::Smpte240M,
+        value if value == Native::AVCOL_SPC_YCGCO as u32 => ColorMatrix::Ycgco,
+        value if value == Native::AVCOL_SPC_CHROMA_DERIVED_NCL as u32 => {
+            ColorMatrix::ChromaDerivedNcl
         }
-        Primaries::BT709 => ColorPrimaries::Bt709,
-        Primaries::BT2020 => ColorPrimaries::Bt2020,
-        Primaries::BT470M => ColorPrimaries::Bt470M,
-        Primaries::BT470BG => ColorPrimaries::Bt470Bg,
-        Primaries::SMPTE170M => ColorPrimaries::Smpte170M,
-        Primaries::SMPTE240M => ColorPrimaries::Smpte240M,
-        Primaries::SMPTE431 => ColorPrimaries::DciP3,
-        Primaries::SMPTE432 => ColorPrimaries::DisplayP3,
-        Primaries::Film => ColorPrimaries::Film,
-        Primaries::SMPTE428 => ColorPrimaries::Other("smpte428".to_owned()),
-        Primaries::EBU3213 => ColorPrimaries::Other("ebu3213".to_owned()),
+        value if value == Native::AVCOL_SPC_CHROMA_DERIVED_CL as u32 => {
+            ColorMatrix::ChromaDerivedCl
+        }
+        value if value == Native::AVCOL_SPC_ICTCP as u32 => ColorMatrix::Ictcp,
+        value if value == Native::AVCOL_SPC_FCC as u32 => ColorMatrix::Fcc,
+        value if value == Native::AVCOL_SPC_SMPTE2085 as u32 => ColorMatrix::Smpte2085,
+        value if value == Native::AVCOL_SPC_IPT_C2 as u32 => ColorMatrix::IptC2,
+        value if value == Native::AVCOL_SPC_YCGCO_RE as u32 => ColorMatrix::YcgcoRe,
+        value if value == Native::AVCOL_SPC_YCGCO_RO as u32 => ColorMatrix::YcgcoRo,
+        _ => ColorMatrix::Unknown,
     }
 }
 
-fn map_color_transfer(value: ffmpeg::color::TransferCharacteristic) -> ColorTransfer {
-    use ffmpeg::color::TransferCharacteristic;
+fn map_color_range(value: u32) -> ColorRange {
+    use ffmpeg::ffi::AVColorRange as Native;
 
     match value {
-        TransferCharacteristic::Reserved0
-        | TransferCharacteristic::Unspecified
-        | TransferCharacteristic::Reserved => ColorTransfer::Unknown,
-        TransferCharacteristic::BT709 => ColorTransfer::Bt709,
-        TransferCharacteristic::GAMMA22 => ColorTransfer::Gamma22,
-        TransferCharacteristic::GAMMA28 => ColorTransfer::Gamma28,
-        TransferCharacteristic::SMPTE170M => ColorTransfer::Smpte170M,
-        TransferCharacteristic::Linear => ColorTransfer::Linear,
-        TransferCharacteristic::Log => ColorTransfer::Log,
-        TransferCharacteristic::IEC61966_2_1 => ColorTransfer::Srgb,
-        TransferCharacteristic::SMPTE2084 => ColorTransfer::Smpte2084,
-        TransferCharacteristic::ARIB_STD_B67 => ColorTransfer::AribStdB67,
-        TransferCharacteristic::SMPTE240M => ColorTransfer::Other("smpte240m".to_owned()),
-        TransferCharacteristic::LogSqrt => ColorTransfer::Other("log_sqrt".to_owned()),
-        TransferCharacteristic::IEC61966_2_4 => ColorTransfer::Other("iec61966_2_4".to_owned()),
-        TransferCharacteristic::BT1361_ECG => ColorTransfer::Other("bt1361_ecg".to_owned()),
-        TransferCharacteristic::BT2020_10 => ColorTransfer::Other("bt2020_10".to_owned()),
-        TransferCharacteristic::BT2020_12 => ColorTransfer::Other("bt2020_12".to_owned()),
-        TransferCharacteristic::SMPTE428 => ColorTransfer::Other("smpte428".to_owned()),
-    }
-}
-
-fn map_color_matrix(value: ffmpeg::color::Space) -> ColorMatrix {
-    use ffmpeg::color::Space;
-
-    match value {
-        Space::Unspecified | Space::Reserved => ColorMatrix::Unknown,
-        Space::RGB => ColorMatrix::Rgb,
-        Space::BT709 => ColorMatrix::Bt709,
-        Space::BT470BG => ColorMatrix::Other("bt470bg".to_owned()),
-        Space::BT2020NCL => ColorMatrix::Bt2020Ncl,
-        Space::BT2020CL => ColorMatrix::Bt2020Cl,
-        Space::SMPTE170M => ColorMatrix::Smpte170M,
-        Space::SMPTE240M => ColorMatrix::Smpte240M,
-        Space::YCGCO => ColorMatrix::Ycgco,
-        Space::ChromaDerivedNCL => ColorMatrix::ChromaDerivedNcl,
-        Space::ChromaDerivedCL => ColorMatrix::ChromaDerivedCl,
-        Space::ICTCP => ColorMatrix::Ictcp,
-        Space::FCC => ColorMatrix::Other("fcc".to_owned()),
-        Space::SMPTE2085 => ColorMatrix::Other("smpte2085".to_owned()),
-        Space::IPT_C2 => ColorMatrix::Other("ipt_c2".to_owned()),
-        Space::YCGCO_RE => ColorMatrix::Other("ycgco_re".to_owned()),
-        Space::YCGCO_RO => ColorMatrix::Other("ycgco_ro".to_owned()),
-    }
-}
-
-fn map_color_range(value: ffmpeg::color::Range) -> ColorRange {
-    match value {
-        ffmpeg::color::Range::Unspecified => ColorRange::Unknown,
-        ffmpeg::color::Range::MPEG => ColorRange::Limited,
-        ffmpeg::color::Range::JPEG => ColorRange::Full,
+        value if value == Native::AVCOL_RANGE_MPEG as u32 => ColorRange::Limited,
+        value if value == Native::AVCOL_RANGE_JPEG as u32 => ColorRange::Full,
+        _ => ColorRange::Unknown,
     }
 }
 

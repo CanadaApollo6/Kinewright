@@ -56,21 +56,31 @@ impl Input {
         // SAFETY: format is the exclusive owner of its live AVFormatContext.
         unsafe {
             (*format.as_mut_ptr()).max_analyze_duration = 5_000_000;
-            if (*format.as_ptr()).ctx_flags & ffi::AVFMTCTX_NOHEADER != 0 {
-                if !matches!(format.format().name(), "png_pipe" | "jpeg_pipe")
-                    || format.nb_streams() != 1
-                {
+            let still_codec = match format.format().name() {
+                "png_pipe" => Some(ffmpeg::codec::Id::PNG),
+                "jpeg_pipe" => Some(ffmpeg::codec::Id::MJPEG),
+                _ => None,
+            };
+            if let Some(codec) = still_codec {
+                if format.nb_streams() != 1 {
                     return Err(Error::UnsupportedMedia);
                 }
-                let (w, h) = still_dimensions(&header).ok_or(Error::UnsupportedMedia)?;
                 let mut parameters = format
                     .stream(0)
                     .ok_or(Error::UnsupportedMedia)?
                     .parameters();
+                if parameters.id() != codec {
+                    return Err(Error::UnsupportedMedia);
+                }
+                let (w, h) = still_dimensions(&header).ok_or(Error::UnsupportedMedia)?;
                 (*parameters.as_mut_ptr()).width =
                     i32::try_from(w).map_err(|_| Error::UnsupportedMedia)?;
                 (*parameters.as_mut_ptr()).height =
                     i32::try_from(h).map_err(|_| Error::UnsupportedMedia)?;
+            } else if format.nb_streams() == 0
+                || (*format.as_ptr()).ctx_flags & ffi::AVFMTCTX_NOHEADER != 0
+            {
+                return Err(Error::UnsupportedMedia);
             }
             (*format.as_mut_ptr()).max_streams =
                 i32::try_from(format.nb_streams()).map_err(|_| Error::UnsupportedMedia)?;
@@ -190,6 +200,9 @@ fn allocation(
     budget: u64,
     metadata: Metadata,
 ) -> Result<Bound, Error> {
+    if !kinewright_media_input::codec_policy::allows(parameters.id()) {
+        return Err(Error::UnsupportedMedia);
+    }
     // SAFETY: the parameters owner keeps this AVCodecParameters alive throughout inspection.
     let p = unsafe { &*parameters.as_ptr() };
     if p.codec_type == ffi::AVMediaType::AVMEDIA_TYPE_AUDIO {
