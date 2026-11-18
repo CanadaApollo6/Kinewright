@@ -1423,7 +1423,7 @@ impl Recovery {
         }
     }
 
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(test)]
     pub(crate) fn journal_path(&self) -> &Path {
         &self.path
     }
