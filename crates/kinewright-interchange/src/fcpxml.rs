@@ -78,11 +78,7 @@ pub fn parse(
         project_rate: rate_hint,
         minor: minor.unwrap_or_default(),
         next_group: 0,
-        newline_offsets: bytes
-            .iter()
-            .enumerate()
-            .filter_map(|(index, byte)| (*byte == b'\n').then_some(index))
-            .collect(),
+        lines: LineIndex::new(bytes),
     };
     if sequence.attribute("tcFormat") == Some("DF") {
         parser
@@ -105,6 +101,49 @@ pub fn parse(
         media: parser.media,
         notes: parser.notes,
     })
+}
+
+const LINE_INDEX_CHUNK_BYTES: usize = 4 * 1024;
+
+struct LineIndex<'input> {
+    bytes: &'input [u8],
+    // Each checkpoint holds the line number and its starting byte offset.
+    prefixes: Vec<(usize, usize)>,
+}
+
+impl<'input> LineIndex<'input> {
+    fn new(bytes: &'input [u8]) -> Self {
+        let (chunks, _) = bytes.as_chunks::<LINE_INDEX_CHUNK_BYTES>();
+        let mut prefixes = Vec::with_capacity(chunks.len() + 1);
+        let mut prefix = (1, 0);
+        prefixes.push(prefix);
+        for (index, chunk) in chunks.iter().enumerate() {
+            prefix = advance_lines(chunk, index * LINE_INDEX_CHUNK_BYTES, prefix);
+            prefixes.push(prefix);
+        }
+        Self { bytes, prefixes }
+    }
+
+    fn position(&self, offset: usize) -> (usize, usize) {
+        let chunk = offset / LINE_INDEX_CHUNK_BYTES;
+        let base = chunk * LINE_INDEX_CHUNK_BYTES;
+        let (line, start) = advance_lines(&self.bytes[base..offset], base, self.prefixes[chunk]);
+        (line, offset - start + 1)
+    }
+}
+
+fn advance_lines(
+    bytes: &[u8],
+    base: usize,
+    (mut line, mut start): (usize, usize),
+) -> (usize, usize) {
+    for (offset, &byte) in bytes.iter().enumerate() {
+        if byte == b'\n' {
+            line += 1;
+            start = base + offset + 1;
+        }
+    }
+    (line, start)
 }
 
 fn child<'a, 'input>(node: Xml<'a, 'input>, name: &str) -> Option<Xml<'a, 'input>> {
@@ -229,7 +268,7 @@ struct Parser<'a, 'input> {
     project_rate: Rational,
     minor: u8,
     next_group: u32,
-    newline_offsets: Vec<usize>,
+    lines: LineIndex<'input>,
 }
 
 type Parts = Vec<(TrackKind, Placed)>;
@@ -879,14 +918,8 @@ impl<'a, 'input> Parser<'a, 'input> {
     }
 
     fn place(&self, node: Xml<'_, '_>) -> String {
-        let start = node.range().start;
-        let line = self
-            .newline_offsets
-            .partition_point(|&newline| newline < start);
-        let line_start = line
-            .checked_sub(1)
-            .map_or(0, |previous| self.newline_offsets[previous] + 1);
-        format!("{}:{}", line + 1, start - line_start + 1)
+        let (line, column) = self.lines.position(node.range().start);
+        format!("{line}:{column}")
     }
 }
 
@@ -1055,4 +1088,36 @@ fn tenth_db(value: &str) -> Result<i64, Refusal> {
     }
     let rate = Rational::new(10, 1).map_err(|_| Refusal::arithmetic())?;
     Ok(Time::decimal(value)?.frame(rate)?.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_newline_xml_position_index_is_sparse() {
+        let bytes = vec![b'\n'; 16 * 1024];
+        let index = LineIndex::new(&bytes);
+        let index_bytes = index.prefixes.capacity() * size_of::<(usize, usize)>();
+        assert!(
+            index_bytes <= bytes.len() / 4,
+            "{index_bytes} index bytes for {} input bytes",
+            bytes.len()
+        );
+        assert_eq!(index.position(0), (1, 1));
+        assert_eq!(index.position(bytes.len()), (bytes.len() + 1, 1));
+    }
+
+    #[test]
+    fn xml_position_index_keeps_columns_across_chunks() {
+        let mut bytes = vec![b' '; 2 * LINE_INDEX_CHUNK_BYTES + 1];
+        bytes[1] = b'\n';
+        bytes[2 * LINE_INDEX_CHUNK_BYTES] = b'\n';
+        let index = LineIndex::new(&bytes);
+        assert_eq!(
+            index.position(2 * LINE_INDEX_CHUNK_BYTES),
+            (2, 2 * LINE_INDEX_CHUNK_BYTES - 1)
+        );
+        assert_eq!(index.position(bytes.len()), (3, 1));
+    }
 }

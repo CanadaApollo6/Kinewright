@@ -715,6 +715,9 @@ no download.
   (`crates/premiere_file/src/format/graph/mod.rs:229-245@cdea27e`).
 - A DOM beats quick-xml streaming here, because `ref` ids resolve across resources and compounds.
 - The walk uses an explicit stack.
+- Loss sites use a checkpoint every 4 KiB of XML to recover line and byte column. Each
+  checkpoint stores the line number and its start offset. OTIO scans for the requested
+  JSON error position on demand.
 
 **No other crates.** There is no zip support (no `.otioz`). File-URL decoding and locator
 classification are about 80 hand-written lines, and they are fuzzed.
