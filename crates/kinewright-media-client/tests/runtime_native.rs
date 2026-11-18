@@ -117,6 +117,12 @@ fn runtime_fixture() {
     } else {
         config
     };
+    #[cfg(feature = "slow-tests")]
+    if case == "persistent-error" {
+        let config = config.scope_seam(kinewright_media_client::ScopeSeam::PersistentError);
+        unproven_cleanup(config, &png);
+        return;
+    }
     let runtime = Runtime::start(config).unwrap();
     let sampler = ms2_diag::sample("runtime_native");
     let result = runtime.probe(Request {
@@ -150,6 +156,42 @@ fn runtime_fixture() {
         (runtime.snapshot().active, runtime.snapshot().pending),
         (0, 0)
     );
+}
+/// Two probes whose scope emptiness proof always errors. Each must be
+/// answered with a typed failure inside the cleanup budget, keep its decode
+/// slot, and leave the other slot usable; close reports the failure.
+#[cfg(feature = "slow-tests")]
+fn unproven_cleanup(config: Config, png: &Path) {
+    use kinewright_media_client::Failure;
+    use kinewright_media_ipc::MediaSandboxError;
+    let runtime = Runtime::start(config).unwrap();
+    let probe = || {
+        let started = Instant::now();
+        let result = runtime.probe(Request {
+            source: Box::new(Input(File::open(png).unwrap())),
+            video: None,
+            audio: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            explicit_retry: false,
+        });
+        (result.err(), started.elapsed(), runtime.snapshot().active)
+    };
+    let first = probe();
+    let second = probe();
+    let shutdown = runtime.shutdown();
+    let held = runtime.snapshot().active;
+    println!(
+        "MS2_UNPROVEN_CLEANUP first={first:?} second={second:?} shutdown={shutdown:?} held={held}"
+    );
+    for (error, elapsed, _) in [&first, &second] {
+        assert!(matches!(
+            error,
+            Some(Failure::Sandbox(MediaSandboxError::Crashed))
+        ));
+        assert!(*elapsed < Duration::from_secs(4), "{elapsed:?}");
+    }
+    assert_eq!((first.2, second.2, held), (1, 2, 2));
+    assert_eq!(shutdown, Err(MediaSandboxError::Crashed));
 }
 /// Runs one fixture case in a child and returns its relayed `MS2_` lines.
 fn run_case(case: &str) -> String {
@@ -293,5 +335,29 @@ fn runtime_scope_proof_holds_when_a_removed_scope_keeps_two_links() {
         relayed
             .contains("MS2_SCOPE_PROOF seam=hosted_kernel nlink=2 events=ENODEV deleted=Ok(true)"),
         "cleanup did not prove the removed two-link scope deleted through ENODEV:\n{relayed}"
+    );
+}
+
+/// A scope whose emptiness proof keeps failing is unproven, not "not yet":
+/// cleanup stops after the bounded error run, answers a typed failure,
+/// never releases the scope or its decode slot, and close reports it.
+#[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn runtime_scope_proof_error_keeps_the_reservation() {
+    let _deadline = deadline::test();
+    ms2_diag::install(kinewright_media_client::diagnostics);
+    if !ms2_diag::user_manager() {
+        println!(
+            "MS2_NATIVE_NOT_RUN binary=runtime_native test=runtime_scope_proof_error_keeps_the_reservation reason=no_user_manager"
+        );
+        return;
+    }
+    let relayed = run_case("persistent-error");
+    assert!(
+        relayed.contains("MS2_UNPROVEN_CLEANUP"),
+        "the unproven cleanup case did not report:\n{relayed}"
     );
 }

@@ -37,6 +37,13 @@ const TICK: Duration = Duration::from_millis(100);
 /// `docs/MS2-MEDIA-SANDBOX.md` performance table). The reservation stays until
 /// cleanup really ends.
 const REAP_BUDGET: Duration = Duration::from_secs(2);
+/// Consecutive emptiness-proof errors tolerated before cleanup stops polling
+/// and keeps the scope reserved as unproven. An error from the retained
+/// descriptors is "unproven", not "not yet": no later read makes a broken
+/// descriptor answer again, so the bound only rides out a one-off failed
+/// read. It sits well inside `REAP_BUDGET`, so the caller's typed failure is
+/// not delayed by it.
+const SCOPE_PROOF_ERRORS: Duration = Duration::from_millis(500);
 
 /// The actor owns this capability until native cleanup, independently of the
 /// caller's lifetime. Only a duplicate file descriptor reaches the I/O worker.
@@ -81,6 +88,9 @@ pub enum ScopeSeam {
     /// hosted kernels do. Cleanup waits for the removal, prints
     /// `MS2_SCOPE_PROOF` with both readings, then proves emptiness.
     HostedKernel,
+    /// Every emptiness proof of the helper scope answers an error, as a
+    /// retained descriptor that the kernel or manager broke would.
+    PersistentError,
 }
 impl Config {
     #[must_use]

@@ -3,7 +3,8 @@
 Run from the repository root with `nice -n 19 python3 -I` after
 `source scripts/setup-ffmpeg.sh`. Each mutation must compile and turn its
 witness red; the restored source must turn it green again. Original bytes are
-restored in a finally block. Pass mutation names to run a subset.
+restored in a finally block. Pass mutation names to run a subset; their
+results replace the same names in the JSON record.
 """
 from pathlib import Path
 import json
@@ -86,7 +87,10 @@ def main():
         results.append({"mutation": name, "killed": killed, "compiled": compiled,
                         "red_exit": red, "red_last": red_last, "green_exit": green, "green_last": green_last})
         print(f"{name}: {'killed' if killed else 'SURVIVED'} red_exit={red} green_exit={green} :: {red_last}")
-    OUT.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+    ran = {result["mutation"] for result in results}
+    kept = json.loads(OUT.read_text(encoding="utf-8")) if OUT.exists() else []
+    merged = [result for result in kept if result["mutation"] not in ran] + results
+    OUT.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
     return 0 if all(result["killed"] for result in results) else 1
 
 

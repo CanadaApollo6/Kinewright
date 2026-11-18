@@ -1,5 +1,8 @@
 //! One pipe owner per probe. Its guard retains cleanup across caller/worker loss.
-use super::{CANCEL_GRACE, Failure, INITIAL_DEADLINE, Limits, Outcome, controller::Handle};
+use super::{
+    CANCEL_GRACE, Failure, INITIAL_DEADLINE, Limits, Outcome, SCOPE_PROOF_ERRORS,
+    controller::Handle,
+};
 use kinewright_job_sys::{
     Cgroup, ProcessHandle,
     media_boundary::{self, Mode},
@@ -129,6 +132,9 @@ pub(super) struct Running {
 pub(super) struct Done {
     pub result: Outcome,
     pub fallback: bool,
+    /// Cleanup could not prove the helper scope empty. The scope was not
+    /// released, and the actor keeps its decode slot reserved.
+    pub unproven: bool,
 }
 pub(super) struct Launch<'a> {
     pub helper: &'a Path,
@@ -162,6 +168,7 @@ struct Lease {
     _root: Root,
     complete: bool,
     reaped: bool,
+    unproven: bool,
     trace: Trace,
     #[cfg(feature = "slow-tests")]
     shim_smaps: Option<File>,
@@ -244,6 +251,7 @@ pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
         _root: root,
         complete: false,
         reaped: false,
+        unproven: false,
         trace,
         #[cfg(feature = "slow-tests")]
         shim_smaps: None,
@@ -291,8 +299,7 @@ pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
                 &mut protocol,
                 &mut fallback,
             );
-            let result = lease.finish(result, &shared, end);
-            Done { result, fallback }
+            lease.finish(result, fallback, &shared, end)
         })?;
     Ok(Running {
         pin: observed_pin,
@@ -505,15 +512,19 @@ impl Lease {
         drop(observation);
         Ok(result)
     }
-    fn finish(&mut self, result: Outcome, shared: &Shared, end: Instant) -> Outcome {
+    fn finish(&mut self, result: Outcome, fallback: bool, shared: &Shared, end: Instant) -> Done {
         let orderly = result.is_ok();
         let success = self.cleanup(!orderly, end);
         shared.native_clean.store(true, Ordering::Release);
         self.release_scope();
-        if orderly && !success {
-            Err(Failure::Sandbox(Error::Crashed))
-        } else {
-            result
+        Done {
+            result: if orderly && !success {
+                Err(Failure::Sandbox(Error::Crashed))
+            } else {
+                result
+            },
+            fallback,
+            unproven: self.unproven,
         }
     }
 
@@ -572,13 +583,40 @@ impl Lease {
         self.trace.set(Phase::ScopeEmpty);
         #[cfg(feature = "slow-tests")]
         self.await_hosted_removal();
+        #[cfg(feature = "slow-tests")]
+        let broken = self.seams.scope == Some(super::ScopeSeam::PersistentError);
+        #[cfg(not(feature = "slow-tests"))]
+        let broken = false;
         if let Some(group) = self.group.as_mut() {
-            while !group.empty().unwrap_or(false) {
+            // Ok(false) is "not yet": members are still leaving. An error is
+            // "unproven" and is tolerated only for SCOPE_PROOF_ERRORS in a row.
+            let mut first_error = None;
+            loop {
+                let empty = if broken {
+                    Err(io::Error::other("injected scope proof error"))
+                } else {
+                    group.empty()
+                };
+                match empty {
+                    Ok(true) => break,
+                    Ok(false) => first_error = None,
+                    Err(error) => {
+                        let errors_since = *first_error.get_or_insert_with(Instant::now);
+                        if errors_since.elapsed() >= SCOPE_PROOF_ERRORS {
+                            eprintln!(
+                                "MS2_CLEANUP_UNPROVEN shim={} error={error} reservation=retained",
+                                self.pin.pid()
+                            );
+                            self.unproven = true;
+                            break;
+                        }
+                    }
+                }
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
         self.complete = self.reaped;
-        success
+        success && !self.unproven
     }
 
     /// Hosted-kernel seam: wait (bounded) until the manager has removed the
@@ -613,6 +651,11 @@ impl Lease {
     }
 
     fn release_scope(&mut self) {
+        // Never release a scope whose emptiness is unproven. It stays
+        // reserved, and the actor keeps the decode slot (`Done::unproven`).
+        if self.unproven {
+            return;
+        }
         if let Some(scope) = self.scope.take() {
             self.controller.release_scope(scope);
         }

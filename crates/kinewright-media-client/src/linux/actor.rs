@@ -115,6 +115,10 @@ struct Actor {
     supervisor_generation: u64,
     controller: Option<Controller>,
     scope_failure: Option<Error>,
+    /// Decode slots held by leases whose scope emptiness was never proven.
+    /// They are never released; the first such failure is reported at close.
+    unproven: usize,
+    cleanup_failure: Option<Error>,
     active: Vec<Job>,
     queue: Queue,
     closed: bool,
@@ -140,6 +144,8 @@ impl Actor {
             supervisor_generation: 1,
             controller,
             scope_failure: None,
+            unproven: 0,
+            cleanup_failure: None,
             active: Vec::with_capacity(ACTIVE_PROBES),
             queue: Queue::new(Instant::now()),
             closed: false,
@@ -256,6 +262,11 @@ impl Actor {
                 let job = self.active.swap_remove(index);
                 let uncaused = job.cause.is_none();
                 let done = job.running.thread.join();
+                let unproven = done.as_ref().is_ok_and(|done| done.unproven);
+                if unproven {
+                    self.unproven += 1;
+                    self.cleanup_failure.get_or_insert(Error::Crashed);
+                }
                 let mut request = job.pending;
                 let identity = request.request.source.identity();
                 if job.memory_violation {
@@ -287,7 +298,9 @@ impl Actor {
                 if recorded.paused {
                     self.queue.clear_for_pause(&self.status, now);
                 }
-                if uncaused && recorded.retry && !recorded.paused {
+                // An unproven cleanup is a host fault, not a helper one; a
+                // retry would only spend the remaining slot on it.
+                if uncaused && !unproven && recorded.retry && !recorded.paused {
                     self.queue.continue_with(request, &self.status, now);
                     continue;
                 }
@@ -326,7 +339,7 @@ impl Actor {
         {
             return;
         }
-        while self.active.len() < ACTIVE_PROBES {
+        while self.active.len() + self.unproven < ACTIVE_PROBES {
             // A supervisor restart may have consumed its bounded handshake time.
             let now = Instant::now();
             // One source identity has only one active cursor, even when
@@ -452,7 +465,7 @@ impl Actor {
             );
         }
         self.status.active.store(
-            self.active.len() + self.queue.continued.len(),
+            self.active.len() + self.unproven + self.queue.continued.len(),
             Ordering::Release,
         );
         self.status
@@ -468,7 +481,8 @@ impl Actor {
         {
             let supervisor = self.controller.take().map_or(Ok(()), Controller::shutdown);
             if let Some(reply) = self.close_reply.take() {
-                let _ = reply.send(self.scope_failure.map_or(supervisor, Err));
+                let failure = self.scope_failure.or(self.cleanup_failure);
+                let _ = reply.send(failure.map_or(supervisor, Err));
             }
         }
     }

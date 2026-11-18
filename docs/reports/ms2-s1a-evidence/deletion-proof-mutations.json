@@ -34,5 +34,14 @@
     "red_last": "error: test failed, to rerun pass `-p kinewright-media-client --test runtime_native`",
     "green_exit": 0,
     "green_last": "MS2_MODES_RAN binary=runtime_native case=hosted-kernel modes=primary"
+  },
+  {
+    "mutation": "cleanup-error-bound",
+    "killed": true,
+    "compiled": true,
+    "red_exit": 101,
+    "red_last": "error: test failed, to rerun pass `-p kinewright-media-client --test runtime_native`",
+    "green_exit": 0,
+    "green_last": "MS2_MODES_RAN binary=runtime_native case=persistent-error modes=primary"
   }
 ]
