@@ -220,8 +220,6 @@ fn prime_native_groups(product: &mut product::ProductSession, seed: u64) {
 }
 
 fn run_seed<S: ModelStore>(seed: u64, length: u64, verify_manual: bool) -> Coverage {
-    #[cfg(not(target_os = "linux"))]
-    let _ = verify_manual;
     struct FailureContext {
         seed: u64,
         attempt: u64,
@@ -237,6 +235,8 @@ fn run_seed<S: ModelStore>(seed: u64, length: u64, verify_manual: bool) -> Cover
             }
         }
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = verify_manual;
     // Attempt zero is the primer; length + 1 is final drain/collection.
     let mut context = FailureContext {
         seed,
