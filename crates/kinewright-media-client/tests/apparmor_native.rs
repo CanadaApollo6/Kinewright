@@ -9,6 +9,8 @@
 //! the restriction (stock Arch) the expectation is `admitted`.
 #[path = "../../kinewright-job-sys/test_support/deadline.rs"]
 mod deadline;
+#[path = "../../kinewright-job-sys/test_support/ms2_diag.rs"]
+mod ms2_diag;
 
 use kinewright_media_client::{Config, Failure, Limits, Request, Runtime, Source};
 use kinewright_media_ipc::{Kind, MediaSandboxError};
@@ -73,7 +75,7 @@ fn expectation() -> &'static str {
 #[test]
 fn ms2_apparmor_userns_gate_refuses_without_the_profile_and_admits_with_it() {
     let _deadline = deadline::test();
-    deadline::report_with(kinewright_media_client::diagnostics);
+    ms2_diag::install(kinewright_media_client::diagnostics);
     let expected = expectation();
     let directory = Directory(
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -106,14 +108,27 @@ fn ms2_apparmor_userns_gate_refuses_without_the_profile_and_admits_with_it() {
         )
         .canonicalize()
         .expect("MS2 binaries: run `cargo build --workspace` first");
+    // The wrappers only move stderr into a log; the profile still attaches at
+    // the exec of the helper's own path.
     let runtime = during("apparmor_native Runtime::start", PHASE_LIMIT, || {
         Runtime::start(Config::new(
-            binaries.join("kinewright-media-helper"),
-            binaries.join("kinewright-media-supervisor"),
+            ms2_diag::wrap(
+                &directory.0,
+                &binaries.join("kinewright-media-helper"),
+                "helper",
+                &[],
+            ),
+            ms2_diag::wrap(
+                &directory.0,
+                &binaries.join("kinewright-media-supervisor"),
+                "supervisor",
+                &[],
+            ),
             Limits::PROBE,
         ))
         .unwrap()
     });
+    let sampler = ms2_diag::sample("apparmor_native");
     let result = during(PROBE_PHASE, PHASE_LIMIT, || {
         runtime.probe(Request {
             source: Box::new(Input(File::open(&png).unwrap())),
@@ -123,6 +138,7 @@ fn ms2_apparmor_userns_gate_refuses_without_the_profile_and_admits_with_it() {
             explicit_retry: false,
         })
     });
+    sampler.finish((expected == "admitted") != result.is_ok());
     // The gate concerns user namespaces, not resource mode, so either mode
     // is accepted here; the mode is printed so the log shows which one ran.
     println!(
@@ -151,7 +167,7 @@ fn ms2_apparmor_userns_gate_refuses_without_the_profile_and_admits_with_it() {
 #[test]
 fn blocked_probe_phase_fails_with_its_name() {
     let _deadline = deadline::test();
-    deadline::report_with(kinewright_media_client::diagnostics);
+    ms2_diag::install(kinewright_media_client::diagnostics);
     if std::env::var_os("KW_MS2_PROBE_DEADLINE_FIXTURE").is_some() {
         let (_sender, stalled) = std::sync::mpsc::channel::<()>();
         during(PROBE_PHASE, Duration::from_millis(50), || {

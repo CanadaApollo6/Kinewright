@@ -1,6 +1,9 @@
 //! C8 production host routes. Native durable success is Linux-only.
 #[path = "../../kinewright-job-sys/test_support/deadline.rs"]
 mod deadline;
+#[cfg(target_os = "linux")]
+#[path = "../../kinewright-job-sys/test_support/ms2_diag.rs"]
+mod ms2_diag;
 use kinewright_agent::{
     ScriptedCall, ScriptedTurn,
     writer_host::{
@@ -127,15 +130,19 @@ fn import_known_wav(
     Vec<u8>,
 ) {
     let bytes = known_wav_f32(tone);
-    let (asset, entry, pins) = store
-        .import_media(
-            &mut bytes.as_slice(),
-            bytes.len() as u64,
-            kinewright_core::AssetId(id),
-            locator,
-            None,
-        )
-        .unwrap();
+    // Import probes the media in the sandbox: on an unexpected failure or the
+    // test deadline, the samples name what the helper was doing.
+    ms2_diag::install(kinewright_media_client::diagnostics);
+    let sampler = ms2_diag::sample("ja_s2_host import_known_wav");
+    let imported = store.import_media(
+        &mut bytes.as_slice(),
+        bytes.len() as u64,
+        kinewright_core::AssetId(id),
+        locator,
+        None,
+    );
+    sampler.finish(imported.is_err());
+    let (asset, entry, pins) = imported.unwrap();
     (asset, entry, pins, bytes)
 }
 fn roots(path: &Path) -> SessionRoots {

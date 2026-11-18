@@ -2320,7 +2320,9 @@ dependencies = [
  "kinewright-core",
  "kinewright-job-sys",
  "kinewright-media",
+ "kinewright-media-client",
  "kinewright-project",
+ "landlock",
  "reqwest",
  "rmcp",
  "rustix 1.1.4",
@@ -2415,6 +2417,7 @@ dependencies = [
  "kinewright-core",
  "kinewright-job-sys",
  "kinewright-media-ipc",
+ "landlock",
  "rustix 1.1.4",
 ]
 

@@ -15,6 +15,11 @@ kinewright-media-ipc = { path = "../kinewright-media-ipc" }
 kinewright-job-sys.workspace = true
 rustix = { version = "=1.1.4", features = ["pipe", "event", "thread", "process", "fs"] }
 
+# MS2 native-test diagnostics (`kinewright-job-sys/test_support/ms2_diag.rs`):
+# the kernel's Landlock ABI, probed with rulesets that are never enforced.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+landlock.workspace = true
+
 [lints.rust]
 unsafe_code = "forbid"
 [lints.clippy]

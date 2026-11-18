@@ -1,9 +1,8 @@
 #![cfg(target_os = "linux")]
 #[path = "../../kinewright-job-sys/test_support/deadline.rs"]
 mod deadline;
-#[cfg(feature = "slow-tests")]
-#[path = "support/mode.rs"]
-mod mode;
+#[path = "../../kinewright-job-sys/test_support/ms2_diag.rs"]
+mod ms2_diag;
 
 #[cfg(feature = "slow-tests")]
 mod support {
@@ -13,7 +12,7 @@ mod support {
     use std::{
         fs::{self, File},
         io::{BufRead, BufReader, Read, Write},
-        os::unix::{fs::PermissionsExt, process::ExitStatusExt},
+        os::unix::process::ExitStatusExt,
         path::{Path, PathBuf},
         process::{Child, Command, Stdio},
         sync::{Arc, atomic::AtomicBool, mpsc},
@@ -114,22 +113,19 @@ mod support {
                 .success()
         );
         let binaries = binaries();
-        let wrapper = directory.0.join("helper");
         let executable = binaries.join("kinewright-media-helper-witness");
         assert!(
             executable.is_file(),
             "build the slow-feature witness binary first"
         );
-        let executable = executable.to_str().unwrap().replace('\'', "'\\''");
-        fs::write(
-            &wrapper,
-            format!("#!/bin/sh\nexec '{executable}' \"$@\" '{stage}'\n"),
-        )
-        .unwrap();
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
         let config = Config::new(
-            wrapper.canonicalize().unwrap(),
-            binaries.join("kinewright-media-supervisor"),
+            crate::ms2_diag::wrap(&directory.0, &executable, "helper", &[stage]),
+            crate::ms2_diag::wrap(
+                &directory.0,
+                &binaries.join("kinewright-media-supervisor"),
+                "supervisor",
+                &[],
+            ),
             Limits {
                 address_space: 2 * 1024 * 1024 * 1024,
                 private_memory: 2 * 1024 * 1024 * 1024,
@@ -187,8 +183,12 @@ mod support {
             },
         )
         .unwrap();
+        crate::ms2_diag::fixture(kinewright_media_client::diagnostics);
         let (_directory, config, png) = workspace(stage);
         let runtime = Runtime::start(config).unwrap();
+        // Prints only if this fixture panics, for example when the witness
+        // never reaches its stage.
+        let sampler = crate::ms2_diag::sample(&format!("witness_native {mode}:{stage}:{loss}"));
         let cancel = Arc::new(AtomicBool::new(false));
         let revoked = Arc::new(AtomicBool::new(false));
         std::thread::scope(|scope| {
@@ -264,6 +264,7 @@ mod support {
                 (0, 0)
             );
         });
+        sampler.finish(false);
     }
     struct CapturedLine {
         text: String,
@@ -436,6 +437,7 @@ mod support {
         for held in [false, true] {
             hold.store(held, std::sync::atomic::Ordering::Release);
             let started = Instant::now();
+            let sampler = crate::ms2_diag::sample(&format!("witness_native silent held={held}"));
             let outcome = runtime.probe(Request {
                 source: Box::new(Input {
                     file: File::open(&png).unwrap(),
@@ -447,6 +449,10 @@ mod support {
                 explicit_retry: false,
             });
             let elapsed = started.elapsed();
+            sampler.finish(
+                !matches!(outcome, Err(Failure::Sandbox(MediaSandboxError::TimedOut)))
+                    || elapsed > bound,
+            );
             let active = runtime.snapshot().active;
             println!(
                 "MS2_SILENT_PROBE held={held} degraded={} elapsed_ms={} active={active} outcome={outcome:?}",
@@ -458,7 +464,7 @@ mod support {
             // environment offers: primary whenever a user manager answers.
             assert_eq!(
                 runtime.snapshot().degraded,
-                !crate::mode::user_manager(),
+                !crate::ms2_diag::user_manager(),
                 "silent helper ran the other resource mode"
             );
             assert!(
@@ -582,13 +588,13 @@ fn loss_fixture() {
 )]
 fn watchdog_disabled_primary_app_and_supervisor_loss() {
     let _deadline = deadline::test();
-    deadline::report_with(kinewright_media_client::diagnostics);
+    ms2_diag::install(kinewright_media_client::diagnostics);
     #[cfg(feature = "slow-tests")]
     for stage in ["before-ready", "decode"] {
         for loss in ["app", "supervisor"] {
             if !support::loss(false, stage, loss) {
                 assert!(
-                    !mode::user_manager(),
+                    !ms2_diag::user_manager(),
                     "a user manager answers but the primary pass ran degraded"
                 );
                 println!(
@@ -606,7 +612,7 @@ fn watchdog_disabled_primary_app_and_supervisor_loss() {
     ] {
         if !support::loss(false, stage, loss) {
             assert!(
-                !mode::user_manager(),
+                !ms2_diag::user_manager(),
                 "a user manager answers but the primary pass ran degraded"
             );
             println!(
@@ -623,7 +629,7 @@ fn watchdog_disabled_primary_app_and_supervisor_loss() {
 )]
 fn watchdog_disabled_degraded_app_and_supervisor_loss() {
     let _deadline = deadline::test();
-    deadline::report_with(kinewright_media_client::diagnostics);
+    ms2_diag::install(kinewright_media_client::diagnostics);
     #[cfg(feature = "slow-tests")]
     for stage in ["before-ready", "decode"] {
         for loss in ["app", "supervisor"] {
@@ -638,7 +644,7 @@ fn watchdog_disabled_degraded_app_and_supervisor_loss() {
 )]
 fn watchdog_disabled_spawner_abort_and_payload_prearm_race() {
     let _deadline = deadline::test();
-    deadline::report_with(kinewright_media_client::diagnostics);
+    ms2_diag::install(kinewright_media_client::diagnostics);
     #[cfg(feature = "slow-tests")]
     for stage in ["before-shim-arm", "decode"] {
         assert!(support::loss(true, stage, "spawner"));
@@ -658,7 +664,7 @@ fn a_silent_helper_fails_typed_within_the_probe_bound() {
         "silent helper probe bound",
         std::time::Duration::from_secs(40),
     );
-    deadline::report_with(kinewright_media_client::diagnostics);
+    ms2_diag::install(kinewright_media_client::diagnostics);
     #[cfg(feature = "slow-tests")]
     support::silent();
 }
@@ -670,7 +676,7 @@ fn a_silent_helper_fails_typed_within_the_probe_bound() {
 )]
 fn cancellation_deadline_and_revocation_discard_partial_results() {
     let _deadline = deadline::test();
-    deadline::report_with(kinewright_media_client::diagnostics);
+    ms2_diag::install(kinewright_media_client::diagnostics);
     #[cfg(feature = "slow-tests")]
     for loss in ["cancel", "deadline", "authority"] {
         assert!(support::loss(true, "decode", loss));

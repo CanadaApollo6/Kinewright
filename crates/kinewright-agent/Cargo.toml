@@ -78,6 +78,12 @@ kinewright-core = { path = "../kinewright-core", features = ["test-util"] }
 kinewright-media = { path = "../kinewright-media", features = ["test-util"] }
 kinewright-project = { path = "../kinewright-project", features = ["test-util", "ms2-test-bin-dir"] }
 
+# MS2 native-test diagnostics (`kinewright-job-sys/test_support/ms2_diag.rs`):
+# the client's per-probe view and the kernel's Landlock ABI.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+kinewright-media-client = { path = "../kinewright-media-client" }
+landlock.workspace = true
+
 [lints]
 workspace = true
 

@@ -1,6 +1,8 @@
 #![cfg(target_os = "linux")]
 #[path = "../../kinewright-job-sys/test_support/deadline.rs"]
 mod deadline;
+#[path = "../../kinewright-job-sys/test_support/ms2_diag.rs"]
+mod ms2_diag;
 
 use kinewright_media_client::{Config, Limits, Request, Runtime, Source};
 use kinewright_media_ipc::Kind;
@@ -16,8 +18,6 @@ use std::{
 #[cfg(feature = "slow-tests")]
 #[path = "support/bus_cleanup.rs"]
 mod bus_cleanup;
-#[path = "support/mode.rs"]
-mod mode;
 
 struct OwnedChild(Child);
 impl Drop for OwnedChild {
@@ -95,12 +95,24 @@ fn runtime_fixture() {
         bus_cleanup::exercise(&directory.0, &binaries, &png, case == "bus-restart");
         return;
     }
+    ms2_diag::fixture(kinewright_media_client::diagnostics);
     let runtime = Runtime::start(Config::new(
-        binaries.join("kinewright-media-helper"),
-        binaries.join("kinewright-media-supervisor"),
+        ms2_diag::wrap(
+            &directory.0,
+            &binaries.join("kinewright-media-helper"),
+            "helper",
+            &[],
+        ),
+        ms2_diag::wrap(
+            &directory.0,
+            &binaries.join("kinewright-media-supervisor"),
+            "supervisor",
+            &[],
+        ),
         Limits::PROBE,
     ))
     .unwrap();
+    let sampler = ms2_diag::sample("runtime_native");
     let result = runtime.probe(Request {
         source: Box::new(Input(File::open(&png).unwrap())),
         video: None,
@@ -108,6 +120,7 @@ fn runtime_fixture() {
         cancel: Arc::new(AtomicBool::new(false)),
         explicit_retry: false,
     });
+    sampler.finish(result.is_err());
     let probe = result.unwrap();
     assert_eq!(probe.metadata().kind, Kind::Image);
     assert_eq!(probe.metadata().duration_frames, 1);
@@ -135,7 +148,7 @@ fn runtime_fixture() {
 fn run_case(case: &str) {
     let degraded = case == "degraded";
     // `automatic` must select primary whenever a user manager is reachable.
-    let expected = if degraded || !mode::user_manager() {
+    let expected = if degraded || !ms2_diag::user_manager() {
         "degraded"
     } else {
         "primary"
@@ -213,7 +226,7 @@ fn run_case(case: &str) {
 )]
 fn runtime_png_automatic_admission_closes_and_cleans() {
     let _deadline = deadline::test();
-    deadline::report_with(kinewright_media_client::diagnostics);
+    ms2_diag::install(kinewright_media_client::diagnostics);
     run_case("automatic");
 }
 #[test]
@@ -223,7 +236,7 @@ fn runtime_png_automatic_admission_closes_and_cleans() {
 )]
 fn runtime_png_degraded_admission_closes_and_cleans() {
     let _deadline = deadline::test();
-    deadline::report_with(kinewright_media_client::diagnostics);
+    ms2_diag::install(kinewright_media_client::diagnostics);
     run_case("degraded");
 }
 
@@ -234,8 +247,8 @@ fn runtime_png_degraded_admission_closes_and_cleans() {
 )]
 fn runtime_releases_both_slots_during_bus_disconnect() {
     let _deadline = deadline::test();
-    deadline::report_with(kinewright_media_client::diagnostics);
-    if !mode::user_manager() {
+    ms2_diag::install(kinewright_media_client::diagnostics);
+    if !ms2_diag::user_manager() {
         println!(
             "MS2_NATIVE_NOT_RUN binary=runtime_native test=runtime_releases_both_slots_during_bus_disconnect reason=no_user_manager"
         );

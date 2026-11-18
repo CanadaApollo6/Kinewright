@@ -21,12 +21,12 @@
 //! as the reply pipe closes, so that status races SIGKILL and is not asserted.
 #[path = "../../kinewright-job-sys/test_support/deadline.rs"]
 mod deadline;
-#[cfg(feature = "slow-tests")]
-#[path = "support/mode.rs"]
-mod mode;
+#[path = "../../kinewright-job-sys/test_support/ms2_diag.rs"]
+mod ms2_diag;
 
 #[cfg(feature = "slow-tests")]
 mod support {
+    use crate::ms2_diag;
     use kinewright_media_client::{Config, Failure, Limits, Request, Runtime, Source};
     use kinewright_media_ipc::{Kind, MediaSandboxError};
     use std::{
@@ -99,6 +99,7 @@ mod support {
     /// Fixture child: one runtime per process, so each attack gets a fresh
     /// one and earlier crashes never pause or quarantine its admission.
     pub fn fixture(case: &str) {
+        ms2_diag::fixture(kinewright_media_client::diagnostics);
         let mut parts = case.splitn(4, '=');
         let (Some(directory), Some(identity), Some(attack), Some(target)) =
             (parts.next(), parts.next(), parts.next(), parts.next())
@@ -152,6 +153,9 @@ mod support {
         assert!(output.status.success(), "{attack} {target}: {output:?}");
         // Evidence only (see the module note): how the shim itself ended.
         for line in String::from_utf8_lossy(&output.stderr).lines() {
+            if line.starts_with("MS2_DIAG ") {
+                println!("{line}");
+            }
             if line.starts_with("MS2_HELPER_EXIT ") {
                 println!("{line} attack={attack} target={target}");
             }
@@ -179,20 +183,20 @@ mod support {
             executable.is_file(),
             "build the slow-feature witness binary first"
         );
-        let wrapper = directory.join(format!("helper-{identity}"));
-        let executable = executable.to_str().unwrap().replace('\'', "'\\''");
-        fs::write(
-            &wrapper,
-            format!("#!/bin/sh\nexec '{executable}' \"$@\" 'escape={attack}={target}'\n"),
-        )
-        .unwrap();
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
-        let runtime = Runtime::start(Config::new(
-            wrapper.canonicalize().unwrap(),
-            binaries.join("kinewright-media-supervisor"),
-            Limits::PROBE,
-        ))
-        .unwrap();
+        let helper = ms2_diag::wrap(
+            directory,
+            &executable,
+            &format!("helper-{identity}"),
+            &[&format!("escape={attack}={target}")],
+        );
+        let supervisor = ms2_diag::wrap(
+            directory,
+            &binaries.join("kinewright-media-supervisor"),
+            &format!("supervisor-{identity}"),
+            &[],
+        );
+        let runtime = Runtime::start(Config::new(helper, supervisor, Limits::PROBE)).unwrap();
+        let sampler = ms2_diag::sample(&format!("escape_native attack={attack}"));
         let result = runtime
             .probe(Request {
                 source: Box::new(Input(File::open(png).unwrap(), identity)),
@@ -202,6 +206,12 @@ mod support {
                 explicit_retry: false,
             })
             .map(|probe| probe.metadata().kind);
+        // The control must be admitted; every attack must end in a seccomp kill.
+        sampler.finish(if attack == "control" {
+            result.is_err()
+        } else {
+            !matches!(result, Err(Failure::Sandbox(MediaSandboxError::Crashed)))
+        });
         let degraded = runtime.snapshot().degraded;
         runtime.shutdown().unwrap();
         assert_eq!(
@@ -254,7 +264,7 @@ fn escape_fixture() {
 )]
 fn full_stack_escapes_are_killed_and_canaries_unchanged() {
     let _deadline = deadline::test();
-    deadline::report_with(kinewright_media_client::diagnostics);
+    ms2_diag::install(kinewright_media_client::diagnostics);
     #[cfg(feature = "slow-tests")]
     {
         use deadline::announce;
@@ -302,7 +312,7 @@ fn full_stack_escapes_are_killed_and_canaries_unchanged() {
             if !degraded && control.starts_with("degraded ") {
                 // No degraded run stands in for the primary pass. With a user
                 // manager answering, falling back is itself a failure.
-                if mode::user_manager() {
+                if ms2_diag::user_manager() {
                     failures.push(format!(
                         "primary control: a user manager answers but ran {control}"
                     ));

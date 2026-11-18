@@ -1,6 +1,8 @@
 #![cfg(target_os = "linux")]
 #[path = "../../kinewright-job-sys/test_support/deadline.rs"]
 mod deadline;
+#[path = "../../kinewright-job-sys/test_support/ms2_diag.rs"]
+mod ms2_diag;
 
 #[cfg(feature = "slow-tests")]
 mod support {
@@ -277,7 +279,7 @@ fn rss_fixture() {
 )]
 fn degraded_rss_polling_records_overshoot_and_quarantines_source() {
     let _deadline = deadline::test();
-    deadline::report_with(kinewright_media_client::diagnostics);
+    ms2_diag::install(kinewright_media_client::diagnostics);
     #[cfg(feature = "slow-tests")]
     support::repeated();
 }
