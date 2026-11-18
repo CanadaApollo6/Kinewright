@@ -32,9 +32,8 @@ const _: () = assert!(
 /// One snapshot's wire bytes outside its transport body: role, sizing,
 /// identity, branch, revision and `history_sha256`, with their JSON syntax.
 pub const SNAPSHOT_WIRE_HEADER_BYTES: u64 = 4096;
-/// The largest escaped transport body each of `snapshots` may have when the
-/// command also carries `other` payload bytes, so the whole request fits
-/// `HOST_BODY_BYTES` with its envelope.
+/// Split the snapshot budget after reserving room for the envelope and
+/// `other` payload bytes. The client checks the serialized request separately.
 const fn snapshot_door_bytes(snapshots: u64, other: u64) -> u64 {
     (HOST_BODY_BYTES as u64 - HOST_ENVELOPE_BYTES as u64 - other) / snapshots
         - SNAPSHOT_WIRE_HEADER_BYTES
@@ -70,6 +69,37 @@ pub(crate) struct SnapshotDoor<'a> {
     pub snapshots: [Option<&'a HostSnapshot>; 3],
 }
 impl HostCommand {
+    /// Maximum serialized request size at the foreground host endpoint.
+    #[must_use]
+    pub fn ingress_bytes(&self) -> usize {
+        if matches!(self, Self::CommitHistory { .. }) {
+            COMMIT_HISTORY_BODY_BYTES as usize
+        } else if self.snapshot_door().is_some() {
+            HOST_BODY_BYTES
+        } else {
+            HOST_ENVELOPE_BYTES
+        }
+    }
+
+    pub(super) fn check_request_capacity(
+        &self,
+        bytes: usize,
+        limit: usize,
+    ) -> Result<(), HostRefusal> {
+        if bytes <= limit {
+            return Ok(());
+        }
+        let code = if self.snapshot_door().is_some() {
+            "snapshot_capacity"
+        } else {
+            "request_capacity"
+        };
+        Err(HostRefusal::new(
+            code,
+            &format!("this request is {bytes} bytes and may carry at most {limit} bytes"),
+        ))
+    }
+
     /// `None` for a command that carries no snapshot.
     pub(crate) fn snapshot_door(&self) -> Option<SnapshotDoor<'_>> {
         let (cap, snapshots) = match self {
@@ -98,8 +128,7 @@ impl HostCommand {
         };
         Some(SnapshotDoor { cap, snapshots })
     }
-    /// Refuses, before any byte is sent, a snapshot larger than its door can
-    /// carry across HTTP.
+    /// Refuses a snapshot over its share before serializing the full request.
     pub(crate) fn check_snapshot_capacity(&self) -> Result<(), HostRefusal> {
         let Some(door) = self.snapshot_door() else {
             return Ok(());

@@ -7,6 +7,8 @@ use kinewright_project::{
     voice_store::{JobKey, VoiceNoteHandle},
 };
 
+const VOICE_METADATA_BYTES: usize = 16 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum VoiceReceipt {
     Absent,
@@ -91,6 +93,10 @@ impl HostClient {
             roots: self.bootstrap.roots.clone(),
             command: HostCommand::AcknowledgeVoice { upload },
         };
+        let metadata = serde_json::to_string(&request)?;
+        request
+            .command
+            .check_request_capacity(metadata.len(), VOICE_METADATA_BYTES)?;
         let response = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(60))
             .no_proxy()
@@ -101,7 +107,7 @@ impl HostClient {
             .header("authorization", self.bootstrap.auth.bearer())
             .header("x-kinewright-project", &self.endpoint().project)
             .header("x-kinewright-protocol", "1")
-            .header("x-kinewright-voice", serde_json::to_string(&request)?)
+            .header("x-kinewright-voice", metadata)
             .body(reqwest::blocking::Body::new(stream))
             .send()
             .map_err(|e| HostError::Protocol(e.to_string()))?;
@@ -135,7 +141,7 @@ pub(super) async fn upload_request(
         .headers()
         .get("x-kinewright-voice")
         .and_then(|h| h.to_str().ok())
-        .filter(|s| s.len() <= 16 * 1024)
+        .filter(|s| s.len() <= VOICE_METADATA_BYTES)
         .and_then(|s| serde_json::from_str::<HostRequest>(s).ok())
     else {
         return StatusCode::BAD_REQUEST.into_response();

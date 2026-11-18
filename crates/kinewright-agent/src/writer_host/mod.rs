@@ -238,7 +238,11 @@ impl HostClient {
             roots: self.bootstrap.roots.clone(),
             command,
         };
-        let response = self.post("host", &serde_json::to_vec(&request)?)?;
+        let body = serde_json::to_vec(&request)?;
+        request
+            .command
+            .check_request_capacity(body.len(), request.command.ingress_bytes())?;
+        let response = self.post("host", &body)?;
         let reply: HostReply = serde_json::from_slice(&response)?;
         if operation.is_some()
             && let Some(error) = &reply.error
@@ -817,11 +821,6 @@ fn check_host_headers(headers: &HeaderMap, state: &HttpState) -> Result<String, 
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     Ok(bearer.to_owned())
 }
-/// Commands whose body holds one or more `HostSnapshot`s. They share Save's
-/// ingress cap rather than the envelope cap, so a long history reaches the door.
-fn carries_snapshot(command: &HostCommand) -> bool {
-    command.snapshot_door().is_some()
-}
 async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> Response {
     let bearer = match check_host_headers(request.headers(), &state) {
         Ok(bearer) => bearer,
@@ -841,15 +840,7 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
     if request.protocol != HOST_PROTOCOL || request.project != state.bootstrap.endpoint.project {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if bytes.len() as u64 > COMMIT_HISTORY_BODY_BYTES
-        && matches!(&request.command, HostCommand::CommitHistory { .. })
-    {
-        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
-    }
-    if bytes.len() > HOST_ENVELOPE_BYTES
-        && !matches!(&request.command, HostCommand::CommitHistory { .. })
-        && !carries_snapshot(&request.command)
-    {
+    if bytes.len() > request.command.ingress_bytes() {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
     #[cfg(target_os = "linux")]

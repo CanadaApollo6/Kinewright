@@ -518,11 +518,18 @@ fn snapshot_doors_admit_a_long_history_past_the_envelope_cap() {
     let mut next = Door::after(None);
     while let Some(door) = next {
         let command = samples.command(door);
+        let carries_snapshot = holds_snapshot(&serde_json::to_value(&command).unwrap());
         assert_eq!(
-            carries_snapshot(&command),
-            holds_snapshot(&serde_json::to_value(&command).unwrap()),
+            command.snapshot_door().is_some(),
+            carries_snapshot,
             "SNAPSHOT_INGRESS_CLASS_MATCHES_PAYLOAD: {door:?}"
         );
+        let limit = match door {
+            Door::CommitHistory => COMMIT_HISTORY_BODY_BYTES as usize,
+            _ if carries_snapshot => HOST_BODY_BYTES,
+            _ => HOST_ENVELOPE_BYTES,
+        };
+        assert_eq!(command.ingress_bytes(), limit, "{door:?}");
         next = Door::after(Some(door));
     }
     for door in [
@@ -572,6 +579,191 @@ fn sized_snapshot(base: &HostSnapshot, escaped: u64) -> HostSnapshot {
     snapshot
 }
 
+fn disconnected_client(client: &HostClient) -> HostClient {
+    // Drop the listener before making the request. A send would return a
+    // connection error, distinct from either local capacity refusal.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let mut bootstrap = client.bootstrap();
+    bootstrap.endpoint.address = closed;
+    HostClient::connect(bootstrap.endpoint, bootstrap.auth, bootstrap.roots).unwrap()
+}
+
+fn foreground_body_bytes(client: &HostClient, command: &HostCommand) -> usize {
+    serde_json::to_vec(&HostRequest {
+        editor: client.editor.clone(),
+        operation: None,
+        protocol: client.endpoint().protocol,
+        project: client.endpoint().project.clone(),
+        roots: client.bootstrap().roots,
+        command: command.clone(),
+    })
+    .unwrap()
+    .len()
+}
+
+fn assert_request_capacity(
+    client: &HostClient,
+    command: HostCommand,
+    code: &str,
+    bytes: usize,
+    limit: usize,
+) {
+    let expected = format!("this request is {bytes} bytes and may carry at most {limit} bytes");
+    let refusal = client.request(command).err();
+    assert!(
+        matches!(&refusal, Some(HostError::Refused(error))
+            if error.code == code && error.message == expected),
+        "WHOLE_REQUEST_REFUSED_BEFORE_POSTING {code}: {refusal:?}"
+    );
+}
+
+fn source_descriptor(objects: usize) -> BorrowedSourceDescriptor {
+    let roots: Vec<_> = (0..objects)
+        .map(|index| ObjectRef {
+            sha256: format!("{index:064x}"),
+            byte_length: 1,
+            record_kind: kinewright_project::bundle_records::RecordKind::OwnedMedia,
+        })
+        .collect();
+    let objects: Vec<_> = roots
+        .iter()
+        .map(|reference| {
+            serde_json::json!({
+                "reference": reference, "dependencies": [], "inventory_dependencies": [],
+            })
+        })
+        .collect();
+    serde_json::from_value(serde_json::json!({
+        "admission": "1".repeat(32), "project_id": null, "session_id": "2".repeat(32),
+        "owner_epoch": 0, "extra_overlap_bytes": 0, "roots": roots, "objects": objects,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn whole_snapshot_requests_refuse_oversized_source_descriptors_before_posting() {
+    use kinewright_project::bundle_records::RecordKind;
+    let core = Core::for_test(Document::default()).unwrap();
+    let snapshot = sized_snapshot(&HostSnapshot::capture(&core).unwrap(), SNAPSHOT_DOOR_BYTES);
+    let bootstrap = test_bootstrap();
+    let client = disconnected_client(
+        &HostClient::connect(bootstrap.endpoint, bootstrap.auth, bootstrap.roots).unwrap(),
+    );
+    for command in [
+        HostCommand::FirstSave {
+            destination: "first.kinewright".into(),
+            snapshot: snapshot.clone(),
+            source: source_descriptor(2_000),
+            inputs: DoorSamples::object(RecordKind::InputManifest),
+            callback: client.bootstrap(),
+        },
+        HostCommand::RefreshUnsavedInputs {
+            snapshot,
+            binding: HostSourceBinding {
+                source: Some(source_descriptor(2_000)),
+                inputs: Some(DoorSamples::object(RecordKind::InputManifest)),
+                callback: client.bootstrap(),
+            },
+        },
+    ] {
+        command.check_snapshot_capacity().unwrap();
+        let bytes = foreground_body_bytes(&client, &command);
+        assert!(bytes > HOST_BODY_BYTES);
+        assert_request_capacity(
+            &client,
+            command,
+            "snapshot_capacity",
+            bytes,
+            HOST_BODY_BYTES,
+        );
+    }
+}
+
+#[test]
+fn whole_snapshot_request_at_http_limit_crosses_ingress() {
+    let temp = kinewright_media::test_support::TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "whole-snapshot-request-cap",
+    );
+    let host = WriterHost::start(HostConfig {
+        scheduler_settings: Some(temp.path("scheduler")),
+        project: "whole-snapshot-request-cap".into(),
+        path: None,
+        roots: SessionRoots::default(),
+        origin: HostOrigin::Headless,
+    })
+    .unwrap();
+    let client = host.client();
+    let unsent = disconnected_client(&client);
+    let core = Core::for_test(Document::default()).unwrap();
+    let snapshot = sized_snapshot(&HostSnapshot::capture(&core).unwrap(), SNAPSHOT_DOOR_BYTES);
+    let command = |padding| {
+        let mut callback = client.bootstrap();
+        callback
+            .endpoint
+            .project
+            .extend(std::iter::repeat_n('x', padding));
+        HostCommand::RefreshUnsavedInputs {
+            snapshot: snapshot.clone(),
+            binding: HostSourceBinding {
+                source: Some(source_descriptor(0)),
+                inputs: None,
+                callback,
+            },
+        }
+    };
+    let padding = HOST_BODY_BYTES - foreground_body_bytes(&client, &command(0));
+    let at_limit = command(padding);
+    assert_eq!(foreground_body_bytes(&client, &at_limit), HOST_BODY_BYTES);
+    // A decoded HostReply shows the exact request passed both size checks.
+    client.request(at_limit).unwrap();
+    let over = command(padding + 1);
+    assert_eq!(foreground_body_bytes(&unsent, &over), HOST_BODY_BYTES + 1);
+    assert_request_capacity(
+        &unsent,
+        over,
+        "snapshot_capacity",
+        HOST_BODY_BYTES + 1,
+        HOST_BODY_BYTES,
+    );
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn whole_non_snapshot_request_refuses_before_posting() {
+    let bootstrap = test_bootstrap();
+    let client = disconnected_client(
+        &HostClient::connect(bootstrap.endpoint, bootstrap.auth, bootstrap.roots).unwrap(),
+    );
+    let command = HostCommand::AcquireManual {
+        client: "x".repeat(HOST_ENVELOPE_BYTES),
+    };
+    let bytes = foreground_body_bytes(&client, &command);
+    assert!(bytes > HOST_ENVELOPE_BYTES);
+    assert_request_capacity(
+        &client,
+        command,
+        "request_capacity",
+        bytes,
+        HOST_ENVELOPE_BYTES,
+    );
+}
+
+fn test_bootstrap() -> HostBootstrap {
+    HostBootstrap {
+        endpoint: HostEndpoint {
+            address: ([127, 0, 0, 1], 0).into(),
+            project: "whole-request-capacity".into(),
+            protocol: HOST_PROTOCOL,
+        },
+        auth: HostAuth::generate().unwrap(),
+        roots: SessionRoots::default(),
+    }
+}
+
 #[test]
 #[allow(
     clippy::too_many_lines,
@@ -600,16 +792,7 @@ fn snapshot_over_its_door_cap_is_refused_at_the_client_before_sending() {
     };
     let before = read();
     let base = HostSnapshot::from_history(before.clone()).unwrap();
-    // A client whose endpoint accepts no connection: any byte it tried to send
-    // would fail as a connection error, not as the capacity refusal.
-    let closed = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap();
-    let mut endpoint = client.endpoint().clone();
-    endpoint.address = closed;
-    let bootstrap = client.bootstrap();
-    let unsent = HostClient::connect(endpoint, bootstrap.auth, bootstrap.roots).unwrap();
+    let unsent = disconnected_client(&client);
     let barrier = |before: &HostSnapshot, after: &HostSnapshot| {
         Box::new(RecoveryBarrier {
             switch_generation: 0,
