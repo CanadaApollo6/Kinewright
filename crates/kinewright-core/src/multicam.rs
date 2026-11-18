@@ -1268,6 +1268,7 @@ mod tests {
 
     fn asset(id: u64, kind: MediaKind) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(id),
             path: PathBuf::from(format!("angle-{id}.mp4")),
             name: format!("Angle {id}"),
@@ -1286,6 +1287,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             }],
@@ -1446,6 +1448,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,

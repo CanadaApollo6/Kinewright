@@ -8,8 +8,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AutomationCurve, ColorContext, ColorDescription, OpError, Rational, TimeCode, Title,
-    map_source_range_to_project,
+    AutomationCurve, ColorContext, ColorDescription, ImportRecord, OpError, Rational, TimeCode,
+    Title, map_source_range_to_project,
 };
 
 macro_rules! id_type {
@@ -127,11 +127,38 @@ impl MediaSourceFingerprint {
     }
 }
 
+/// An imported locator preserved for the person to read.
+///
+/// ```compile_fail
+/// let locator = kinewright_core::RemoteLocator::new("file://host/share/take.mov".into());
+/// let _ = std::fs::File::open(&locator);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RemoteLocator(pub(crate) String);
+
+impl RemoteLocator {
+    #[must_use]
+    pub const fn new(written: String) -> Self {
+        Self(written)
+    }
+
+    /// Read the exact spelling in the source timeline.
+    #[must_use]
+    pub fn as_text(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MediaAsset {
     pub id: AssetId,
     pub path: PathBuf,
+    /// Written locator for offline media whose remote share has not been opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub remote_locator: Option<RemoteLocator>,
     pub name: String,
     /// Duration in source frames.
     pub duration: TimeCode,
@@ -160,6 +187,17 @@ pub struct MediaAsset {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(default)]
     pub assumed_from: Option<ColorDescription>,
+}
+
+impl MediaAsset {
+    /// Location text for the offline list and inspector.
+    #[must_use]
+    pub fn display_location(&self) -> std::borrow::Cow<'_, str> {
+        self.remote_locator.as_ref().map_or_else(
+            || self.path.to_string_lossy(),
+            |locator| std::borrow::Cow::Borrowed(locator.as_text()),
+        )
+    }
 }
 
 /// Probed replacement metadata supplied to the filesystem-owning media layer
@@ -540,6 +578,8 @@ const fn time_code_is_zero(value: &TimeCode) -> bool {
 pub struct Track {
     pub id: TrackId,
     pub kind: TrackKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Whether ripple edits initiated on other tracks shift this track to
     /// preserve cross-track synchronization. The edited track always ripples
     /// itself even when this flag is false. Defaults to true when omitted.
@@ -1457,6 +1497,8 @@ pub struct Document {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(default)]
     pub investigator: Option<InvestigatorPreferences>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imported_from: Vec<ImportRecord>,
     pub fps: Rational,
     pub resolution: (u32, u32),
     pub duration: TimeCode,
@@ -1473,6 +1515,7 @@ impl Default for Document {
             color_context: ColorContext::default(),
             lut_assets: Vec::new(),
             investigator: None,
+            imported_from: Vec::new(),
             fps: Rational::default(),
             resolution: (1_920, 1_080),
             duration: TimeCode::ZERO,
@@ -1704,7 +1747,7 @@ pub fn document_support_fields(
     raw: &serde_json::Value,
 ) -> Result<std::collections::BTreeSet<String>, String> {
     static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
-    let schema = SCHEMA.get_or_init(|| schemars::schema_for!(Document).to_value());
+    let schema = SCHEMA.get_or_init(persisted_document_schema);
     serialized_support_fields(raw, "document", schema)
 }
 /// Validate a raw persisted operation before its typed payload can discard fields.
@@ -1726,6 +1769,21 @@ pub fn clip_support_fields(
     static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
     let schema = SCHEMA.get_or_init(|| schemars::schema_for!(Clip).to_value());
     serialized_support_fields(raw, "clip", schema)
+}
+
+fn persisted_document_schema() -> serde_json::Value {
+    let mut schema = schemars::schema_for!(Document).to_value();
+    // Stored documents own this field. It is outside the operation schema
+    // so tools cannot supply a preserved locator when adding media.
+    schema
+        .pointer_mut("/$defs/MediaAsset/properties")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("a persisted document schema defines media asset properties")
+        .insert(
+            "remote_locator".to_owned(),
+            serde_json::json!({"type": ["string", "null"]}),
+        );
+    schema
 }
 
 fn serialized_support_fields(

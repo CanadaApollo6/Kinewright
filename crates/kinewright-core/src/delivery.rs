@@ -1452,6 +1452,7 @@ mod tests {
 
     fn fixture() -> Document {
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: "variant.mp4".into(),
             name: "variant".to_owned(),
@@ -1467,6 +1468,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -1734,6 +1736,7 @@ mod tests {
         document.media_pool[0].path =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         document.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: "definitely-missing-delivery-unused-fixture.mov".into(),
             name: "unused-offline".to_owned(),
@@ -1993,6 +1996,7 @@ mod tests {
         document.media_pool[0].path =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         document.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
             name: "unused-unknown".to_owned(),
@@ -2031,6 +2035,7 @@ mod tests {
         document.media_pool[0].path =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         document.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
             name: "audio-track-av".to_owned(),
@@ -2045,6 +2050,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,

@@ -71,6 +71,7 @@ fn long_document() -> kinewright_core::Document {
         tracks: vec![kinewright_core::Track {
             id: kinewright_core::TrackId(1),
             kind: kinewright_core::TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![clip],
         }],

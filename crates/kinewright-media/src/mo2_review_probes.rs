@@ -41,6 +41,7 @@ fn review1_r10_normal_adjustment_storage_must_refuse_on(context: GpuContext) {
             doc.tracks.push(Track {
                 id: TrackId(3),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![cover],
             });
@@ -150,6 +151,7 @@ fn review2_nonfinite_inputs_and_normal_adjustment_on(context: GpuContext) {
             doc.tracks.push(Track {
                 id: TrackId(3),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![solid(3, GREY, BlendMode::Normal, vec![])],
             });
@@ -817,6 +819,7 @@ fn review1_generated_keep_outside_enable_keys_on(context: GpuContext) {
         doc.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![keyed.clone()],
         });
@@ -1016,6 +1019,7 @@ fn rereview_me7_valid_normal_solid_overflow_on(context: GpuContext) {
             doc.tracks.push(Track {
                 id: TrackId(2),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![solid(2, GREY, BlendMode::Normal, vec![])],
             });
@@ -1226,6 +1230,7 @@ fn rereview_projection_enabled_curve_on(context: GpuContext) {
         cover,
     ]);
     doc.media_pool.push(kinewright_core::MediaAsset {
+        remote_locator: None,
         id: AssetId::default(),
         path: directory.path("unneeded-missing.mp4"),
         name: "excluded".into(),

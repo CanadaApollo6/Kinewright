@@ -790,10 +790,16 @@ impl KinewrightApp {
                 if layout.narrow {
                     ui.menu_button(
                         egui::RichText::new("Project").font(theme::medium(12.5)),
-                        |ui| self.studio_actions(ui),
+                        |ui| {
+                            self.studio_actions(ui);
+                            self.import_report_menu_item(ui);
+                        },
                     );
                 } else {
                     self.studio_actions(ui);
+                    if !self.focused().document.imported_from.is_empty() {
+                        ui.menu_button("Project", |ui| self.import_report_menu_item(ui));
+                    }
                 }
             },
         );

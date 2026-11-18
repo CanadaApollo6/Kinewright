@@ -25,6 +25,7 @@ fn case() -> Case {
 fn document() -> Document {
     let mut d = Document::default();
     d.media_pool.push(MediaAsset {
+        remote_locator: None,
         id: AssetId(1),
         path: "recording.wav".into(),
         name: "recording".into(),
@@ -41,6 +42,7 @@ fn document() -> Document {
     });
     let clip:Clip=serde_json::from_value(serde_json::json!({"id":1,"asset":1,"source_range":{"start":0,"end":600},"timeline_start":0,"effects":[],"transition_in":null})).unwrap();
     d.tracks.push(Track {
+        name: None,
         id: TrackId(1),
         kind: TrackKind::Audio,
         sync_lock: true,

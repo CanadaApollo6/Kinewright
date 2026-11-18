@@ -1056,6 +1056,7 @@ fn barrier_capacity_refusal_keeps_edits_reopenable(door: Door) {
             color_token: 0,
         }],
         tracks: vec![Track {
+            name: None,
             id: TrackId(1),
             kind: TrackKind::Video,
             sync_lock: true,
@@ -1207,6 +1208,7 @@ fn snapshot_door_caps_against_a_large_realistic_session() {
     let clip_len = 432_i64;
     let assets: Vec<MediaAsset> = (1..=ASSETS)
         .map(|id| MediaAsset {
+            remote_locator: None,
             id: AssetId(id),
             path: format!(
                 "/media/interview/day-{}/A{id:03}_C{id:03}_0613RK.mov",
@@ -1225,6 +1227,7 @@ fn snapshot_door_caps_against_a_large_realistic_session() {
         .collect();
     let tracks = (0..TRACKS)
         .map(|track| Track {
+            name: None,
             id: TrackId(track + 1),
             kind: TrackKind::Video,
             sync_lock: true,

@@ -1,0 +1,13 @@
+<fcpxml version="1.13">
+  <resources>
+    <format id="f" frameDuration="1/24s" width="1920" height="1080"/>
+    <effect id="background" name="Solid Color" uid="Generators.localized/Solids.localized/Solid.motn"/>
+  </resources>
+  <library><event><project name="Anchored title">
+    <sequence format="f"><spine>
+      <video ref="background" offset="1s" start="2s" duration="1s">
+        <title lane="1" offset="5/2s" duration="1/2s"><text><text-style>Caption</text-style></text></title>
+      </video>
+    </spine></sequence>
+  </project></event></library>
+</fcpxml>

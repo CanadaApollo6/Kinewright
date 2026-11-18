@@ -2807,6 +2807,7 @@ mod tests {
 
     fn asset(id: u64, kind: MediaKind, duration: i64, fps: Rational) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(id),
             path: PathBuf::from(format!("asset-{id}.mov")),
             name: format!("asset-{id}"),
@@ -2847,6 +2848,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![clip(10, 1, 0, 0..300)],
             }],
@@ -2877,12 +2879,14 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![clip(90, 9, 0, 0..300)],
                 },
@@ -4230,6 +4234,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             }],
@@ -4279,6 +4284,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             }],
@@ -4312,6 +4318,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             }],
@@ -4351,6 +4358,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             }],
@@ -4397,6 +4405,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             }],
@@ -4448,6 +4457,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             }],
@@ -4490,6 +4500,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             }],

@@ -572,6 +572,7 @@ fn run_limit_cleanup_undo_and_redo_are_bounded_before_mutation() {
         },
         kinewright_core::Document {
             tracks: vec![kinewright_core::Track {
+                name: None,
                 id: kinewright_core::TrackId(1),
                 kind: kinewright_core::TrackKind::Video,
                 sync_lock: true,

@@ -35,6 +35,7 @@ fn supported_source_description() -> ColorDescription {
 
 fn managed_document() -> Document {
     let asset = MediaAsset {
+        remote_locator: None,
         id: AssetId(1),
         path: present_media_path(),
         name: "managed-source".to_owned(),
@@ -50,6 +51,7 @@ fn managed_document() -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,

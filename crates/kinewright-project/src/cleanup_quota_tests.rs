@@ -15,6 +15,7 @@ fn run_limit_cleanup_reserves_specialist_versions_and_reuses_a_full_raw_slot() {
     );
     let core = Core::for_test(Document {
         tracks: vec![Track {
+            name: None,
             id: TrackId(1),
             kind: TrackKind::Video,
             sync_lock: false,

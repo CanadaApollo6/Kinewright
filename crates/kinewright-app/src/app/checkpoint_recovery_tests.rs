@@ -50,6 +50,7 @@ mod tests {
         std::fs::write(&locator, wav()).unwrap();
         let mut document = Document::default();
         document.tracks.push(Track {
+            name: None,
             id: TrackId(1),
             kind: TrackKind::Video,
             sync_lock: true,
@@ -217,24 +218,24 @@ mod tests {
         let saved = root.path("recovered.kinewright");
         let directory = root.path("recovery");
         std::fs::create_dir_all(&directory).unwrap();
-        let original = Document::default();
         std::fs::write(
             &project,
             serde_json::to_vec(&kinewright_project::ProjectFile {
                 format_version: PROJECT_FORMAT_VERSION,
                 studio: None,
-                document: original.clone(),
+                document: Document::default(),
             })
             .unwrap(),
         )
         .unwrap();
         let journal = directory.join("pending.journal");
         let mut bytes = kinewright_project::JOURNAL_MAGIC.to_vec();
-        bytes.extend(serde_json::to_vec(&serde_json::json!({"format_version":PROJECT_FORMAT_VERSION,"project_path":project,"initial_document":original})).unwrap());
+        bytes.extend(serde_json::to_vec(&serde_json::json!({"format_version":PROJECT_FORMAT_VERSION,"project_path":project,"initial_document":Document::default()})).unwrap());
         bytes.push(b'\n');
         let commands = [
             JournalCommand::Do(Operation::AddTrack {
                 track: Track {
+                    name: None,
                     id: TrackId(1),
                     kind: TrackKind::Video,
                     sync_lock: true,
@@ -247,6 +248,7 @@ mod tests {
             }),
             JournalCommand::Do(Operation::AddTrack {
                 track: Track {
+                    name: None,
                     id: TrackId(2),
                     kind: TrackKind::Audio,
                     sync_lock: true,

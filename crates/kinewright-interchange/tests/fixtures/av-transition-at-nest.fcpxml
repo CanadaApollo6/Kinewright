@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.13">
+  <resources>
+    <format id="fmt" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="av" format="fmt" start="0s" duration="4s" hasVideo="1" hasAudio="1">
+      <media-rep kind="original-media" src="file:///media/outer.mov"/>
+    </asset>
+    <asset id="inside" format="fmt" start="0s" duration="4s" hasVideo="1" hasAudio="1">
+      <media-rep kind="original-media" src="file:///media/inside.mov"/>
+    </asset>
+    <media id="compound">
+      <sequence format="fmt"><spine><asset-clip ref="inside" duration="1s"/></spine></sequence>
+    </media>
+  </resources>
+  <library><event><project name="av-transition-at-nest">
+    <sequence format="fmt"><spine>
+      <asset-clip ref="av" start="1s" duration="1s"/>
+      <transition offset="22/24s" duration="6/24s"/>
+      <ref-clip ref="compound" offset="1s" duration="1s"/>
+    </spine></sequence>
+  </project></event></library>
+</fcpxml>

@@ -190,6 +190,7 @@ fn exit_fix1_accepted_export_survives_refresh_apply_and_discard() {
                 .core()
                 .request(Command::Do(Operation::AddTrack {
                     track: Track {
+                        name: None,
                         id: TrackId(99),
                         kind: TrackKind::Video,
                         sync_lock: true,
@@ -324,6 +325,7 @@ fn exit_fix1_branch_and_thread_close_retire_without_joining_a_live_server() {
                 .core()
                 .request(Command::Do(Operation::AddTrack {
                     track: Track {
+                        name: None,
                         id: TrackId(99),
                         kind: TrackKind::Video,
                         sync_lock: true,
@@ -578,6 +580,7 @@ fn exit_fix1_gui_export_close_choice_uses_the_same_project_guard() {
 fn renderable_document(duration: i64) -> Document {
     Document {
         tracks: vec![Track {
+            name: None,
             id: TrackId(1),
             kind: TrackKind::Video,
             sync_lock: true,
@@ -701,6 +704,7 @@ fn runtime_followup_export_preflight_cannot_slip_past_close_or_quit() {
             document.tracks[0].clips[0].content = ClipContent::Media;
             document.tracks[0].clips[0].asset = AssetId(1);
             document.media_pool.push(MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
                 name: "preflight-source".into(),

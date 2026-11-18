@@ -6,6 +6,7 @@ fn b20_fixture() -> Fixture {
             history_marker(1),
             kinewright_core::Operation::AddTrack {
                 track: kinewright_core::Track {
+                    name: None,
                     id: kinewright_core::TrackId(81),
                     kind: kinewright_core::TrackKind::Video,
                     sync_lock: false,
@@ -172,7 +173,8 @@ fn b20_sequence(role: Role, early: bool) {
         let clip = core
             .export_history()
             .unwrap()
-            .history().document
+            .history()
+            .document
             .tracks
             .iter()
             .flat_map(|t| &t.clips)

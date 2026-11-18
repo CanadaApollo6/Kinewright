@@ -24,6 +24,7 @@ fn document() -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],
@@ -619,6 +620,7 @@ fn r1_ordinary_floor_committed_identity_excludes_suffix() {
         .map(|id| Track {
             id: TrackId(id),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         })

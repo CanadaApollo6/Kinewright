@@ -984,6 +984,7 @@ mod tests {
     #[test]
     fn qa_reports_missing_media_gaps_retiming_and_caption_readability() {
         let asset = MediaAsset {
+            remote_locator: None,
             id: crate::AssetId(1),
             path: "definitely-missing-m31-fixture.mp4".into(),
             name: "fixture".to_owned(),
@@ -999,6 +1000,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![
                     Clip {
@@ -1063,6 +1065,7 @@ mod tests {
     #[test]
     fn qa_missing_media_scopes_to_timeline_references_including_audio() {
         let offline = |id, kind| MediaAsset {
+            remote_locator: None,
             id: crate::AssetId(id),
             path: format!("definitely-missing-qa-scope-{id}.mov").into(),
             name: format!("fixture-{id}"),
@@ -1097,12 +1100,14 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![media_clip(1)],
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![media_clip(2)],
                 },
@@ -1128,6 +1133,7 @@ mod tests {
     #[test]
     fn source_color_warning_is_typed_and_non_blocking() {
         let asset = MediaAsset {
+            remote_locator: None,
             id: crate::AssetId(7),
             path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
             name: "unknown-source".to_owned(),
@@ -1162,6 +1168,7 @@ mod tests {
     #[test]
     fn unknown_white_point_alone_does_not_warn_about_source_color() {
         let asset = MediaAsset {
+            remote_locator: None,
             id: crate::AssetId(8),
             path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
             name: "probe-complete".to_owned(),
@@ -1204,6 +1211,7 @@ mod tests {
         let mut color_description = crate::ColorContext::sdr_rec709().delivery;
         color_description.provenance = ColorProvenance::Inferred;
         let asset = MediaAsset {
+            remote_locator: None,
             id: crate::AssetId(9),
             path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
             name: "inferred-source".to_owned(),
@@ -1239,6 +1247,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(12),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -1653,6 +1662,7 @@ mod tests {
             tracks: vec![crate::Track {
                 id: crate::TrackId(1),
                 kind: crate::TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![crate::Clip {
                     enabled: true,

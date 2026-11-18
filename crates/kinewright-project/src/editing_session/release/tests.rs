@@ -13,6 +13,7 @@ fn fixture() -> (
     let temp = TempDirectory::new_in(&workspace_target_dir(), "native-actor-release");
     let core = Core::for_test(Document {
         tracks: vec![Track {
+            name: None,
             id: TrackId(1),
             kind: TrackKind::Video,
             sync_lock: true,

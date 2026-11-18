@@ -51,6 +51,7 @@ fn point(edits: u64, saves: u64) {
     let document = Document {
         tracks: (1..=8)
             .map(|id| Track {
+                name: None,
                 id: TrackId(id),
                 kind: TrackKind::Video,
                 sync_lock: true,

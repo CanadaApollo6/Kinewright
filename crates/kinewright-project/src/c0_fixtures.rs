@@ -169,6 +169,7 @@ fn build(
                 track: Track {
                     id: TrackId(id),
                     kind,
+                    name: None,
                     sync_lock: true,
                     clips: vec![],
                 },
@@ -225,6 +226,7 @@ pub fn save_cost_document() -> Document {
         duration: kinewright_core::TimeCode(900),
         tracks: (1..=12)
             .map(|track| Track {
+                name: None,
                 id: TrackId(track),
                 kind: TrackKind::Video,
                 sync_lock: true,

@@ -2,12 +2,13 @@
 use crate::undo::Error;
 use crate::{
     AssetId, AudioBus, AudioBusId, AudioMaster, AudioMix, AutomationCurve, BinId, BlendMode, Clip,
-    ClipContent, ClipId, ColorContext, ColorDescription, Document, Effect, EffectId, FreezeFrame,
-    InvestigatorPreferences, Keyframe, LinkId, LutAsset, LutAssetId, LutAssetKind, LutAssetSource,
-    Marker, MarkerId, MediaAsset, MediaBin, MediaCatalog, MediaKind, MediaSourceFingerprint,
-    Operation, PanLaw, ParamValue, Rational, RelinkCandidate, SolidColor, SourceSelect, StringOut,
-    StringOutId, SyncGroup, SyncGroupId, SyncGroupMember, TimeCode, Title, Track, TrackId,
-    TrackKind, TrackMix, Transition,
+    ClipContent, ClipId, ColorContext, ColorDescription, Document, Effect, EffectId, Fidelity,
+    FreezeFrame, ImportRecord, InterchangeFormat, InvestigatorPreferences, Keyframe, LinkId,
+    LossBound, LossCode, LossRow, LossSite, LutAsset, LutAssetId, LutAssetKind, LutAssetSource,
+    Marker, MarkerId, MediaAsset, MediaBin, MediaCatalog, MediaCounts, MediaKind,
+    MediaSourceFingerprint, Operation, PanLaw, ParamValue, Rational, RelinkCandidate,
+    RemoteLocator, SolidColor, SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId,
+    SyncGroupMember, TimeCode, Title, Track, TrackId, TrackKind, TrackMix, Transition,
 };
 use std::{collections::BTreeMap, mem::size_of, path::PathBuf};
 /// Source capacity and canonical wire replay capacity are both admitted.
@@ -90,6 +91,11 @@ inline!(
     LutAssetKind,
     SolidColor,
     FreezeFrame,
+    InterchangeFormat,
+    LossCode,
+    Fidelity,
+    LossBound,
+    MediaCounts,
     crate::title::TitlePosition,
     crate::CaptionPreset,
     crate::automation::KeyframeInterpolation,
@@ -246,9 +252,20 @@ macro_rules! fields{($t:ident{$($f:ident),*$(,)?})=>{
 impl Heap for $t{fn measured(&self, layout: Allocation) ->Result<u64,Error>{let Self{$($f),*}=self;sum([$($f.measured(layout)),*])}}
 impl Preserve for $t{fn copied(&self, layout: Allocation)->Self{let Self{$($f),*}=self;Self{$($f:$f.copied(layout)),*}}}
 };}
+impl Heap for RemoteLocator {
+    fn measured(&self, layout: Allocation) -> Result<u64, Error> {
+        self.0.measured(layout)
+    }
+}
+impl Preserve for RemoteLocator {
+    fn copied(&self, layout: Allocation) -> Self {
+        Self::new(self.0.copied(layout))
+    }
+}
 fields!(MediaAsset {
     id,
     path,
+    remote_locator,
     name,
     duration,
     fps,
@@ -295,6 +312,7 @@ fields!(Clip {
 fields!(Track {
     id,
     kind,
+    name,
     sync_lock,
     clips
 });
@@ -376,9 +394,40 @@ fields!(Document {
     color_context,
     lut_assets,
     investigator,
+    imported_from,
     fps,
     resolution,
     duration
+});
+fields!(ImportRecord {
+    format,
+    format_version,
+    source_name,
+    source_sha256,
+    start_offset_frames,
+    items,
+    exact,
+    approximated,
+    dropped,
+    media,
+    estimated_assets,
+    retimed_source_end_drift_frames,
+    rows,
+    omitted_codes
+});
+fields!(LossRow {
+    code,
+    fidelity,
+    count,
+    bound,
+    unverified,
+    names,
+    at
+});
+fields!(LossSite {
+    source,
+    frame,
+    clip
 });
 fields!(MediaSourceFingerprint {
     content_sha256,

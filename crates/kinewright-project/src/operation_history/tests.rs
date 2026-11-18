@@ -22,6 +22,7 @@ pub(super) fn origin(value: u64) -> CreationOrigin {
 pub(super) fn document() -> Document {
     Document {
         tracks: vec![Track {
+            name: None,
             id: TrackId(81),
             kind: TrackKind::Video,
             sync_lock: false,
@@ -107,6 +108,7 @@ fn coalesced_members_follow_undo_redo_and_discard() {
         .execute(
             Command::Do(Operation::AddTrack {
                 track: Track {
+                    name: None,
                     id: TrackId(82),
                     kind: TrackKind::Video,
                     sync_lock: false,

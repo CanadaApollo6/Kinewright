@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.13">
+  <resources>
+    <format id="fmt" frameDuration="1/25s" width="1920" height="1080"/>
+    <asset id="a" name="a" format="fmt" start="0s" duration="180s" ><media-rep kind="original-media" src="file:///media/a.mov"/></asset><asset id="b" name="b" format="fmt" start="0s" duration="180s" ><media-rep kind="original-media" src="file:///media/b.mov"/></asset><media id="compound"><sequence format="fmt"><spine><asset-clip ref="a" offset="0s" duration="2s"/><asset-clip ref="b" lane="1" offset="0s" duration="2s"/></spine></sequence></media>
+  </resources>
+  <library><event name="Cuts"><project name="anchored-nest-order">
+    <sequence format="fmt" >
+      <spine>
+        <ref-clip ref="compound" offset="0s" duration="2s">
+   <asset-clip ref="b" lane="1" offset="0s" duration="1s"/>
+   <asset-clip ref="a" lane="1" offset="1/2s" duration="1s"/>
+ </ref-clip>
+      </spine>
+    </sequence>
+  </project></event></library>
+</fcpxml>

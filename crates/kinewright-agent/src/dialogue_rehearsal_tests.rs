@@ -502,7 +502,7 @@ mod dialogue_rehearsal_tests {
             Arc::new(Document::default()),
         );
         let asset = probe.probe(&audio).unwrap();
-        let doc=Arc::new(Document {fps:asset.fps,duration:asset.duration,media_pool:vec![asset.clone()],tracks:vec![Track{id:TrackId(1),kind:TrackKind::Audio,sync_lock:true,clips:vec![serde_json::from_value(json!({"id":1,"asset":asset.id,"source_range":{"start":0,"end":asset.duration},"timeline_start":0,"effects":[],"transition_in":null})).unwrap()]}],..Document::default()});
+        let doc=Arc::new(Document {fps:asset.fps,duration:asset.duration,media_pool:vec![asset.clone()],tracks:vec![Track{ name: None,id:TrackId(1),kind:TrackKind::Audio,sync_lock:true,clips:vec![serde_json::from_value(json!({"id":1,"asset":asset.id,"source_range":{"start":0,"end":asset.duration},"timeline_start":0,"effects":[],"transition_in":null})).unwrap()]}],..Document::default()});
         doc.validate().unwrap();
         drop(probe);
         let identity = MediaIdentity::of(&asset).unwrap();

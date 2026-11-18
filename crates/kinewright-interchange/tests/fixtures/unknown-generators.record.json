@@ -1,0 +1,109 @@
+{
+  "format": "otio",
+  "format_version": "Timeline.1",
+  "source_name": "unknown-generators.otio",
+  "source_sha256": "50f8462b947527a9ddc4fe2cb5c9cc556df89c577590a892d648b45e2f755a20",
+  "start_offset_frames": 0,
+  "items": 4,
+  "exact": 1,
+  "approximated": 0,
+  "dropped": 3,
+  "media": {
+    "assets": 1,
+    "online": 0,
+    "offline": 1,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 2
+    }
+  ],
+  "rows": [
+    {
+      "code": "generator_dropped",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [
+        "GeneratorReference.1"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0
+        }
+      ]
+    },
+    {
+      "code": "image_sequence_dropped",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [
+        "ImageSequenceReference.1"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/1",
+          "frame": 24
+        }
+      ]
+    },
+    {
+      "code": "unknown_item",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [
+        "VendorItem.1"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/2",
+          "frame": 48
+        }
+      ]
+    },
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "clip_names_dropped",
+      "fidelity": "dropped",
+      "count": 3,
+      "names": [
+        "Color",
+        "Sequence"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0
+        },
+        {
+          "source": "/tracks/children/0/children/1",
+          "frame": 24
+        }
+      ]
+    },
+    {
+      "code": "resolution_inferred",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    }
+  ],
+  "omitted_codes": []
+}

@@ -55,6 +55,19 @@ mod worker;
 
 #[cfg(feature = "test-util")]
 pub mod rehearsal_support;
+/// Drive the shared probe with `FFmpeg` and no playback device.
+///
+/// # Errors
+/// Returns a shared probe error, including typed cancellation.
+#[cfg(feature = "test-util")]
+pub fn probe_fixture_observed(
+    path: &std::path::Path,
+    observer: &dyn kinewright_core::ProbeObserver,
+) -> Result<kinewright_core::MediaAsset, kinewright_core::MediaError> {
+    crate::initialize_ffmpeg()?;
+    crate::decode::probe_path_observed(path, kinewright_core::AssetId(1), observer)
+}
+
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
 

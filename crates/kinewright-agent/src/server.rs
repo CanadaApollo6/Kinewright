@@ -1,5 +1,8 @@
 #[path = "dialogue_tools/server.rs"]
 mod dialogue_dispatch;
+#[path = "interchange.rs"]
+mod interchange;
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt::Write as _,
@@ -1433,12 +1436,14 @@ fn host_scoped_tool_admitted(request: &CallToolRequestParams) -> bool {
         | "discard_edit_plan"
         | "commit_edit_plan" => true,
         "invoke_capability" => {
-            request
-                .arguments
-                .as_ref()
-                .and_then(|a| a.get("name"))
-                .and_then(serde_json::Value::as_str)
-                == Some("get_timeline_state")
+            matches!(
+                request
+                    .arguments
+                    .as_ref()
+                    .and_then(|a| a.get("name"))
+                    .and_then(serde_json::Value::as_str),
+                Some("get_timeline_state" | "get_import_report" | "inspect_interchange")
+            )
         }
         "prepare_edit_plan" => !request
             .arguments
@@ -2013,6 +2018,24 @@ impl KinewrightMcp {
             "propose_fix" => {
                 let args: ProposeFixArgs = decode_args("propose_fix", arguments)?;
                 self.propose_fix(&args)
+            }
+            "inspect_interchange" => {
+                if self.host_scoped {
+                    return Ok(interchange::outside_roots());
+                }
+                Ok(interchange::inspect_timeline(decode_args(
+                    "inspect_interchange",
+                    arguments,
+                )?))
+            }
+            "get_import_report" => {
+                let args = decode_args("get_import_report", arguments)?;
+                let (revision, document) = self.snapshot()?;
+                Ok(interchange::import_report(
+                    &args,
+                    revision,
+                    &document.imported_from,
+                ))
             }
             "get_timeline_state" => {
                 let (revision, document) = self.snapshot()?;
@@ -2845,6 +2868,14 @@ impl KinewrightMcp {
             )));
         };
 
+        if kinewright_project::interchange::is_remote_locator(&args.path)
+            || current.remote_locator.is_some()
+        {
+            return Ok(error_structured(
+                "Use the editor's Relink dialog to replace remote media.",
+                serde_json::json!({"code": "remote_path"}),
+            ));
+        }
         let probed = match self.analysis.probe(&args.path) {
             Ok(asset) => asset,
             Err(error) => return Ok(error_text(error.to_string())),
@@ -7360,6 +7391,7 @@ impl KinewrightMcp {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -7954,6 +7986,7 @@ impl KinewrightMcp {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -14212,6 +14245,7 @@ fn compact_tools_cached() -> Vec<Tool> {
 #[allow(clippy::too_many_lines)]
 fn inspector_tools() -> Vec<Tool> {
     let read_only = read_only_annotations;
+    let [inspect_interchange, get_import_report] = interchange::tools();
     vec![
         // IN1 §6.4 rule 20: both descriptions are normative bytes, measured at
         // 530 B and 365 B, with self-contained first sentences because
@@ -14262,6 +14296,8 @@ fn inspector_tools() -> Vec<Tool> {
         // in `compact_get_timeline_state_tool`, called here at its registry
         // position so the full registry and the served surface cannot drift.
         compact_get_timeline_state_tool(),
+        inspect_interchange,
+        get_import_report,
         Tool::new(
             "get_color_context",
             "Return the project working, monitoring, and delivery colour descriptions, source metadata, managed-profile status, ordered CC1 stages, and legacy-stage warnings at the exact timeline revision. Each clip carries its ordered managed colour-node stack across all five node kinds - technical_lut, primary_correction, color_wheels, color_curves, creative_look - with role, color_stage, stage_index, bypass, active, inactive_reason, and resolved values; LUT nodes add lut_asset_id, lut_title, lut_sha256, lut_size, lut_kind, lut_provenance, lut_availability, lut_store_path, mix_basis_points, input_encoding, and may_be_active. legacy_look_conversions lists every legacy look_lut/cube_lut with status ready, needs_import, or unconvertible, the exact operations, and a recovery_action naming convert_legacy_look. The default status matches the executed application D65 profile assumption; use raw_only for unassumed classifier evidence. Metadata remains unchanged. Use render_color_proof for an isolated mapped BEFORE/AFTER frame.",
@@ -14384,7 +14420,7 @@ fn inspector_tools() -> Vec<Tool> {
         ),
         Tool::new(
             "relink_media",
-            "Probe and hash one replacement path, require exact kind/frame-rate/duration/resolution compatibility, then apply one undoable RelinkAsset operation at the expected revision. Known fingerprints must match exactly; legacy unknown fingerprints require explicit allow_unverified_source.",
+            "Probe and hash a replacement path and apply an undoable relink at the expected revision. Match kind, frame rate, duration, resolution and any known fingerprint. For an estimated interchange asset with an unknown fingerprint, match frame rate and cover every clip with compatible media. An unknown fingerprint requires allow_unverified_source.",
             schema_object::<RelinkMediaArgs>(),
         )
         .with_annotations(
@@ -19666,6 +19702,7 @@ mod tests {
 
     fn fixture() -> (Core, Arc<dyn Playback>, Arc<dyn Analysis>) {
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("fixture.mp4"),
             name: "fixture".to_owned(),
@@ -19679,11 +19716,13 @@ mod tests {
         };
         let document = Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -19741,6 +19780,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(9),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: false,
             clips: vec![
                 Clip {
@@ -19801,6 +19841,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         });
@@ -19821,6 +19862,7 @@ mod tests {
 
     fn relink_probe_asset(source_fingerprint: MediaSourceFingerprint) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(99),
             path: PathBuf::from("probe-placeholder.mp4"),
             name: "replacement".to_owned(),
@@ -19908,6 +19950,7 @@ mod tests {
     fn montage_fixture(status: BeatStatus) -> (Core, Arc<NoopMedia>) {
         let fps = Rational::new(30, 1).unwrap();
         let video_asset = |id| MediaAsset {
+            remote_locator: None,
             id: AssetId(id),
             path: PathBuf::from(format!("montage-{id}.mp4")),
             name: format!("montage-{id}"),
@@ -19920,6 +19963,7 @@ mod tests {
             assumed_from: None,
         };
         let music = MediaAsset {
+            remote_locator: None,
             id: AssetId(9),
             path: PathBuf::from("montage-music.mp4"),
             name: "montage music".to_owned(),
@@ -19936,12 +19980,14 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![Clip {
                         enabled: true,
@@ -19979,6 +20025,7 @@ mod tests {
     ) -> (Core, Arc<NoopMedia>) {
         let fps = Rational::new(30, 1).unwrap();
         let video = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("music-structure-video.mp4"),
             name: "music structure video".to_owned(),
@@ -19991,6 +20038,7 @@ mod tests {
             assumed_from: None,
         };
         let music = MediaAsset {
+            remote_locator: None,
             id: AssetId(9),
             path: PathBuf::from("music-structure-audio.wav"),
             name: "music structure audio".to_owned(),
@@ -20025,12 +20073,14 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![media_clip(1, 1, 0)],
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![media_clip(90, 9, 0)],
                 },
@@ -20052,6 +20102,7 @@ mod tests {
     fn end_anchored_music_fit_fixture() -> (Core, Arc<NoopMedia>) {
         let source_fps = Rational::new(30, 1).unwrap();
         let music = MediaAsset {
+            remote_locator: None,
             id: AssetId(9),
             path: PathBuf::from("end-anchored-music.wav"),
             name: "end anchored music".to_owned(),
@@ -20067,6 +20118,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(2),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             }],
@@ -20460,6 +20512,7 @@ mod tests {
                 track: Track {
                     id: TrackId(2),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
@@ -21555,6 +21608,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![audio_clip],
         });
@@ -21628,6 +21682,7 @@ mod tests {
         overlay_document.tracks.push(Track {
             id: TrackId(3),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![overlay_clip],
         });
@@ -21730,6 +21785,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(9),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![overlay_clip],
         });
@@ -24192,6 +24248,7 @@ mod tests {
     /// frames coincide and the thumbnail map is keyed by either.
     fn tracked_shot_service() -> (KinewrightMcp, Core) {
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("cc5-tracked-shot.mp4"),
             name: "cc5-tracked-shot".to_owned(),
@@ -24205,11 +24262,13 @@ mod tests {
         };
         let document = Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -24954,7 +25013,7 @@ mod tests {
         }
         // IN1 §6.6: get_incidents and resolve_incident join the registry;
         // IN2 §4.1 rule 2 adds propose_fix beside them.
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 88);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 90);
 
         for name in [
             "plan_primary_correction",
@@ -25317,6 +25376,7 @@ mod tests {
     /// lives in the project's room-tone store.
     fn au5b_fill_document() -> Document {
         let dialogue = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("dialogue.wav"),
             name: "dialogue".to_owned(),
@@ -25329,6 +25389,7 @@ mod tests {
             assumed_from: None,
         };
         let room_tone = MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: PathBuf::from("/p/show.kinewright-assets/room-tone/abc.wav"),
             name: "Room tone — dialogue".to_owned(),
@@ -25364,6 +25425,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: vec![clip(1, 0), clip(2, 60)],
             }],
@@ -26119,6 +26181,7 @@ mod tests {
         wider.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         });
@@ -26440,6 +26503,7 @@ mod tests {
 
         let mut document = au5b_repair_document();
         document.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: AssetId(10),
             path: PathBuf::from("long.wav"),
             name: "two minutes".to_owned(),
@@ -26452,6 +26516,7 @@ mod tests {
             assumed_from: None,
         });
         document.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: AssetId(9),
             path: PathBuf::from("silent.mp4"),
             name: "picture only".to_owned(),
@@ -27246,6 +27311,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -28887,7 +28953,7 @@ mod tests {
             }
         }
 
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 88);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 90);
         // IN1 §6.1 rule 3: nothing the dispatcher accepted before is now
         // refused, and no generated operation tool became invocable.
         let stranded = crate::schema::INSPECTOR_TOOL_NAMES
@@ -29575,6 +29641,7 @@ mod tests {
     fn in1b_asset_document(color_description: ColorDescription, assumed: bool) -> Document {
         Document {
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: PathBuf::from("fixture.webm"),
                 name: "fixture".to_owned(),
@@ -30038,6 +30105,15 @@ mod tests {
     ///   **1 848 392**, 128 734 + 703 = **129 437**. Counts `153 / 64 / 89` —
     ///   Part B's `(1,0,1)`. Served quad unchanged (`7 / 5 660 / 3 510 /
     ///   998`) — the twenty-third consecutive measurement.
+    ///
+    /// - **IX1 (ruling 25, track names): +2 210 / +2 210 / 0.** The optional
+    ///   `Track.name` adds 34 B to each of the 64 generated operation input
+    ///   schemas opened by `get_capability` and to the registry's `apply_edit_plan`
+    ///   schema. `Document.imported_from` adds no schema bytes. Registry
+    ///   totals are **2 005 164 / 1 850 602 / 129 437** and the served quad
+    ///   stays **7 / 5 660 / 3 510 / 998**.
+    /// - **IX1 stage 2a: +1 832 / +996 / +506.** Two inspectors and the
+    ///   estimated-source relink description move the registry only.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -30065,15 +30141,15 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_981_514, 5_660),
+            (1_985_683, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_826_246,
+            registry_metrics.input_schema_bytes, 1_829_592,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 130_006,
+            registry_metrics.description_bytes, 130_499,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
@@ -30369,6 +30445,7 @@ mod tests {
         let (core, playback, analysis) = fixture();
         core.request(Command::Do(Operation::AddAsset {
             asset: MediaAsset {
+                remote_locator: None,
                 id: AssetId(2),
                 path: PathBuf::from("fixture.wav"),
                 name: "fixture audio".to_owned(),
@@ -30568,6 +30645,7 @@ mod tests {
             track: Track {
                 id: TrackId(2),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             },
@@ -30944,6 +31022,7 @@ mod tests {
 
         core.request(Command::Do(Operation::AddAsset {
             asset: MediaAsset {
+                remote_locator: None,
                 id: AssetId(2),
                 path: PathBuf::from("fixture.wav"),
                 name: "fixture audio".to_owned(),
@@ -31212,6 +31291,7 @@ mod tests {
     fn dialogue_keep_ranges_remove_qualified_silence_and_fillers() {
         let fps = Rational::new(30, 1).unwrap();
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: "dialogue.mp4".into(),
             name: "dialogue".to_owned(),
@@ -31287,6 +31367,7 @@ mod tests {
     fn dialogue_keep_ranges_retain_pause_and_pad_fillers() {
         let fps = Rational::new(30, 1).unwrap();
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: "dialogue.mp4".into(),
             name: "dialogue".to_owned(),
@@ -31344,6 +31425,7 @@ mod tests {
     fn dialogue_keep_ranges_never_escape_the_requested_source_envelope() {
         let fps = Rational::new(30, 1).unwrap();
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: "dialogue.mp4".into(),
             name: "dialogue".to_owned(),
@@ -31405,6 +31487,7 @@ mod tests {
     fn dialogue_filler_bridge_caps_long_pauses_and_preserves_shorter_ones() {
         let fps = Rational::new(30, 1).unwrap();
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: "dialogue.mp4".into(),
             name: "dialogue".to_owned(),
@@ -33106,6 +33189,7 @@ mod tests {
             document.tracks.push(Track {
                 id,
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -33190,6 +33274,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(4),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         });
@@ -33625,6 +33710,7 @@ mod tests {
     /// 30 fps) document with a music track 1 and a dialogue track 2.
     fn au4_ducking_document() -> Document {
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("duck.mp4"),
             name: "duck".to_owned(),
@@ -33656,6 +33742,7 @@ mod tests {
         };
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
@@ -33664,12 +33751,14 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: false,
                     clips: vec![clip(1)],
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: false,
                     clips: vec![clip(2)],
                 },
@@ -34464,6 +34553,7 @@ mod tests {
     fn au4_plan_audio_ducking_skips_a_video_only_dialogue_clip() {
         let mut document = au4_ducking_document();
         document.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: PathBuf::from("broll.mp4"),
             name: "broll".to_owned(),
@@ -34478,6 +34568,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(3),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: false,
             clips: vec![Clip {
                 enabled: true,
@@ -34924,11 +35015,13 @@ mod tests {
     fn mo1_motion_document(duration: i64, effects: Vec<Effect>) -> Document {
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -34952,6 +35045,7 @@ mod tests {
                 }],
             }],
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: "fixture.mp4".into(),
                 name: "fixture".into(),
@@ -35930,12 +36024,12 @@ mod tests {
     /// touch. MO2 A3 (R8) generates four more mutators
     /// (`set_clip_blend_mode`, `add_adjustment_clip`, `add_solid_clip`,
     /// `set_solid_color`), registry-only the same way: counts `152 / 64 / 88`.
-    /// MO2 Part B (R24) adds one inspector (`preview_solo`): `153 / 64 / 89`.
+    /// MO2 Part B added `preview_solo`. IX1 adds two more inspectors for `155 / 64 / 91`.
     #[test]
     fn in2_the_registry_grows_by_one_capability() {
         let registry = KinewrightMcp::capability_tools().unwrap();
-        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 154);
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 88);
+        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 156);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 90);
         assert_eq!(operation_tools().unwrap().len(), 64);
         let generated = operation_tools().unwrap();
         for name in [

@@ -225,6 +225,7 @@ fn fixture_document(asset: MediaAsset, effects: Vec<Effect>) -> Arc<Document> {
     let duration = asset.duration;
     let document = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: AudioMix {
             tracks: Vec::new(),
@@ -244,6 +245,7 @@ fn fixture_document(asset: MediaAsset, effects: Vec<Effect>) -> Arc<Document> {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,

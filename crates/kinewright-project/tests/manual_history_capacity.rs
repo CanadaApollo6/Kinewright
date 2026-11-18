@@ -16,6 +16,7 @@ use std::{
 fn heavy_document(clips: i64) -> Document {
     let mut document = Document {
         tracks: vec![Track {
+            name: None,
             id: TrackId(1),
             kind: TrackKind::Video,
             sync_lock: true,

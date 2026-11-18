@@ -1,0 +1,176 @@
+{
+  "tracks": [
+    {
+      "id": 2,
+      "kind": "Video",
+      "clips": [
+        {
+          "id": 3,
+          "asset": 1,
+          "source_range": {
+            "start": 0,
+            "end": 99
+          },
+          "timeline_start": 100,
+          "effects": [],
+          "transition_in": null,
+          "speed_percent": 200
+        }
+      ]
+    }
+  ],
+  "media_pool": [
+    {
+      "id": 1,
+      "path": "file:///media/a.mov",
+      "name": "a",
+      "duration": 4500,
+      "fps": {
+        "numerator": 25,
+        "denominator": 1
+      },
+      "kind": "Video",
+      "resolution": [
+        1920,
+        1080
+      ],
+      "color_description": {
+        "primaries": "unknown",
+        "transfer": "unknown",
+        "matrix": "unknown",
+        "range": "unknown",
+        "white_point": "unknown",
+        "bit_depth": "unknown",
+        "confidence_basis_points": 0,
+        "provenance": "unknown"
+      }
+    }
+  ],
+  "markers": [
+    {
+      "id": 4,
+      "position": 125,
+      "label": "Inner",
+      "color_token": 0
+    },
+    {
+      "id": 5,
+      "position": 125,
+      "label": "Container",
+      "color_token": 0
+    }
+  ],
+  "color_context": {
+    "pipeline_state": "managed_sdr_v1",
+    "working": {
+      "primaries": "bt709",
+      "transfer": "linear",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "monitoring": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "delivery": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "bt709",
+      "range": "limited",
+      "white_point": "d65",
+      "bit_depth": 8,
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    }
+  },
+  "imported_from": [
+    {
+      "format": "fcpxml",
+      "format_version": "1.13",
+      "source_name": "retimed-nest-markers.fcpxml",
+      "source_sha256": "95e8688f130a3b3cd371f664d7c3315340438e5e86804f54cefcad425c16c99a",
+      "start_offset_frames": 0,
+      "items": 4,
+      "exact": 1,
+      "approximated": 3,
+      "dropped": 0,
+      "media": {
+        "assets": 1,
+        "online": 0,
+        "offline": 1,
+        "remote": 0,
+        "timed_out": 0
+      },
+      "estimated_assets": [
+        {
+          "start": 1,
+          "end": 2
+        }
+      ],
+      "rows": [
+        {
+          "code": "media_offline",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": []
+        },
+        {
+          "code": "item_marker_pinned",
+          "fidelity": "approximated",
+          "count": 2,
+          "names": [],
+          "at": [
+            {
+              "source": "11:9/6:234",
+              "frame": 125
+            },
+            {
+              "source": "13:4",
+              "frame": 125
+            }
+          ]
+        },
+        {
+          "code": "nest_flattened",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": [
+            {
+              "source": "11:9",
+              "frame": 100
+            }
+          ]
+        },
+        {
+          "code": "color_space_default",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": []
+        }
+      ],
+      "omitted_codes": []
+    }
+  ],
+  "fps": {
+    "numerator": 25,
+    "denominator": 1
+  },
+  "resolution": [
+    1920,
+    1080
+  ],
+  "duration": 150
+}

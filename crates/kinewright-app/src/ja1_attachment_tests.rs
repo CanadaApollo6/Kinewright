@@ -746,6 +746,7 @@ fn doc() -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],
@@ -1025,6 +1026,7 @@ fn w03_native_rescue_keeps_all_undo_without_requesting_trim_consent() {
             .map(|id| Track {
                 id: TrackId(id),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             })

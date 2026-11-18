@@ -839,6 +839,10 @@ pub enum OpError {
     DuplicateTrack(TrackId),
     #[error("new track {0} must be empty")]
     NewTrackNotEmpty(TrackId),
+    #[error("track {0} has a name longer than 64 bytes")]
+    TrackNameTooLong(TrackId),
+    #[error("invalid import records: {0}")]
+    InvalidImportRecord(&'static str),
     #[error("clip {0} occurs more than once")]
     DuplicateClip(ClipId),
     #[error("asset {0} does not exist")]
@@ -1940,6 +1944,11 @@ fn add_asset(doc: &mut Document, asset: MediaAsset) -> Result<(), OpError> {
     if asset.color_description.provenance == ColorProvenance::AgentAssumption {
         return Err(OpError::AssumedFromNotSuppliable { asset: asset.id });
     }
+    if asset.remote_locator.is_some() {
+        return Err(OpError::InvalidImportRecord(
+            "a new asset cannot supply a preserved remote locator",
+        ));
+    }
     validate_asset(&asset)?;
     doc.media_pool.push(asset);
     Ok(())
@@ -1965,7 +1974,12 @@ fn relink_asset(
     }
 
     let current = &doc.media_pool[index];
-    if current.kind != candidate.kind {
+    let estimated = !current.source_fingerprint.is_verified()
+        && doc
+            .imported_from
+            .iter()
+            .any(|record| record.estimated_asset(asset_id));
+    if !estimated && current.kind != candidate.kind {
         return Err(OpError::RelinkMetadataMismatch {
             asset: asset_id,
             field: "kind",
@@ -1985,7 +1999,7 @@ fn relink_asset(
             ),
         });
     }
-    if current.duration != candidate.duration {
+    if !estimated && current.duration != candidate.duration {
         return Err(OpError::RelinkMetadataMismatch {
             asset: asset_id,
             field: "duration",
@@ -1993,7 +2007,7 @@ fn relink_asset(
             actual: candidate.duration.to_string(),
         });
     }
-    if current.resolution != candidate.resolution {
+    if !estimated && current.resolution != candidate.resolution {
         return Err(OpError::RelinkMetadataMismatch {
             asset: asset_id,
             field: "resolution",
@@ -2010,6 +2024,18 @@ fn relink_asset(
         return Err(OpError::RelinkRequiresExplicitUnverifiedSource { asset: asset_id });
     }
 
+    if estimated {
+        validate_estimated_relink(doc, asset_id, candidate)?;
+        let asset = &mut doc.media_pool[index];
+        asset.path.clone_from(&candidate.path);
+        asset.remote_locator = None;
+        asset.source_fingerprint.clone_from(&candidate.fingerprint);
+        asset.kind = candidate.kind;
+        asset.duration = candidate.duration;
+        asset.resolution = candidate.resolution;
+        return Ok(());
+    }
+
     let before = clip_durations_for_asset(doc, asset_id)?;
     doc.media_pool[index].path.clone_from(&candidate.path);
     doc.media_pool[index]
@@ -2021,6 +2047,41 @@ fn relink_asset(
             continue;
         }
         survive_clip_edit(doc, track_index, clip_index, TimeCode::ZERO)?;
+    }
+    Ok(())
+}
+
+fn validate_estimated_relink(
+    doc: &Document,
+    asset: AssetId,
+    candidate: &RelinkCandidate,
+) -> Result<(), OpError> {
+    for track in &doc.tracks {
+        for clip in track
+            .clips
+            .iter()
+            .filter(|clip| clip.asset == asset && clip.content.references_asset())
+        {
+            if !candidate.kind.supports(track.kind) {
+                return Err(OpError::RelinkMetadataMismatch {
+                    asset,
+                    field: "kind",
+                    expected: format!("compatible with {:?} track", track.kind),
+                    actual: format!("{:?}", candidate.kind),
+                });
+            }
+            let end = match &clip.content {
+                ClipContent::Freeze(freeze) => TimeCode(freeze.source_frame.0.saturating_add(1)),
+                _ => clip.source_range.end,
+            };
+            if end > candidate.duration {
+                return Err(OpError::SourceOutOfBounds {
+                    asset,
+                    end,
+                    duration: candidate.duration,
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -5195,6 +5256,12 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
     if doc.resolution.0 == 0 || doc.resolution.1 == 0 {
         return Err(OpError::InvalidResolution);
     }
+    if doc.imported_from.len() > crate::DOCUMENT_MAX_IMPORT_RECORDS {
+        return Err(OpError::InvalidImportRecord("too many records"));
+    }
+    for record in &doc.imported_from {
+        record.validate().map_err(OpError::InvalidImportRecord)?;
+    }
     for color_description in [
         &doc.color_context.working,
         &doc.color_context.monitoring,
@@ -5209,6 +5276,18 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
             return Err(OpError::DuplicateAsset(asset.id));
         }
         validate_asset(asset)?;
+        if asset.remote_locator.is_some()
+            && (!asset.path.as_os_str().is_empty()
+                || !asset.source_fingerprint.is_unknown()
+                || !doc
+                    .imported_from
+                    .iter()
+                    .any(|record| record.estimated_asset(asset.id)))
+        {
+            return Err(OpError::InvalidImportRecord(
+                "a preserved remote locator requires an estimated asset, empty playback path and unknown fingerprint",
+            ));
+        }
     }
 
     let mut lut_asset_ids = HashSet::new();
@@ -5227,6 +5306,13 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
     for track in &doc.tracks {
         if !track_ids.insert(track.id) {
             return Err(OpError::DuplicateTrack(track.id));
+        }
+        if track
+            .name
+            .as_ref()
+            .is_some_and(|name| name.len() > crate::TRACK_NAME_MAX_BYTES)
+        {
+            return Err(OpError::TrackNameTooLong(track.id));
         }
         let mut previous: Option<(&Clip, TimeCode)> = None;
         for clip in &track.clips {
@@ -5921,6 +6007,8 @@ impl OpError {
             | Self::InvalidThreePointSource { .. }
             | Self::InvalidThreePointTimeline { .. }
             | Self::InvalidProjectRate { .. }
+            | Self::InvalidImportRecord { .. }
+            | Self::TrackNameTooLong { .. }
             | Self::InvalidAssetRate { .. }
             | Self::InvalidAssetDuration { .. }
             | Self::InvalidResolution { .. }
@@ -6288,14 +6376,14 @@ mod tests {
         grouped
     }
 
-    /// Appendix A, normative, **per variant**: all 162 `OpError` variant names
+    /// Appendix A, normative, **per variant**: all 164 `OpError` variant names
     /// with the family the contract assigns each one.
     ///
     /// Written out rather than counted, so a variant moved from one family to
     /// another fails here instead of cancelling out against another move
     /// (review-2 S4, review-1 N2). It is transcribed from
     /// `docs/IN1B-ERROR-MIGRATION.md`'s Appendix A, not from the accessor.
-    const APPENDIX_A: [(&str, &str); 162] = [
+    const APPENDIX_A: [(&str, &str); 164] = [
         ("AudioBusLookaheadExceeded", "Bounds"),
         ("AudioBusKeyframeOutsideProject", "Bounds"),
         ("AudioBusGainOutOfRange", "Bounds"),
@@ -6345,6 +6433,8 @@ mod tests {
         ("InvalidThreePointSource", "Malformed"),
         ("InvalidThreePointTimeline", "Malformed"),
         ("InvalidProjectRate", "Malformed"),
+        ("InvalidImportRecord", "Malformed"),
+        ("TrackNameTooLong", "Malformed"),
         ("InvalidAssetRate", "Malformed"),
         ("InvalidAssetDuration", "Malformed"),
         ("InvalidResolution", "Malformed"),
@@ -6537,7 +6627,7 @@ mod tests {
         ("SetSolidColor", "Clip"),
     ];
 
-    /// `IN1b` §9 clause 1: the match is exhaustive over all **162** `OpError`
+    /// `IN1b` §9 clause 1: the match is exhaustive over all **164** `OpError`
     /// variants with no wildcard, every family is non-empty, and **every
     /// variant** is in the family Appendix A gives it.
     #[test]
@@ -6563,10 +6653,10 @@ mod tests {
             .collect();
         assert_eq!(
             declared.len(),
-            162,
-            "Appendix A names 162 distinct variants"
+            164,
+            "Appendix A names 164 distinct variants"
         );
-        assert_eq!(implemented.len(), 162, "the accessor names 162 variants");
+        assert_eq!(implemented.len(), 164, "the accessor names 164 variants");
         for (variant, family) in &declared {
             assert_eq!(
                 implemented.get(variant),
@@ -6845,6 +6935,7 @@ mod tests {
                 track: Track {
                     id: TrackId(3),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },

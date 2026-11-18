@@ -33,6 +33,7 @@ fn person_latched_fixture_inner(
         &[
             kinewright_core::Operation::AddTrack {
                 track: kinewright_core::Track {
+                    name: None,
                     id: kinewright_core::TrackId(81),
                     kind: kinewright_core::TrackKind::Video,
                     sync_lock: false,

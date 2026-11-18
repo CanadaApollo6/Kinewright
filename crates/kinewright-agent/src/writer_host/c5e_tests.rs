@@ -445,6 +445,7 @@ fn c5e_run(size: C5eSize) {
         &mut document,
         &[kinewright_core::Operation::AddTrack {
             track: kinewright_core::Track {
+                name: None,
                 id: kinewright_core::TrackId(81),
                 kind: kinewright_core::TrackKind::Video,
                 sync_lock: false,
@@ -617,7 +618,11 @@ fn c5e_run(size: C5eSize) {
                         &mut maximum,
                         &mut storage,
                     );
-                    assert_eq!(approved_cycles, size.approvals(), "C5E_EXACT_APPROVE_DELETE_UNDO_CYCLES");
+                    assert_eq!(
+                        approved_cycles,
+                        size.approvals(),
+                        "C5E_EXACT_APPROVE_DELETE_UNDO_CYCLES"
+                    );
                     c4_mcp_edit_redo(&C4Mcp::new(&f, &run, &task), &core)
                 } else {
                     core.export_history().unwrap()
@@ -625,11 +630,7 @@ fn c5e_run(size: C5eSize) {
                 c5e_pending_history(
                     &f,
                     &core,
-                    if task_index == 0 {
-                        approved_cycles
-                    } else {
-                        0
-                    },
+                    if task_index == 0 { approved_cycles } else { 0 },
                     "checkpoint",
                 );
                 f.host
@@ -737,7 +738,12 @@ fn c5e_run(size: C5eSize) {
             let host = f.host.owner.upgrade().unwrap();
             let owner = host.lock().unwrap();
             assert_eq!(
-                owner.core().history_pool().lease_counts(kinewright_project::operation_history::Role::Task).unwrap().0,
+                owner
+                    .core()
+                    .history_pool()
+                    .lease_counts(kinewright_project::operation_history::Role::Task)
+                    .unwrap()
+                    .0,
                 owner.hooks.runs[&run].tasks.len(),
                 "C5E_BETWEEN_TASKS_ONLY_PRODUCT_ACTOR_LEASES"
             );
@@ -1048,9 +1054,18 @@ fn c5e_run(size: C5eSize) {
     }
     if matches!(size, C5eSize::Maximal) {
         let elapsed = qualification_started.elapsed();
-        eprintln!("C5E_MAXIMAL_QUALIFICATION cycles={approved_cycles} seconds={:.6} authority_seconds=3600 renewed=false tail_complete=true", elapsed.as_secs_f64());
-        assert_eq!(approved_cycles, 256, "C5E_EXACTLY_256_CYCLES_WITH_THE_COMPLETE_TAIL");
-        assert!(elapsed < Duration::from_secs(3600), "C5E_COMPLETE_TAIL_FITS_THE_ORIGINAL_AUTHORITY: {elapsed:?}");
+        eprintln!(
+            "C5E_MAXIMAL_QUALIFICATION cycles={approved_cycles} seconds={:.6} authority_seconds=3600 renewed=false tail_complete=true",
+            elapsed.as_secs_f64()
+        );
+        assert_eq!(
+            approved_cycles, 256,
+            "C5E_EXACTLY_256_CYCLES_WITH_THE_COMPLETE_TAIL"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3600),
+            "C5E_COMPLETE_TAIL_FITS_THE_ORIGINAL_AUTHORITY: {elapsed:?}"
+        );
     }
 }
 
@@ -1206,6 +1221,7 @@ fn c5e_prefix_measure(approvals: usize, evidence: C5ePrefixEvidence) {
         &mut document,
         &[kinewright_core::Operation::AddTrack {
             track: kinewright_core::Track {
+                name: None,
                 id: kinewright_core::TrackId(81),
                 kind: kinewright_core::TrackKind::Video,
                 sync_lock: false,
@@ -1603,6 +1619,7 @@ fn s4b_c5e_expired_authority_keeps_accepted_work_and_stops() {
         &[
             kinewright_core::Operation::AddTrack {
                 track: kinewright_core::Track {
+                    name: None,
                     id: kinewright_core::TrackId(81),
                     kind: kinewright_core::TrackKind::Video,
                     sync_lock: false,

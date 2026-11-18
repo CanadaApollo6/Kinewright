@@ -2184,6 +2184,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -2786,6 +2787,7 @@ mod tests {
             track: Track {
                 id: TrackId(901),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             },
@@ -3139,6 +3141,7 @@ mod k1_allocation {
                 .map(|(id, clip)| Track {
                     id: TrackId(id),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![clip],
                 })

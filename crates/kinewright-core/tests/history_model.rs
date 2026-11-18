@@ -314,6 +314,7 @@ fn malformed_snapshot_install_is_typed_and_atomic() {
 fn literal_baseline() -> Document {
     Document {
         tracks: vec![kinewright_core::Track {
+            name: None,
             id: kinewright_core::TrackId(1),
             kind: kinewright_core::TrackKind::Video,
             sync_lock: true,

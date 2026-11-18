@@ -5441,6 +5441,7 @@ mod tests {
 
     fn document() -> Document {
         let asset = kinewright_core::MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: "source.mp4".into(),
             name: "source".to_owned(),
@@ -5454,9 +5455,11 @@ mod tests {
         };
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -5549,6 +5552,7 @@ mod tests {
     fn status_blocks_only_referenced_unsupported_sources() {
         let mut document = document();
         document.media_pool.push(kinewright_core::MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: "unused.mp4".into(),
             name: "unused".to_owned(),
@@ -5812,6 +5816,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,

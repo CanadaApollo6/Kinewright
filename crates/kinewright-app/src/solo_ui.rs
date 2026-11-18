@@ -401,6 +401,7 @@ pub(crate) mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![clip],
             }],
@@ -495,6 +496,7 @@ pub(crate) mod tests {
                 tracks: vec![Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![clip],
                 }],
@@ -562,6 +564,7 @@ pub(crate) mod tests {
         let track = |id, clip| Track {
             id: TrackId(id),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![clip],
         };
@@ -692,6 +695,7 @@ pub(crate) mod tests {
         let track = |id, clip| Track {
             id: TrackId(id),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![clip],
         };

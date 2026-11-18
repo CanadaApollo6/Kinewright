@@ -4554,6 +4554,7 @@ mod tests {
     fn document_with_probed_asset(probed: &ColorDescription) -> Document {
         Document {
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: "in1_untagged.mp4".into(),
                 name: "in1_untagged".to_owned(),
@@ -8558,6 +8559,7 @@ mod tests {
             track: Track {
                 id: TrackId(42),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             },

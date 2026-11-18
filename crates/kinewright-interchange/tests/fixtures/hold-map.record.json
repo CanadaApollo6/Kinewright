@@ -1,0 +1,55 @@
+{
+  "format": "fcpxml",
+  "format_version": "1.13",
+  "source_name": "hold-map.fcpxml",
+  "source_sha256": "c478da06cee7c1bcf67a3de0ac30f623888b274e9b4933065601cc25a95eadca",
+  "start_offset_frames": 0,
+  "items": 1,
+  "exact": 1,
+  "approximated": 0,
+  "dropped": 0,
+  "media": {
+    "assets": 1,
+    "online": 0,
+    "offline": 1,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 2
+    }
+  ],
+  "rows": [
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "hold_reading",
+      "fidelity": "approximated",
+      "count": 1,
+      "unverified": true,
+      "names": [],
+      "at": [
+        {
+          "source": "11:9",
+          "frame": 0,
+          "clip": 3
+        }
+      ]
+    }
+  ],
+  "omitted_codes": []
+}

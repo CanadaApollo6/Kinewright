@@ -51,3 +51,6 @@ crates/kinewright-agent/src/orchestration/provider_pipes.rs -text
 
 # Authenticated negative recovery graphs; preserve compressed fixture bytes.
 crates/kinewright-project/tests/fixtures/te15-b2b/** -text
+
+# The interchange goldens include a hash of the authored source bytes.
+crates/kinewright-interchange/tests/fixtures/** -text

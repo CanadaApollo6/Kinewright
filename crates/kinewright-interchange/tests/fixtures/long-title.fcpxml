@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.13">
+  <resources>
+    <format id="fmt" frameDuration="1/25s" width="1920" height="1080"/>
+    <asset id="a" name="a" format="fmt" start="0s" duration="180s" ><media-rep kind="original-media" src="file:///media/a.mov"/></asset><asset id="b" name="b" format="fmt" start="0s" duration="180s" ><media-rep kind="original-media" src="file:///media/b.mov"/></asset>
+  </resources>
+  <library><event name="Cuts"><project name="long-title">
+    <sequence format="fmt" >
+      <spine>
+        <title offset="0s" duration="1s" name="Long"><text><text-style>éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé</text-style></text></title>
+      </spine>
+    </sequence>
+  </project></event></library>
+</fcpxml>

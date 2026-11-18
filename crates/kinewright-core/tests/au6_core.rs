@@ -99,6 +99,7 @@ fn fps(numerator: u32) -> Rational {
 
 fn asset(id: AssetId, kind: MediaKind, rate: u32, frames: i64) -> MediaAsset {
     MediaAsset {
+        remote_locator: None,
         id,
         path: PathBuf::from(format!("au6-asset-{}", id.0)),
         name: format!("au6 asset {}", id.0),
@@ -158,6 +159,7 @@ fn base_document(scenario: Au6Scenario) -> Document {
         .map(|track| Track {
             id: track.track,
             kind: track.kind,
+            name: None,
             sync_lock: track.sync_lock,
             clips: spec
                 .clips

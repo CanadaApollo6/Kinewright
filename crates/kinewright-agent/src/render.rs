@@ -1184,12 +1184,14 @@ mod tests {
     fn fixture() -> Document {
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             lut_assets: Vec::new(),
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![
                     Clip {
@@ -1244,6 +1246,7 @@ mod tests {
                 ],
             }],
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(4),
                 path: PathBuf::from("fixtures/interview.mp4"),
                 name: "interview.mp4".to_owned(),
@@ -1872,6 +1875,7 @@ assets:
         document.tracks.push(Track {
             id: TrackId(8),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: false,
             clips: vec![Clip {
                 enabled: true,
@@ -1904,6 +1908,7 @@ assets:
         document.tracks.push(Track {
             id: TrackId(9),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: false,
             clips: vec![Clip {
                 enabled: true,
@@ -2035,6 +2040,7 @@ assets:
         document.tracks.push(Track {
             id: TrackId(8),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: false,
             clips: vec![Clip {
                 enabled: true,
@@ -2083,6 +2089,7 @@ assets:
         document.tracks.push(Track {
             id: TrackId(8),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: false,
             clips: vec![Clip {
                 enabled: true,

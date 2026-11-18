@@ -23,6 +23,7 @@ use crate::{
     app::KinewrightApp,
     color_wheel_widget::{self, ColorWheelState, color_wheel},
     curve_editor_widget::{self, curve_editor},
+    display_text::{DETAIL_CHARS, ROW_CHARS, copyable_label, display_text},
     matte_overlay_ui::{MatteHit, MatteTarget},
     media_workflow::{paint_source_status, source_display_state},
     theme::{self, color, size, space, type_size},
@@ -1189,7 +1190,18 @@ impl KinewrightApp {
         ui.label(egui::RichText::new(&asset.name).font(theme::semibold(type_size::BODY)));
         ui.colored_label(color::TEXT_MUTED, format!("{:?}", asset.kind));
         ui.add_space(space::ONE);
-        data_row(ui, "Path", &asset.path.display().to_string());
+        let location = asset.display_location();
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(color::TEXT_MUTED, "Path");
+            copyable_label(
+                ui,
+                egui::RichText::new(display_text(&[&location], ROW_CHARS)).monospace(),
+                &location,
+            )
+            .on_hover_ui(|ui| {
+                ui.monospace(display_text(&[&location], DETAIL_CHARS));
+            });
+        });
         let status = self.media_status_for_asset(&asset);
         let source_state = source_display_state(status.as_ref());
         ui.horizontal(|ui| {
@@ -2048,9 +2060,12 @@ fn lut_node_section(
             Some(asset) => {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(egui::RichText::new(&asset.title).strong());
-                    ui.colored_label(
-                        color::TEXT_MUTED,
-                        format!("{}³ · {}", asset.size, provenance_label(asset)),
+                    let provenance = format!("{}³ · {}", asset.size, provenance_label(asset));
+                    let text = display_text(&[&provenance], ROW_CHARS);
+                    copyable_label(
+                        ui,
+                        egui::RichText::new(text).color(color::TEXT_MUTED),
+                        &provenance,
                     );
                     let (chip_text, chip_color) =
                         availability_chip(availability.flatten().map(|status| status.kind));
@@ -2315,10 +2330,20 @@ fn lut_recovery_banner(
         ),
     );
     if let Some(path) = &status.path {
-        ui.colored_label(color::TEXT_MUTED, format!("Expected at {}", path.display()));
+        let path = path.to_string_lossy();
+        copyable_label(
+            ui,
+            egui::RichText::new(display_text(&["Expected at ", &path], ROW_CHARS))
+                .color(color::TEXT_MUTED),
+            &path,
+        );
     }
     if let Some(reason) = &status.reason {
-        ui.colored_label(color::TEXT_MUTED, reason);
+        copyable_label(
+            ui,
+            egui::RichText::new(display_text(&[reason], ROW_CHARS)).color(color::TEXT_MUTED),
+            reason,
+        );
     }
     ui.horizontal_wrapped(|ui| {
         let locate = ui.add_enabled(looks.has_store(), egui::Button::new("Locate file…").small());
@@ -6017,6 +6042,122 @@ mod tests {
     use crate::{color_wheel_widget::ColorWheelResponse, curve_editor_widget::CurveEditorResponse};
 
     #[test]
+    fn ix1_inspector_path_bounds_the_written_locator_before_layout() {
+        use crate::app::in1_tests::{in1_harness, in1_shutdown};
+        use crate::ix1_tests::{
+            assert_locator_layout, assert_locator_tooltip, click_text, hostile_session_locator,
+            layout_text_position, prepare_edit, write_edit,
+        };
+        use kinewright_media::test_support::TempDirectory;
+        use kinewright_project::interchange::commit;
+
+        let directory = TempDirectory::new("ix1-inspector-path");
+        let path = directory.path("edit.otio");
+        let locator = hostile_session_locator();
+        write_edit(&path, &locator);
+        let prepared = prepare_edit(&path, Arc::new(kinewright_core::RefusedMedia));
+        let document = commit(prepared, |_, document, _| Ok::<_, ()>(document)).unwrap();
+        let clip = document.tracks[0].clips[0].clone();
+        let (mut app, _engine) = in1_harness(document);
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut draw = |ui: &mut egui::Ui| app.media_clip_inspector(ui, &clip);
+        let output = ctx.run_ui(egui::RawInput::default(), &mut draw);
+        assert_locator_layout(&output, 160);
+        let at = layout_text_position(&output, |text| text.contains(r"\u{202e}tail"));
+        assert_locator_tooltip(&ctx, at, &mut draw);
+
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), &mut draw);
+        let _ = click_text(&ctx, at, egui::PointerButton::Secondary, &mut draw);
+        let menu = ctx.run_ui(egui::RawInput::default(), &mut draw);
+        let copy = layout_text_position(&menu, |text| text == "Copy full text");
+        let copied = click_text(&ctx, copy, egui::PointerButton::Primary, &mut draw);
+        assert!(
+            copied.platform_output.commands.iter().any(|command| {
+                matches!(command, egui::OutputCommand::CopyText(text) if text == &locator)
+            }),
+            "the clipboard received the full original locator"
+        );
+        assert_eq!(
+            app.focused()
+                .document
+                .asset(clip.asset)
+                .unwrap()
+                .display_location(),
+            locator
+        );
+
+        let local = locator.strip_prefix("file://unapproved.invalid/").unwrap();
+        let asset = &mut Arc::make_mut(&mut app.focused_mut().document).media_pool[0];
+        asset.remote_locator = None;
+        asset.path = PathBuf::from(local);
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.media_clip_inspector(ui, &clip);
+        });
+        assert_locator_layout(&output, 160);
+        in1_shutdown(&mut app);
+    }
+
+    #[test]
+    fn ix1_lut_inspector_bounds_source_provenance_and_recovery_paths() {
+        let locator = crate::ix1_tests::hostile_locator();
+        let mut asset = BuiltinLook::Warm.to_lut_asset(LutAssetId(1));
+        asset.source = LutAssetSource::Imported {
+            source_path: locator.clone(),
+        };
+        let effect = lut_effect(1, "creative_look", 1, None);
+        let clip = look_clip(vec![effect.clone()]);
+        let document = look_document(vec![effect.clone()], vec![asset]);
+        let availability = BTreeMap::from([(
+            LutAssetId(1),
+            LutAvailabilityStatus {
+                kind: LutAvailabilityKind::Unreadable,
+                observed_sha256: None,
+                reason: Some(format!("Could not read {locator}")),
+                path: Some(PathBuf::from(locator)),
+            },
+        )]);
+        let context = LookInspectorContext {
+            document: &document,
+            availability: &availability,
+            qc_clipping: &crate::color_qc_ui::ColorQcNodeClipping::default(),
+            store_unavailable: None,
+        };
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            lut_node_section(
+                ui,
+                &clip,
+                &effect,
+                ColorNodeKind::CreativeLook,
+                1,
+                &context,
+                &mut InspectorEdits::default(),
+            );
+        });
+        let painted = crate::theme::painted_text(&output);
+        let provenance_prefix = format!("{}³ · ", document.lut_assets[0].size);
+        for prefix in [
+            provenance_prefix.as_str(),
+            "Expected at ",
+            "Could not read ",
+        ] {
+            let row = painted
+                .iter()
+                .find(|text| text.starts_with(prefix))
+                .unwrap_or_else(|| panic!("missing {prefix}"));
+            assert!(row.chars().count() <= 160, "{prefix} exceeds the row limit");
+            assert!(row.contains(r"\u{202e}tail") && row.contains('…'));
+        }
+        crate::ix1_tests::assert_locator_layout(&output, 160);
+    }
+
+    #[test]
     fn converted_look_effect_carries_enabled_and_curve() {
         let curve = AutomationCurve {
             keyframes: vec![Keyframe {
@@ -6063,6 +6204,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -6553,6 +6695,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![freeze],
             }],
@@ -6577,6 +6720,7 @@ mod tests {
         let document = Document {
             media_pool: vec![
                 MediaAsset {
+                    remote_locator: None,
                     id: AssetId(1),
                     path: PathBuf::from("picture.mov"),
                     name: "Picture".to_owned(),
@@ -6589,6 +6733,7 @@ mod tests {
                     assumed_from: None,
                 },
                 MediaAsset {
+                    remote_locator: None,
                     id: AssetId(2),
                     path: PathBuf::from("sound.wav"),
                     name: "Sound".to_owned(),
@@ -6605,12 +6750,14 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![media_clip(ClipId(10), AssetId(1), link)],
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![media_clip(ClipId(11), AssetId(2), link)],
                 },
@@ -6643,6 +6790,7 @@ mod tests {
     fn keyed_enable_header_toggle_auto_keys_at_the_clamped_playhead() {
         fn asset(id: u64, name: &str, kind: MediaKind) -> MediaAsset {
             MediaAsset {
+                remote_locator: None,
                 id: AssetId(id),
                 path: PathBuf::from(name),
                 name: name.to_owned(),
@@ -6675,12 +6823,14 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![keyed],
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![media_clip(ClipId(11), AssetId(2), link)],
                 },
@@ -6762,6 +6912,7 @@ mod tests {
     fn stills_offer_no_audio_target() {
         fn asset(id: u64, name: &str, kind: MediaKind) -> MediaAsset {
             MediaAsset {
+                remote_locator: None,
                 id: AssetId(id),
                 path: PathBuf::from(name),
                 name: name.to_owned(),
@@ -6791,12 +6942,14 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![freeze(10, link), freeze(11, link)],
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![media_clip(ClipId(12), AssetId(2), None)],
                 },
@@ -6885,12 +7038,14 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![media_clip(ClipId(10), AssetId(1), None)],
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![media_clip(ClipId(11), AssetId(1), None)],
                 },
@@ -6917,6 +7072,7 @@ mod tests {
     fn still_fit_predicate_is_freeze_over_image_only() {
         fn asset(id: u64, kind: MediaKind) -> MediaAsset {
             MediaAsset {
+                remote_locator: None,
                 id: AssetId(id),
                 path: PathBuf::from("a"),
                 name: "a".to_owned(),
@@ -6968,6 +7124,7 @@ mod tests {
         });
         let document = Document {
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: PathBuf::from("picture.mov"),
                 name: "Picture".to_owned(),
@@ -6982,6 +7139,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![keyed],
             }],
@@ -7949,6 +8107,7 @@ mod tests {
         }];
         Document {
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: PathBuf::from("picture.mov"),
                 name: "Picture".to_owned(),
@@ -7963,6 +8122,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![clip],
             }],
@@ -10070,6 +10230,7 @@ mod tests {
         for (index, clip) in spec.clips.iter().enumerate() {
             let asset = AssetId(u64::try_from(index).expect("a CC7 clip index fits") + 1);
             media_pool.push(MediaAsset {
+                remote_locator: None,
                 id: asset,
                 path: PathBuf::from(format!("cc7-{}-{index}.mkv", spec.id)),
                 name: format!("{} {index}", spec.title),
@@ -10107,6 +10268,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips,
             }],
@@ -11546,6 +11708,7 @@ mod tests {
         linked.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![partner],
         });
@@ -12481,6 +12644,7 @@ mod tests {
     fn header_document(clip: Clip) -> Document {
         Document {
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: PathBuf::from("picture.mov"),
                 name: "Picture".to_owned(),
@@ -12495,6 +12659,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![clip],
             }],
@@ -12645,6 +12810,7 @@ mod tests {
     fn plan_driver_document(effects: Vec<Effect>) -> Document {
         Document {
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: "f.mp4".into(),
                 name: "f".into(),
@@ -12659,6 +12825,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -13115,6 +13282,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![partner],
         });
@@ -13427,6 +13595,7 @@ pub(crate) mod mo2_parity {
     pub(super) fn mo2_document(clip: Clip) -> Document {
         let document = Document {
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: PathBuf::from("picture.mov"),
                 name: "Picture".to_owned(),
@@ -13441,6 +13610,7 @@ pub(crate) mod mo2_parity {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![clip],
             }],

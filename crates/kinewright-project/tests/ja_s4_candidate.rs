@@ -38,6 +38,7 @@ fn run_case(drop_ack: bool) {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],
@@ -370,6 +371,7 @@ fn run_manual_refusal(fault: &'static str, _landed: bool, earlier_refusal: bool)
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],
@@ -469,6 +471,7 @@ fn fu1_definite_candidate_refusal_releases_the_frozen_cut() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],

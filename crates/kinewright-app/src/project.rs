@@ -1414,12 +1414,14 @@ mod tests {
                 Track {
                     id: TrackId(7),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
                 Track {
                     id: TrackId(3),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
@@ -1460,17 +1462,20 @@ mod tests {
                 Track {
                     id: TrackId(7),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
                 Track {
                     id: TrackId(3),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
             ],
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: "shot.mov".into(),
                 name: "Shot".to_owned(),
@@ -1573,10 +1578,12 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             }],
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: "shot.mov".into(),
                 name: "Shot".to_owned(),
@@ -2169,10 +2176,12 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips,
             }],
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: "synthetic.mov".into(),
                 name: "Synthetic".to_owned(),

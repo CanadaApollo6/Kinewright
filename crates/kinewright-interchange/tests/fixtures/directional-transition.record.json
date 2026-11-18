@@ -1,0 +1,95 @@
+{
+  "format": "otio",
+  "format_version": "Timeline.1",
+  "source_name": "directional-transition.otio",
+  "source_sha256": "f4f884a67fbec1144f8b26c447b630679783cfae28e83e7110b6b5b2402a4b1e",
+  "start_offset_frames": 0,
+  "items": 3,
+  "exact": 2,
+  "approximated": 1,
+  "dropped": 0,
+  "media": {
+    "assets": 2,
+    "online": 0,
+    "offline": 2,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 3
+    }
+  ],
+  "rows": [
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 2,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "transition_lane",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/1",
+          "frame": 24
+        }
+      ]
+    },
+    {
+      "code": "transition_type_mapped",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [
+        "Wipe Left"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/1",
+          "frame": 24
+        }
+      ]
+    },
+    {
+      "code": "clip_names_dropped",
+      "fidelity": "dropped",
+      "count": 2,
+      "names": [
+        "CutA",
+        "CutB"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0,
+          "clip": 5
+        },
+        {
+          "source": "/tracks/children/0/children/2",
+          "frame": 24,
+          "clip": 6
+        }
+      ]
+    },
+    {
+      "code": "resolution_inferred",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    }
+  ],
+  "omitted_codes": []
+}

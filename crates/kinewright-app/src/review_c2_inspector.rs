@@ -47,6 +47,7 @@ fn clip(id: u64, start: i64, source: std::ops::Range<i64>, effects: Vec<Effect>)
 
 fn video_asset() -> MediaAsset {
     MediaAsset {
+        remote_locator: None,
         id: AssetId(1),
         path: "fixture.mp4".into(),
         name: "fixture".into(),
@@ -68,11 +69,13 @@ fn document(clips: Vec<Clip>) -> Document {
         .unwrap_or(0);
     let mut document = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips,
         }],
@@ -592,6 +595,7 @@ fn rc2_value_edit_on_a_kept_outside_key_keeps_its_frame() {
 fn still_doc(resolution: (u32, u32)) -> (Document, MediaAsset) {
     let mut doc = document(Vec::new());
     let still = MediaAsset {
+        remote_locator: None,
         id: AssetId(9),
         path: "portrait.png".into(),
         name: "portrait.png".into(),

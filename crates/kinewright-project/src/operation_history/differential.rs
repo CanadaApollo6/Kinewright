@@ -291,6 +291,7 @@ fn stream(
         vec![
             Command::DoBatch(vec![Operation::AddTrack {
                 track: kinewright_core::Track {
+                    name: None,
                     id: TrackId(82),
                     kind: kinewright_core::TrackKind::Video,
                     sync_lock: false,
@@ -562,6 +563,7 @@ fn preapproval_folded_snapshot_differential(totals: &mut Totals) {
     .unwrap();
     let c = Command::DoBatch(vec![Operation::AddTrack {
         track: kinewright_core::Track {
+            name: None,
             id: TrackId(82),
             kind: kinewright_core::TrackKind::Video,
             sync_lock: false,

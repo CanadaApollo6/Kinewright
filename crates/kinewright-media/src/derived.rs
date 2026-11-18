@@ -1998,6 +1998,7 @@ mod tests {
 
     fn fixture_document() -> Document {
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("fixture.mp4"),
             name: "fixture".to_owned(),
@@ -2017,6 +2018,7 @@ mod tests {
         .unwrap();
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
@@ -2024,6 +2026,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,

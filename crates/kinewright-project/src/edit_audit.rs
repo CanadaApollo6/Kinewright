@@ -592,6 +592,7 @@ mod compact_position_tests {
             Command::Redo,
             Command::Do(Operation::AddTrack {
                 track: Track {
+                    name: None,
                     id: TrackId(1),
                     kind: TrackKind::Video,
                     sync_lock: false,

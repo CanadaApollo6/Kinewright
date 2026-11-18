@@ -48,6 +48,7 @@ fn check(case: Case) {
         ..Document::default()
     };
     document.media_pool.push(MediaAsset {
+        remote_locator: None,
         id: AssetId(1),
         path: source,
         name: "clock markers".into(),
@@ -86,6 +87,7 @@ fn check(case: Case) {
         (case.source, TimeCode::ZERO)
     };
     document.tracks.push(Track {
+        name: None,
         id: TrackId(1),
         kind: TrackKind::Audio,
         sync_lock: true,

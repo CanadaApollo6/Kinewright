@@ -408,6 +408,8 @@ pub(crate) struct KinewrightApp {
     /// another edit before the original request resolves fail-closed.
     pub(crate) pending_source_edit: Option<crate::media_workflow::PendingSourceEdit>,
     pub(crate) pending_legacy_relink: Option<crate::media_workflow::PendingLegacyRelink>,
+    pub(crate) interchange_dialog: Option<crate::interchange_ui::ImportDialog>,
+    import_report_open: bool,
     /// MO1 R25: the copy-attributes source clip, until the next copy.
     pub(crate) clip_attributes_clipboard: Option<ClipId>,
     /// MO1 R25: the open plan-a-move dialog, if any.
@@ -714,6 +716,8 @@ impl KinewrightApp {
             media_statuses: crate::media_workflow::MediaStatusStore::default(),
             pending_source_edit: None,
             pending_legacy_relink: None,
+            interchange_dialog: None,
+            import_report_open: false,
             clip_attributes_clipboard: None,
             motion_plan_dialog: None,
             solo_dialog: None,
@@ -850,7 +854,7 @@ impl KinewrightApp {
                 .media_pool
                 .iter()
                 .filter(|asset| !asset.path.is_file())
-                .map(|asset| format!("{} ({})", asset.name, asset.path.display()))
+                .map(|asset| format!("{} ({})", asset.name, asset.display_location()))
                 .collect();
             if missing.is_empty() {
                 app.status = if screenshotting {
@@ -1894,17 +1898,102 @@ impl KinewrightApp {
         self.lut_publisher.set_lut_library(&library);
     }
 
-    fn choose_project(&mut self) {
+    fn choose_project(&mut self, ctx: &egui::Context) {
         if !self.ja1_destination_change() {
             return;
         }
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Kinewright project", &["kinewright", "json"])
+            .add_filter(
+                crate::interchange_ui::OPEN_FILTER.0,
+                crate::interchange_ui::OPEN_FILTER.1,
+            )
             .pick_file()
         else {
             return;
         };
-        self.open_project(&path);
+        match crate::interchange_ui::classify_open_path(&path) {
+            crate::interchange_ui::OpenPath::Project => self.open_project(&path),
+            crate::interchange_ui::OpenPath::Timeline => {
+                self.open_interchange(path, ctx);
+            }
+        }
+    }
+
+    pub(crate) fn open_interchange(&mut self, path: PathBuf, ctx: &egui::Context) {
+        if self.interchange_dialog.is_some() || !self.ja1_destination_change() {
+            return;
+        }
+        let admission = kinewright_project::bundle::BundleWriteAdmission::new_document();
+        let Some(grant) = admission.legacy_media() else {
+            self.note_label(
+                LabelIncident::Project,
+                IncidentSubject::Project,
+                "Could not open timeline: local media access is unavailable.",
+            );
+            return;
+        };
+        let analysis = self
+            .lut_publisher
+            .legacy_media(grant, Arc::new(Document::default()));
+        self.interchange_dialog = Some(crate::interchange_ui::ImportDialog::new(
+            path, analysis, ctx,
+        ));
+    }
+
+    fn show_interchange(&mut self, ctx: &egui::Context) {
+        use crate::display_text::{ROW_CHARS, display_text};
+        use crate::interchange_ui::{ImportAction, import_status, show_report};
+        use kinewright_project::interchange::{CommitImportError, commit};
+        if let Some(dialog) = &mut self.interchange_dialog {
+            match dialog.show(ctx) {
+                ImportAction::Wait => {}
+                ImportAction::Cancel => self.interchange_dialog = None,
+                ImportAction::Open(prepared) => {
+                    self.interchange_dialog = None;
+                    let status = import_status(prepared.name(), prepared.record());
+                    match commit(*prepared, |name, document, admission| {
+                        self.create_project_session(
+                            name,
+                            document,
+                            admission,
+                            None,
+                            &SidecarMode::None,
+                        )
+                    }) {
+                        Ok(session) => {
+                            self.projects.push(session);
+                            self.focus_project(self.projects.len() - 1);
+                            self.status = status;
+                        }
+                        Err(CommitImportError::Cancelled) => {
+                            self.status = "Import cancelled".into();
+                        }
+                        Err(CommitImportError::Session(error)) => self.note_label(
+                            LabelIncident::Project,
+                            IncidentSubject::Project,
+                            display_text(&["Could not open timeline: ", &error], ROW_CHARS),
+                        ),
+                    }
+                }
+            }
+        }
+        if self.import_report_open && show_report(ctx, &self.focused().document) {
+            self.import_report_open = false;
+        }
+    }
+
+    pub(crate) fn import_report_menu_item(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .add_enabled(
+                !self.focused().document.imported_from.is_empty(),
+                egui::Button::new("Import report"),
+            )
+            .clicked()
+        {
+            self.import_report_open = true;
+            ui.close();
+        }
     }
 
     pub(crate) fn new_project(&mut self) {
@@ -2030,7 +2119,7 @@ impl KinewrightApp {
             .media_pool
             .iter()
             .filter(|asset| !asset.path.is_file())
-            .map(|asset| format!("{} ({})", asset.name, asset.path.display()))
+            .map(|asset| format!("{} ({})", asset.name, asset.display_location()))
             .collect();
         let fallback = format!("Project {}", self.next_project_id);
         let name = project_name(Some(path), &fallback);
@@ -4146,7 +4235,7 @@ impl KinewrightApp {
             }
             if ui.button("Open…").clicked() {
                 ui.close();
-                self.choose_project();
+                self.choose_project(ui.ctx());
             }
             if ui.button("Studio recovery and rescue…").clicked() {
                 ui.close();
@@ -4348,8 +4437,10 @@ impl eframe::App for KinewrightApp {
             return;
         }
         self.poll_background(ui.ctx());
-        self.keyboard_shortcuts(ui.ctx());
-        self.import_dropped_files(ui.ctx());
+        if self.interchange_dialog.is_none() && !self.import_report_open {
+            self.keyboard_shortcuts(ui.ctx());
+            self.import_dropped_files(ui.ctx());
+        }
         self.show_recovery_dialogs(ui.ctx());
 
         self.sync_studio_selection();
@@ -4375,6 +4466,7 @@ impl eframe::App for KinewrightApp {
         self.show_color_qc_window(ui.ctx());
         self.look_browser(ui.ctx());
         self.show_legacy_relink_confirmation(ui.ctx());
+        self.show_interchange(ui.ctx());
         self.show_help(ui.ctx());
         self.show_error_log(ui.ctx());
         // `IN1b` §5.5 rule 31: the badge's own panel, drawn beside the audit
@@ -4435,6 +4527,7 @@ impl KinewrightApp {
                         self.focused_mut().studio.mode = crate::studio::Mode::Studio;
                     }
                     self.file_menu(ui);
+                    ui.menu_button("Project", |ui| self.import_report_menu_item(ui));
                     self.view_menu(ui);
                     self.look_menu(ui);
                     if ui
@@ -4509,7 +4602,15 @@ impl KinewrightApp {
                             self.show_thread_rail = !self.show_thread_rail;
                         }
                         ui.separator();
-                        ui.colored_label(color::TEXT_MUTED, &self.status);
+                        let text = crate::display_text::display_text(
+                            &[&self.status],
+                            crate::display_text::ROW_CHARS,
+                        );
+                        crate::display_text::copyable_label(
+                            ui,
+                            egui::RichText::new(text).color(color::TEXT_MUTED),
+                            &self.status,
+                        );
                     });
                 });
             });
@@ -5048,6 +5149,7 @@ fn default_project_document() -> Document {
         tracks: vec![Track {
             id: DEFAULT_TRACK_ID,
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         }],
@@ -5139,6 +5241,12 @@ pub(crate) fn run() -> eframe::Result {
                 renderer: render_state.clone(),
                 picture: None,
             });
+            if std::env::var_os("KINEWRIGHT_SCREENSHOT_TO").is_some()
+                && std::env::var("KINEWRIGHT_SCREENSHOT_SHOW").as_deref() == Ok("import")
+                && let Some(path) = std::env::var_os("KINEWRIGHT_SCREENSHOT_IMPORT")
+            {
+                app.open_interchange(PathBuf::from(path), &creation_context.egui_ctx);
+            }
             if std::env::var_os("KINEWRIGHT_SCREENSHOT_TO").is_some()
                 && let Some(path) = std::env::var_os("KINEWRIGHT_SCREENSHOT_STUDIO_BUNDLE")
                 && let Err(error) = app.prepare_studio_screenshot(std::path::Path::new(&path))
@@ -6380,6 +6488,7 @@ mod tests {
         use kinewright_core::{Clip, MediaKind, MediaSourceFingerprint, Rational};
         let document = super::Document {
             media_pool: vec![super::MediaAsset {
+                remote_locator: None,
                 id: super::AssetId(1),
                 path: "f.mp4".into(),
                 name: "f".into(),
@@ -6394,6 +6503,7 @@ mod tests {
             tracks: vec![super::Track {
                 id: super::TrackId(1),
                 kind: super::TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -6494,12 +6604,14 @@ mod tests {
                 Track {
                     id: super::TrackId(1),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
                 Track {
                     id: super::TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
@@ -6564,6 +6676,7 @@ mod tests {
             tracks: vec![kinewright_core::Track {
                 id: super::TrackId(1),
                 kind: kinewright_core::TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             }],
@@ -7059,6 +7172,8 @@ pub(crate) mod in1_tests {
             media_statuses: crate::media_workflow::MediaStatusStore::default(),
             pending_source_edit: None,
             pending_legacy_relink: None,
+            interchange_dialog: None,
+            import_report_open: false,
             clip_attributes_clipboard: None,
             motion_plan_dialog: None,
             solo_dialog: None,
@@ -8339,6 +8454,34 @@ pub(crate) mod in1_tests {
         assert!(app.error_log_open, "and the window pops open");
         assert_eq!(app.error_log.count_with_source("Incident"), 1);
         assert_eq!(incident.subject.label(), "Bus 3");
+        in1_shutdown(&mut app);
+    }
+
+    #[test]
+    fn ix1_saved_project_missing_media_status_bounds_the_locator_before_layout() {
+        use crate::ix1_tests::{
+            assert_locator_layout, hostile_session_locator, prepare_edit, write_edit,
+        };
+        let (mut app, _engine) = in1_harness(Document::default());
+        let temporary = TempDirectory::new("ix1-open-status");
+        let source = temporary.path("edit.otio");
+        let locator = hostile_session_locator();
+        write_edit(&source, &locator);
+        let prepared = prepare_edit(&source, Arc::new(kinewright_core::RefusedMedia));
+        let document = kinewright_project::interchange::commit(prepared, |_, document, _| {
+            Ok::<_, ()>(document)
+        })
+        .unwrap();
+        let path = temporary.path("saved.kinewright");
+        std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+
+        app.open_project(&path);
+        assert!(app.status.starts_with("Opened "), "{}", app.status);
+        assert!(app.status.contains(&locator));
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| app.app_top_bar(ui));
+        assert_locator_layout(&output, 160);
         in1_shutdown(&mut app);
     }
 
@@ -9899,6 +10042,7 @@ pub(crate) mod in1_tests {
             track: Track {
                 id: TrackId(id),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             },
@@ -12054,6 +12198,7 @@ mod in2b_tests {
                     track: Track {
                         id: TrackId(81),
                         kind: TrackKind::Video,
+                        name: None,
                         sync_lock: true,
                         clips: vec![],
                     },
@@ -12245,6 +12390,8 @@ mod in2b_tests {
             media_statuses: crate::media_workflow::MediaStatusStore::default(),
             pending_source_edit: None,
             pending_legacy_relink: None,
+            interchange_dialog: None,
+            import_report_open: false,
             clip_attributes_clipboard: None,
             motion_plan_dialog: None,
             solo_dialog: None,
@@ -12769,6 +12916,7 @@ mod in2b_tests {
                 track: kinewright_core::Track {
                     id: TrackId(1),
                     kind: kinewright_core::TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
@@ -14415,6 +14563,7 @@ mod in2b_tests {
 
         let mut doc_full = Document::default();
         doc_full.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: std::path::PathBuf::from("graded.mov"),
             name: "graded.mov".to_owned(),
@@ -14560,6 +14709,7 @@ mod in2b_tests {
         // The asset, named "Interview A".
         let mut document = Document::default();
         document.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: AssetId(5),
             path: std::path::PathBuf::from("interview.mov"),
             name: "Interview A".to_owned(),
@@ -15449,6 +15599,7 @@ mod in2b_tests {
             .core
             .request(Command::Do(Operation::AddTrack {
                 track: Track {
+                    name: None,
                     id: TrackId(1),
                     kind: TrackKind::Video,
                     sync_lock: true,
@@ -15484,10 +15635,13 @@ mod in2b_tests {
 
         let temp = TempDirectory::new("in2b-h8-startup");
         let project_path = temp.path("edit.kinewright");
+        let locator = crate::ix1_tests::hostile_session_locator();
+        let local = locator.strip_prefix("file://unapproved.invalid/").unwrap();
         let mut document = Document::default();
         document.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
-            path: temp.path("nowhere.mov"),
+            path: PathBuf::from(local),
             name: "gone.mov".to_owned(),
             duration: TimeCode(30),
             fps: Rational::new(30, 1).expect("30 fps"),
@@ -15515,6 +15669,11 @@ mod in2b_tests {
             .expect("the test engine starts"),
         );
         let mut app = KinewrightApp::new(engine.clone(), Some(project_path)).unwrap();
+        assert!(app.status.contains(local));
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| app.app_top_bar(ui));
+        crate::ix1_tests::assert_locator_layout(&output, 160);
         app.route_incidents();
         {
             let log = app
@@ -16556,6 +16715,7 @@ mod in2b_tests {
         });
         // Row 11: media nowhere on disk.
         document.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: temp.path("nowhere.mov"),
             name: "gone.mov".to_owned(),
@@ -16817,6 +16977,7 @@ pub(crate) mod s3a_tests {
                 track: kinewright_core::Track {
                     id: TrackId(1),
                     kind: kinewright_core::TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![],
                 },
@@ -17379,7 +17540,7 @@ pub(crate) fn ja1_destination_witness() {
                     assert!(!app.save_project(true));
                 }
                 1 => app.open_project(&temp.path("elsewhere.kinewright")),
-                2 => app.choose_project(),
+                2 => app.choose_project(&egui::Context::default()),
                 3 => app.new_project(),
                 _ => {
                     app.status = app
@@ -17794,6 +17955,7 @@ pub(crate) fn ja_c9_bootstrap_save_witness(dirty_named: bool) {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],
@@ -18111,6 +18273,7 @@ pub(crate) fn ja_c9_manual_producer_gate_witness() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],
@@ -18177,6 +18340,7 @@ pub(crate) fn ja_c9_manual_producer_gate_witness() {
         .send_manual_command(motion_plan_apply_command(expected, vec![operation()]))
         .unwrap();
     let asset = MediaAsset {
+        remote_locator: None,
         id: AssetId(700),
         path: temp.path("deferred.wav"),
         name: "deferred".into(),
@@ -18231,6 +18395,7 @@ pub(crate) fn ja_s2h_legacy_activation_witness() {
     let temp = kinewright_media::test_support::TempDirectory::new_in(&root, "s2h-legacy");
     let path = temp.path("legacy.kinewright");
     let asset = MediaAsset {
+        remote_locator: None,
         id: AssetId(7),
         path: temp.path("source.mov"),
         name: "legacy source".into(),
@@ -18247,6 +18412,7 @@ pub(crate) fn ja_s2h_legacy_activation_witness() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],

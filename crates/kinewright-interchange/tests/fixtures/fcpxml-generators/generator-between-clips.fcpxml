@@ -1,0 +1,16 @@
+<fcpxml version="1.13">
+  <resources>
+    <format id="f" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="camera" format="f" start="0s" duration="4s" hasVideo="1">
+      <media-rep kind="original-media" src="camera.mov"/>
+    </asset>
+    <effect id="background" name="Solid Color" uid="Generators.localized/Solids.localized/Solid.motn"/>
+  </resources>
+  <library><event><project name="Generator gap">
+    <sequence format="f"><spine>
+      <asset-clip ref="camera" start="0s" duration="1s"/>
+      <video ref="background" duration="1s"/>
+      <asset-clip ref="camera" start="2s" duration="1s"/>
+    </spine></sequence>
+  </project></event></library>
+</fcpxml>

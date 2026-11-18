@@ -139,6 +139,7 @@ fn fps() -> Rational {
 fn document_with_one_clip() -> Document {
     let mut doc = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: ColorContext::default(),
@@ -146,6 +147,7 @@ fn document_with_one_clip() -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         }],
@@ -157,6 +159,7 @@ fn document_with_one_clip() -> Document {
     };
     Operation::AddAsset {
         asset: MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: std::path::PathBuf::from("asset-1.wav"),
             name: "asset-1".to_owned(),
@@ -1248,6 +1251,7 @@ fn au5_repair_reuses_the_mix_spectrum_point_spelling() {
 fn gap_corpus() -> Document {
     Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: ColorContext::default(),
@@ -1263,6 +1267,7 @@ fn gap_corpus() -> Document {
 
 fn gap_corpus_assets() -> Vec<MediaAsset> {
     let audio = MediaAsset {
+        remote_locator: None,
         id: AssetId(1),
         path: std::path::PathBuf::from("au5-part-b-gap-corpus.wav"),
         name: "corpus-audio".to_owned(),
@@ -1275,6 +1280,7 @@ fn gap_corpus_assets() -> Vec<MediaAsset> {
         assumed_from: None,
     };
     let video = MediaAsset {
+        remote_locator: None,
         id: AssetId(2),
         path: std::path::PathBuf::from("au5-part-b-gap-corpus.mp4"),
         name: "corpus-video".to_owned(),
@@ -1312,6 +1318,7 @@ fn gap_corpus_tracks() -> Vec<Track> {
         Track {
             id: TrackId(1),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![
                 media_clip(1, AssetId(1), 10, 0..10),
@@ -1322,18 +1329,21 @@ fn gap_corpus_tracks() -> Vec<Track> {
         Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         },
         Track {
             id: TrackId(3),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![media_clip(4, AssetId(1), 0, 0..30)],
         },
         Track {
             id: TrackId(4),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![
                 media_clip(5, AssetId(2), 0, 0..10),
@@ -1361,6 +1371,7 @@ fn gap_corpus_tracks() -> Vec<Track> {
         Track {
             id: TrackId(5),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![
                 media_clip(8, AssetId(9), 0, 0..10),
@@ -1698,6 +1709,7 @@ fn au5_a_fill_built_from_the_inverse_has_the_gaps_exact_duration() {
     let project_fps = Rational::new(25, 1).unwrap();
     let mut doc = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: ColorContext::default(),
@@ -1705,6 +1717,7 @@ fn au5_a_fill_built_from_the_inverse_has_the_gaps_exact_duration() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         }],
@@ -1717,6 +1730,7 @@ fn au5_a_fill_built_from_the_inverse_has_the_gaps_exact_duration() {
     assert_eq!(Rational::default(), source_fps);
     Operation::AddAsset {
         asset: MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: std::path::PathBuf::from("au5-part-b-fill.wav"),
             name: "room-tone".to_owned(),

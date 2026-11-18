@@ -2448,11 +2448,13 @@ fn cc7_timeline_document(assets: Vec<MediaAsset>) -> Result<Document, EvalError>
     }
     Ok(Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips,
         }],
@@ -2891,6 +2893,7 @@ fn au6_fixture_from_sources(
         .map(|track| Track {
             id: track.track,
             kind: track.kind,
+            name: None,
             sync_lock: track.sync_lock,
             clips: spec
                 .clips
@@ -3888,6 +3891,7 @@ fn fixture_real_event_multicam() -> Result<PreparedFixture, EvalError> {
         .collect::<Result<Vec<_>, EvalError>>()?;
     let document = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: MediaCatalog {
             sync_groups: vec![SyncGroup {
                 id: SyncGroupId(1),
@@ -3903,6 +3907,7 @@ fn fixture_real_event_multicam() -> Result<PreparedFixture, EvalError> {
             Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -3927,6 +3932,7 @@ fn fixture_real_event_multicam() -> Result<PreparedFixture, EvalError> {
             Track {
                 id: TrackId(2),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -4284,6 +4290,7 @@ fn fixture_real_music_montage() -> Result<PreparedFixture, EvalError> {
     }
     let document = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -4292,12 +4299,14 @@ fn fixture_real_music_montage() -> Result<PreparedFixture, EvalError> {
             Track {
                 id: TrackId(truth.video_track_id),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             },
             Track {
                 id: TrackId(truth.audio_track_id),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             },
@@ -4862,6 +4871,7 @@ fn single_asset_document(asset: MediaAsset) -> Document {
 fn empty_timeline_document(assets: Vec<MediaAsset>) -> Document {
     Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -4869,6 +4879,7 @@ fn empty_timeline_document(assets: Vec<MediaAsset>) -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         }],
@@ -4917,11 +4928,13 @@ fn timeline_document(
     }
     Ok(Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: timeline_clips,
         }],
@@ -5294,6 +5307,7 @@ mod tests {
     #[test]
     fn clean_selectable_frames_do_not_count_excluded_intervals() {
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("fixture.mp4"),
             name: "fixture".to_owned(),
@@ -7662,6 +7676,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, clip)| MediaAsset {
+                remote_locator: None,
                 id: AssetId(u64::try_from(index + 1).unwrap_or(u64::MAX)),
                 path: PathBuf::from(format!("{}.mkv", cc7_source_token(clip.source))),
                 name: cc7_source_token(clip.source).to_owned(),
@@ -8447,6 +8462,7 @@ mod tests {
             .tracks
             .iter()
             .map(|track| MediaAsset {
+                remote_locator: None,
                 id: AssetId(track.track.0),
                 path: PathBuf::from(format!("au6-{}.wav", track.track.0)),
                 name: format!("au6-{}", track.track.0),
@@ -8468,6 +8484,7 @@ mod tests {
             .map(|track| Track {
                 id: track.track,
                 kind: track.kind,
+                name: None,
                 sync_lock: track.sync_lock,
                 clips: spec
                     .clips

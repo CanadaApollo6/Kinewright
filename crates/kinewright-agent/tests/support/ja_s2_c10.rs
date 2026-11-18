@@ -20,8 +20,13 @@ pub(super) fn restart_case(
     let path = root.path("manual.kinewright");
     let gui = Core::for_test(Document {
         duration: kinewright_core::TimeCode(90),
-        tracks: vec![Track { id: TrackId(1), kind: TrackKind::Video, sync_lock: true,
-            clips: vec![serde_json::from_value(json!({"id":1,"asset":0,"source_range":{"start":0,"end":90},"content":{"solid":{"r":20,"g":40,"b":60}},"timeline_start":0,"effects":[],"transition_in":null})).unwrap()] }],
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            name: None,
+            sync_lock: true,
+            clips: vec![serde_json::from_value(json!({"id":1,"asset":0,"source_range":{"start":0,"end":90},"content":{"solid":{"r":20,"g":40,"b":60}},"timeline_start":0,"effects":[],"transition_in":null})).unwrap()],
+        }],
         ..Document::default()
     }).unwrap();
     let mut source = Ja1EditingSession::new(root.root(), &gui, StorageLimits::default()).unwrap();
@@ -347,6 +352,7 @@ pub(super) fn prefix_and_pause_cases(case_filter: Option<usize>) {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             }],

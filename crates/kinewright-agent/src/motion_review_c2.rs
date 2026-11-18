@@ -11,11 +11,13 @@ use super::*;
 fn doc(duration: i64, effects: Vec<Effect>) -> Document {
     Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -37,6 +39,7 @@ fn doc(duration: i64, effects: Vec<Effect>) -> Document {
             }],
         }],
         media_pool: vec![MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: "f.mp4".into(),
             name: "f".into(),

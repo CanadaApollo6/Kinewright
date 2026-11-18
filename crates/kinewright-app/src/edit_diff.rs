@@ -227,6 +227,7 @@ mod tests {
     fn fixture() -> Document {
         let fps = Rational::new(30, 1).unwrap();
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("diff.mp4"),
             name: "diff.mp4".to_owned(),
@@ -261,12 +262,14 @@ mod tests {
             .collect();
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips,
             }],

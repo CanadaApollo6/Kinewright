@@ -63,6 +63,7 @@ fn core(asset: MediaAsset, pool: &kinewright_project::operation_history::History
     doc.tracks.push(Track {
         id: TrackId(1),
         kind: TrackKind::Video,
+        name: None,
         sync_lock: true,
         clips: vec![],
     });

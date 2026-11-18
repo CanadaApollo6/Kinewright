@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.8">
+  <resources>
+    <format id="fmt" frameDuration="1/25s" width="1920" height="1080"/>
+    <asset id="a" name="a" format="fmt" start="0s" duration="180s"  src="file:///media/a.mov"/>
+  </resources>
+  <library><event name="Cuts"><project name="legacy-18">
+    <sequence format="fmt" >
+      <spine>
+        <asset-clip ref="a" duration="1s"/>
+      </spine>
+    </sequence>
+  </project></event></library>
+</fcpxml>

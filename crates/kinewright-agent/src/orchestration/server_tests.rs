@@ -131,12 +131,14 @@ fn s4_role_scope_closure() {
             Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             },
             Track {
                 id: TrackId(2),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: false,
                 clips: vec![],
             },
@@ -187,7 +189,13 @@ fn s4_role_scope_closure() {
     );
     assert_eq!(result.is_error, Some(false), "{result:?}");
     assert_eq!(
-        core.export_history().unwrap().history().document.audio_mix.tracks[0].gain_tenth_db,
+        core.export_history()
+            .unwrap()
+            .history()
+            .document
+            .audio_mix
+            .tracks[0]
+            .gain_tenth_db,
         -60
     );
     let before = core.export_history().unwrap();
@@ -344,6 +352,7 @@ fn s4_drain_and_durable_base() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],
@@ -376,7 +385,11 @@ fn s4_drain_and_durable_base() {
         .issue_manual_lease("person".into(), "s4-manual".into())
         .unwrap();
     let permit = owner
-        .bind_manual_producer(lease, owner.manual_input_context().unwrap(), std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)))
+        .bind_manual_producer(
+            lease,
+            owner.manual_input_context().unwrap(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        )
         .unwrap();
     permit
         .request(Command::Do(Operation::SetTrackSyncLock {
@@ -495,7 +508,10 @@ fn s4_drain_and_durable_base() {
     );
     assert!(matches!(
         task.core().request(Command::Redo),
-        Err(kinewright_project::operation_actor::Refusal { error: kinewright_project::operation_actor::Error::MutationRefused(_), .. })
+        Err(kinewright_project::operation_actor::Refusal {
+            error: kinewright_project::operation_actor::Error::MutationRefused(_),
+            ..
+        })
     ));
     assert_eq!(core.export_history().unwrap(), manual);
     assert_eq!(permit.pending().unwrap(), manual_pending);
@@ -504,7 +520,13 @@ fn s4_drain_and_durable_base() {
     drop(task);
     drop(handler);
     drop(owner);
-    let mut owner = Ja1EditingSession::open(&path, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
+    let mut owner = Ja1EditingSession::open(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     let candidate = owner
         .reopen_registered_candidate(candidate.branch_id().clone(), &candidate_base)
         .unwrap();
@@ -520,7 +542,12 @@ fn s4_drain_and_durable_base() {
     )
     .unwrap();
     assert_eq!(
-        reopened.freeze_fixture(&mut owner).unwrap().delta(&owner).unwrap().len(),
+        reopened
+            .freeze_fixture(&mut owner)
+            .unwrap()
+            .delta(&owner)
+            .unwrap()
+            .len(),
         1
     );
     let mut wrong = base.clone();
@@ -614,12 +641,14 @@ fn s4_editor_result_to_candidate() {
             Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             },
             Track {
                 id: TrackId(2),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: false,
                 clips: vec![],
             },
@@ -653,7 +682,11 @@ fn s4_editor_result_to_candidate() {
         .issue_manual_lease("person".into(), "person-private".into())
         .unwrap();
     let permit = owner
-        .bind_manual_producer(lease, owner.manual_input_context().unwrap(), std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)))
+        .bind_manual_producer(
+            lease,
+            owner.manual_input_context().unwrap(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        )
         .unwrap();
     permit
         .request(Command::Do(Operation::SetTrackSyncLock {
@@ -727,6 +760,7 @@ fn s4_solo_removal_and_director_routing() {
                 track: Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: false,
                     clips: vec![],
                 },
@@ -848,7 +882,8 @@ fn s4_solo_removal_and_director_routing() {
     assert_eq!(
         core.export_history()
             .unwrap()
-            .history().document
+            .history()
+            .document
             .clip(ClipId(1))
             .unwrap()
             .audio_gain_tenth_db,

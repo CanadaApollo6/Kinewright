@@ -32,6 +32,7 @@ mod delivery;
 pub mod dialogue;
 mod editorial;
 mod effect;
+mod import_record;
 mod incident;
 mod journal;
 mod media;
@@ -198,6 +199,11 @@ pub use effect::{
     managed_color_node_count, matte_capable, matte_parameter_names, matte_parameters,
     matte_window_parameter_names, matte_window_parameters, scale_to_frame_fit,
 };
+pub use import_record::{
+    DOCUMENT_MAX_IMPORT_RECORDS, Fidelity, IMPORT_RECORD_MAX_BYTES,
+    IMPORT_RECORD_MAX_ESTIMATED_RANGES, IMPORT_RECORD_MAX_ROWS, ImportRecord, InterchangeFormat,
+    LossBound, LossCode, LossRow, LossSite, MediaCounts, TRACK_NAME_MAX_BYTES,
+};
 pub use incident::{
     ColorQcIncident, DeliveryColorIncident, DeliveryVerificationIncident, INVESTIGATOR_ALLOWLIST,
     INVESTIGATOR_EXPLANATION_CEILING_BYTES, INVESTIGATOR_MAX_PROPOSAL_OPERATIONS, Incident,
@@ -234,9 +240,9 @@ pub use media::{
     MixLevelRequest, MixNoiseProfileRequest, MixPeaks, MixSpectrumPoint, MixSpectrumReport,
     MixSpectrumRequest, MixWindowLevelReport, MixWindowRequest, MonitorProof, MonitorProofMetadata,
     MonitorProofRenderKind, NoiseProfileReport, Playback, PlaybackState, PlaybackStats,
-    PreviewFrame, ProgressSink, RgbaImage, SceneChange, SceneStatus, SilenceSpan, SilenceStatus,
-    SourceColorRefusal, SpectrumBand, ThumbnailFrame, ThumbnailKey, TimelineBeat,
-    TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TrackLevels,
+    PreviewFrame, ProbeEvent, ProbeObserver, ProgressSink, RgbaImage, SceneChange, SceneStatus,
+    SilenceSpan, SilenceStatus, SourceColorRefusal, SpectrumBand, ThumbnailFrame, ThumbnailKey,
+    TimelineBeat, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TrackLevels,
     TranscriptStatus, TranscriptWord, VisualAssetResult, VisualRequestKind, WORKING_PROOF_ENCODING,
     WORKING_PROOF_STAGE, WaveformData, WaveformPeak, WorkingProof, WorkingProofMetadata,
     export_lut_preflight_with, export_media_preflight, matte_coverage_statistics,
@@ -249,8 +255,8 @@ pub use model::{
     LUT_ASSET_ID_MAX, LUT_SIZE_MAX, LUT_SIZE_MIN, LinkId, LutAsset, LutAssetId, LutAssetKind,
     LutAssetSource, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaBin, MediaCatalog,
     MediaKind, MediaSourceFingerprint, PROJECT_FORMAT_MISMATCH, PROJECT_FORMAT_VERSION, PanLaw,
-    ParamValue, RelinkCandidate, SolidColor, SourceSelect, StringOut, StringOutId, SyncGroup,
-    SyncGroupId, SyncGroupMember, TRACK_AUTOMATION_PARAMETERS, TRACK_MIX_GAIN_MAX,
+    ParamValue, RelinkCandidate, RemoteLocator, SolidColor, SourceSelect, StringOut, StringOutId,
+    SyncGroup, SyncGroupId, SyncGroupMember, TRACK_AUTOMATION_PARAMETERS, TRACK_MIX_GAIN_MAX,
     TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, Track, TrackId, TrackKind, TrackMix,
     Transition, chain_lookahead_milliseconds, clip_effective_fps, deserialize_format_version,
     envelope_coalesce_key, project_format_version, track_automation_coalesce_key,

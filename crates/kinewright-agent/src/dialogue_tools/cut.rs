@@ -1116,6 +1116,7 @@ mod tests {
             ..Document::default()
         };
         doc.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: kinewright_core::AssetId(1),
             path: "not-opened.wav".into(),
             name: "dialogue".into(),
@@ -1132,7 +1133,7 @@ mod tests {
         });
         // Final geometry after A backs its end from 190 to 188, then B removes
         // 190..250: a two-frame sliver survives between the two joins.
-        doc.tracks.push(Track{id:TrackId(1),kind:TrackKind::Audio,sync_lock:true,clips:serde_json::from_value(serde_json::json!([
+        doc.tracks.push(Track{ name: None,id:TrackId(1),kind:TrackKind::Audio,sync_lock:true,clips:serde_json::from_value(serde_json::json!([
             {"id":1,"asset":1,"source_range":{"start":188,"end":190},"timeline_start":65,"effects":[],"transition_in":null},
             {"id":2,"asset":1,"source_range":{"start":250,"end":400},"timeline_start":67,"effects":[],"transition_in":null}
         ])).unwrap()});

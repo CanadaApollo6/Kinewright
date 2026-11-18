@@ -106,6 +106,7 @@ mod dialogue_tool_tests {
             ..Document::default()
         };
         doc.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: "never-opened.wav".into(),
             name: "talk".into(),
@@ -122,6 +123,7 @@ mod dialogue_tool_tests {
         });
         let clip=serde_json::from_value(json!({"id":1,"asset":1,"source_range":{"start":start,"end":end},"timeline_start":0,"effects":[],"transition_in":null})).unwrap();
         doc.tracks.push(Track {
+            name: None,
             id: TrackId(1),
             kind: TrackKind::Audio,
             sync_lock: true,
@@ -863,6 +865,7 @@ mod dialogue_tool_tests {
         let mut bed = doc.tracks[0].clips[0].clone();
         bed.id = ClipId(3);
         doc.tracks.push(Track {
+            name: None,
             id: TrackId(2),
             kind: TrackKind::Audio,
             sync_lock: false,

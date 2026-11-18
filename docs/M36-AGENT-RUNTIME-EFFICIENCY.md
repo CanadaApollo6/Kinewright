@@ -144,6 +144,14 @@ served by the runtime. The M36 regression test records:
 | Served MCP runtime (2026-09-26, after the MO2 Part A fixes) | 7 | 5,660 B | 3,510 B | 998 B |
 | Internal capability registry (2026-09-26, after MO2 Part B preview_solo) | 153 | 2,002,954 B | 1,848,392 B | 129,437 B |
 | Served MCP runtime (2026-09-26, after MO2 Part B preview_solo) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-11-17, IX1 Track.name) | 153 | 2,005,164 B | 1,850,602 B | 129,437 B |
+| Internal capability registry (2026-11-17, IX1 stage 2a) | 155 | 2,006,996 B | 1,851,598 B | 129,943 B |
+| Served MCP runtime (2026-11-17, IX1 stage 2a) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-11-17, IX1 paged import report) | 155 | 2,007,094 B | 1,851,709 B | 129,930 B |
+| Served MCP runtime (2026-11-17, IX1 paged import report) | 7 | 5,660 B | 3,510 B | 998 B |
+
+Paging `get_import_report` adds 111 B to its input schema and removes 13 B from its description.
+The registry's serialized size rises by 98 B, and the served tool list is unchanged.
 
 IN1 Part A adds two capabilities, `get_incidents` and `resolve_incident`,
 reached through `invoke_capability` and served as no tool: the registry grows
@@ -530,6 +538,14 @@ cache, and meter tool definitions differently. A controlled benchmark between
 the pre-M36 revision and the current runtime is the acceptance gate for model-
 token and latency savings; Kinewright does not retain an obsolete production mode
 only to run that comparison.
+
+IX1's optional `Track.name` adds 34 B to each of 64 generated operation schemas and to
+`apply_edit_plan`, for 2,210 B of registry and schema growth. Stage 2a adds two inspectors.
+`inspect_interchange` measures 1,332 B serialized, 902 B of schema and 264 B of description.
+`get_import_report` measures 440 B serialized, 94 B of schema and 182 B of description.
+The revised `relink_media` description adds 60 B. Stage 2a grows the registry by 1,832 B
+serialized, 996 B of schema and 506 B of description. The served quad remains
+7 / 5,660 B / 3,510 B / 998 B.
 
 ## Token telemetry
 

@@ -20,6 +20,7 @@ fn setup(path: &Path) -> (Core, ProjectBundle, ObjectRef) {
     document.tracks.push(Track {
         id: TrackId(83),
         kind: TrackKind::Video,
+        name: None,
         sync_lock: true,
         clips: vec![],
     });

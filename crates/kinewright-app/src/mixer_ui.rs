@@ -1704,6 +1704,7 @@ mod tests {
 
     fn asset() -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("take.mp4"),
             name: "take.mp4".to_owned(),
@@ -1726,6 +1727,7 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![Clip {
                         enabled: true,
@@ -1749,6 +1751,7 @@ mod tests {
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
@@ -5429,6 +5432,7 @@ mod tests {
         let track = Track {
             id: AU6_A_BED_TRACK,
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         };
@@ -5469,6 +5473,7 @@ mod tests {
             .tracks
             .iter()
             .map(|track| MediaAsset {
+                remote_locator: None,
                 id: AssetId(track.track.0),
                 path: PathBuf::from(format!("au6-{}-{}.bin", spec.id, track.track.0)),
                 name: format!("{} {}", spec.id, track.track.0),
@@ -5490,6 +5495,7 @@ mod tests {
             .map(|track| Track {
                 id: track.track,
                 kind: track.kind,
+                name: None,
                 sync_lock: track.sync_lock,
                 clips: spec
                     .clips
@@ -5974,6 +5980,7 @@ mod tests {
 
         // `capture_room_tone`'s own `AddAsset`: an Action, not a builder.
         let room = MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: PathBuf::from("au6-c-room.wav"),
             name: "room".to_owned(),

@@ -251,6 +251,7 @@ pub fn single_clip_document(asset: MediaAsset) -> Document {
     let resolution = asset.resolution.unwrap_or((320, 180));
     Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -258,6 +259,7 @@ pub fn single_clip_document(asset: MediaAsset) -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,

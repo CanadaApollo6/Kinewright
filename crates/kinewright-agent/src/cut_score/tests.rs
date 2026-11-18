@@ -468,6 +468,7 @@ fn cut_score_whole_repeated_opening_and_optional_phrase_bound() {
 fn document() -> Document {
     let mut d = Document::default();
     d.media_pool.push(MediaAsset {
+        remote_locator: None,
         id: AssetId(1),
         path: "recording.wav".into(),
         name: "recording".into(),
@@ -484,6 +485,7 @@ fn document() -> Document {
     });
     let clip:Clip=serde_json::from_value(serde_json::json!({"id":1,"asset":1,"source_range":{"start":0,"end":600},"timeline_start":0,"effects":[],"transition_in":null})).unwrap();
     d.tracks.push(Track {
+        name: None,
         id: TrackId(1),
         kind: TrackKind::Audio,
         sync_lock: true,
@@ -790,6 +792,7 @@ fn cut_score_only_selected_track_mix_blocks_and_generated_content_refuses() {
     use kinewright_core::{AudioBus, AudioBusId, ClipContent, SolidColor, TrackMix};
     let mut d = document();
     d.tracks.push(Track {
+        name: None,
         id: TrackId(2),
         kind: TrackKind::Audio,
         sync_lock: true,

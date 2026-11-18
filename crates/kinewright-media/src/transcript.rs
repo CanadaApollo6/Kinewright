@@ -1194,6 +1194,7 @@ mod tests {
             source: None,
             profile_only: false,
             asset: MediaAsset {
+                remote_locator: None,
                 id: AssetId(id),
                 name: "fixture".into(),
                 path: path.to_path_buf(),
@@ -1659,6 +1660,7 @@ mod tests {
 
     fn fixture_document(source_fps: Rational) -> Document {
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("fixture.mp4"),
             name: "fixture".to_owned(),
@@ -1678,6 +1680,7 @@ mod tests {
         .unwrap();
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
@@ -1685,6 +1688,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -1761,6 +1765,7 @@ mod measurement_tests {
         let data = TempDirectory::new("dq-media-transcript-profile-root");
         let content = sha256_file(audio.path()).unwrap();
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: audio.path().into(),
             name: "measured".into(),

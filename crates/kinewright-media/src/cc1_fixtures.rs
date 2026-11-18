@@ -3221,6 +3221,7 @@ pub(crate) fn simple_document(asset: MediaAsset, resolution: (u32, u32)) -> Docu
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,

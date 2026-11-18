@@ -30,6 +30,7 @@ impl Fixture {
     fn new() -> Self {
         let mut document = Document {
             tracks: vec![Track {
+                name: None,
                 id: TrackId(1),
                 kind: TrackKind::Video,
                 sync_lock: true,

@@ -7,13 +7,17 @@ mod color_ui;
 mod color_wheel_widget;
 mod curve_editor_widget;
 mod director_readiness;
+mod display_text;
 mod edit_diff;
 mod error_ui;
 mod export_ui;
 mod icons;
 mod incident_ui;
 mod inspector_ui;
+mod interchange_ui;
 mod investigator;
+#[cfg(test)]
+mod ix1_tests;
 mod ja1_attachment;
 mod ja1_chat;
 #[cfg(test)]

@@ -15,6 +15,7 @@ fn origin() -> CreationOrigin {
 fn document() -> Document {
     Document {
         tracks: vec![Track {
+            name: None,
             id: TrackId(1),
             kind: TrackKind::Audio,
             sync_lock: false,
@@ -920,6 +921,7 @@ fn manual_input_admission_is_atomic_after_kernel_validation_and_keeps_external_l
         )
         .unwrap();
     let owned = || MediaAsset {
+        remote_locator: None,
         id: AssetId(2),
         path: "external.mp4".into(),
         name: "test".into(),

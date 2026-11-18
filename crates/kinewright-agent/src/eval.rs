@@ -2997,6 +2997,7 @@ fn audio_tail_document(
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -9609,6 +9610,7 @@ mod tests {
 
     fn document() -> Document {
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("fixture.mp4"),
             name: "fixture".to_owned(),
@@ -9622,11 +9624,13 @@ mod tests {
         };
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -9729,6 +9733,7 @@ mod tests {
     fn audio_fixture_document() -> (Document, FixtureContext) {
         let mut final_document = document();
         let audio_asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: PathBuf::from("music.wav"),
             name: "music".to_owned(),
@@ -9744,6 +9749,7 @@ mod tests {
         final_document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![clip_fixture(2, AssetId(2), 0, 0, 60, ClipContent::Media)],
         });
@@ -9942,6 +9948,7 @@ mod tests {
         final_document.tracks.push(Track {
             id: TrackId(3),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![clip_fixture(3, AssetId(2), 0, 60, 120, ClipContent::Media)],
         });
@@ -10219,6 +10226,7 @@ mod tests {
         exact_document.tracks[0].clips[0] =
             clip_fixture(1, AssetId(1), 0, 0, 600, ClipContent::Media);
         let audio_asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: PathBuf::from("music.wav"),
             name: "music".to_owned(),
@@ -10234,6 +10242,7 @@ mod tests {
         exact_document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![clip_fixture(2, AssetId(2), 0, 0, 600, ClipContent::Media)],
         });
@@ -10331,6 +10340,7 @@ mod tests {
         let mut final_document = document();
         final_document.media_pool[0].duration = TimeCode(600);
         let pivot_asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: PathBuf::from("pivot.mp4"),
             name: "pivot".to_owned(),
@@ -10343,6 +10353,7 @@ mod tests {
             assumed_from: None,
         };
         let closing_asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(3),
             path: PathBuf::from("closing.mp4"),
             name: "closing".to_owned(),
@@ -11550,6 +11561,7 @@ mod tests {
     fn required_assets_and_source_range_separation_are_track_scoped() {
         let mut final_document = document();
         let second_asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: PathBuf::from("second.mp4"),
             name: "second".to_owned(),
@@ -12041,6 +12053,7 @@ mod tests {
         final_document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -13399,6 +13412,7 @@ mod tests {
         let fixture = PreparedFixture::new(
             Document {
                 tracks: vec![kinewright_core::Track {
+                    name: None,
                     id: TrackId(1),
                     kind: kinewright_core::TrackKind::Video,
                     sync_lock: false,
@@ -14017,6 +14031,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         });

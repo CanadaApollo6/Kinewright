@@ -14,7 +14,7 @@ use std::{
 
 use eframe::egui;
 use kinewright_core::{
-    AssetId, ClipContent, ClipId, ColorStage, Command, Document, EffectId, IncidentCode,
+    Analysis, AssetId, ClipContent, ClipId, ColorStage, Command, Document, EffectId, IncidentCode,
     IncidentEvidence, IncidentObservation, IncidentSubject, LabelIncident, LutAsset, LutAssetId,
     MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult,
     MediaCacheFamily, MediaCacheFamilyStatus, MediaError, MediaKind, MediaSourceFingerprint,
@@ -25,6 +25,7 @@ use kinewright_media::{LutAssetImport, LutStore};
 
 use crate::{
     app::KinewrightApp,
+    display_text::{DETAIL_CHARS, ROW_CHARS, copyable_label, display_text},
     project::session_index_by_id,
     theme::{self, color, space, type_size},
 };
@@ -55,6 +56,26 @@ pub(crate) struct MediaStatusResponse {
     pub(crate) fingerprint: MediaSourceFingerprint,
     pub(crate) status: MediaAvailabilityStatus,
 }
+pub(crate) fn media_status_work(
+    analysis: Arc<dyn Analysis>,
+    asset: MediaAsset,
+    session_id: u64,
+    request_id: u64,
+    output: std::sync::mpsc::Sender<MediaStatusResponse>,
+) -> impl FnOnce() + Send + 'static {
+    move || {
+        let status = analysis.media_availability(&asset);
+        let _ = output.send(MediaStatusResponse {
+            session_id,
+            asset_id: asset.id,
+            request_id,
+            path: asset.path,
+            fingerprint: asset.source_fingerprint,
+            status,
+        });
+    }
+}
+
 pub(crate) type CacheClearResponse = (MediaCacheFamily, Result<MediaCacheClearResult, MediaError>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1013,24 +1034,15 @@ impl KinewrightApp {
         else {
             return false;
         };
-        let media = project.analysis();
-        let status_tx = self.media_status_tx.clone();
-        let path = asset.path.clone();
-        let fingerprint = asset.source_fingerprint.clone();
-        let asset_id = asset.id;
-        let asset_snapshot = asset.clone();
+        let work = media_status_work(
+            project.analysis(),
+            asset.clone(),
+            session_id,
+            request_id,
+            self.media_status_tx.clone(),
+        );
         if self
-            .spawn_media_worker("kinewright-media-status", move || {
-                let status = media.media_availability(&asset_snapshot);
-                let _ = status_tx.send(MediaStatusResponse {
-                    session_id,
-                    asset_id,
-                    request_id,
-                    path,
-                    fingerprint,
-                    status,
-                });
-            })
+            .spawn_media_worker("kinewright-media-status", work)
             .is_ok()
         {
             true
@@ -1503,7 +1515,7 @@ impl KinewrightApp {
     }
 
     pub(crate) fn show_legacy_relink_confirmation(&mut self, ctx: &egui::Context) {
-        let Some(pending) = self.pending_legacy_relink.clone() else {
+        let Some(pending) = self.pending_legacy_relink.as_ref() else {
             return;
         };
         let mut confirm = false;
@@ -1517,13 +1529,19 @@ impl KinewrightApp {
                     "SOURCE IDENTITY UNKNOWN",
                     color::STATUS_WARNING,
                 ));
-                ui.label(format!(
-                    "{} is a legacy asset without a stored source fingerprint.",
-                    pending.asset_name
-                ));
+                let estimated = session_index_by_id(pending.session_id, &self.projects)
+                    .is_some_and(|index| self.projects[index].document.imported_from.iter()
+                        .any(|record| record.estimated_asset(pending.asset_id)));
+                ui.label(if estimated {
+                    format!("{} was imported without checking its original file.", pending.asset_name)
+                } else {
+                    format!("{} is a legacy asset without a stored source fingerprint.", pending.asset_name)
+                });
                 ui.label("The replacement was probed successfully, but the original bytes cannot be verified.");
                 ui.add_space(space::TWO);
-                ui.label(format!("Use {}?", pending.candidate.path.display()));
+                let path = pending.candidate.path.to_string_lossy();
+                copyable_label(ui, display_text(&["Use ", &path, "?"], ROW_CHARS), &path)
+                    .on_hover_ui(|ui| { ui.label(display_text(&[&path], DETAIL_CHARS)); });
                 ui.add_space(space::TWO);
                 ui.horizontal(|ui| {
                     if ui
@@ -1541,8 +1559,7 @@ impl KinewrightApp {
                     }
                 });
             });
-        if confirm {
-            self.pending_legacy_relink = None;
+        if confirm && let Some(pending) = self.pending_legacy_relink.take() {
             if let Some(project_index) = session_index_by_id(pending.session_id, &self.projects) {
                 if let Err(conflict) = validate_relink_revision(
                     pending.expected_revision,
@@ -2364,6 +2381,7 @@ mod tests {
 
     fn asset(fingerprint: MediaSourceFingerprint) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(7),
             path: PathBuf::from("original.mov"),
             name: "original.mov".to_owned(),
@@ -3068,12 +3086,14 @@ mod tests {
                 kinewright_core::Track {
                     id: TrackId(1),
                     kind: kinewright_core::TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![solid],
                 },
                 kinewright_core::Track {
                     id: TrackId(2),
                     kind: kinewright_core::TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![],
                 },
@@ -3301,6 +3321,7 @@ mod tests {
             tracks: vec![kinewright_core::Track {
                 id: TrackId(1),
                 kind: kinewright_core::TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![kinewright_core::Clip {
                     enabled: true,
@@ -3322,6 +3343,7 @@ mod tests {
                 }],
             }],
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: PathBuf::from("shot.mov"),
                 name: "Shot".to_owned(),
@@ -3430,6 +3452,42 @@ mod tests {
                 value: kinewright_core::ParamValue::Integer(1),
             }
         );
+    }
+
+    #[test]
+    fn ix1_relink_confirmation_bounds_the_candidate_path_before_layout() {
+        use crate::app::in1_tests::{in1_harness, in1_shutdown};
+        use crate::ix1_tests::{
+            RecordingMedia, assert_locator_layout, assert_locator_tooltip, hostile_locator,
+            layout_text_position,
+        };
+
+        let locator = hostile_locator();
+        let path = PathBuf::from(&locator);
+        let probed = RecordingMedia::default()
+            .probe(Path::new("candidate.mov"))
+            .unwrap();
+        let (mut app, _engine) = in1_harness(Document::default());
+        app.pending_legacy_relink = Some(PendingLegacyRelink {
+            session_id: app.focused().id,
+            asset_id: AssetId(1),
+            expected_revision: TimelineRevision(0),
+            candidate: build_relink_candidate(path.clone(), &probed),
+            asset_name: "Source".to_owned(),
+        });
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut draw = |ui: &mut egui::Ui| app.show_legacy_relink_confirmation(ui.ctx());
+        let _ = ctx.run_ui(egui::RawInput::default(), &mut draw);
+        let output = ctx.run_ui(egui::RawInput::default(), &mut draw);
+        assert_locator_layout(&output, 160);
+        let at = layout_text_position(&output, |text| text.contains(r"\u{202e}tail"));
+        assert_locator_tooltip(&ctx, at, draw);
+        assert_eq!(
+            app.pending_legacy_relink.as_ref().unwrap().candidate.path,
+            path
+        );
+        in1_shutdown(&mut app);
     }
 
     #[test]

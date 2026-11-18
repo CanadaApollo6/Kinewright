@@ -569,6 +569,7 @@ mod durable_bundle {
             track: Track {
                 id: TrackId(71),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             },
@@ -1541,6 +1542,7 @@ mod durable_bundle {
                 track: Track {
                     id: TrackId(72),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![],
                 },
@@ -1580,6 +1582,7 @@ mod durable_bundle {
                 track: Track {
                     id: TrackId(72),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![],
                 },

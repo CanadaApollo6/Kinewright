@@ -36,6 +36,7 @@ fn w2_long_session_save_cost() {
     let document = Document {
         tracks: (1..=8)
             .map(|id| Track {
+                name: None,
                 id: TrackId(id),
                 kind: TrackKind::Video,
                 sync_lock: true,

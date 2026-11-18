@@ -1,0 +1,58 @@
+{
+  "format": "fcpxml",
+  "format_version": "1.13",
+  "source_name": "variable-map.fcpxml",
+  "source_sha256": "9aa7778c42a9b089037b08e5fcdfc2fa325d66e0fdfe183b41a955512baabeb7",
+  "start_offset_frames": 0,
+  "items": 1,
+  "exact": 0,
+  "approximated": 1,
+  "dropped": 0,
+  "media": {
+    "assets": 1,
+    "online": 0,
+    "offline": 1,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 2
+    }
+  ],
+  "rows": [
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "variable_speed_averaged",
+      "fidelity": "approximated",
+      "count": 1,
+      "bound": {
+        "unit": "frames",
+        "value": 25
+      },
+      "names": [],
+      "at": [
+        {
+          "source": "11:9",
+          "frame": 0,
+          "clip": 3
+        }
+      ]
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    }
+  ],
+  "omitted_codes": []
+}

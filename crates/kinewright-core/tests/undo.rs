@@ -366,6 +366,7 @@ fn differential_long() {
 fn literal_document() -> Document {
     Document {
         tracks: vec![kinewright_core::Track {
+            name: None,
             id: kinewright_core::TrackId(1),
             kind: kinewright_core::TrackKind::Video,
             sync_lock: true,

@@ -1502,6 +1502,7 @@ mod tests {
         let track = |id, kind| Track {
             id: TrackId(id),
             kind,
+            name: None,
             sync_lock: true,
             clips: vec![],
         };
@@ -1510,6 +1511,7 @@ mod tests {
             &[
                 Operation::AddAsset {
                     asset: MediaAsset {
+                        remote_locator: None,
                         id: AssetId(1),
                         path: "fixture.mp4".into(),
                         name: "fixture".into(),

@@ -418,6 +418,7 @@ mod tests {
     fn history_capacity_legacy_merge_and_cherry_pick_refuse_before_live_mutation() {
         let core = Core::for_test(Document {
             tracks: vec![kinewright_core::Track {
+                name: None,
                 id: kinewright_core::TrackId(1),
                 kind: kinewright_core::TrackKind::Video,
                 sync_lock: true,
@@ -555,6 +556,7 @@ mod tests {
 
     fn asset(id: u64) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(id),
             path: format!("asset-{id}.mp4").into(),
             name: format!("asset {id}"),

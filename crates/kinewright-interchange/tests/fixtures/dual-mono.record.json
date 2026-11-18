@@ -1,0 +1,80 @@
+{
+  "format": "otio",
+  "format_version": "Timeline.1",
+  "source_name": "dual-mono.otio",
+  "source_sha256": "ea92ff34cb762e7a5125fbeec170e02fed5918f7f0c8dd67ae7acad19548bc81",
+  "start_offset_frames": 0,
+  "items": 3,
+  "exact": 2,
+  "approximated": 1,
+  "dropped": 0,
+  "media": {
+    "assets": 1,
+    "online": 0,
+    "offline": 1,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 2
+    }
+  ],
+  "rows": [
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "channel_map_dropped",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": [
+        {
+          "source": "/tracks/children/2/children/0",
+          "frame": 0
+        }
+      ]
+    },
+    {
+      "code": "clip_names_dropped",
+      "fidelity": "dropped",
+      "count": 3,
+      "names": [
+        "Interview"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0,
+          "clip": 5
+        },
+        {
+          "source": "/tracks/children/1/children/0",
+          "frame": 0,
+          "clip": 6
+        }
+      ]
+    },
+    {
+      "code": "resolution_inferred",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    }
+  ],
+  "omitted_codes": []
+}

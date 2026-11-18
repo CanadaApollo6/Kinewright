@@ -348,6 +348,7 @@ mod tests {
             tracks: vec![kinewright_core::Track {
                 id: kinewright_core::TrackId(1),
                 kind: kinewright_core::TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             }],
@@ -471,6 +472,7 @@ mod tests {
                 tracks: vec![Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![],
                 }],
@@ -666,6 +668,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             }],

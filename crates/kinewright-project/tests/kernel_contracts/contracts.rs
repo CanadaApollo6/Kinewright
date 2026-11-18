@@ -25,6 +25,7 @@ use schemars::schema_for;
 
 fn asset(id: u64, fps: Rational, duration: i64) -> MediaAsset {
     MediaAsset {
+        remote_locator: None,
         id: AssetId(id),
         path: PathBuf::from(format!("asset-{id}.mp4")),
         name: format!("asset-{id}"),
@@ -72,6 +73,7 @@ fn user_color_override() -> ColorDescription {
 fn empty_timeline(fps: Rational) -> Document {
     Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: ColorContext::default(),
@@ -79,6 +81,7 @@ fn empty_timeline(fps: Rational) -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         }],
@@ -141,6 +144,7 @@ fn audio_video_document() -> Document {
         track: Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         },
@@ -386,6 +390,7 @@ fn document_and_every_operation_variant_round_trip_through_json() {
             track: Track {
                 id: TrackId(2),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             },
@@ -1472,6 +1477,7 @@ fn title_clips_reuse_move_trim_split_ripple_link_and_undo_contracts() {
         track: Track {
             id: TrackId(2),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         },
@@ -1587,12 +1593,14 @@ fn add_freeze_frame_validates_track_asset_frame_and_duration() {
     document.tracks.push(Track {
         id: TrackId(2),
         kind: TrackKind::Audio,
+        name: None,
         sync_lock: true,
         clips: Vec::new(),
     });
     document.media_pool.extend([
         asset(1, fps, 120),
         MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: PathBuf::from("audio.wav"),
             name: "audio".to_owned(),
@@ -1722,6 +1730,7 @@ fn freeze_clips_reuse_move_trim_split_ripple_link_and_undo_contracts() {
     document.tracks.push(Track {
         id: TrackId(2),
         kind: TrackKind::Video,
+        name: None,
         sync_lock: true,
         clips: Vec::new(),
     });
@@ -1875,6 +1884,7 @@ fn ripple_operations_shift_all_markers_independently_of_sync_locks() {
         track: Track {
             id: TrackId(2),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         },
@@ -1909,6 +1919,7 @@ fn ripple_operations_shift_all_markers_independently_of_sync_locks() {
         track: Track {
             id: TrackId(3),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         },
@@ -2060,6 +2071,7 @@ fn ripple_delete_rejects_straddling_boundary_overlap_atomically() {
         track: Track {
             id: TrackId(2),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         },
@@ -2114,6 +2126,7 @@ proptest! {
             track: Track {
                 id: TrackId(2),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             },
@@ -4004,6 +4017,7 @@ fn add_and_remove_track_are_validated_and_atomic() {
     let video = Track {
         id: TrackId(1),
         kind: TrackKind::Video,
+        name: None,
         sync_lock: true,
         clips: Vec::new(),
     };
@@ -4027,6 +4041,7 @@ fn add_and_remove_track_are_validated_and_atomic() {
     let non_empty = Track {
         id: TrackId(2),
         kind: TrackKind::Video,
+        name: None,
         sync_lock: true,
         clips: vec![Clip {
             enabled: true,
@@ -4190,6 +4205,7 @@ fn public_actor_builds_undoes_redoes_saves_and_reopens_a_rough_cut() {
             track: Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             },
@@ -4338,11 +4354,13 @@ fn unsorted_input_document_is_rejected() {
     };
     let doc = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![later, earlier],
         }],
@@ -4548,6 +4566,7 @@ fn three_point_insert_splits_every_sync_locked_straddler_before_ripple() {
         track: Track {
             id: TrackId(2),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         },
@@ -4779,6 +4798,7 @@ fn patched_three_point_overwrite_routes_dual_av_once_and_only_clears_targets() {
         track: Track {
             id: TrackId(3),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         },
@@ -4871,6 +4891,7 @@ fn patched_three_point_insert_ripples_selected_and_sync_locked_tracks_once() {
         track: Track {
             id: TrackId(3),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         },
@@ -4881,6 +4902,7 @@ fn patched_three_point_insert_ripples_selected_and_sync_locked_tracks_once() {
         track: Track {
             id: TrackId(4),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: false,
             clips: Vec::new(),
         },

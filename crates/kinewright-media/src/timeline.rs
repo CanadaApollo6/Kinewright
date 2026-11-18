@@ -653,6 +653,7 @@ mod tests {
     fn fixture() -> Document {
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
@@ -660,6 +661,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(7),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![
                     Clip {
@@ -702,6 +704,7 @@ mod tests {
             }],
             media_pool: vec![
                 MediaAsset {
+                    remote_locator: None,
                     id: AssetId(1),
                     path: PathBuf::from("one.mp4"),
                     name: "one".to_owned(),
@@ -714,6 +717,7 @@ mod tests {
                     assumed_from: None,
                 },
                 MediaAsset {
+                    remote_locator: None,
                     id: AssetId(2),
                     path: PathBuf::from("two.mp4"),
                     name: "two".to_owned(),
@@ -827,6 +831,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(8),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -917,6 +922,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(8),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -971,6 +977,7 @@ mod tests {
         document.tracks = vec![Track {
             id: TrackId(8),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -1034,6 +1041,7 @@ mod tests {
         document.tracks = vec![Track {
             id: TrackId(7),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -1071,6 +1079,7 @@ mod tests {
         let mut document = fixture();
         document.media_pool.extend([
             MediaAsset {
+                remote_locator: None,
                 id: AssetId(3),
                 path: PathBuf::from("bed.wav"),
                 name: "bed".to_owned(),
@@ -1083,6 +1092,7 @@ mod tests {
                 assumed_from: None,
             },
             MediaAsset {
+                remote_locator: None,
                 id: AssetId(4),
                 path: PathBuf::from("silent.mp4"),
                 name: "silent".to_owned(),
@@ -1099,6 +1109,7 @@ mod tests {
             Track {
                 id: TrackId(8),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -1122,6 +1133,7 @@ mod tests {
             Track {
                 id: TrackId(9),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -1706,6 +1718,7 @@ mod tests {
             document.tracks.push(Track {
                 id: TrackId(100 + index as u64),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![clip],
             });

@@ -1941,6 +1941,7 @@ mod fu1_tests {
         );
         let core = Core::for_test(Document {
             tracks: vec![Track {
+                name: None,
                 id: TrackId(1),
                 kind: TrackKind::Video,
                 sync_lock: true,
@@ -2057,6 +2058,7 @@ mod fu1_tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             }],

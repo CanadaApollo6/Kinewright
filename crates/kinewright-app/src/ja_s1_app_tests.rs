@@ -12,6 +12,7 @@ fn app_session_save_preserves_all_undo_redo_and_later_edits() {
             .map(|id| Track {
                 id: TrackId(id),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             })

@@ -1,0 +1,139 @@
+{
+  "format": "otio",
+  "format_version": "Timeline.1",
+  "source_name": "row-cap.otio",
+  "source_sha256": "a3ddcd35949b3133b992f3179afa42181a53b2f2269275f9de5fed34acccb17d",
+  "start_offset_frames": 0,
+  "items": 14,
+  "exact": 5,
+  "approximated": 0,
+  "dropped": 9,
+  "media": {
+    "assets": 6,
+    "online": 0,
+    "offline": 6,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 7
+    }
+  ],
+  "rows": [
+    {
+      "code": "clip_too_short",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/5",
+          "frame": 104
+        }
+      ]
+    },
+    {
+      "code": "outside_window",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [],
+      "at": [
+        {
+          "source": "/tracks/children/2/children/0",
+          "frame": 0
+        }
+      ]
+    },
+    {
+      "code": "reverse_dropped",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0,
+          "clip": 10
+        }
+      ]
+    },
+    {
+      "code": "retimed_audio_muted",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [],
+      "at": [
+        {
+          "source": "/tracks/children/1/children/0",
+          "frame": 0,
+          "clip": 14
+        }
+      ]
+    },
+    {
+      "code": "marker_outside_item",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/1/markers/0",
+          "frame": 200
+        }
+      ]
+    },
+    {
+      "code": "effect_dropped",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [
+        "Blur"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/1/effects/0",
+          "frame": 0
+        }
+      ]
+    },
+    {
+      "code": "generator_dropped",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [
+        "GeneratorReference.1"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/2",
+          "frame": 48
+        }
+      ]
+    },
+    {
+      "code": "image_sequence_dropped",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [
+        "ImageSequenceReference.1"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/3",
+          "frame": 72
+        }
+      ]
+    }
+  ],
+  "omitted_codes": [
+    "unknown_item",
+    "media_offline",
+    "cut_snapped",
+    "clip_names_dropped",
+    "time_warp_reading",
+    "resolution_inferred",
+    "color_space_default"
+  ]
+}

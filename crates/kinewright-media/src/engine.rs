@@ -24,9 +24,9 @@ use kinewright_core::{
     MediaError, MediaEvent, MediaKind, MixLevelReport, MixLevelRequest, MixNoiseProfileRequest,
     MixPeaks, MixSpectrumReport, MixSpectrumRequest, MixWindowLevelReport, MixWindowRequest,
     MonitorProof, NoiseProfileReport, Playback, PlaybackState, PlaybackStats, PreviewFrame,
-    ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode, TimelineBeat,
-    TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus,
-    VisualAssetResult, WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WorkingProof,
+    ProbeObserver, ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode,
+    TimelineBeat, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
+    TranscriptStatus, VisualAssetResult, WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WorkingProof,
     WorkingProofMetadata, audio_qc_technical_pass, delivery_audio_exceptions,
     export_lut_preflight_with,
 };
@@ -40,7 +40,7 @@ use crate::{
     clock::{frame_to_samples, samples_to_frame},
     compositor::GpuContext,
     data_dir::default_data_dir,
-    decode::probe_path,
+    decode::{probe_path, probe_path_observed},
     derived::{DerivedAnalysisConfig, DerivedAnalysisService},
     derived_cache::CacheStats,
     loudness::{LiveLoudnessMeter, LoudnessMeter},
@@ -1962,9 +1962,17 @@ impl Playback for SessionMedia {
 
 impl Analysis for SessionMedia {
     fn probe(&self, path: &Path) -> Result<MediaAsset, MediaError> {
+        self.probe_observed(path, &())
+    }
+
+    fn probe_observed(
+        &self,
+        path: &Path,
+        observer: &dyn ProbeObserver,
+    ) -> Result<MediaAsset, MediaError> {
         let _access = self.locator_access()?;
         let id = AssetId(self.next_asset_id.fetch_add(1, Ordering::Relaxed));
-        probe_path(path, id)
+        probe_path_observed(path, id, observer)
     }
 
     fn media_availability(&self, asset: &MediaAsset) -> MediaAvailabilityStatus {
@@ -4187,6 +4195,7 @@ mod tests {
 
     fn asset(path: PathBuf, fingerprint: MediaSourceFingerprint) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path,
             name: "fixture".to_owned(),
@@ -4260,6 +4269,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -4875,6 +4885,7 @@ mod tests {
         covered_document.tracks.push(Track {
             id: TrackId(2),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![covering],
         });
@@ -5017,6 +5028,7 @@ mod tests {
         let audio_track = |id: u64| Track {
             id: TrackId(id),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         };
@@ -5186,6 +5198,7 @@ mod tests {
                 tracks: vec![Track {
                     id: TrackId(1),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 }],
@@ -7170,6 +7183,7 @@ mod tests {
                 tracks: vec![Track {
                     id: TrackId(1),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 }],

@@ -61,6 +61,7 @@ fn inspected_native_open_validates_before_retirement_and_preserves_every_accepte
     assert!(matches!(
         view.request(Command::Do(Operation::AddTrack {
             track: Track {
+                name: None,
                 id: TrackId(1),
                 kind: TrackKind::Video,
                 sync_lock: true,

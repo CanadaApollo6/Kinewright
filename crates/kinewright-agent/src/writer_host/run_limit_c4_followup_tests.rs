@@ -311,6 +311,7 @@ mod followups {
                     },
                     Operation::AddTrack {
                         track: kinewright_core::Track {
+                            name: None,
                             id: kinewright_core::TrackId(81),
                             kind: kinewright_core::TrackKind::Audio,
                             sync_lock: true,

@@ -820,6 +820,7 @@ mod tests {
             ..Document::default()
         };
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("a1.mp4"),
             name: "a1".to_owned(),
@@ -834,6 +835,7 @@ mod tests {
         let track = Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         };

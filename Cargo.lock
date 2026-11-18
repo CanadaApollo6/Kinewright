@@ -2342,6 +2342,7 @@ dependencies = [
  "image",
  "kinewright-agent",
  "kinewright-core",
+ "kinewright-interchange",
  "kinewright-media",
  "kinewright-project",
  "pollster",
@@ -2372,6 +2373,17 @@ dependencies = [
 [[package]]
 name = "kinewright-hash"
 version = "0.1.0"
+
+[[package]]
+name = "kinewright-interchange"
+version = "0.1.0"
+dependencies = [
+ "kinewright-core",
+ "proptest",
+ "roxmltree",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "kinewright-job-sys"
@@ -2476,6 +2488,7 @@ dependencies = [
  "getrandom 0.3.4",
  "kinewright-core",
  "kinewright-hash",
+ "kinewright-interchange",
  "kinewright-media",
  "kinewright-media-client",
  "kinewright-media-ipc",

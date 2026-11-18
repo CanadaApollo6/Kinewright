@@ -1,0 +1,100 @@
+{
+  "format": "otio",
+  "format_version": "Timeline.1",
+  "source_name": "snap-next-limit.otio",
+  "source_sha256": "9e3f277da9763936214eb74f2f223bec3772800ff5a960979c5a62a1d1aa8493",
+  "start_offset_frames": 0,
+  "items": 3,
+  "exact": 2,
+  "approximated": 1,
+  "dropped": 0,
+  "media": {
+    "assets": 2,
+    "online": 0,
+    "offline": 2,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 3
+    }
+  ],
+  "rows": [
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 2,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "cut_snapped",
+      "fidelity": "approximated",
+      "count": 1,
+      "bound": {
+        "unit": "frames",
+        "value": 18
+      },
+      "names": [],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0,
+          "clip": 4
+        }
+      ]
+    },
+    {
+      "code": "clip_names_dropped",
+      "fidelity": "dropped",
+      "count": 2,
+      "names": [
+        "SlowGrid",
+        "Next"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0,
+          "clip": 4
+        },
+        {
+          "source": "/tracks/children/0/children/1",
+          "frame": 20,
+          "clip": 5
+        }
+      ]
+    },
+    {
+      "code": "resolution_inferred",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "time_warp_reading",
+      "fidelity": "approximated",
+      "count": 1,
+      "unverified": true,
+      "names": [],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0,
+          "clip": 4
+        }
+      ]
+    }
+  ],
+  "omitted_codes": []
+}

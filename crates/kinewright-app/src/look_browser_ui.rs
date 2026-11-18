@@ -329,9 +329,13 @@ fn look_row(ui: &mut egui::Ui, row: &LookRow) -> Option<RowAction> {
                 title = title.color(color::ACCENT);
             }
             ui.label(title);
-            ui.colored_label(
-                color::TEXT_MUTED,
-                format!("{}³ · {}", row.size, row.provenance),
+            let provenance = format!("{}³ · {}", row.size, row.provenance);
+            let text =
+                crate::display_text::display_text(&[&provenance], crate::display_text::ROW_CHARS);
+            crate::display_text::copyable_label(
+                ui,
+                egui::RichText::new(text).color(color::TEXT_MUTED),
+                &provenance,
             );
             let (chip_text, chip_color) = chip_for(row.availability);
             ui.colored_label(chip_color, chip_text);
@@ -350,6 +354,30 @@ fn look_row(ui: &mut egui::Ui, row: &LookRow) -> Option<RowAction> {
         });
     });
     action
+}
+
+#[cfg(test)]
+#[test]
+fn ix1_look_browser_bounds_imported_source_provenance_before_layout() {
+    let mut asset = BuiltinLook::Warm.to_lut_asset(LutAssetId(1));
+    asset.source = kinewright_core::LutAssetSource::Imported {
+        source_path: crate::ix1_tests::hostile_locator(),
+    };
+    let document = Document {
+        lut_assets: vec![asset],
+        ..Document::default()
+    };
+    let rows = look_rows(&document, &BTreeMap::new(), None);
+    let row = rows
+        .iter()
+        .find(|row| row.entry == LookEntry::Project(LutAssetId(1)))
+        .unwrap();
+    let ctx = egui::Context::default();
+    theme::install(&ctx);
+    let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        look_row(ui, row);
+    });
+    crate::ix1_tests::assert_locator_layout(&output, 160);
 }
 
 /// One availability state as its browser chip, matching the media card's
@@ -416,10 +444,12 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![clip],
             }],
             media_pool: vec![kinewright_core::MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: std::path::PathBuf::from("shot.mov"),
                 name: "Shot".to_owned(),
@@ -644,6 +674,7 @@ mod tests {
         };
         let mut document = Document {
             media_pool: vec![kinewright_core::MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: std::path::PathBuf::from("cc7-e-0.mkv"),
                 name: spec.title.to_owned(),
@@ -658,6 +689,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![clip.clone()],
             }],

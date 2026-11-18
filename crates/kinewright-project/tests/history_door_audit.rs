@@ -29,12 +29,14 @@ fn evidence() -> ObjectRef {
 fn baseline() -> Document {
     let mut doc = Document {
         tracks: vec![Track {
+            name: None,
             id: TrackId(1),
             kind: TrackKind::Video,
             sync_lock: true,
             clips: vec![],
         }],
         media_pool: vec![MediaAsset {
+            remote_locator: None,
             id: AssetId(50),
             path: "external-unhashed.wav".into(),
             name: "external".into(),

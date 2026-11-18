@@ -341,6 +341,7 @@ fn document_with_one_clip() -> Document {
     let fps = Rational::new(30, 1).unwrap();
     let mut doc = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: ColorContext::default(),
@@ -348,6 +349,7 @@ fn document_with_one_clip() -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         }],
@@ -359,6 +361,7 @@ fn document_with_one_clip() -> Document {
     };
     Operation::AddAsset {
         asset: MediaAsset {
+            remote_locator: None,
             id: kinewright_core::AssetId(1),
             path: std::path::PathBuf::from("asset-1.mp4"),
             name: "asset-1".to_owned(),
@@ -1308,6 +1311,7 @@ fn next_bus_id_allocates_max_plus_one_and_agrees_with_the_former_inline_scan() {
             track: Track {
                 id: TrackId(id),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             },

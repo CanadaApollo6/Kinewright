@@ -20,6 +20,7 @@ fn fps(n: u32) -> Rational {
 
 fn asset(id: u64, kind: MediaKind, duration: i64) -> MediaAsset {
     MediaAsset {
+        remote_locator: None,
         id: AssetId(id),
         path: std::path::PathBuf::from(format!("a{id}.mp4")),
         name: format!("a{id}"),
@@ -38,11 +39,13 @@ fn empty() -> Document {
     let track = |id, kind| Track {
         id: TrackId(id),
         kind,
+        name: None,
         sync_lock: true,
         clips: Vec::new(),
     };
     let mut doc = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: ColorContext::default(),

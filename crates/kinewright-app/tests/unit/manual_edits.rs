@@ -58,6 +58,7 @@ pub(crate) fn fixture_with_document(
 pub(crate) fn add(id: u64) -> Command {
     Command::Do(Operation::AddTrack {
         track: Track {
+            name: None,
             id: TrackId(id),
             kind: TrackKind::Video,
             sync_lock: true,

@@ -2100,6 +2100,7 @@ fn cc3_collinear_sixteen_point_curve_is_identity_without_the_short_circuit() {
 
 fn cc3_asset() -> kinewright_core::MediaAsset {
     kinewright_core::MediaAsset {
+        remote_locator: None,
         id: AssetId(1),
         path: std::path::PathBuf::from("cc3-fixture.mp4"),
         name: "cc3 fixture".to_owned(),

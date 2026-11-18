@@ -594,6 +594,7 @@ impl ProjectStore {
         let probe = crate::media_sandbox::probe(&certificate, Arc::clone(&cancel))?;
         let probed_color = probe.color_description.clone();
         let asset = MediaAsset {
+            remote_locator: None,
             id,
             path: locator.to_path_buf(),
             name: locator

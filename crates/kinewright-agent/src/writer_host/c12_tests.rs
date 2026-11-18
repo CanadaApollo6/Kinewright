@@ -29,6 +29,7 @@ fn document() -> Document {
             .map(|id| kinewright_core::Track {
                 id: kinewright_core::TrackId(id),
                 kind: kinewright_core::TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             })

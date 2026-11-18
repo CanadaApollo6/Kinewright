@@ -639,6 +639,7 @@ fn te14_media_fixture() -> (Fixture, RunId, TaskId, Core, C4Mcp, std::path::Path
     let operations = vec![
         Operation::AddTrack {
             track: kinewright_core::Track {
+                name: None,
                 id: TrackId(1),
                 kind: kinewright_core::TrackKind::Audio,
                 sync_lock: true,
@@ -659,6 +660,7 @@ fn te14_media_fixture() -> (Fixture, RunId, TaskId, Core, C4Mcp, std::path::Path
         },
         Operation::AddTrack {
             track: kinewright_core::Track {
+                name: None,
                 id: TrackId(2),
                 kind: kinewright_core::TrackKind::Video,
                 sync_lock: true,
@@ -878,6 +880,7 @@ fn te14_large_overview_is_bounded_and_can_expand() {
     let mut doc = Document::default();
     for id in 1..120 {
         doc.tracks.push(kinewright_core::Track {
+            name: None,
             id: kinewright_core::TrackId(id),
             kind: kinewright_core::TrackKind::Audio,
             sync_lock: false,

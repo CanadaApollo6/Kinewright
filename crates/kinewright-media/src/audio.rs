@@ -5201,12 +5201,14 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
@@ -5720,6 +5722,7 @@ mod tests {
     fn video_only_document(fps: Rational) -> Document {
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
@@ -5727,6 +5730,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -5748,6 +5752,7 @@ mod tests {
                 }],
             }],
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: PathBuf::from("video-only.mp4"),
                 name: "video only".to_owned(),
@@ -5983,6 +5988,7 @@ mod tests {
         document.tracks.push(Track {
             id: TrackId(3),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         });
@@ -6407,12 +6413,14 @@ mod tests {
             ..audio_asset(id, source.path(), "h4-stereo", fps)
         };
         let track = |id| Track {
+            name: None,
             id: TrackId(id),
             kind: TrackKind::Audio,
             sync_lock: true,
             clips: vec![audio_clip(id, id, 0..frames, 0)],
         };
         let document = Document {
+            imported_from: Vec::new(),
             investigator: None,
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: AudioMix::default(),
@@ -6441,6 +6449,7 @@ mod tests {
     fn parity_document(voice: &Path, bed: &Path, fps: Rational) -> Document {
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: AudioMix {
                 tracks: Vec::new(),
@@ -6474,18 +6483,21 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![audio_clip(1, 1, 0..6, 0), audio_clip(2, 1, 16..20, 16)],
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![audio_clip(3, 2, 4..14, 4)],
                 },
                 Track {
                     id: TrackId(3),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![Clip {
                         enabled: true,
@@ -6638,6 +6650,7 @@ mod tests {
     fn levels_document(steady: &Path, late: &Path, fps: Rational) -> Document {
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
@@ -6646,12 +6659,14 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![audio_clip(1, 1, 0..20, 0)],
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![audio_clip(2, 2, 0..5, 15)],
                 },
@@ -6776,6 +6791,7 @@ mod tests {
 
     fn audio_asset(id: u64, path: &Path, name: &str, fps: Rational) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(id),
             path: path.to_path_buf(),
             name: name.to_owned(),
@@ -8129,6 +8145,7 @@ mod tests {
     fn impulse_document(source: &Path, fps: Rational) -> Document {
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: AudioMix {
                 tracks: Vec::new(),
@@ -8157,6 +8174,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: vec![audio_clip(1, 1, 0..20, 0)],
             }],
@@ -9314,6 +9332,7 @@ mod tests {
         asset.duration = TimeCode(frames);
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
@@ -9321,6 +9340,7 @@ mod tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: vec![audio_clip(1, 1, 0..frames, 0)],
             }],

@@ -249,14 +249,29 @@ impl Default for Sha256 {
 /// # Errors
 /// Returns an error when the reader cannot be read completely.
 pub fn sha256_reader(file: &mut impl std::io::Read) -> std::io::Result<String> {
+    sha256_reader_observed(file, |_| Ok(()), std::convert::identity)
+}
+
+/// Hash a reader while reporting the cumulative bytes after each chunk.
+///
+/// # Errors
+/// Returns either a read error mapped by the caller or a progress callback error.
+pub fn sha256_reader_observed<E>(
+    file: &mut impl std::io::Read,
+    mut progress: impl FnMut(u64) -> Result<(), E>,
+    map_error: impl Fn(std::io::Error) -> E,
+) -> Result<String, E> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut bytes = 0_u64;
     loop {
-        let count = file.read(&mut buffer)?;
+        let count = file.read(&mut buffer).map_err(&map_error)?;
         if count == 0 {
             break;
         }
         hasher.update(&buffer[..count]);
+        bytes += count as u64;
+        progress(bytes)?;
     }
     let mut encoded = String::with_capacity(64);
     for byte in hasher.finalize() {

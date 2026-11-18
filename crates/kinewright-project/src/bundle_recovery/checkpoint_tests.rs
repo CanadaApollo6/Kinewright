@@ -11,6 +11,7 @@ fn fixture_with(toggles: usize) -> (TempDirectory, Core, ProjectBundle) {
     let temp = TempDirectory::new_in(&workspace_target_dir(), "checkpoint-undo-recovery");
     let mut document = Document::default();
     document.tracks.push(Track {
+        name: None,
         id: TrackId(1),
         kind: TrackKind::Video,
         sync_lock: true,
@@ -74,6 +75,7 @@ fn history_admission_split_core() -> Core {
     use kinewright_core::{ClipId, Event, SolidColor, TimeCode};
     let core = Core::for_test(Document {
         tracks: vec![Track {
+            name: None,
             id: TrackId(1),
             kind: TrackKind::Video,
             sync_lock: true,
@@ -118,6 +120,7 @@ fn history_admission_copy_core() -> Core {
     let effect = history_admission_effect(1000);
     let core = Core::for_test(Document {
         tracks: vec![Track {
+            name: None,
             id: TrackId(1),
             kind: TrackKind::Video,
             sync_lock: true,

@@ -309,6 +309,14 @@ impl Analysis for BaselineProofAnalysis {
         self.inner.probe(path)
     }
 
+    fn probe_observed(
+        &self,
+        path: &std::path::Path,
+        observer: &dyn kinewright_core::ProbeObserver,
+    ) -> Result<kinewright_core::MediaAsset, MediaError> {
+        self.inner.probe_observed(path, observer)
+    }
+
     fn media_availability(
         &self,
         asset: &kinewright_core::MediaAsset,

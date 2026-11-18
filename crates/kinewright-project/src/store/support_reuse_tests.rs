@@ -11,6 +11,7 @@ fn fixture() -> (TempDirectory, Core, ProjectBundle, ObjectRef) {
     let temp = TempDirectory::new_in(&workspace_target_dir(), "owner-publication-proof");
     let core = Core::for_test(Document {
         tracks: vec![Track {
+            name: None,
             id: TrackId(1),
             kind: TrackKind::Video,
             sync_lock: true,

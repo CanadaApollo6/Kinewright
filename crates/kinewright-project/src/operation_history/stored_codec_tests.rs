@@ -235,6 +235,7 @@ fn oversize_baseline_is_refused_before_loading_the_second_document() {
             Ok(kinewright_core::Document {
                 tracks: (0..100_000)
                     .map(|id| kinewright_core::Track {
+                        name: None,
                         id: TrackId(id),
                         kind: kinewright_core::TrackKind::Video,
                         sync_lock: false,

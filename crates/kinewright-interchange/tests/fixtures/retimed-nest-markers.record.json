@@ -1,0 +1,69 @@
+{
+  "format": "fcpxml",
+  "format_version": "1.13",
+  "source_name": "retimed-nest-markers.fcpxml",
+  "source_sha256": "95e8688f130a3b3cd371f664d7c3315340438e5e86804f54cefcad425c16c99a",
+  "start_offset_frames": 0,
+  "items": 4,
+  "exact": 1,
+  "approximated": 3,
+  "dropped": 0,
+  "media": {
+    "assets": 1,
+    "online": 0,
+    "offline": 1,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 2
+    }
+  ],
+  "rows": [
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "item_marker_pinned",
+      "fidelity": "approximated",
+      "count": 2,
+      "names": [],
+      "at": [
+        {
+          "source": "11:9/6:234",
+          "frame": 125
+        },
+        {
+          "source": "13:4",
+          "frame": 125
+        }
+      ]
+    },
+    {
+      "code": "nest_flattened",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": [
+        {
+          "source": "11:9",
+          "frame": 100
+        }
+      ]
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    }
+  ],
+  "omitted_codes": []
+}

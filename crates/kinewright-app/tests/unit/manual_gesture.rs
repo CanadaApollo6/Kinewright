@@ -24,6 +24,7 @@ impl WheelProbe {
     fn with_setup(setup: impl FnOnce(&mut Document)) -> Self {
         let mut document = Document {
             tracks: vec![Track {
+                name: None,
                 id: TrackId(1),
                 kind: TrackKind::Video,
                 sync_lock: true,
@@ -710,6 +711,7 @@ enum NumericFamily {
 impl NumericFamily {
     fn setup(self, document: &mut Document) {
         document.tracks.push(Track {
+            name: None,
             id: TrackId(3),
             kind: TrackKind::Audio,
             sync_lock: true,
@@ -717,6 +719,7 @@ impl NumericFamily {
         });
         if matches!(self, Self::ClipFade | Self::Keyframe) {
             document.media_pool.push(kinewright_core::MediaAsset {
+                remote_locator: None,
                 id: kinewright_core::AssetId(1),
                 path: "numeric-fixture.wav".into(),
                 name: "numeric-fixture.wav".into(),

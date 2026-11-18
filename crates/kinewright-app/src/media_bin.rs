@@ -24,6 +24,17 @@ use crate::{
     timeline_ui::format_timecode,
 };
 
+pub(crate) fn dropped_paths(ctx: &egui::Context) -> Vec<std::path::PathBuf> {
+    ctx.input(|input| {
+        input
+            .raw
+            .dropped_files
+            .iter()
+            .filter_map(|file| file.path.clone())
+            .collect()
+    })
+}
+
 impl KinewrightApp {
     pub(crate) fn choose_media(&mut self) {
         let Some(path) = rfd::FileDialog::new()
@@ -65,15 +76,13 @@ impl KinewrightApp {
     /// Files dropped anywhere on the window import into the focused project -
     /// the media column is optional, not a prerequisite for getting footage in.
     pub(crate) fn import_dropped_files(&mut self, ctx: &egui::Context) {
-        let dropped: Vec<std::path::PathBuf> = ctx.input(|input| {
-            input
-                .raw
-                .dropped_files
-                .iter()
-                .filter_map(|file| file.path.clone())
-                .collect()
-        });
-        for path in dropped {
+        for path in dropped_paths(ctx) {
+            if crate::interchange_ui::classify_open_path(&path)
+                == crate::interchange_ui::OpenPath::Timeline
+            {
+                self.open_interchange(path, ctx);
+                continue;
+            }
             if crate::media_workflow::is_cube_lut_path(&path) {
                 let clip = self.selected_media_clip();
                 self.start_lut_import(
@@ -635,6 +644,7 @@ fn audio_video_placement_operations(
             track: Track {
                 id: track_id,
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             },
@@ -802,6 +812,7 @@ mod tests {
     fn audio_video_placement_creates_audio_track_and_links_both_clips() {
         let fps = Rational::new(30, 1).unwrap();
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(4),
             path: PathBuf::from("interview.mp4"),
             name: "interview.mp4".to_owned(),
@@ -815,12 +826,14 @@ mod tests {
         };
         let document = Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             }],
@@ -838,6 +851,7 @@ mod tests {
                     track: Track {
                         id: TrackId(2),
                         kind: TrackKind::Audio,
+                        name: None,
                         sync_lock: true,
                         clips: Vec::new(),
                     },
@@ -864,12 +878,14 @@ mod tests {
     fn still_document(fps: Rational, frame: (u32, u32)) -> Document {
         Document {
             investigator: None,
+            imported_from: Vec::new(),
             catalog: kinewright_core::MediaCatalog::default(),
             audio_mix: kinewright_core::AudioMix::default(),
             color_context: kinewright_core::ColorContext::default(),
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: Vec::new(),
             }],
@@ -884,6 +900,7 @@ mod tests {
 
     fn still_asset(id: u64, still: (u32, u32)) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(id),
             path: PathBuf::from(format!("still{id}.png")),
             name: format!("still{id}.png"),

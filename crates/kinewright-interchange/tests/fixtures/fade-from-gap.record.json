@@ -1,0 +1,75 @@
+{
+  "format": "otio",
+  "format_version": "Timeline.1",
+  "source_name": "fade-from-gap.otio",
+  "source_sha256": "0bbbac0cfe33e5cf90fcbe77706bdba598bdc1560905fb1a04660297835318df",
+  "start_offset_frames": 0,
+  "items": 3,
+  "exact": 2,
+  "approximated": 1,
+  "dropped": 0,
+  "media": {
+    "assets": 1,
+    "online": 0,
+    "offline": 1,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 2
+    }
+  ],
+  "rows": [
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "fade_shape_linear",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/1",
+          "frame": 24
+        }
+      ]
+    },
+    {
+      "code": "resolution_inferred",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "clip_names_dropped",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [
+        "Picture"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/2",
+          "frame": 24,
+          "clip": 3
+        }
+      ]
+    }
+  ],
+  "omitted_codes": []
+}

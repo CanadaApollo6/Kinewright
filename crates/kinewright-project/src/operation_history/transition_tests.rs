@@ -46,6 +46,7 @@ fn owner(pool: &HistoryPool, fold: bool, empty: bool) -> OwnerHistory {
 fn add() -> Command {
     Command::Do(Operation::AddTrack {
         track: Track {
+            name: None,
             id: TrackId(81),
             kind: TrackKind::Video,
             sync_lock: false,
@@ -646,6 +647,7 @@ fn folded_do_fact_does_not_turn_a_nonprefix_transition_into_holds() {
     let pool = super::tests::story_pool();
     let mut doc = document();
     doc.tracks.push(Track {
+        name: None,
         id: TrackId(82),
         kind: TrackKind::Video,
         sync_lock: false,

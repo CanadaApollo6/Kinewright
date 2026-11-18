@@ -129,6 +129,7 @@ fn document_sized(resolution: (u32, u32), clips: Vec<Clip>) -> Document {
             .map(|(index, clip)| Track {
                 id: TrackId(index as u64 + 1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![clip],
             })
@@ -1114,6 +1115,7 @@ fn r22_audio_ramp_is_type_independent() {
     let mut linked = Document {
         duration: TimeCode(9),
         media_pool: vec![kinewright_core::MediaAsset {
+            remote_locator: None,
             id: AssetId::default(),
             path: "linked.mp4".into(),
             name: "linked".to_owned(),
@@ -1131,6 +1133,7 @@ fn r22_audio_ramp_is_type_independent() {
         linked.tracks.push(Track {
             id: TrackId(id),
             kind,
+            name: None,
             sync_lock: true,
             clips: vec![clip],
         });

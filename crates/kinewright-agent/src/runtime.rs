@@ -184,6 +184,7 @@ const CAPABILITY_KIND_OVERRIDES: &[(&str, CapabilityKind)] = &[
     // CC4 §8: `list_look_assets` is read-only LUT-asset evidence.
     ("list_look_assets", CapabilityKind::Inspector),
     ("inspect_grade_matte", CapabilityKind::Inspector),
+    ("inspect_interchange", CapabilityKind::Inspector),
     ("preview_solo", CapabilityKind::Inspector),
 ];
 
@@ -677,6 +678,7 @@ mod tests {
         document.tracks.push(kinewright_core::Track {
             id: kinewright_core::TrackId(1),
             kind: kinewright_core::TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         });

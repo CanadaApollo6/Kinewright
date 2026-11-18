@@ -1,0 +1,213 @@
+{
+  "tracks": [
+    {
+      "id": 3,
+      "kind": "Video",
+      "name": "A",
+      "clips": [
+        {
+          "id": 5,
+          "asset": 1,
+          "source_range": {
+            "start": 24,
+            "end": 52
+          },
+          "timeline_start": 0,
+          "effects": [],
+          "transition_in": null
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "kind": "Video",
+      "name": "A +1",
+      "clips": [
+        {
+          "id": 6,
+          "asset": 2,
+          "source_range": {
+            "start": 22,
+            "end": 28
+          },
+          "timeline_start": 22,
+          "effects": [],
+          "transition_in": {
+            "name": "crossfade",
+            "duration": 6
+          }
+        }
+      ]
+    }
+  ],
+  "media_pool": [
+    {
+      "id": 1,
+      "path": "file:///media/CutA.mov",
+      "name": "CutA",
+      "duration": 7200,
+      "fps": {
+        "numerator": 24,
+        "denominator": 1
+      },
+      "kind": "Video",
+      "resolution": null,
+      "color_description": {
+        "primaries": "unknown",
+        "transfer": "unknown",
+        "matrix": "unknown",
+        "range": "unknown",
+        "white_point": "unknown",
+        "bit_depth": "unknown",
+        "confidence_basis_points": 0,
+        "provenance": "unknown"
+      }
+    },
+    {
+      "id": 2,
+      "path": "file:///media/CutB.mov",
+      "name": "CutB",
+      "duration": 7200,
+      "fps": {
+        "numerator": 24,
+        "denominator": 1
+      },
+      "kind": "Video",
+      "resolution": null,
+      "color_description": {
+        "primaries": "unknown",
+        "transfer": "unknown",
+        "matrix": "unknown",
+        "range": "unknown",
+        "white_point": "unknown",
+        "bit_depth": "unknown",
+        "confidence_basis_points": 0,
+        "provenance": "unknown"
+      }
+    }
+  ],
+  "color_context": {
+    "pipeline_state": "managed_sdr_v1",
+    "working": {
+      "primaries": "bt709",
+      "transfer": "linear",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "monitoring": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "delivery": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "bt709",
+      "range": "limited",
+      "white_point": "d65",
+      "bit_depth": 8,
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    }
+  },
+  "imported_from": [
+    {
+      "format": "otio",
+      "format_version": "Timeline.1",
+      "source_name": "whole-body-dissolve.otio",
+      "source_sha256": "1f639fdc3523fabdff98e518203eeb76e2a70059a53242a724bc8b6bd47ff1e0",
+      "start_offset_frames": 0,
+      "items": 3,
+      "exact": 2,
+      "approximated": 1,
+      "dropped": 0,
+      "media": {
+        "assets": 2,
+        "online": 0,
+        "offline": 2,
+        "remote": 0,
+        "timed_out": 0
+      },
+      "estimated_assets": [
+        {
+          "start": 1,
+          "end": 3
+        }
+      ],
+      "rows": [
+        {
+          "code": "media_offline",
+          "fidelity": "approximated",
+          "count": 2,
+          "names": [],
+          "at": []
+        },
+        {
+          "code": "transition_lane",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": [
+            {
+              "source": "/tracks/children/0/children/1",
+              "frame": 24
+            }
+          ]
+        },
+        {
+          "code": "clip_names_dropped",
+          "fidelity": "dropped",
+          "count": 2,
+          "names": [
+            "CutA",
+            "CutB"
+          ],
+          "at": [
+            {
+              "source": "/tracks/children/0/children/0",
+              "frame": 0,
+              "clip": 5
+            },
+            {
+              "source": "/tracks/children/0/children/2",
+              "frame": 24
+            }
+          ]
+        },
+        {
+          "code": "resolution_inferred",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": []
+        },
+        {
+          "code": "color_space_default",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": []
+        }
+      ],
+      "omitted_codes": []
+    }
+  ],
+  "fps": {
+    "numerator": 24,
+    "denominator": 1
+  },
+  "resolution": [
+    1920,
+    1080
+  ],
+  "duration": 28
+}

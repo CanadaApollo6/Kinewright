@@ -7,6 +7,7 @@ pub fn document(clips: u64, tracks: u64, clip_frames: i64) -> Document {
         duration: TimeCode(i64::try_from(per_track).unwrap() * clip_frames),
         tracks: (1..=tracks)
             .map(|track| Track {
+                name: None,
                 id: TrackId(track),
                 kind: TrackKind::Video,
                 sync_lock: true,

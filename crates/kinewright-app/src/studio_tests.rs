@@ -237,6 +237,7 @@ fn s3_frozen_selection_survives_background_copy_and_reopen() {
                 track: Track {
                     id: TrackId(99),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![]
                 }
@@ -295,6 +296,7 @@ fn s3_frozen_selection_survives_background_copy_and_reopen() {
             track: Track {
                 id: TrackId(100),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: vec![]
             }
@@ -642,6 +644,7 @@ fn s3_still_import_and_manual_placement() {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             }],
@@ -847,6 +850,7 @@ fn s3_failed_edit_copy_keeps_frozen_selection() {
                 track: Track {
                     id: TrackId(99),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: vec![]
                 }

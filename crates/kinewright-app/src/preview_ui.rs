@@ -1844,12 +1844,14 @@ mod tests {
                 Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
                 Track {
                     id: TrackId(2),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
@@ -1947,6 +1949,7 @@ mod tests {
         let mut document = document();
         document.resolution = (1920, 1080);
         document.media_pool = vec![MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: std::path::PathBuf::from("picture.mov"),
             name: "Picture".to_owned(),
@@ -2658,6 +2661,7 @@ pub(crate) mod mo2_tests {
         };
         let document = Document {
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: std::path::PathBuf::from("picture.mov"),
                 name: "Picture".to_owned(),
@@ -2672,6 +2676,7 @@ pub(crate) mod mo2_tests {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,

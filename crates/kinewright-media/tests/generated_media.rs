@@ -507,6 +507,7 @@ fn export_fixture(engine: &dyn Analysis) -> Document {
     std::mem::forget(blue);
     let document = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -515,6 +516,7 @@ fn export_fixture(engine: &dyn Analysis) -> Document {
             Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -538,6 +540,7 @@ fn export_fixture(engine: &dyn Analysis) -> Document {
             Track {
                 id: TrackId(2),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -726,6 +729,7 @@ fn title_export_pixels_match_preview_after_h264_redecode() {
     let engine = TeardownObservedEngine::new();
     let document = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -733,6 +737,7 @@ fn title_export_pixels_match_preview_after_h264_redecode() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -825,6 +830,7 @@ fn freeze_export_pixels_match_preview_after_h264_redecode() {
     let asset = engine.probe(&input.0).unwrap();
     let document = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -832,6 +838,7 @@ fn freeze_export_pixels_match_preview_after_h264_redecode() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -1173,6 +1180,7 @@ fn timeline_decode_selects_two_clips_and_renders_the_gap_black() {
     let asset = engine.probe(&clip.0).unwrap();
     let document = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -1180,6 +1188,7 @@ fn timeline_decode_selects_two_clips_and_renders_the_gap_black() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![
                 Clip {
@@ -1315,6 +1324,7 @@ fn multi_track_audio_device_play_pause_and_seek_smoke_test() {
     );
     let document = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -1323,6 +1333,7 @@ fn multi_track_audio_device_play_pause_and_seek_smoke_test() {
             Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -1346,6 +1357,7 @@ fn multi_track_audio_device_play_pause_and_seek_smoke_test() {
             Track {
                 id: TrackId(2),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: vec![Clip {
                     enabled: true,
@@ -1405,6 +1417,7 @@ fn timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test() {
     let asset = engine.probe(&clip.0).unwrap();
     let document = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -1412,6 +1425,7 @@ fn timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![
                 Clip {
@@ -1481,6 +1495,7 @@ fn full_timeline(asset: MediaAsset) -> Document {
     let resolution = asset.resolution.unwrap();
     let document = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),
@@ -1488,6 +1503,7 @@ fn full_timeline(asset: MediaAsset) -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,

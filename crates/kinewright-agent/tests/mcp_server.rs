@@ -2027,6 +2027,7 @@ async fn cc6_video_scopes_v2_points_at_get_color_qc_instead_of_a_fabricated_zero
 
 fn edit_plan_document() -> Document {
     let asset = MediaAsset {
+        remote_locator: None,
         id: AssetId(1),
         path: PathBuf::from("fixture.mp4"),
         name: "fixture".to_owned(),
@@ -2040,11 +2041,13 @@ fn edit_plan_document() -> Document {
     };
     Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -2578,9 +2581,8 @@ async fn cc7_prepare_commit_and_compare(
 /// planner, `plan_motion`, MO2 Part A generates four more
 /// **registry-only** mutators, and MO2 Part B adds one **registry-only**
 /// inspector, `preview_solo`. The registry sextuple does move, to
-/// `153 / 64 / 89`, which is the count assertions below, and its three byte
-/// measures `2 002 954 / 1 848 392 / 129 437` are pinned beside the served
-/// quad.
+/// `153 / 64 / 89` before IX1. IX1 adds two inspectors and adjusts the
+/// relink description. The count and byte pins below include those changes.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
@@ -2607,12 +2609,12 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         kinewright_agent::compact_tool_names()
     );
 
-    // The internal registry: 153 tools, of which `INSPECTOR_TOOL_NAMES` is 89.
+    // The internal registry has 156 tools, including 90 inspector names.
     let registry = kinewright_agent::capability_tool_names().unwrap();
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        154,
+        156,
         "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool; \
          AU2 Part B adds set_audio_master, set_pan_law and get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds none; \
@@ -2627,7 +2629,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
          MO1 A4c generates copy_clip_attributes; \
          MO1 Part C adds plan_motion; \
          MO2 Part A generates set_clip_blend_mode, add_adjustment_clip, add_solid_clip and set_solid_color; \
-         MO2 Part B adds preview_solo"
+         MO2 Part B adds preview_solo; IX1 adds two inspectors"
     );
     assert_eq!(
         operations.len(),
@@ -2662,7 +2664,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     }
     assert_eq!(
         registry.len() - operations.len(),
-        90,
+        92,
         "AU1 adds get_audio_levels; AU2 Part B adds get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds no inspector; \
          AU4 Part A adds no inspector; AU4 Part B adds the two planners; \
@@ -2670,7 +2672,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
          AU6 §5.4 Part A and Part B add none; \
          IN1 Part A adds get_incidents and resolve_incident; \
          IN2 Part A adds propose_fix; \
-         MO1 Part C adds plan_motion; MO2 Part B adds preview_solo"
+         MO1 Part C adds plan_motion; MO2 Part B adds preview_solo; IX1 adds two inspectors"
     );
     let spectrum = registry
         .iter()
@@ -2755,7 +2757,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
             registry_metrics.input_schema_bytes,
             registry_metrics.description_bytes
         ),
-        (154, 1_981_514, 1_826_246, 130_006),
+        (156, 1_985_683, 1_829_592, 130_499),
         "registry={registry_metrics:?}"
     );
 
@@ -2887,6 +2889,7 @@ async fn au1_get_audio_levels_measures_the_real_mix() {
     document.tracks.push(Track {
         id: TrackId(2),
         kind: TrackKind::Audio,
+        name: None,
         sync_lock: true,
         clips: vec![Clip {
             enabled: true,
@@ -7610,6 +7613,7 @@ async fn au4_plan_audio_ducking_converges_through_the_real_engine() {
     document.tracks.push(Track {
         id: TrackId(2),
         kind: TrackKind::Audio,
+        name: None,
         sync_lock: false,
         clips: vec![Clip {
             enabled: true,
@@ -7945,6 +7949,7 @@ fn au5_audio_document(asset: MediaAsset) -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![Clip {
                 enabled: true,
@@ -8460,6 +8465,7 @@ async fn au5_capture_room_tone_and_fill_a_gap_through_the_real_store() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![clip(1, 0), clip(2, 60)],
         }],
@@ -8712,6 +8718,7 @@ async fn au5_plan_room_tone_fill_commits_a_covering_tile_at_25_fps() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![clip(1, 0), clip(2, 32)],
         }],
@@ -8863,6 +8870,7 @@ async fn au5_plan_room_tone_fill_commits_a_covering_tile_at_29_97_fps() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![clip(1, 0), clip(2, 40)],
         }],
@@ -9001,6 +9009,7 @@ async fn au5_plan_room_tone_fill_tiles_a_1200_frame_asset_at_29_97_fps() {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: vec![clip(1, 0), clip(2, 40)],
         }],
@@ -9095,6 +9104,7 @@ fn au6_agent_scene(
         .map(|track| Track {
             id: track.track,
             kind: track.kind,
+            name: None,
             sync_lock: track.sync_lock,
             clips: spec
                 .clips
@@ -10601,7 +10611,7 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
 /// §6.4 rules 12–13 and §9 clause 19: **three** registry-only capabilities, no
 /// served tool, for the **twenty-third** consecutive measurement.
 ///
-/// The registry sextuple is `153 / 64 / 89 / 2 002 954 / 1 848 392 / 129 437`,
+/// The registry sextuple is `155 / 64 / 91 / 2 006 996 / 1 851 598 / 129 943`,
 /// pinned byte for byte with its decomposition in
 /// `server::tests::served_surface_is_small_and_keeps_the_internal_registry_discoverable`;
 /// this test pins all six registry numbers and the served quad over the live
@@ -10662,15 +10672,15 @@ async fn mo2_the_served_quad_does_not_move_for_the_twenty_third_measurement() {
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        154,
-        "IN1 adds two capabilities, IN2 Part A adds propose_fix, MO1 A4a/b/c add six mutators, MO1 Part C adds plan_motion, MO2 Part A adds four mutators, MO2 Part B adds preview_solo"
+        156,
+        "IN1 adds two capabilities, IN2 Part A adds propose_fix, MO1 A4a/b/c add six mutators, MO1 Part C adds plan_motion, MO2 Part A adds four mutators, MO2 Part B adds preview_solo; IX1 adds two inspectors"
     );
     assert_eq!(
         operations.len(),
         64,
         "MO2 Part A adds four Operation variants"
     );
-    assert_eq!(registry.len() - operations.len(), 90);
+    assert_eq!(registry.len() - operations.len(), 92);
     // MO2 R25/R30 (review 1 S1): the registry byte trio beside the counts.
     let registry_metrics = kinewright_agent::capability_tool_metrics().unwrap();
     assert_eq!(
@@ -10680,7 +10690,7 @@ async fn mo2_the_served_quad_does_not_move_for_the_twenty_third_measurement() {
             registry_metrics.input_schema_bytes,
             registry_metrics.description_bytes
         ),
-        (154, 1_981_514, 1_826_246, 130_006),
+        (156, 1_985_683, 1_829_592, 130_499),
         "registry={registry_metrics:?}"
     );
     let state = registry
@@ -10919,6 +10929,7 @@ fn mo2_solo_stack(mut document: Document, clips: Vec<Clip>) -> Document {
         document.tracks.push(Track {
             id,
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![clip],
         });
@@ -11553,6 +11564,7 @@ mod mo2_solo_review {
         document.tracks.push(Track {
             id: TrackId(3),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![mo2_solo_solid(3, [0, 255, 0], 12)],
         });

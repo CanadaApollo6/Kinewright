@@ -301,6 +301,7 @@ fn build_document(
         tracks.push(Track {
             id: TrackId(id),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips,
         });
@@ -308,6 +309,7 @@ fn build_document(
     let duration = TimeCode(cursors.iter().copied().max().unwrap_or(0));
     let document = Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: kinewright_core::MediaCatalog::default(),
         audio_mix: kinewright_core::AudioMix::default(),
         color_context: kinewright_core::ColorContext::default(),

@@ -668,6 +668,7 @@ fn te14_fix2_real_scale_measurements() {
             .request(Command::DoBatch(vec![
                 Operation::AddTrack {
                     track: Track {
+                        name: None,
                         id: TrackId(1),
                         kind: TrackKind::Audio,
                         sync_lock: true,

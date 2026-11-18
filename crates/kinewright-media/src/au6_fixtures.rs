@@ -493,6 +493,7 @@ impl Au6Scene {
             .map(|track| Track {
                 id: track.track,
                 kind: track.kind,
+                name: None,
                 sync_lock: track.sync_lock,
                 clips: spec
                     .clips
@@ -1254,6 +1255,7 @@ fn au6_c_a_click_in_the_learn_gap_splits_it() {
         tracks: vec![Track {
             id: AU6_C_DIALOGUE_TRACK,
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: spec.clips.iter().map(media_clip).collect(),
         }],

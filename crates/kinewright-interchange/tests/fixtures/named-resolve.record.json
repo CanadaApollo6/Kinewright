@@ -1,0 +1,84 @@
+{
+  "format": "otio",
+  "format_version": "Timeline.1",
+  "source_name": "named-resolve.otio",
+  "source_sha256": "f7a7879bfed071d407c2c8cc07bb1e4ad94943f2f19814dcd47360392a18a2ea",
+  "start_offset_frames": 86400,
+  "items": 1,
+  "exact": 1,
+  "approximated": 0,
+  "dropped": 0,
+  "media": {
+    "assets": 1,
+    "online": 0,
+    "offline": 1,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 2
+    }
+  ],
+  "rows": [
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "rate_snapped",
+      "fidelity": "approximated",
+      "count": 5,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "start_rebased",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "resolution_inferred",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "clip_names_dropped",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [
+        "Interview \"A\""
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0,
+          "clip": 3
+        }
+      ]
+    },
+    {
+      "code": "metadata_dropped",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [],
+      "at": []
+    }
+  ],
+  "omitted_codes": []
+}

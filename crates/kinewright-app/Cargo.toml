@@ -36,6 +36,7 @@ proptest.workspace = true
 # The person-path tests read `au6_scenarios` / `cc7_scenarios` and generate
 # media through `test_support`; none of that is in a shipping path.
 kinewright-core = { path = "../kinewright-core", features = ["test-util"] }
+kinewright-interchange = { path = "../kinewright-interchange" }
 kinewright-media = { path = "../kinewright-media", features = ["test-util"] }
 kinewright-project = { path = "../kinewright-project", features = ["test-util", "ms2-test-bin-dir"] }
 

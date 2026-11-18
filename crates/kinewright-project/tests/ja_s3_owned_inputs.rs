@@ -1178,6 +1178,7 @@ fn compact_history_redo_keeps_owned_lut_after_collection_reopen_and_save_as() {
     std::fs::write(&external, cube).unwrap();
     let core = Core::for_test(Document {
         tracks: vec![Track {
+            name: None,
             id: TrackId(1),
             kind: TrackKind::Video,
             sync_lock: true,

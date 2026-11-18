@@ -8,6 +8,7 @@ use kinewright_core::{Document, Operation, Track, TrackId, TrackKind};
 fn document() -> Document {
     Document {
         tracks: vec![Track {
+            name: None,
             id: TrackId(1),
             kind: TrackKind::Audio,
             sync_lock: false,

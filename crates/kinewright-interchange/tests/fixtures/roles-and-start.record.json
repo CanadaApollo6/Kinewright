@@ -1,0 +1,70 @@
+{
+  "format": "fcpxml",
+  "format_version": "1.13",
+  "source_name": "roles-and-start.fcpxml",
+  "source_sha256": "7d0b38d7a98016d53138f148cac15a84364e25a527eed898bf8a60eab3661f08",
+  "start_offset_frames": 90000,
+  "items": 2,
+  "exact": 2,
+  "approximated": 0,
+  "dropped": 0,
+  "media": {
+    "assets": 2,
+    "online": 0,
+    "offline": 2,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 3
+    }
+  ],
+  "rows": [
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 2,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "start_rebased",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "drop_frame_labels",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "clip_names_dropped",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [
+        "Establishing"
+      ],
+      "at": [
+        {
+          "source": "11:9",
+          "frame": 0,
+          "clip": 4
+        }
+      ]
+    }
+  ],
+  "omitted_codes": []
+}

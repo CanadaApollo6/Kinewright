@@ -112,6 +112,7 @@ fn add_track(core: &Core, id: u64) {
             track: Track {
                 id: TrackId(id),
                 kind: TrackKind::Audio,
+                name: None,
                 sync_lock: true,
                 clips: vec![]
             }

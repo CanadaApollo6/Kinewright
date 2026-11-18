@@ -3,7 +3,7 @@ use std::{
     path::Path,
 };
 
-use kinewright_core::{MediaError, MediaSourceFingerprint};
+use kinewright_core::{MediaError, MediaSourceFingerprint, ProbeEvent, ProbeObserver};
 
 #[cfg(test)]
 pub(crate) use kinewright_hash::Sha256;
@@ -81,9 +81,29 @@ pub fn sha256_file(path: &Path) -> Result<String, MediaError> {
 ///
 /// Returns a media error when the source metadata or bytes cannot be read.
 pub fn source_fingerprint(path: &Path) -> Result<MediaSourceFingerprint, MediaError> {
+    source_fingerprint_observed(path, &())
+}
+
+pub(crate) fn source_fingerprint_observed(
+    path: &Path,
+    observer: &dyn ProbeObserver,
+) -> Result<MediaSourceFingerprint, MediaError> {
+    if !observer.observe(ProbeEvent::HashedBytes(0)) {
+        return Err(MediaError::Cancelled);
+    }
     let (mut file, metadata) = open_regular_file(path)?;
     let byte_len = metadata.len();
-    let content_sha256 = hash_reader(&mut file, path)?;
+    let content_sha256 = kinewright_hash::sha256_reader_observed(
+        &mut file,
+        |bytes| {
+            if observer.observe(ProbeEvent::HashedBytes(bytes)) {
+                Ok(())
+            } else {
+                Err(MediaError::Cancelled)
+            }
+        },
+        |error| MediaError::Backend(format!("could not hash {}: {error}", path.display())),
+    )?;
     let after = file.metadata().map_err(|error| {
         MediaError::Backend(format!(
             "could not inspect {} after fingerprinting: {error}",

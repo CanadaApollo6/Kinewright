@@ -200,7 +200,7 @@ fn c7_revise_cut_replays_after_host_restart() {
         write: vec![temp.root().into()],
     };
     let host = WriterHost::start(HostConfig {
-                data_dir: Some((folder).with_extension("voice-data")),
+        data_dir: Some((folder).with_extension("voice-data")),
         scheduler_settings: Some(folder),
         project: "hooks".into(),
         path: Some(temp.path("project.kinewright")),
@@ -363,6 +363,7 @@ fn c7_moved_head_is_conflict() {
                 track: Track {
                     id: TrackId(41),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: vec![],
                 },

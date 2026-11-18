@@ -35,6 +35,7 @@ mod tests {
             &[
                 kinewright_core::Operation::AddTrack {
                     track: kinewright_core::Track {
+                        name: None,
                         id: kinewright_core::TrackId(81),
                         kind: kinewright_core::TrackKind::Video,
                         sync_lock: false,
@@ -287,8 +288,15 @@ mod tests {
             "B21_NO_CONFIRMATION_WAIT"
         );
         let after = b.core.export_history().unwrap();
-        assert_eq!(after.history().document.tracks[0].clips.len(), 1, "B21_CUT_APPLIED");
-        assert_eq!(after.history().document.tracks[0].clips[0].timeline_start.0, 10);
+        assert_eq!(
+            after.history().document.tracks[0].clips.len(),
+            1,
+            "B21_CUT_APPLIED"
+        );
+        assert_eq!(
+            after.history().document.tracks[0].clips[0].timeline_start.0,
+            10
+        );
         b.core.request(kinewright_core::Command::Undo).unwrap();
         assert_eq!(
             b.core.export_history().unwrap().history().document,
@@ -296,7 +304,10 @@ mod tests {
             "B21_REVERSIBLE"
         );
         b.core.request(kinewright_core::Command::Redo).unwrap();
-        assert_eq!(b.core.export_history().unwrap().history().document, after.history().document);
+        assert_eq!(
+            b.core.export_history().unwrap().history().document,
+            after.history().document
+        );
         assert_eq!(
             b.f.host
                 .owner
@@ -573,7 +584,9 @@ mod tests {
             Arc::default(),
             None,
         );
-        let media = Arc::new(super::super::super::LazyHostMedia::new(host.config.data_dir.clone()));
+        let media = Arc::new(super::super::super::LazyHostMedia::new(
+            host.config.data_dir.clone(),
+        ));
         let server = crate::McpServer::start_task_isolated(
             manual.clone(),
             media.clone(),
@@ -686,7 +699,13 @@ mod tests {
                 "B21_RESTART_PENDING_REFUSED {reply:?}"
             );
         });
-        assert!(matches!(core.export_history(), Err(kinewright_project::operation_actor::Error::Retired)), "RESTART_RELEASES_THE_UNACKNOWLEDGED_TASK_ACTOR");
+        assert!(
+            matches!(
+                core.export_history(),
+                Err(kinewright_project::operation_actor::Error::Retired)
+            ),
+            "RESTART_RELEASES_THE_UNACKNOWLEDGED_TASK_ACTOR"
+        );
         assert_eq!(
             mcp.server.confirmations().pending_task_count(),
             0,
@@ -730,9 +749,23 @@ mod tests {
             .unwrap();
         assert_eq!(state.edit_consent, grant, "B21_GRANT_SURVIVES_RESTART");
         let host_owner = owner.lock().unwrap();
-        let saved = host_owner.saved_task_history(&state, &child).unwrap().unwrap();
-        let checkpoint = host_owner.owner().unwrap().store().unwrap().read_record::<kinewright_project::bundle_records::BranchCheckpoint>(&saved.source.checkpoint).unwrap();
-        assert_eq!(checkpoint.identity, before, "RESTART_KEEPS_THE_EXACT_PRE_APPROVAL_TASK_CUT");
+        let saved = host_owner
+            .saved_task_history(&state, &child)
+            .unwrap()
+            .unwrap();
+        let checkpoint = host_owner
+            .owner()
+            .unwrap()
+            .store()
+            .unwrap()
+            .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(
+                &saved.source.checkpoint,
+            )
+            .unwrap();
+        assert_eq!(
+            checkpoint.identity, before,
+            "RESTART_KEEPS_THE_EXACT_PRE_APPROVAL_TASK_CUT"
+        );
         drop(checkpoint);
         drop(host_owner);
         assert!(
@@ -762,7 +795,15 @@ mod tests {
             Some(false),
             "B21_TRIM_TRACK_APPLIED {committed:?}"
         );
-        assert!(b.core.export_history().unwrap().history().document.tracks.is_empty());
+        assert!(
+            b.core
+                .export_history()
+                .unwrap()
+                .history()
+                .document
+                .tracks
+                .is_empty()
+        );
         b.core.request(kinewright_core::Command::Undo).unwrap();
         assert_eq!(
             b.core.export_history().unwrap().history().document,

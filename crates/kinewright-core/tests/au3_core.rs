@@ -68,6 +68,7 @@ fn codes(exceptions: &[AudioQcException]) -> Vec<&str> {
 fn empty_timeline(fps: Rational) -> Document {
     Document {
         investigator: None,
+        imported_from: Vec::new(),
         catalog: MediaCatalog::default(),
         audio_mix: AudioMix::default(),
         color_context: ColorContext::default(),
@@ -75,6 +76,7 @@ fn empty_timeline(fps: Rational) -> Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         }],
@@ -88,6 +90,7 @@ fn empty_timeline(fps: Rational) -> Document {
 
 fn asset(id: u64, fps: Rational, kind: MediaKind) -> MediaAsset {
     MediaAsset {
+        remote_locator: None,
         id: AssetId(id),
         path: std::path::PathBuf::from(format!("asset-{id}.mp4")),
         name: format!("asset-{id}"),
@@ -110,6 +113,7 @@ fn document_with_one_audio_track() -> Document {
         track: Track {
             id: TrackId(2),
             kind: TrackKind::Audio,
+            name: None,
             sync_lock: true,
             clips: Vec::new(),
         },

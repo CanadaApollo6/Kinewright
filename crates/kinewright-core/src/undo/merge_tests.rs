@@ -4,6 +4,7 @@ use crate::{SolidColor, TimeCode, Track, TrackId, TrackKind};
 fn document() -> Document {
     Document {
         tracks: vec![Track {
+            name: None,
             id: TrackId(1),
             kind: TrackKind::Video,
             sync_lock: false,

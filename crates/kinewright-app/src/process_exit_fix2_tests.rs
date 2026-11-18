@@ -214,6 +214,7 @@ fn acknowledgement_order(recorder: bool) {
             .core
             .request(Command::Do(Operation::AddTrack {
                 track: Track {
+                    name: None,
                     id: TrackId(333),
                     kind: TrackKind::Video,
                     sync_lock: true,

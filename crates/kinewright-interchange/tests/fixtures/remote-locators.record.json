@@ -1,0 +1,76 @@
+{
+  "format": "otio",
+  "format_version": "Timeline.1",
+  "source_name": "remote-locators.otio",
+  "source_sha256": "8c7a62b52acec8cca68e35a033173fe044f83550893cb519cb7da79638b3d321",
+  "start_offset_frames": 0,
+  "items": 2,
+  "exact": 2,
+  "approximated": 0,
+  "dropped": 0,
+  "media": {
+    "assets": 2,
+    "online": 0,
+    "offline": 2,
+    "remote": 2,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 3
+    }
+  ],
+  "rows": [
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 2,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "remote_url",
+      "fidelity": "approximated",
+      "count": 2,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "clip_names_dropped",
+      "fidelity": "dropped",
+      "count": 2,
+      "names": [
+        "Untrusted",
+        "Encoded"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0,
+          "clip": 4
+        },
+        {
+          "source": "/tracks/children/0/children/1",
+          "frame": 24,
+          "clip": 5
+        }
+      ]
+    },
+    {
+      "code": "resolution_inferred",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    }
+  ],
+  "omitted_codes": []
+}

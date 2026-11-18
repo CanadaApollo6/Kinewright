@@ -705,6 +705,7 @@ fn with_parameter(effect: &Effect, name: &str, value: i64) -> Effect {
 
 fn cc4_asset() -> kinewright_core::MediaAsset {
     kinewright_core::MediaAsset {
+        remote_locator: None,
         id: kinewright_core::AssetId(1),
         path: std::path::PathBuf::from("cc4-fixture.mp4"),
         name: "cc4 fixture".to_owned(),
@@ -3279,6 +3280,7 @@ fn relocatable_document(assets: &[LutAsset], effects: Vec<Effect>) -> Document {
         tracks: vec![kinewright_core::Track {
             id: kinewright_core::TrackId(1),
             kind: kinewright_core::TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![kinewright_core::Clip {
                 enabled: true,

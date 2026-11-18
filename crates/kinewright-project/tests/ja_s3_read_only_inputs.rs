@@ -127,6 +127,7 @@ impl Fixture {
         let manifest_ref = record(&root.path("manifest"), &manifest, RecordKind::InputManifest);
         let document = Document {
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: root.path("this-locator-does-not-exist.wav"),
                 name: "provenance only".into(),

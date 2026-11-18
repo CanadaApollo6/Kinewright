@@ -1,0 +1,87 @@
+{
+  "format": "otio",
+  "format_version": "Timeline.1",
+  "source_name": "snap-two.otio",
+  "source_sha256": "dcde938992e0d8e31fe7cd84bada8be56ebbdcf213de2ea91c21ca2d2636cb72",
+  "start_offset_frames": 0,
+  "items": 1,
+  "exact": 0,
+  "approximated": 1,
+  "dropped": 0,
+  "media": {
+    "assets": 1,
+    "online": 0,
+    "offline": 1,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 2
+    }
+  ],
+  "rows": [
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "cut_snapped",
+      "fidelity": "approximated",
+      "count": 1,
+      "bound": {
+        "unit": "frames",
+        "value": 1
+      },
+      "names": [],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0,
+          "clip": 3
+        }
+      ]
+    },
+    {
+      "code": "rate_snapped",
+      "fidelity": "approximated",
+      "count": 3,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "resolution_inferred",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "clip_names_dropped",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [
+        "SlowGrid"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0,
+          "clip": 3
+        }
+      ]
+    }
+  ],
+  "omitted_codes": []
+}

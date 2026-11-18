@@ -70,6 +70,7 @@ mod dialogue_measurement_tests {
             wav[4..8].copy_from_slice(&riff_bytes.to_le_bytes());
             std::fs::write(&path, wav).unwrap();
             assets.push(MediaAsset {
+                remote_locator: None,
                 id: AssetId(u64::from(id)),
                 path: path.clone(),
                 name: format!("recording {id}"),
@@ -87,7 +88,7 @@ mod dialogue_measurement_tests {
         }
         let doc = Arc::new(Document {
             fps, duration: TimeCode(400), media_pool: assets.clone(),
-            tracks: vec![Track { id: TrackId(1), kind: TrackKind::Audio, sync_lock: true,
+            tracks: vec![Track { name: None, id: TrackId(1), kind: TrackKind::Audio, sync_lock: true,
                 clips: vec![serde_json::from_value(json!({"id":1,"asset":1,"source_range":{"start":0,"end":400},"timeline_start":0,"effects":[],"transition_in":null})).unwrap()] }],
             ..Document::default()
         });

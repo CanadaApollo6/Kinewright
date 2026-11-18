@@ -184,6 +184,7 @@ fn stored_fixture() -> StoredFixture {
         || {
             Ok(Document {
                 tracks: vec![Track {
+                    name: None,
                     id: TrackId(1),
                     kind: TrackKind::Video,
                     sync_lock: false,

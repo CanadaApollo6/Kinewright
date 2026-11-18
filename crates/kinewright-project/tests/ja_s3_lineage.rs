@@ -658,6 +658,7 @@ fn compact_lineage_keeps_original_occurrences_when_a_clip_id_is_reused() {
     let path = temporary.path("project.kinewright");
     let mut document = Document {
         tracks: vec![Track {
+            name: None,
             id: TrackId(1),
             kind: TrackKind::Video,
             sync_lock: true,

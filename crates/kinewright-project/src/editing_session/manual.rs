@@ -914,6 +914,7 @@ mod c0_fix1_tests {
     fn owner_at(path: &std::path::Path) -> Ja1EditingSession {
         let core = Core::for_test(Document {
             tracks: vec![Track {
+                name: None,
                 id: TrackId(1),
                 kind: TrackKind::Video,
                 sync_lock: true,
@@ -1275,6 +1276,7 @@ mod c0_fix1_tests {
         let temp = TempDirectory::new_in(&workspace_target_dir(), "first-save-later-suffix");
         let core = Core::for_test(Document {
             tracks: vec![Track {
+                name: None,
                 id: TrackId(1),
                 kind: TrackKind::Video,
                 sync_lock: true,

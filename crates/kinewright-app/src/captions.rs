@@ -135,12 +135,14 @@ mod tests {
                 Track {
                     id: TrackId(3),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 },
                 Track {
                     id: TrackId(9),
                     kind: TrackKind::Audio,
+                    name: None,
                     sync_lock: false,
                     clips: Vec::new(),
                 },
@@ -163,6 +165,7 @@ mod tests {
                 track: Track {
                     id: TrackId(10),
                     kind: TrackKind::Video,
+                    name: None,
                     sync_lock: true,
                     clips: Vec::new(),
                 }

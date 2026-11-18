@@ -23,6 +23,7 @@ fn bound() -> (OwnerHistory, Producer) {
     let pool = HistoryPool::new(PoolLimits::default());
     let document = Document {
         tracks: vec![Track {
+            name: None,
             id: TrackId(1),
             kind: TrackKind::Audio,
             sync_lock: false,

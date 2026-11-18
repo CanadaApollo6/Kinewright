@@ -1,0 +1,189 @@
+{
+  "tracks": [
+    {
+      "id": 2,
+      "kind": "Video",
+      "name": "A",
+      "clips": [
+        {
+          "id": 4,
+          "asset": 1,
+          "source_range": {
+            "start": 24,
+            "end": 72
+          },
+          "timeline_start": 0,
+          "effects": [],
+          "transition_in": null
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "kind": "Audio",
+      "name": "A",
+      "clips": [
+        {
+          "id": 5,
+          "asset": 1,
+          "source_range": {
+            "start": 29,
+            "end": 74
+          },
+          "timeline_start": 3,
+          "effects": [],
+          "transition_in": null
+        }
+      ]
+    }
+  ],
+  "media_pool": [
+    {
+      "id": 1,
+      "path": "file:///media/Interview.mov",
+      "name": "Interview",
+      "duration": 7200,
+      "fps": {
+        "numerator": 24,
+        "denominator": 1
+      },
+      "kind": "AudioVideo",
+      "resolution": null,
+      "color_description": {
+        "primaries": "unknown",
+        "transfer": "unknown",
+        "matrix": "unknown",
+        "range": "unknown",
+        "white_point": "unknown",
+        "bit_depth": "unknown",
+        "confidence_basis_points": 0,
+        "provenance": "unknown"
+      }
+    }
+  ],
+  "color_context": {
+    "pipeline_state": "managed_sdr_v1",
+    "working": {
+      "primaries": "bt709",
+      "transfer": "linear",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "monitoring": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "delivery": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "bt709",
+      "range": "limited",
+      "white_point": "d65",
+      "bit_depth": 8,
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    }
+  },
+  "imported_from": [
+    {
+      "format": "otio",
+      "format_version": "Timeline.1",
+      "source_name": "split-edit.otio",
+      "source_sha256": "02f970408f6b9b04181bb0fc3935cc6f77dff7e20238c6ab3229154c93f38485",
+      "start_offset_frames": 0,
+      "items": 3,
+      "exact": 2,
+      "approximated": 1,
+      "dropped": 0,
+      "media": {
+        "assets": 1,
+        "online": 0,
+        "offline": 1,
+        "remote": 0,
+        "timed_out": 0
+      },
+      "estimated_assets": [
+        {
+          "start": 1,
+          "end": 2
+        }
+      ],
+      "rows": [
+        {
+          "code": "media_offline",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": []
+        },
+        {
+          "code": "av_link_unpaired",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": [
+            {
+              "source": "/tracks/children/1/children/1",
+              "frame": 3,
+              "clip": 5
+            }
+          ]
+        },
+        {
+          "code": "clip_names_dropped",
+          "fidelity": "dropped",
+          "count": 2,
+          "names": [
+            "Interview"
+          ],
+          "at": [
+            {
+              "source": "/tracks/children/0/children/0",
+              "frame": 0,
+              "clip": 4
+            },
+            {
+              "source": "/tracks/children/1/children/1",
+              "frame": 3,
+              "clip": 5
+            }
+          ]
+        },
+        {
+          "code": "resolution_inferred",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": []
+        },
+        {
+          "code": "color_space_default",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": []
+        }
+      ],
+      "omitted_codes": []
+    }
+  ],
+  "fps": {
+    "numerator": 24,
+    "denominator": 1
+  },
+  "resolution": [
+    1920,
+    1080
+  ],
+  "duration": 48
+}

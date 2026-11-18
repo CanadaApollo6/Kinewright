@@ -146,6 +146,7 @@ fn observe(root: &Path) -> Result<Value, BundleError> {
             .map(|id| Track {
                 id: TrackId(id),
                 kind: TrackKind::Video,
+                name: None,
                 sync_lock: true,
                 clips: vec![],
             })
@@ -241,6 +242,7 @@ pub(super) fn core_seal(revised: bool) -> Result<Value, String> {
         track: Track {
             id: TrackId(id),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         },
@@ -414,6 +416,7 @@ pub(super) fn writer_identity(root: &Path) -> Result<Value, String> {
         tracks: vec![Track {
             id: TrackId(mark),
             kind: TrackKind::Video,
+            name: None,
             sync_lock: true,
             clips: vec![],
         }],
