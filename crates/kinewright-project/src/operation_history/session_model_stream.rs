@@ -1,5 +1,13 @@
 use super::*;
 
+// The first four slow groups run the native manual lane. All seeds also
+// exercise the portable consent, checkpoint and resource grammar.
+const MANUAL_SEEDS: u64 = 16;
+
+fn verify_manual(seed: u64, length: u64) -> bool {
+    length >= 1024 && seed <= MANUAL_SEEDS
+}
+
 fn random(state: &mut u64) -> u64 {
     *state ^= *state << 13;
     *state ^= *state >> 7;
@@ -174,7 +182,46 @@ fn prime_group<S: ModelStore>(session: &mut Session<S>, seed: u64, state: &mut u
     session.drain();
 }
 
-fn run_seed<S: ModelStore>(seed: u64, length: u64) -> Coverage {
+#[cfg(target_os = "linux")]
+fn prime_native_groups(product: &mut product::ProductSession, seed: u64) {
+    let base = 3_000_000 + seed * 16;
+    let marker = |offset, gesture: Option<&str>| Message {
+        id: base + offset,
+        action: Action::Do {
+            operations: vec![marker(base + offset)],
+            gesture: gesture.map(str::to_owned),
+        },
+        creation: origin(base + offset),
+        approval: None,
+        transition: None,
+    };
+    product.send(marker(0, Some("exported")));
+    product.send(marker(1, Some("exported")));
+    product.group(1, GroupFault::RefuseAt(0));
+    product.send(marker(2, Some("exported")));
+    product.group(1, GroupFault::LoseAcknowledgement);
+    product.drain();
+
+    product.send(marker(3, None));
+    product.send(marker(4, Some("atomic")));
+    product.send(marker(5, Some("atomic")));
+    product.send(marker(6, None));
+    product.group(3, GroupFault::RefuseFoldedAt(1));
+    product.drain();
+
+    product.send(marker(7, None));
+    product.send(marker(8, None));
+    product.send(marker(9, None));
+    product.group(3, GroupFault::IssuerAt(1));
+    product.group(2, GroupFault::StopBeforeRoot(1));
+    product.send(marker(10, None));
+    product.group(1, GroupFault::StopAfterRoot);
+    product.drain();
+}
+
+fn run_seed<S: ModelStore>(seed: u64, length: u64, verify_manual: bool) -> Coverage {
+    #[cfg(not(target_os = "linux"))]
+    let _ = verify_manual;
     struct FailureContext {
         seed: u64,
         attempt: u64,
@@ -201,12 +248,22 @@ fn run_seed<S: ModelStore>(seed: u64, length: u64) -> Coverage {
     prime_redo_payload(&mut session, seed);
     let mut state = seed;
     prime_group(&mut session, seed, &mut state);
+    #[cfg(target_os = "linux")]
+    let mut product = verify_manual.then(product::ProductSession::new);
+    #[cfg(target_os = "linux")]
+    if let Some(product) = &mut product {
+        prime_native_groups(product, seed);
+    }
     for index in 0..length {
         context.attempt = index + 1;
         let id = seed * (length + 1) + index;
         let choice = random(&mut state);
         let input = message(&mut session, id, choice);
         let synchronous = input.approval.is_some() || input.transition.is_some();
+        #[cfg(target_os = "linux")]
+        if let Some(product) = &mut product {
+            product.send(input.clone());
+        }
         session.send(input);
         if synchronous {
             session.drain();
@@ -233,16 +290,44 @@ fn run_seed<S: ModelStore>(seed: u64, length: u64) -> Coverage {
             10 => session.group(width, GroupFault::StopAfterRoot),
             _ => {}
         }
+        #[cfg(target_os = "linux")]
+        if let Some(product) = &mut product {
+            match (choice >> 16) % 12 {
+                0 => product.group(width, GroupFault::LoseAcknowledgement),
+                1 => product.group(width, GroupFault::StopBeforeRoot(point)),
+                2..=7 => product.drain(),
+                9 => product.group(width, GroupFault::RefuseAt(point)),
+                10 => product.group(width, GroupFault::StopAfterRoot),
+                11 => product.group(width, GroupFault::IssuerAt(point)),
+                _ => {}
+            }
+        }
         session.assert_acknowledged();
     }
     context.attempt = length + 1;
     session.drain();
     session.collect();
+    #[cfg(target_os = "linux")]
+    if let Some(mut product) = product {
+        product.drain();
+        product.assert_reopened();
+        session.coverage.manual = product.counts;
+    }
     eprintln!(
         "HX_SESSION_SEED_COMPLETE seed={seed} random_attempts={length} elapsed_ms={}",
         started.elapsed().as_millis()
     );
     session.coverage
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn run_manual_smoke() {
+    let coverage = run_seed::<MemoryStore>(1, 8, true);
+    assert!(coverage.manual.folds >= 2);
+    assert!(coverage.manual.issuer_refusals > 0);
+    assert!(coverage.manual.partial_refusals > 0);
+    assert!(coverage.manual.lost_acks > 0);
+    assert!(coverage.manual.retries > 0);
 }
 
 pub(super) fn run<S: ModelStore>(seeds: u64, length: u64) {
@@ -386,7 +471,12 @@ pub(super) fn run_range<S: ModelStore>(first: u64, last: u64, length: u64) {
                     scope.spawn(move || {
                         (first..=last)
                             .filter(|seed| (seed - first) % 4 == lane)
-                            .map(|seed| (seed, run_seed::<S>(seed, length)))
+                            .map(|seed| {
+                                (
+                                    seed,
+                                    run_seed::<S>(seed, length, verify_manual(seed, length)),
+                                )
+                            })
                             .collect::<Vec<_>>()
                     })
                 })
@@ -398,7 +488,12 @@ pub(super) fn run_range<S: ModelStore>(first: u64, last: u64, length: u64) {
         })
     } else {
         (first..=last)
-            .map(|seed| (seed, run_seed::<S>(seed, length)))
+            .map(|seed| {
+                (
+                    seed,
+                    run_seed::<S>(seed, length, verify_manual(seed, length)),
+                )
+            })
             .collect()
     };
     let mut totals = Coverage::default();
@@ -415,6 +510,41 @@ pub(super) fn run_range<S: ModelStore>(first: u64, last: u64, length: u64) {
         (first..=last).collect(),
         "SESSION_COMPLETE_CORPUS_WAS_EXECUTED"
     );
+    assert_portable_coverage(&totals);
+    println!(
+        "HX_SESSION_MODEL first_seed={first} last_seed={last} seeds={seeds} random_attempts={} primed_transitions={} elapsed_ms={} folds={} outbox_folds={} restart={} lost_ack={} prepublication_crash={} postpublication_crash={} group_refusal={} largest_group={} handoff={} save={} save_as={} rescue={} cold_open={} collect={} approvals={} transition_approvals={} baseline_lineage={} split_ancestry={} redo_payloads={} ordinary_lease_peak={}",
+        seeds * length,
+        seeds * 5,
+        started.elapsed().as_millis(),
+        totals.folds,
+        totals.outbox_folds,
+        totals.restarts,
+        totals.lost_acks,
+        totals.before_publish,
+        totals.after_publish,
+        totals.group_refusals,
+        totals.largest_group,
+        totals.handoffs,
+        totals.saves,
+        totals.save_as,
+        totals.rescues,
+        totals.opens,
+        totals.collections,
+        totals.approvals,
+        totals.transitions,
+        totals.baseline_lineage,
+        totals.split_ancestry,
+        totals.redo_payloads,
+        totals.ordinary_lease_peak
+    );
+    #[cfg(target_os = "linux")]
+    if verify_manual(first, length) {
+        let last_manual = last.min(MANUAL_SEEDS);
+        report_manual(first, last_manual, &totals.manual);
+    }
+}
+
+fn assert_portable_coverage(totals: &Coverage) {
     for (name, count) in [
         ("edit", totals.edits),
         ("fold", totals.folds),
@@ -445,31 +575,29 @@ pub(super) fn run_range<S: ModelStore>(first: u64, last: u64, length: u64) {
     ] {
         assert!(count > 0, "SESSION_GRAMMAR_REACHES_{name}");
     }
+}
+
+#[cfg(target_os = "linux")]
+fn report_manual(first: u64, last: u64, counts: &product::Counts) {
+    for (name, count) in [
+        ("folds", counts.folds),
+        ("refusals", counts.refusals),
+        ("issuer refusals", counts.issuer_refusals),
+        ("partial refusals", counts.partial_refusals),
+        ("lost acknowledgements", counts.lost_acks),
+        ("retries", counts.retries),
+    ] {
+        assert!(count > 0, "HX_MODEL_NATIVE_COVERAGE_{name}");
+    }
     println!(
-        "HX_SESSION_MODEL first_seed={first} last_seed={last} seeds={seeds} random_attempts={} primed_transitions={} elapsed_ms={} folds={} outbox_folds={} restart={} lost_ack={} prepublication_crash={} postpublication_crash={} group_refusal={} largest_group={} handoff={} save={} save_as={} rescue={} cold_open={} collect={} approvals={} transition_approvals={} baseline_lineage={} split_ancestry={} redo_payloads={} ordinary_lease_peak={}",
-        seeds * length,
-        seeds * 5,
-        started.elapsed().as_millis(),
-        totals.folds,
-        totals.outbox_folds,
-        totals.restarts,
-        totals.lost_acks,
-        totals.before_publish,
-        totals.after_publish,
-        totals.group_refusals,
-        totals.largest_group,
-        totals.handoffs,
-        totals.saves,
-        totals.save_as,
-        totals.rescues,
-        totals.opens,
-        totals.collections,
-        totals.approvals,
-        totals.transitions,
-        totals.baseline_lineage,
-        totals.split_ancestry,
-        totals.redo_payloads,
-        totals.ordinary_lease_peak
+        "HX_PRODUCT_MODEL first_seed={first} last_seed={last} seeds={} folds={} refusals={} issuer_refusals={} partial_refusals={} lost_acks={} retries={}",
+        last - first + 1,
+        counts.folds,
+        counts.refusals,
+        counts.issuer_refusals,
+        counts.partial_refusals,
+        counts.lost_acks,
+        counts.retries,
     );
 }
 

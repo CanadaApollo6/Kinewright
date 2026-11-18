@@ -1,6 +1,7 @@
 //! Executable session specification. Both replicas use the new executor and
 //! owner; both stores use the production compact codec and semantic validator.
-//! The protocol harness is replaced by product calls as the switch proceeds.
+//! The native manual lane exercises the real producer and publisher alongside
+//! the portable authority, selection and resource grammar.
 use super::*;
 use crate::operation_history::{
     Approval, ApprovalAnswer, CreationOrigin, Direction, OwnerHistory, PoolLimits, Resources,
@@ -16,6 +17,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[path = "session_model_store.rs"]
 mod storage;
 use storage::{MemoryStore, ModelStore, owned_resource};
+
+#[cfg(target_os = "linux")]
+#[path = "session_model_product.rs"]
+mod product;
 
 fn bounds() -> RoleBounds {
     RoleBounds {
@@ -89,6 +94,8 @@ struct Root {
 }
 #[derive(Default)]
 struct Coverage {
+    #[cfg(target_os = "linux")]
+    manual: product::Counts,
     edits: usize,
     folds: usize,
     outbox_folds: usize,
@@ -116,6 +123,8 @@ struct Coverage {
 }
 impl Coverage {
     fn accumulate(&mut self, other: &Self) {
+        #[cfg(target_os = "linux")]
+        self.manual.accumulate(&other.manual);
         self.edits += other.edits;
         self.folds += other.folds;
         self.outbox_folds += other.outbox_folds;
@@ -146,6 +155,10 @@ impl Coverage {
 enum GroupFault {
     None,
     RefuseAt(usize),
+    #[cfg(target_os = "linux")]
+    IssuerAt(usize),
+    #[cfg(target_os = "linux")]
+    RefuseFoldedAt(usize),
     StopBeforeRoot(usize),
     StopAfterRoot,
     LoseAcknowledgement,
@@ -809,6 +822,11 @@ mod stream;
 #[test]
 fn generated_sessions_preserve_acknowledgements_and_reachable_states() {
     stream::run::<MemoryStore>(8, 160);
+}
+#[test]
+#[cfg(target_os = "linux")]
+fn generated_manual_session_checks_native_protocol_faults() {
+    stream::run_manual_smoke();
 }
 #[test]
 fn generated_implicit_title_split_sessions_keep_font_through_collection_and_cold_open() {
