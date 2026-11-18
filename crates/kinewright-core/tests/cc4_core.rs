@@ -55,6 +55,7 @@ fn imported_asset(id: u64) -> LutAsset {
 
 fn managed_document() -> Document {
     let asset = MediaAsset {
+        remote_locator: None,
         id: AssetId(1),
         path: present_media_path(),
         name: "managed-source".to_owned(),

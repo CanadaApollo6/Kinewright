@@ -1929,6 +1929,7 @@ mod tests {
         let mut document = document();
         document.resolution = (1920, 1080);
         document.media_pool = vec![MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: std::path::PathBuf::from("picture.mov"),
             name: "Picture".to_owned(),
@@ -2640,6 +2641,7 @@ pub(crate) mod mo2_tests {
         };
         let document = Document {
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: std::path::PathBuf::from("picture.mov"),
                 name: "Picture".to_owned(),

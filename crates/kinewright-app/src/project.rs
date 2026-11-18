@@ -1315,6 +1315,7 @@ mod tests {
                 },
             ],
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: "shot.mov".into(),
                 name: "Shot".to_owned(),
@@ -1422,6 +1423,7 @@ mod tests {
                 clips: Vec::new(),
             }],
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: "shot.mov".into(),
                 name: "Shot".to_owned(),
@@ -2011,6 +2013,7 @@ mod tests {
                 clips,
             }],
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: "synthetic.mov".into(),
                 name: "Synthetic".to_owned(),

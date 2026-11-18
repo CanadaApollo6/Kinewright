@@ -86,6 +86,7 @@ fn empty_timeline(fps: Rational) -> Document {
 
 fn asset(id: u64, fps: Rational, kind: MediaKind) -> MediaAsset {
     MediaAsset {
+        remote_locator: None,
         id: AssetId(id),
         path: std::path::PathBuf::from(format!("asset-{id}.mp4")),
         name: format!("asset-{id}"),

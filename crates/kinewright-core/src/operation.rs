@@ -1899,6 +1899,11 @@ fn add_asset(doc: &mut Document, asset: MediaAsset) -> Result<(), OpError> {
     if asset.color_description.provenance == ColorProvenance::AgentAssumption {
         return Err(OpError::AssumedFromNotSuppliable { asset: asset.id });
     }
+    if asset.remote_locator.is_some() {
+        return Err(OpError::InvalidImportRecord(
+            "a new asset cannot supply a preserved remote locator",
+        ));
+    }
     validate_asset(&asset)?;
     doc.media_pool.push(asset);
     Ok(())
@@ -1978,6 +1983,7 @@ fn relink_asset(
         validate_estimated_relink(doc, asset_id, candidate)?;
         let asset = &mut doc.media_pool[index];
         asset.path.clone_from(&candidate.path);
+        asset.remote_locator = None;
         asset.source_fingerprint.clone_from(&candidate.fingerprint);
         asset.kind = candidate.kind;
         asset.duration = candidate.duration;
@@ -5223,6 +5229,18 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
             return Err(OpError::DuplicateAsset(asset.id));
         }
         validate_asset(asset)?;
+        if asset.remote_locator.is_some()
+            && (!asset.path.as_os_str().is_empty()
+                || !asset.source_fingerprint.is_unknown()
+                || !doc
+                    .imported_from
+                    .iter()
+                    .any(|record| record.estimated_asset(asset.id)))
+        {
+            return Err(OpError::InvalidImportRecord(
+                "a preserved remote locator requires an estimated asset, empty playback path and unknown fingerprint",
+            ));
+        }
     }
 
     let mut lut_asset_ids = HashSet::new();

@@ -679,6 +679,7 @@ mod tests {
                 }],
             }],
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: "fixture.mp4".into(),
                 name: "fixture".into(),

@@ -591,6 +591,7 @@ mod tests {
 
     fn asset(id: u64) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(id),
             path: PathBuf::from(format!("visual-{id}.wav")),
             name: format!("Visual {id}"),

@@ -1494,6 +1494,7 @@ impl Analysis for GainAnalysis {
 /// One managed video asset the fixture documents reference.
 fn fixture_asset() -> MediaAsset {
     MediaAsset {
+        remote_locator: None,
         id: AssetId(1),
         path: Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
         name: "cc6".to_owned(),

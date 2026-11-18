@@ -15,7 +15,7 @@ use std::{
 
 use eframe::egui;
 use kinewright_core::{
-    AssetId, ClipContent, ClipId, ColorStage, Command, Document, EffectId, IncidentCode,
+    Analysis, AssetId, ClipContent, ClipId, ColorStage, Command, Document, EffectId, IncidentCode,
     IncidentEvidence, IncidentObservation, IncidentSubject, LabelIncident, LutAsset, LutAssetId,
     MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult,
     MediaCacheFamily, MediaCacheFamilyStatus, MediaError, MediaKind, MediaSourceFingerprint,
@@ -56,6 +56,28 @@ pub(crate) struct MediaStatusResponse {
     pub(crate) fingerprint: MediaSourceFingerprint,
     pub(crate) status: MediaAvailabilityStatus,
 }
+pub(crate) fn request_media_status(
+    analysis: Arc<dyn Analysis>,
+    asset: MediaAsset,
+    session_id: u64,
+    request_id: u64,
+    output: std::sync::mpsc::Sender<MediaStatusResponse>,
+) -> std::io::Result<thread::JoinHandle<()>> {
+    thread::Builder::new()
+        .name("kinewright-media-status".to_owned())
+        .spawn(move || {
+            let status = analysis.media_availability(&asset);
+            let _ = output.send(MediaStatusResponse {
+                session_id,
+                asset_id: asset.id,
+                request_id,
+                path: asset.path,
+                fingerprint: asset.source_fingerprint,
+                status,
+            });
+        })
+}
+
 pub(crate) type CacheClearResponse = (MediaCacheFamily, Result<MediaCacheClearResult, MediaError>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1016,26 +1038,14 @@ impl KinewrightApp {
         else {
             return false;
         };
-        let media = project.analysis();
-        let status_tx = self.media_status_tx.clone();
-        let path = asset.path.clone();
-        let fingerprint = asset.source_fingerprint.clone();
-        let asset_id = asset.id;
-        let asset_snapshot = asset.clone();
-        if thread::Builder::new()
-            .name("kinewright-media-status".to_owned())
-            .spawn(move || {
-                let status = media.media_availability(&asset_snapshot);
-                let _ = status_tx.send(MediaStatusResponse {
-                    session_id,
-                    asset_id,
-                    request_id,
-                    path,
-                    fingerprint,
-                    status,
-                });
-            })
-            .is_ok()
+        if request_media_status(
+            project.analysis(),
+            asset.clone(),
+            session_id,
+            request_id,
+            self.media_status_tx.clone(),
+        )
+        .is_ok()
         {
             true
         } else {
@@ -2374,6 +2384,7 @@ mod tests {
 
     fn asset(fingerprint: MediaSourceFingerprint) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(7),
             path: PathBuf::from("original.mov"),
             name: "original.mov".to_owned(),
@@ -3301,6 +3312,7 @@ mod tests {
                 }],
             }],
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: PathBuf::from("shot.mov"),
                 name: "Shot".to_owned(),

@@ -4569,6 +4569,7 @@ mod tests {
     fn linked_fixture() -> Document {
         let fps = Rational::new(30, 1).unwrap();
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("linked.mp4"),
             name: "linked.mp4".to_owned(),
@@ -4871,6 +4872,7 @@ mod tests {
             ..Document::default()
         };
         document.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: std::path::PathBuf::from("speed.mp4"),
             name: "speed.mp4".to_owned(),
@@ -6623,6 +6625,7 @@ mod tests {
     fn gapped_fixture(project_fps: Rational) -> Document {
         let asset_fps = Rational::new(30, 1).unwrap();
         let source = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("interview.wav"),
             name: "interview.wav".to_owned(),
@@ -6635,6 +6638,7 @@ mod tests {
             assumed_from: None,
         };
         let tone = MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: PathBuf::from("/p/show.kinewright-assets/room-tone/abc.wav"),
             name: "Room tone \u{2014} interview.wav".to_owned(),
@@ -6931,6 +6935,7 @@ mod tests {
     /// of a 30 fps asset, which is ten project frames at 25.
     fn seven_frame_gap_fixture(project_fps: Rational, asset_fps: Rational) -> Document {
         let source = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("interview.wav"),
             name: "interview.wav".to_owned(),

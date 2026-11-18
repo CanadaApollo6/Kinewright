@@ -252,6 +252,7 @@ mod tests {
 
     fn asset(kind: MediaKind, color_description: ColorDescription) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(7),
             path: PathBuf::from("fixture.mov"),
             name: "fixture.mov".to_owned(),

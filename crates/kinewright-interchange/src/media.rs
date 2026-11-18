@@ -2,7 +2,7 @@ use std::{ops::Range, path::PathBuf};
 
 use kinewright_core::{
     AssetId, ColorDescription, MediaAsset, MediaCounts, MediaKind, MediaSourceFingerprint,
-    Rational, TimeCode,
+    Rational, RemoteLocator, TimeCode,
 };
 
 use crate::{
@@ -133,6 +133,7 @@ impl Assets {
             Ok(duration.ceil_frame(estimate_rate)?.max(TimeCode(1)))
         };
         let mut asset = MediaAsset {
+            remote_locator: None,
             id,
             path: PathBuf::from(&media.locator),
             name: if media.name.is_empty() {
@@ -175,11 +176,16 @@ impl Assets {
             _ => {
                 asset.duration = estimate()?;
                 self.counts.offline += 1;
+                let remote = *availability == Availability::Remote
+                    || locator::classify(&media.locator, Platform::NATIVE) == Locator::Remote;
+                if remote {
+                    asset.path = PathBuf::new();
+                    asset.remote_locator = Some(RemoteLocator::new(media.locator.clone()));
+                }
                 if *availability == Availability::TimedOut {
                     self.counts.timed_out += 1;
-                } else if *availability == Availability::Remote
-                    || (*availability == Availability::Missing
-                        && locator::classify(&media.locator, Platform::NATIVE) == Locator::Remote)
+                } else if remote
+                    && matches!(availability, Availability::Missing | Availability::Remote)
                 {
                     self.counts.remote += 1;
                 }

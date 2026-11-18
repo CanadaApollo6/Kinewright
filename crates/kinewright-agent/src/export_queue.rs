@@ -2225,6 +2225,7 @@ mod tests {
 
     fn media_asset(id: u64, kind: MediaKind) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(id),
             path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
             name: format!("source-{id}"),

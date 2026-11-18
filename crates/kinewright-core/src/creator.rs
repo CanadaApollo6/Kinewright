@@ -2785,6 +2785,7 @@ mod tests {
 
     fn asset(id: u64, kind: MediaKind, duration: i64, fps: Rational) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(id),
             path: PathBuf::from(format!("asset-{id}.mov")),
             name: format!("asset-{id}"),

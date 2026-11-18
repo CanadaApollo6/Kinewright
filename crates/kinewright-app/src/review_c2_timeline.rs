@@ -115,6 +115,7 @@ fn linked_fixture_like(clip: Clip) -> kinewright_core::Document {
             clips: vec![clip],
         }],
         media_pool: vec![kinewright_core::MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: "fixture.mp4".into(),
             name: "fixture".into(),

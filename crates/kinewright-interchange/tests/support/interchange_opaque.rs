@@ -150,10 +150,17 @@ pub fn check(
                 let source = &timeline.media[id.0];
                 let asset = document.asset(clip.asset).unwrap();
                 assert_eq!(
-                    asset.path.to_str(),
-                    Some(source.locator.as_str()),
+                    asset.display_location(),
+                    source.locator,
                     "{fixture} frame {frame}"
                 );
+                if kinewright_interchange::locator::classify(
+                    &source.locator,
+                    kinewright_interchange::locator::Platform::NATIVE,
+                ) == kinewright_interchange::locator::Locator::Remote
+                {
+                    assert!(asset.path.as_os_str().is_empty(), "{fixture} frame {frame}");
+                }
                 let source_frame = if let ClipContent::Freeze(freeze) = &clip.content {
                     freeze.source_frame
                 } else {

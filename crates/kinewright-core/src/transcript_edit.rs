@@ -193,6 +193,7 @@ mod tests {
         let mut timeline_start = 0;
         for (id, source) in clip_ranges {
             let asset = MediaAsset {
+                remote_locator: None,
                 id: AssetId(*id),
                 path: PathBuf::from(format!("asset-{id}.wav")),
                 name: format!("asset-{id}.wav"),

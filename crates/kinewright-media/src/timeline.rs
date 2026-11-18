@@ -704,6 +704,7 @@ mod tests {
             }],
             media_pool: vec![
                 MediaAsset {
+                    remote_locator: None,
                     id: AssetId(1),
                     path: PathBuf::from("one.mp4"),
                     name: "one".to_owned(),
@@ -716,6 +717,7 @@ mod tests {
                     assumed_from: None,
                 },
                 MediaAsset {
+                    remote_locator: None,
                     id: AssetId(2),
                     path: PathBuf::from("two.mp4"),
                     name: "two".to_owned(),
@@ -1077,6 +1079,7 @@ mod tests {
         let mut document = fixture();
         document.media_pool.extend([
             MediaAsset {
+                remote_locator: None,
                 id: AssetId(3),
                 path: PathBuf::from("bed.wav"),
                 name: "bed".to_owned(),
@@ -1089,6 +1092,7 @@ mod tests {
                 assumed_from: None,
             },
             MediaAsset {
+                remote_locator: None,
                 id: AssetId(4),
                 path: PathBuf::from("silent.mp4"),
                 name: "silent".to_owned(),

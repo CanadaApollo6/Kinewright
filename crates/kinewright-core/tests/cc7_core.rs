@@ -1457,6 +1457,7 @@ fn cc7_every_budget_carries_the_declared_margin() {
 /// One managed video asset the CC7 scenario documents reference.
 fn cc7_asset() -> MediaAsset {
     MediaAsset {
+        remote_locator: None,
         id: AssetId(1),
         path: Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
         name: "cc7".to_owned(),

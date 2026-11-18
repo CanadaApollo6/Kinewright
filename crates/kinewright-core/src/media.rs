@@ -3189,6 +3189,7 @@ mod tests {
 
     fn asset(id: u64, kind: MediaKind) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(id),
             path: format!("fixture-{id}.mov").into(),
             name: format!("fixture-{id}"),

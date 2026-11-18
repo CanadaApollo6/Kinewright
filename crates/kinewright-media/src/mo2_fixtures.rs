@@ -1115,6 +1115,7 @@ fn r22_audio_ramp_is_type_independent() {
     let mut linked = Document {
         duration: TimeCode(9),
         media_pool: vec![kinewright_core::MediaAsset {
+            remote_locator: None,
             id: AssetId::default(),
             path: "linked.mp4".into(),
             name: "linked".to_owned(),

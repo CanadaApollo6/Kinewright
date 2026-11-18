@@ -33,7 +33,8 @@
   "media_pool": [
     {
       "id": 1,
-      "path": "file://localhost//host.invalid/share/a.mov",
+      "path": "",
+      "remote_locator": "file://localhost//host.invalid/share/a.mov",
       "name": "Untrusted",
       "duration": 7200,
       "fps": {
@@ -55,7 +56,8 @@
     },
     {
       "id": 2,
-      "path": "file:///local%5cclip.mov",
+      "path": "",
+      "remote_locator": "file:///local%5cclip.mov",
       "name": "Encoded",
       "duration": 7200,
       "fps": {

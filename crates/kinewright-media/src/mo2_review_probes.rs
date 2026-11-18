@@ -1230,6 +1230,7 @@ fn rereview_projection_enabled_curve_on(context: GpuContext) {
         cover,
     ]);
     doc.media_pool.push(kinewright_core::MediaAsset {
+        remote_locator: None,
         id: AssetId::default(),
         path: directory.path("unneeded-missing.mp4"),
         name: "excluded".into(),

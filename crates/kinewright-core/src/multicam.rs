@@ -1257,6 +1257,7 @@ mod tests {
 
     fn asset(id: u64, kind: MediaKind) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(id),
             path: PathBuf::from(format!("angle-{id}.mp4")),
             name: format!("Angle {id}"),

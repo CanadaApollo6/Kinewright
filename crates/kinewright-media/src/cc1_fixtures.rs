@@ -1815,6 +1815,7 @@ fn cc1_core_migration_fixture_preserves_effect_order_and_parameters() {
     let reopened: Document = serde_json::from_slice(&saved).expect("reopen migrated document");
     assert_eq!(reopened, decoded);
     let migration_asset = MediaAsset {
+        remote_locator: None,
         id: AssetId(22),
         path: PathBuf::from("cc1-migration-fixture.mp4"),
         name: "migration fixture".to_owned(),

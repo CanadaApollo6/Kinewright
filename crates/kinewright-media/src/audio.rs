@@ -5687,6 +5687,7 @@ mod tests {
                 }],
             }],
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: PathBuf::from("video-only.mp4"),
                 name: "video only".to_owned(),
@@ -6660,6 +6661,7 @@ mod tests {
 
     fn audio_asset(id: u64, path: &Path, name: &str, fps: Rational) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(id),
             path: path.to_path_buf(),
             name: name.to_owned(),

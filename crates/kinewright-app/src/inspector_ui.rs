@@ -1002,7 +1002,7 @@ impl KinewrightApp {
         ui.label(egui::RichText::new(&asset.name).font(theme::semibold(type_size::BODY)));
         ui.colored_label(color::TEXT_MUTED, format!("{:?}", asset.kind));
         ui.add_space(space::ONE);
-        data_row(ui, "Path", &asset.path.display().to_string());
+        data_row(ui, "Path", &asset.display_location());
         let status = self.media_status_for_asset(&asset);
         let source_state = source_display_state(status.as_ref());
         ui.horizontal(|ui| {
@@ -6213,6 +6213,7 @@ mod tests {
         let document = Document {
             media_pool: vec![
                 MediaAsset {
+                    remote_locator: None,
                     id: AssetId(1),
                     path: PathBuf::from("picture.mov"),
                     name: "Picture".to_owned(),
@@ -6225,6 +6226,7 @@ mod tests {
                     assumed_from: None,
                 },
                 MediaAsset {
+                    remote_locator: None,
                     id: AssetId(2),
                     path: PathBuf::from("sound.wav"),
                     name: "Sound".to_owned(),
@@ -6281,6 +6283,7 @@ mod tests {
     fn keyed_enable_header_toggle_auto_keys_at_the_clamped_playhead() {
         fn asset(id: u64, name: &str, kind: MediaKind) -> MediaAsset {
             MediaAsset {
+                remote_locator: None,
                 id: AssetId(id),
                 path: PathBuf::from(name),
                 name: name.to_owned(),
@@ -6402,6 +6405,7 @@ mod tests {
     fn stills_offer_no_audio_target() {
         fn asset(id: u64, name: &str, kind: MediaKind) -> MediaAsset {
             MediaAsset {
+                remote_locator: None,
                 id: AssetId(id),
                 path: PathBuf::from(name),
                 name: name.to_owned(),
@@ -6561,6 +6565,7 @@ mod tests {
     fn still_fit_predicate_is_freeze_over_image_only() {
         fn asset(id: u64, kind: MediaKind) -> MediaAsset {
             MediaAsset {
+                remote_locator: None,
                 id: AssetId(id),
                 path: PathBuf::from("a"),
                 name: "a".to_owned(),
@@ -6612,6 +6617,7 @@ mod tests {
         });
         let document = Document {
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: PathBuf::from("picture.mov"),
                 name: "Picture".to_owned(),
@@ -7594,6 +7600,7 @@ mod tests {
         }];
         Document {
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: PathBuf::from("picture.mov"),
                 name: "Picture".to_owned(),
@@ -9716,6 +9723,7 @@ mod tests {
         for (index, clip) in spec.clips.iter().enumerate() {
             let asset = AssetId(u64::try_from(index).expect("a CC7 clip index fits") + 1);
             media_pool.push(MediaAsset {
+                remote_locator: None,
                 id: asset,
                 path: PathBuf::from(format!("cc7-{}-{index}.mkv", spec.id)),
                 name: format!("{} {index}", spec.title),
@@ -12124,6 +12132,7 @@ mod tests {
     fn header_document(clip: Clip) -> Document {
         Document {
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: PathBuf::from("picture.mov"),
                 name: "Picture".to_owned(),
@@ -12289,6 +12298,7 @@ mod tests {
     fn plan_driver_document(effects: Vec<Effect>) -> Document {
         Document {
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: "f.mp4".into(),
                 name: "f".into(),
@@ -13074,6 +13084,7 @@ pub(crate) mod mo2_parity {
     pub(super) fn mo2_document(clip: Clip) -> Document {
         let document = Document {
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: PathBuf::from("picture.mov"),
                 name: "Picture".to_owned(),

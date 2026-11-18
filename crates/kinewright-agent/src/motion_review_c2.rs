@@ -39,6 +39,7 @@ fn doc(duration: i64, effects: Vec<Effect>) -> Document {
             }],
         }],
         media_pool: vec![MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: "f.mp4".into(),
             name: "f".into(),

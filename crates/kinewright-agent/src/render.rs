@@ -1282,6 +1282,7 @@ mod tests {
                 ],
             }],
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(4),
                 path: PathBuf::from("fixtures/interview.mp4"),
                 name: "interview.mp4".to_owned(),

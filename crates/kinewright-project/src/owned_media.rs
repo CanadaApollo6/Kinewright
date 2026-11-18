@@ -576,6 +576,7 @@ impl ProjectStore {
         let probe = certificate.probe(Arc::clone(&cancel)).map_err(io_error)?;
         let probed_color = probe.color_description.clone();
         let asset = MediaAsset {
+            remote_locator: None,
             id,
             path: locator.to_path_buf(),
             name: locator

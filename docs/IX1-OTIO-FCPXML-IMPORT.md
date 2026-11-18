@@ -574,6 +574,14 @@ preparation again. Its files use the ordinary stat and probe deadlines. Linux pr
 rows without an Allow control. Agent inspection never accepts share approval. It refuses remote
 input paths or roots with `remote_path` and reports remote media without touching it.
 
+*Stored locators (ruling 33).* `MediaAsset.path` remains the field passed to filesystem and media
+ports. An unapproved remote asset has an empty playback path and a separate optional string
+`remote_locator` containing the written locator for display and the report. Parser classification
+and name matching work on locator text. A successful Allow probe stores the real path and the
+verified fingerprint together. A remote asset whose probe failed stays offline with its written
+locator. MS-T2 covers remote paths introduced by hand-made projects and by the agent's general
+`add_asset` capability.
+
 *Mapped drives and symlinks.* Mapped drive letters and symlinks are local to the OS and are
 treated as local. They are the person's own configuration, and the deadlines bound a hung mount.
 Under the open-a-project model, a timeline can name absolute local paths that the importer
@@ -633,13 +641,18 @@ counts `source_origin_assumed`.
   which M41 forbids (`docs/M41-OFFLINE-RELINK-CACHE-VISIBILITY.md:50`).
 
 *Offline assets.* Media still missing becomes an offline asset:
-- its path as written (remote locators included);
+- its path as written for local media, including timed-out files;
+- for unapproved remote media, an empty playback path and the original locator string shown in
+  the offline list and import report;
 - an unknown fingerprint;
 - kind, fps, duration and resolution estimated from the interchange: FCPXML `asset` and `format`,
   or OTIO `available_range`, else the furthest frame used.
 
 These assets take the last ids, as contiguous ranges recorded in the record's `estimated_assets`
-(finding 13).
+(finding 13). Validation requires all three properties for an asset holding a preserved remote
+locator: the empty playback path, unknown fingerprint, and membership in `estimated_assets`.
+The optional string is omitted when absent. Project and saved-history admission recognize the
+field. The operation schemas exposed to tools omit it.
 
 *Relink (finding 8).* M41's `relink_asset` checks an exact kind, fps, duration and resolution
 (`operation.rs:1923-1956`), then writes only the path and the fingerprint (`:1964-1968`). For an asset
@@ -650,7 +663,11 @@ inside any record's `estimated_assets` whose fingerprint is still unknown, IX1 c
   - its duration covers every clip's source end;
   - its resolution is free.
 - **Writes:** the path, the fingerprint, and the candidate's kind, duration and resolution, so no
-  estimated metadata survives.
+  estimated metadata survives. A person's relink clears the preserved locator in the same
+  operation. Undo restores it together with the empty path and unknown fingerprint.
+
+Agent relink refuses any remote candidate with `remote_path`. Replacing an asset that carries a
+preserved remote locator requires the editor's Relink dialog.
 
 `allow_unverified_source` stays required, and the known fingerprint ends the relaxation. The fps is
 unchanged, so clip lengths do not move and `survive_clip_edit` has nothing to do.
@@ -985,6 +1002,8 @@ Lead rulings (2026-11-17):
 31. **Report paging.** Each call returns one persisted import record, within 6 KiB (§10).
 32. **Final Cut generators.** A referenced generator leaves a gap and keeps its anchors. A
     dangling reference remains a typed refusal (§3).
+33. **Offline remote media.** Store the written locator as display text and keep an empty
+    playback path. Allow or a person's relink replaces that state atomically (§8.1, §8.3).
 
 Open questions:
 1. **Marker colour switch.** Should `MARKER_COLOR_POLICY` ship as `LabelPrefix` or `Drop`? This is

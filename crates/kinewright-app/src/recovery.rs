@@ -1365,6 +1365,7 @@ mod tests {
 
     fn asset(id: u64) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(id),
             path: PathBuf::from(format!("agent-import-{id}.mp4")),
             name: format!("Agent import {id}"),

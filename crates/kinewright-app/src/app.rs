@@ -843,7 +843,7 @@ impl KinewrightApp {
                 .media_pool
                 .iter()
                 .filter(|asset| !asset.path.is_file())
-                .map(|asset| format!("{} ({})", asset.name, asset.path.display()))
+                .map(|asset| format!("{} ({})", asset.name, asset.display_location()))
                 .collect();
             if missing.is_empty() {
                 app.status = if screenshotting {
@@ -1971,7 +1971,7 @@ impl KinewrightApp {
             .media_pool
             .iter()
             .filter(|asset| !asset.path.is_file())
-            .map(|asset| format!("{} ({})", asset.name, asset.path.display()))
+            .map(|asset| format!("{} ({})", asset.name, asset.display_location()))
             .collect();
         let fallback = format!("Project {}", self.next_project_id);
         let name = project_name(Some(path), &fallback);
@@ -5999,6 +5999,7 @@ mod tests {
         use kinewright_core::{Clip, MediaKind, MediaSourceFingerprint, Rational};
         let document = super::Document {
             media_pool: vec![super::MediaAsset {
+                remote_locator: None,
                 id: super::AssetId(1),
                 path: "f.mp4".into(),
                 name: "f".into(),
@@ -14316,6 +14317,7 @@ mod in2b_tests {
 
         let mut doc_full = Document::default();
         doc_full.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: std::path::PathBuf::from("graded.mov"),
             name: "graded.mov".to_owned(),
@@ -14461,6 +14463,7 @@ mod in2b_tests {
         // The asset, named "Interview A".
         let mut document = Document::default();
         document.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: AssetId(5),
             path: std::path::PathBuf::from("interview.mov"),
             name: "Interview A".to_owned(),
@@ -15296,6 +15299,7 @@ mod in2b_tests {
         let project_path = temp.path("edit.kinewright");
         let mut document = Document::default();
         document.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: temp.path("nowhere.mov"),
             name: "gone.mov".to_owned(),
@@ -16368,6 +16372,7 @@ mod in2b_tests {
         });
         // Row 11: media nowhere on disk.
         document.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: temp.path("nowhere.mov"),
             name: "gone.mov".to_owned(),
@@ -17880,6 +17885,7 @@ pub(crate) fn ja_c9_manual_producer_gate_witness() {
         ))
         .unwrap();
     let asset = MediaAsset {
+        remote_locator: None,
         id: AssetId(700),
         path: temp.path("deferred.wav"),
         name: "deferred".into(),
@@ -17933,6 +17939,7 @@ pub(crate) fn ja_s2h_legacy_activation_witness() {
     let temp = kinewright_media::test_support::TempDirectory::new_in(&root, "s2h-legacy");
     let path = temp.path("legacy.kinewright");
     let asset = MediaAsset {
+        remote_locator: None,
         id: AssetId(7),
         path: temp.path("source.mov"),
         name: "legacy source".into(),

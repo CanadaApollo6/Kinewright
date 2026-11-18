@@ -5408,6 +5408,7 @@ mod tests {
     #[test]
     fn clean_selectable_frames_do_not_count_excluded_intervals() {
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("fixture.mp4"),
             name: "fixture".to_owned(),
@@ -7771,6 +7772,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, clip)| MediaAsset {
+                remote_locator: None,
                 id: AssetId(u64::try_from(index + 1).unwrap_or(u64::MAX)),
                 path: PathBuf::from(format!("{}.mkv", cc7_source_token(clip.source))),
                 name: cc7_source_token(clip.source).to_owned(),
@@ -8556,6 +8558,7 @@ mod tests {
             .tracks
             .iter()
             .map(|track| MediaAsset {
+                remote_locator: None,
                 id: AssetId(track.track.0),
                 path: PathBuf::from(format!("au6-{}.wav", track.track.0)),
                 name: format!("au6-{}", track.track.0),

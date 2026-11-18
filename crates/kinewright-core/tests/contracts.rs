@@ -23,6 +23,7 @@ use schemars::schema_for;
 
 fn asset(id: u64, fps: Rational, duration: i64) -> MediaAsset {
     MediaAsset {
+        remote_locator: None,
         id: AssetId(id),
         path: PathBuf::from(format!("asset-{id}.mp4")),
         name: format!("asset-{id}"),
@@ -1713,6 +1714,7 @@ fn add_freeze_frame_validates_track_asset_frame_and_duration() {
     document.media_pool.extend([
         asset(1, fps, 120),
         MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: PathBuf::from("audio.wav"),
             name: "audio".to_owned(),

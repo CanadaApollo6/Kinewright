@@ -183,6 +183,7 @@ pub(crate) fn probe_path_observed(
     }
 
     Ok(MediaAsset {
+        remote_locator: None,
         id,
         path: path.to_path_buf(),
         name: path

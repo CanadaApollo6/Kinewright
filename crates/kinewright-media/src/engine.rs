@@ -4028,6 +4028,7 @@ mod tests {
 
     fn asset(path: PathBuf, fingerprint: MediaSourceFingerprint) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path,
             name: "fixture".to_owned(),

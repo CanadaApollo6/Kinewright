@@ -4769,6 +4769,7 @@ mod tests {
     fn document_with_probed_asset(probed: &ColorDescription) -> Document {
         Document {
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: "in1_untagged.mp4".into(),
                 name: "in1_untagged".to_owned(),

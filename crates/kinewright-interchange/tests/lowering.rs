@@ -452,9 +452,15 @@ fn hostile_decoded_file_locators_become_offline_assets() {
             .iter()
             .all(|asset| asset.source_fingerprint.is_unknown())
     );
+    assert!(
+        document
+            .media_pool
+            .iter()
+            .all(|asset| asset.path.as_os_str().is_empty())
+    );
     assert_eq!(
-        document.media_pool[0].path.to_str(),
-        Some("file://localhost//host.invalid/share/a.mov")
+        document.media_pool[0].display_location(),
+        "file://localhost//host.invalid/share/a.mov"
     );
     assert!(
         record

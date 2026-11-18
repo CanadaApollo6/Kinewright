@@ -805,6 +805,7 @@ mod tests {
     fn audio_video_placement_creates_audio_track_and_links_both_clips() {
         let fps = Rational::new(30, 1).unwrap();
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(4),
             path: PathBuf::from("interview.mp4"),
             name: "interview.mp4".to_owned(),
@@ -892,6 +893,7 @@ mod tests {
 
     fn still_asset(id: u64, still: (u32, u32)) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(id),
             path: PathBuf::from(format!("still{id}.png")),
             name: format!("still{id}.png"),

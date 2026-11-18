@@ -845,6 +845,7 @@ fn fixture_luts(directory: &TempDirectory) -> LutLibrary {
 /// built from it renders at the raster the hand-derived sets were computed on.
 fn cc5_asset() -> kinewright_core::MediaAsset {
     kinewright_core::MediaAsset {
+        remote_locator: None,
         id: kinewright_core::AssetId(1),
         path: std::path::PathBuf::from("cc5-fixture.mp4"),
         name: "cc5 fixture".to_owned(),

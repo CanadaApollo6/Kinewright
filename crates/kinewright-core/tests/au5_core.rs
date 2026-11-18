@@ -155,6 +155,7 @@ fn document_with_one_clip() -> Document {
     };
     Operation::AddAsset {
         asset: MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: std::path::PathBuf::from("asset-1.wav"),
             name: "asset-1".to_owned(),
@@ -1254,6 +1255,7 @@ fn gap_corpus() -> Document {
 
 fn gap_corpus_assets() -> Vec<MediaAsset> {
     let audio = MediaAsset {
+        remote_locator: None,
         id: AssetId(1),
         path: std::path::PathBuf::from("au5-part-b-gap-corpus.wav"),
         name: "corpus-audio".to_owned(),
@@ -1266,6 +1268,7 @@ fn gap_corpus_assets() -> Vec<MediaAsset> {
         assumed_from: None,
     };
     let video = MediaAsset {
+        remote_locator: None,
         id: AssetId(2),
         path: std::path::PathBuf::from("au5-part-b-gap-corpus.mp4"),
         name: "corpus-video".to_owned(),
@@ -1715,6 +1718,7 @@ fn au5_a_fill_built_from_the_inverse_has_the_gaps_exact_duration() {
     assert_eq!(Rational::default(), source_fps);
     Operation::AddAsset {
         asset: MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: std::path::PathBuf::from("au5-part-b-fill.wav"),
             name: "room-tone".to_owned(),

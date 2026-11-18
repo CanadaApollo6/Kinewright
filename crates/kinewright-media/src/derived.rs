@@ -1977,6 +1977,7 @@ mod tests {
 
     fn fixture_document() -> Document {
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("fixture.mp4"),
             name: "fixture".to_owned(),

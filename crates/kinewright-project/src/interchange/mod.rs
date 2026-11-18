@@ -358,6 +358,14 @@ fn prepare_with(
     ))
 }
 
+/// Classify a relink candidate before a capability passes it to the media backend.
+#[must_use]
+pub fn is_remote_locator(path: &Path) -> bool {
+    use kinewright_interchange::locator::{Locator, classify};
+
+    classify(&path.to_string_lossy(), Platform::NATIVE) == Locator::Remote
+}
+
 fn local_path(path: &str) -> Result<PathBuf, Refusal> {
     with_local(path, Platform::NATIVE, |path| PathBuf::from(path.as_str()))
 }

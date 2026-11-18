@@ -2026,6 +2026,7 @@ async fn cc6_video_scopes_v2_points_at_get_color_qc_instead_of_a_fabricated_zero
 
 fn edit_plan_document() -> Document {
     let asset = MediaAsset {
+        remote_locator: None,
         id: AssetId(1),
         path: PathBuf::from("fixture.mp4"),
         name: "fixture".to_owned(),

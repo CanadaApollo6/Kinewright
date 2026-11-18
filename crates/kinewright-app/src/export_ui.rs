@@ -2099,6 +2099,7 @@ mod tests {
     /// blocking finding is the source colour contract.
     fn document_with_hdr_source() -> Document {
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
             name: "hdr-master.mov".to_owned(),
@@ -2431,6 +2432,7 @@ mod tests {
                 }],
             }],
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: PathBuf::from("shot.mov"),
                 name: "Shot".to_owned(),

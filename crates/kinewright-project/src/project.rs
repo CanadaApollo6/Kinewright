@@ -1070,6 +1070,7 @@ mod tests {
             ..Document::default()
         };
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("a1.mp4"),
             name: "a1".to_owned(),

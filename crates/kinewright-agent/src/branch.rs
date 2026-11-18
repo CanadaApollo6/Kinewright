@@ -400,6 +400,7 @@ mod tests {
 
     fn asset(id: u64) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(id),
             path: format!("asset-{id}.mp4").into(),
             name: format!("asset {id}"),

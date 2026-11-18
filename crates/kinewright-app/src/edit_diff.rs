@@ -227,6 +227,7 @@ mod tests {
     fn fixture() -> Document {
         let fps = Rational::new(30, 1).unwrap();
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("diff.mp4"),
             name: "diff.mp4".to_owned(),

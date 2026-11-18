@@ -55,7 +55,8 @@
     },
     {
       "id": 2,
-      "path": "file://host.invalid/a.mov",
+      "path": "",
+      "remote_locator": "file://host.invalid/a.mov",
       "name": "Missing",
       "duration": 7200,
       "fps": {

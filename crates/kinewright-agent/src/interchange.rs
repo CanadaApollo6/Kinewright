@@ -508,6 +508,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ix1_agent_relink_refuses_a_remote_candidate_and_leaves_the_import_locator_in_place() {
+        let directory = TempDirectory::new("ix1-agent-relink");
+        let path = directory.path("source.otio");
+        write_inspection_fixture(&path);
+        let prepared = prepare(
+            path.to_str().unwrap(),
+            PrepareOptions {
+                import: ImportOptions::default(),
+                allowed_shares: std::collections::BTreeSet::new(),
+                analysis: Arc::new(RefusedMedia),
+            },
+        )
+        .unwrap();
+        let mut document = commit(prepared, |_, document, _| Ok::<_, ()>(document)).unwrap();
+        let mut local = document.media_pool[0].clone();
+        local.id = kinewright_core::AssetId(2);
+        local.path = "previous.mov".into();
+        local.remote_locator = None;
+        document.media_pool.push(local);
+        let core = Core::spawn(document).unwrap();
+        let service = KinewrightMcp::new(
+            core,
+            Arc::new(RefusedMedia),
+            Arc::new(RefusedMedia),
+            ConfirmationBroker::default(),
+        );
+        for (asset, candidate) in [
+            (2, "file://unapproved.invalid/share/replacement.mov"),
+            (1, "local.mov"),
+        ] {
+            let reply = service
+                .call_exposed_blocking(
+                    CallToolRequestParams::new("invoke_capability").with_arguments(
+                        json!({"name":"relink_media","arguments":{
+                            "expected_revision":0, "asset_id":asset, "path":candidate,
+                            "allow_unverified_source":true,
+                        }})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    ),
+                )
+                .unwrap();
+            assert_eq!(reply.is_error, Some(true));
+            assert_eq!(reply.structured_content.unwrap()["code"], "remote_path");
+        }
+        let (revision, current) = service.snapshot().unwrap();
+        assert_eq!(revision, TimelineRevision(0));
+        assert_eq!(
+            current.media_pool[0].display_location(),
+            "https://example.invalid/a.mov"
+        );
+        assert!(current.media_pool[0].path.as_os_str().is_empty());
+    }
+
     fn write_inspection_fixture(path: &Path) {
         let clip = json!({
             "OTIO_SCHEMA": "Clip.1",

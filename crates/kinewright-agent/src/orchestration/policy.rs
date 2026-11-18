@@ -1496,6 +1496,7 @@ mod tests {
             &[
                 Operation::AddAsset {
                     asset: MediaAsset {
+                        remote_locator: None,
                         id: AssetId(1),
                         path: "fixture.mp4".into(),
                         name: "fixture".into(),

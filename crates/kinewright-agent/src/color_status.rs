@@ -5443,6 +5443,7 @@ mod tests {
 
     fn document() -> Document {
         let asset = kinewright_core::MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: "source.mp4".into(),
             name: "source".to_owned(),
@@ -5553,6 +5554,7 @@ mod tests {
     fn status_blocks_only_referenced_unsupported_sources() {
         let mut document = document();
         document.media_pool.push(kinewright_core::MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: "unused.mp4".into(),
             name: "unused".to_owned(),

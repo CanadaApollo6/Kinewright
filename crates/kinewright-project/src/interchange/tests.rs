@@ -115,6 +115,7 @@ impl LocatorFs for RecordingFs {
             }
         }
         Ok(MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: path.into(),
             name: "fixture".into(),
@@ -386,6 +387,85 @@ fn estimated_relink_requires_consent_and_covers_each_source_range() {
             ..
         })
     ));
+}
+
+#[test]
+fn remote_locator_requires_an_offline_import_asset_and_undo_restores_it() {
+    use kinewright_core::{Command, Core, Event, Operation, Query, QueryResult, RelinkCandidate};
+    use kinewright_media::test_support::TempDirectory;
+
+    let locator = "file://unapproved.invalid/camera/take.mov";
+    let fs = Arc::new(RecordingFs::new(&[locator]));
+    let (prepared, _) = prepare_with(
+        Arc::clone(&fs),
+        "edit.otio",
+        ImportOptions::default(),
+        Preparation::LOCAL,
+    )
+    .unwrap();
+    assert_eq!(*fs.calls.lock().unwrap(), [Call::Open("edit.otio".into())]);
+    let original = &prepared.document.media_pool[0];
+    assert_eq!(original.path, Path::new(""));
+    assert_eq!(original.display_location(), locator);
+    let id = original.id;
+    let temp = TempDirectory::new("ix1-remote-locator");
+    let path = temp.path("project.kinewright");
+    let valid = serde_json::to_value(prepared.document()).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&valid).unwrap()).unwrap();
+    assert_eq!(crate::load_document(&path).unwrap().0, prepared.document);
+    let mut live = valid.clone();
+    live["media_pool"][0]["path"] = json!("replacement.mov");
+    let mut known = valid.clone();
+    known["media_pool"][0]["source_fingerprint"] = json!({
+        "content_sha256": "a".repeat(64), "byte_len": 64,
+    });
+    let mut unrecorded = valid;
+    unrecorded["imported_from"] = json!([]);
+    for invalid in [live, known, unrecorded] {
+        std::fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(
+            crate::load_document(&path)
+                .unwrap_err()
+                .contains("preserved remote locator")
+        );
+    }
+
+    let core = Core::spawn(prepared.document).unwrap();
+    let history = serde_json::to_value(core.export_history().unwrap()).unwrap();
+    kinewright_core::history_support_fields(&history).unwrap();
+    let operation = Operation::RelinkAsset {
+        asset: id,
+        candidate: RelinkCandidate {
+            path: "replacement.mov".into(),
+            fingerprint: MediaSourceFingerprint {
+                content_sha256: Some("a".repeat(64)),
+                byte_len: Some(64),
+            },
+            kind: MediaKind::Video,
+            fps: Rational::new(24, 1).unwrap(),
+            duration: TimeCode(96),
+            resolution: Some((256, 144)),
+        },
+        allow_unverified_source: true,
+    };
+    let snapshot = || {
+        let Event::QueryResult(QueryResult::Snapshot { document, .. }) =
+            core.request(Command::Query(Query::Snapshot)).unwrap()
+        else {
+            panic!("expected a snapshot");
+        };
+        document
+    };
+    core.request(Command::Do(operation)).unwrap();
+    let relinked = snapshot();
+    let asset = relinked.asset(id).unwrap();
+    assert_eq!(asset.path, Path::new("replacement.mov"));
+    assert!(asset.remote_locator.is_none());
+    core.request(Command::Undo).unwrap();
+    let restored = snapshot();
+    assert_eq!(restored.asset(id).unwrap().path, Path::new(""));
+    assert_eq!(restored.asset(id).unwrap().display_location(), locator);
+    assert!(restored.asset(id).unwrap().source_fingerprint.is_unknown());
 }
 
 #[test]
@@ -809,6 +889,10 @@ fn approving_one_windows_share_reaches_only_files_under_that_share() {
         )
         .unwrap();
         assert_eq!(prepared.record().media.remote, 12);
+        for (asset, written) in prepared.document.media_pool.iter().zip(references) {
+            assert_eq!(asset.path, Path::new(""));
+            assert_eq!(asset.display_location(), written);
+        }
         assert_eq!(*fs.calls.lock().unwrap(), [Call::Open(input.into())]);
     }
 
@@ -828,8 +912,11 @@ fn approving_one_windows_share_reaches_only_files_under_that_share() {
     let calls = fs.calls.lock().unwrap();
     assert_eq!(calls.first(), Some(&Call::Open(input.into())));
     assert_eq!(calls.len(), 9);
-    for reference in &references[..4] {
+    for (asset, reference) in prepared.document.media_pool.iter().zip(&references[..4]) {
         let path = PathBuf::from(share_path(reference, Platform::Windows).unwrap().path);
+        assert_eq!(asset.path, path);
+        assert!(asset.remote_locator.is_none());
+        assert!(asset.source_fingerprint.is_verified());
         assert!(calls.contains(&Call::Stat(path.clone())));
         assert!(calls.contains(&Call::Probe(path)));
     }

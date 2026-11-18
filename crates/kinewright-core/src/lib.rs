@@ -265,9 +265,9 @@ pub use model::{
     LUT_ASSET_ID_MAX, LUT_SIZE_MAX, LUT_SIZE_MIN, LinkId, LutAsset, LutAssetId, LutAssetKind,
     LutAssetSource, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaBin, MediaCatalog,
     MediaKind, MediaSourceFingerprint, PROJECT_FORMAT_VERSION, PanLaw, ParamValue, RelinkCandidate,
-    SolidColor, SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId, SyncGroupMember,
-    TRACK_AUTOMATION_PARAMETERS, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX,
-    TRACK_MIX_PAN_MIN, Track, TrackId, TrackKind, TrackMix, Transition,
+    RemoteLocator, SolidColor, SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId,
+    SyncGroupMember, TRACK_AUTOMATION_PARAMETERS, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN,
+    TRACK_MIX_PAN_MAX, TRACK_MIX_PAN_MIN, Track, TrackId, TrackKind, TrackMix, Transition,
     chain_lookahead_milliseconds, clip_effective_fps, envelope_coalesce_key,
     project_format_version, track_automation_coalesce_key, validate_lut_asset,
 };

@@ -421,6 +421,7 @@ mod tests {
                 clips: vec![clip],
             }],
             media_pool: vec![kinewright_core::MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: std::path::PathBuf::from("shot.mov"),
                 name: "Shot".to_owned(),
@@ -645,6 +646,7 @@ mod tests {
         };
         let mut document = Document {
             media_pool: vec![kinewright_core::MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: std::path::PathBuf::from("cc7-e-0.mkv"),
                 name: spec.title.to_owned(),

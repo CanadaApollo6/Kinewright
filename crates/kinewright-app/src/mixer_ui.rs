@@ -1652,6 +1652,7 @@ mod tests {
 
     fn asset() -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("take.mp4"),
             name: "take.mp4".to_owned(),
@@ -5420,6 +5421,7 @@ mod tests {
             .tracks
             .iter()
             .map(|track| MediaAsset {
+                remote_locator: None,
                 id: AssetId(track.track.0),
                 path: PathBuf::from(format!("au6-{}-{}.bin", spec.id, track.track.0)),
                 name: format!("{} {}", spec.id, track.track.0),
@@ -5926,6 +5928,7 @@ mod tests {
 
         // `capture_room_tone`'s own `AddAsset`: an Action, not a builder.
         let room = MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: PathBuf::from("au6-c-room.wav"),
             name: "room".to_owned(),

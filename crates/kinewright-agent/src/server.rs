@@ -2395,6 +2395,14 @@ impl KinewrightMcp {
             )));
         };
 
+        if kinewright_project::interchange::is_remote_locator(&args.path)
+            || current.remote_locator.is_some()
+        {
+            return Ok(error_structured(
+                "Use the editor's Relink dialog to replace remote media.",
+                serde_json::json!({"code": "remote_path"}),
+            ));
+        }
         let probed = match self.analysis.probe(&args.path) {
             Ok(asset) => asset,
             Err(error) => return Ok(error_text(error.to_string())),
@@ -19030,6 +19038,7 @@ mod tests {
 
     fn fixture() -> (Core, Arc<dyn Playback>, Arc<dyn Analysis>) {
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("fixture.mp4"),
             name: "fixture".to_owned(),
@@ -19189,6 +19198,7 @@ mod tests {
 
     fn relink_probe_asset(source_fingerprint: MediaSourceFingerprint) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(99),
             path: PathBuf::from("probe-placeholder.mp4"),
             name: "replacement".to_owned(),
@@ -19276,6 +19286,7 @@ mod tests {
     fn montage_fixture(status: BeatStatus) -> (Core, Arc<NoopMedia>) {
         let fps = Rational::new(30, 1).unwrap();
         let video_asset = |id| MediaAsset {
+            remote_locator: None,
             id: AssetId(id),
             path: PathBuf::from(format!("montage-{id}.mp4")),
             name: format!("montage-{id}"),
@@ -19288,6 +19299,7 @@ mod tests {
             assumed_from: None,
         };
         let music = MediaAsset {
+            remote_locator: None,
             id: AssetId(9),
             path: PathBuf::from("montage-music.mp4"),
             name: "montage music".to_owned(),
@@ -19349,6 +19361,7 @@ mod tests {
     ) -> (Core, Arc<NoopMedia>) {
         let fps = Rational::new(30, 1).unwrap();
         let video = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("music-structure-video.mp4"),
             name: "music structure video".to_owned(),
@@ -19361,6 +19374,7 @@ mod tests {
             assumed_from: None,
         };
         let music = MediaAsset {
+            remote_locator: None,
             id: AssetId(9),
             path: PathBuf::from("music-structure-audio.wav"),
             name: "music structure audio".to_owned(),
@@ -19424,6 +19438,7 @@ mod tests {
     fn end_anchored_music_fit_fixture() -> (Core, Arc<NoopMedia>) {
         let source_fps = Rational::new(30, 1).unwrap();
         let music = MediaAsset {
+            remote_locator: None,
             id: AssetId(9),
             path: PathBuf::from("end-anchored-music.wav"),
             name: "end anchored music".to_owned(),
@@ -23569,6 +23584,7 @@ mod tests {
     /// frames coincide and the thumbnail map is keyed by either.
     fn tracked_shot_service() -> (KinewrightMcp, Core) {
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("cc5-tracked-shot.mp4"),
             name: "cc5-tracked-shot".to_owned(),
@@ -24696,6 +24712,7 @@ mod tests {
     /// lives in the project's room-tone store.
     fn au5b_fill_document() -> Document {
         let dialogue = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("dialogue.wav"),
             name: "dialogue".to_owned(),
@@ -24708,6 +24725,7 @@ mod tests {
             assumed_from: None,
         };
         let room_tone = MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: PathBuf::from("/p/show.kinewright-assets/room-tone/abc.wav"),
             name: "Room tone — dialogue".to_owned(),
@@ -25821,6 +25839,7 @@ mod tests {
 
         let mut document = au5b_repair_document();
         document.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: AssetId(10),
             path: PathBuf::from("long.wav"),
             name: "two minutes".to_owned(),
@@ -25833,6 +25852,7 @@ mod tests {
             assumed_from: None,
         });
         document.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: AssetId(9),
             path: PathBuf::from("silent.mp4"),
             name: "picture only".to_owned(),
@@ -28961,6 +28981,7 @@ mod tests {
     fn in1b_asset_document(color_description: ColorDescription, assumed: bool) -> Document {
         Document {
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: PathBuf::from("fixture.webm"),
                 name: "fixture".to_owned(),
@@ -29762,6 +29783,7 @@ mod tests {
         let (core, playback, analysis) = fixture();
         core.request(Command::Do(Operation::AddAsset {
             asset: MediaAsset {
+                remote_locator: None,
                 id: AssetId(2),
                 path: PathBuf::from("fixture.wav"),
                 name: "fixture audio".to_owned(),
@@ -30338,6 +30360,7 @@ mod tests {
 
         core.request(Command::Do(Operation::AddAsset {
             asset: MediaAsset {
+                remote_locator: None,
                 id: AssetId(2),
                 path: PathBuf::from("fixture.wav"),
                 name: "fixture audio".to_owned(),
@@ -30637,6 +30660,7 @@ mod tests {
     fn dialogue_keep_ranges_remove_qualified_silence_and_fillers() {
         let fps = Rational::new(30, 1).unwrap();
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: "dialogue.mp4".into(),
             name: "dialogue".to_owned(),
@@ -30712,6 +30736,7 @@ mod tests {
     fn dialogue_keep_ranges_retain_pause_and_pad_fillers() {
         let fps = Rational::new(30, 1).unwrap();
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: "dialogue.mp4".into(),
             name: "dialogue".to_owned(),
@@ -30769,6 +30794,7 @@ mod tests {
     fn dialogue_keep_ranges_never_escape_the_requested_source_envelope() {
         let fps = Rational::new(30, 1).unwrap();
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: "dialogue.mp4".into(),
             name: "dialogue".to_owned(),
@@ -30830,6 +30856,7 @@ mod tests {
     fn dialogue_filler_bridge_caps_long_pauses_and_preserves_shorter_ones() {
         let fps = Rational::new(30, 1).unwrap();
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: "dialogue.mp4".into(),
             name: "dialogue".to_owned(),
@@ -33089,6 +33116,7 @@ mod tests {
     /// 30 fps) document with a music track 1 and a dialogue track 2.
     fn au4_ducking_document() -> Document {
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("duck.mp4"),
             name: "duck".to_owned(),
@@ -33931,6 +33959,7 @@ mod tests {
     fn au4_plan_audio_ducking_skips_a_video_only_dialogue_clip() {
         let mut document = au4_ducking_document();
         document.media_pool.push(MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: PathBuf::from("broll.mp4"),
             name: "broll".to_owned(),
@@ -34422,6 +34451,7 @@ mod tests {
                 }],
             }],
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: "fixture.mp4".into(),
                 name: "fixture".into(),

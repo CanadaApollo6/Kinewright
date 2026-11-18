@@ -359,6 +359,7 @@ fn document_with_one_clip() -> Document {
     };
     Operation::AddAsset {
         asset: MediaAsset {
+            remote_locator: None,
             id: kinewright_core::AssetId(1),
             path: std::path::PathBuf::from("asset-1.mp4"),
             name: "asset-1".to_owned(),

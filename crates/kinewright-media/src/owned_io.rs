@@ -653,6 +653,7 @@ impl CertifiedSource {
             write!(sha256, "{byte:02x}").expect("writing to a String cannot fail");
         }
         Ok(kinewright_core::MediaAsset {
+            remote_locator: None,
             id,
             path: locator.to_path_buf(),
             name: locator

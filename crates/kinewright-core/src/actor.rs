@@ -1791,6 +1791,7 @@ mod tests {
 
     fn asset(id: u64) -> MediaAsset {
         MediaAsset {
+            remote_locator: None,
             id: AssetId(id),
             path: PathBuf::from("fixture.mp4"),
             name: "fixture".to_owned(),
@@ -2540,6 +2541,7 @@ mod tests {
                 clips,
             }],
             media_pool: vec![MediaAsset {
+                remote_locator: None,
                 id: AssetId(1),
                 path: PathBuf::from("generated.mp4"),
                 name: "generated".to_owned(),

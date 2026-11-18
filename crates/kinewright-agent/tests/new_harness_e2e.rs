@@ -181,6 +181,7 @@ fn query_document(core: &Core) -> Arc<Document> {
 
 fn fixture_document() -> Document {
     let asset = MediaAsset {
+        remote_locator: None,
         id: AssetId(1),
         path: PathBuf::from("headless-agent-fixture.mp4"),
         name: "headless fixture".to_owned(),

@@ -22,6 +22,7 @@ fn fps() -> Rational {
 
 fn asset(id: u64, name: &str, duration: i64, rate: Rational) -> MediaAsset {
     MediaAsset {
+        remote_locator: None,
         id: AssetId(id),
         path: std::path::PathBuf::from(format!("{name}.mp4")),
         name: name.to_owned(),

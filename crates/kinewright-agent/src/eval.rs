@@ -9398,6 +9398,7 @@ mod tests {
 
     fn document() -> Document {
         let asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(1),
             path: PathBuf::from("fixture.mp4"),
             name: "fixture".to_owned(),
@@ -9520,6 +9521,7 @@ mod tests {
     fn audio_fixture_document() -> (Document, FixtureContext) {
         let mut final_document = document();
         let audio_asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: PathBuf::from("music.wav"),
             name: "music".to_owned(),
@@ -10012,6 +10014,7 @@ mod tests {
         exact_document.tracks[0].clips[0] =
             clip_fixture(1, AssetId(1), 0, 0, 600, ClipContent::Media);
         let audio_asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: PathBuf::from("music.wav"),
             name: "music".to_owned(),
@@ -10125,6 +10128,7 @@ mod tests {
         let mut final_document = document();
         final_document.media_pool[0].duration = TimeCode(600);
         let pivot_asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: PathBuf::from("pivot.mp4"),
             name: "pivot".to_owned(),
@@ -10137,6 +10141,7 @@ mod tests {
             assumed_from: None,
         };
         let closing_asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(3),
             path: PathBuf::from("closing.mp4"),
             name: "closing".to_owned(),
@@ -10752,6 +10757,7 @@ mod tests {
     fn required_assets_and_source_range_separation_are_track_scoped() {
         let mut final_document = document();
         let second_asset = MediaAsset {
+            remote_locator: None,
             id: AssetId(2),
             path: PathBuf::from("second.mp4"),
             name: "second".to_owned(),

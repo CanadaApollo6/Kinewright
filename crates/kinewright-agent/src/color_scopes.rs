@@ -2196,6 +2196,7 @@ mod tests {
 
     fn two_shot_document() -> Document {
         let asset = |id: u64| MediaAsset {
+            remote_locator: None,
             id: AssetId(id),
             path: PathBuf::from(format!("stub-{id}.mp4")),
             name: format!("stub-{id}"),
