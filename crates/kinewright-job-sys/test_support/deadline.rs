@@ -21,6 +21,18 @@ pub fn report_with(report: fn() -> String) {
     let _ = REPORT.set(report);
 }
 
+/// Writes one named line past libtest's output capture, so it reaches the CI
+/// job log even when the test passes (for example which resource modes ran).
+#[allow(
+    dead_code,
+    reason = "shared test support; only some crates announce a line"
+)]
+pub fn announce(line: &str) {
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "{line}");
+    let _ = stderr.flush();
+}
+
 /// Every descendant of this process, with the kernel's view of where it is.
 /// Reads procfs only (no ptrace); fields it may not read are left out.
 fn processes() -> String {

@@ -16,6 +16,8 @@ use std::{
 #[cfg(feature = "slow-tests")]
 #[path = "support/bus_cleanup.rs"]
 mod bus_cleanup;
+#[path = "support/mode.rs"]
+mod mode;
 
 struct OwnedChild(Child);
 impl Drop for OwnedChild {
@@ -110,10 +112,20 @@ fn runtime_fixture() {
     assert_eq!(probe.metadata().kind, Kind::Image);
     assert_eq!(probe.metadata().duration_frames, 1);
     let state = runtime.snapshot();
-    if case == "degraded" {
-        assert!(state.degraded);
-    }
+    // The parent names the mode this environment must give; the other mode
+    // never stands in for it.
+    let expected = std::env::var("KW_RUNTIME_EXPECT").unwrap();
+    assert!(case != "degraded" || expected == "degraded");
     println!("MS2_RUNTIME_MODE degraded={}", state.degraded);
+    assert_eq!(
+        if state.degraded {
+            "degraded"
+        } else {
+            "primary"
+        },
+        expected,
+        "runtime fixture ran the wrong resource mode"
+    );
     runtime.shutdown().unwrap();
     assert_eq!(
         (runtime.snapshot().active, runtime.snapshot().pending),
@@ -122,6 +134,17 @@ fn runtime_fixture() {
 }
 fn run_case(case: &str) {
     let degraded = case == "degraded";
+    // `automatic` must select primary whenever a user manager is reachable.
+    let expected = if degraded || !mode::user_manager() {
+        "degraded"
+    } else {
+        "primary"
+    };
+    if case == "automatic" && expected == "degraded" {
+        deadline::announce(
+            "MS2_PRIMARY_UNAVAILABLE binary=runtime_native test=automatic reason=no_user_manager",
+        );
+    }
     let mut bus = if degraded {
         Some(OwnedChild(
             Command::new("/usr/bin/dbus-daemon")
@@ -147,6 +170,7 @@ fn run_case(case: &str) {
     command
         .args(["--exact", "runtime_fixture", "--nocapture"])
         .env("KW_RUNTIME_FIXTURE", case)
+        .env("KW_RUNTIME_EXPECT", expected)
         .stdin(Stdio::null())
         // The child's own libtest headers must not interleave with this
         // test's output; only its evidence lines are relayed below.
@@ -170,6 +194,9 @@ fn run_case(case: &str) {
                 println!("{}", &line[line.find("MS2_").unwrap_or(0)..]);
             }
             assert!(status.success(), "runtime fixture: {status}");
+            deadline::announce(&format!(
+                "MS2_MODES_RAN binary=runtime_native case={case} modes={expected}"
+            ));
             break;
         }
         assert!(
@@ -208,11 +235,7 @@ fn runtime_png_degraded_admission_closes_and_cleans() {
 fn runtime_releases_both_slots_during_bus_disconnect() {
     let _deadline = deadline::test();
     deadline::report_with(kinewright_media_client::diagnostics);
-    if !Command::new("systemctl")
-        .args(["--user", "show", "--property=Version"])
-        .output()
-        .is_ok_and(|result| result.status.success())
-    {
+    if !mode::user_manager() {
         println!(
             "MS2_NATIVE_NOT_RUN binary=runtime_native test=runtime_releases_both_slots_during_bus_disconnect reason=no_user_manager"
         );

@@ -123,7 +123,16 @@ fn ms2_apparmor_userns_gate_refuses_without_the_profile_and_admits_with_it() {
             explicit_retry: false,
         })
     });
-    println!("MS2_APPARMOR_GATE expected={expected} result={result:?}");
+    // The gate concerns user namespaces, not resource mode, so either mode
+    // is accepted here; the mode is printed so the log shows which one ran.
+    println!(
+        "MS2_APPARMOR_GATE expected={expected} result={result:?} mode={}",
+        if runtime.snapshot().degraded {
+            "degraded"
+        } else {
+            "primary"
+        }
+    );
     match expected {
         "refused" => assert!(
             matches!(

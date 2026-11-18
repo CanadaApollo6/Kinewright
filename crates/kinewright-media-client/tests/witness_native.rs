@@ -1,6 +1,9 @@
 #![cfg(target_os = "linux")]
 #[path = "../../kinewright-job-sys/test_support/deadline.rs"]
 mod deadline;
+#[cfg(feature = "slow-tests")]
+#[path = "support/mode.rs"]
+mod mode;
 
 #[cfg(feature = "slow-tests")]
 mod support {
@@ -451,6 +454,13 @@ mod support {
                 elapsed.as_millis()
             );
             hold.store(false, std::sync::atomic::Ordering::Release);
+            // This test requests no mode, so it must run the mode the
+            // environment offers: primary whenever a user manager answers.
+            assert_eq!(
+                runtime.snapshot().degraded,
+                !crate::mode::user_manager(),
+                "silent helper ran the other resource mode"
+            );
             assert!(
                 matches!(outcome, Err(Failure::Sandbox(MediaSandboxError::TimedOut))),
                 "silent helper held={held}: {outcome:?}"
@@ -465,6 +475,14 @@ mod support {
                 assert_eq!(active, 1, "reservation released before cleanup ended");
             }
         }
+        crate::deadline::announce(&format!(
+            "MS2_MODES_RAN binary=witness_native test=silent modes={}",
+            if runtime.snapshot().degraded {
+                "degraded"
+            } else {
+                "primary"
+            }
+        ));
         runtime.shutdown().unwrap();
         assert_eq!(
             (runtime.snapshot().active, runtime.snapshot().pending),
@@ -569,6 +587,10 @@ fn watchdog_disabled_primary_app_and_supervisor_loss() {
     for stage in ["before-ready", "decode"] {
         for loss in ["app", "supervisor"] {
             if !support::loss(false, stage, loss) {
+                assert!(
+                    !mode::user_manager(),
+                    "a user manager answers but the primary pass ran degraded"
+                );
                 println!(
                     "MS2_NATIVE_NOT_RUN binary=witness_native test=watchdog_disabled_primary_app_and_supervisor_loss reason=no_user_manager"
                 );
@@ -583,6 +605,10 @@ fn watchdog_disabled_primary_app_and_supervisor_loss() {
         ("before-arm", "shim"),
     ] {
         if !support::loss(false, stage, loss) {
+            assert!(
+                !mode::user_manager(),
+                "a user manager answers but the primary pass ran degraded"
+            );
             println!(
                 "MS2_NATIVE_NOT_RUN binary=witness_native test=watchdog_disabled_primary_app_and_supervisor_loss reason=no_user_manager"
             );

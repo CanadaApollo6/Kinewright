@@ -7,15 +7,23 @@
 //! denial by a lower layer replies `UnsupportedMedia`, and a successful escape
 //! replies `ProtocolViolation` before the helper closes any descriptor, so
 //! removing a guard changes the outcome. The `control` attack attempts nothing
-//! and must be admitted. Both modes always run, and every check is collected
-//! before the one assertion, so a removal shows its result in each mode
-//! (`scripts/ms2_s1a_mutations.py`).
+//! and must be admitted. Each pass asserts the mode it requested: the control
+//! and every attack must report that mode, and a pass never accepts the other
+//! mode in its place. When the primary control runs degraded (no user manager
+//! reachable), the primary pass prints `MS2_PRIMARY_UNAVAILABLE` and runs no
+//! attacks instead of running them degraded; `MS2_MODES_RAN` names the modes
+//! that ran, written past libtest's capture so it reaches the CI job log.
+//! Every check is collected before the one assertion, so a removal shows its
+//! result in each mode (`scripts/ms2_s1a_mutations.py`).
 //!
 //! The runtime result carries `Crashed`, not the signal: the shim turns the
 //! payload's SIGSYS into exit status 159, but the host kills the shim as soon
 //! as the reply pipe closes, so that status races SIGKILL and is not asserted.
 #[path = "../../kinewright-job-sys/test_support/deadline.rs"]
 mod deadline;
+#[cfg(feature = "slow-tests")]
+#[path = "support/mode.rs"]
+mod mode;
 
 #[cfg(feature = "slow-tests")]
 mod support {
@@ -202,7 +210,29 @@ mod support {
         );
         (result, degraded)
     }
-    pub fn killed(line: &str) -> bool {
+    /// Runs every attack in the requested mode. Each must report that mode
+    /// (never the other) and end in a seccomp kill.
+    pub fn attacks_in(
+        directory: &Directory,
+        degraded: bool,
+        attacks: &[(&str, &str)],
+        identity: &mut u8,
+        failures: &mut Vec<String>,
+    ) {
+        let mode = if degraded { "degraded" } else { "primary" };
+        for &(name, target) in attacks {
+            *identity += 1;
+            let result = attack(directory, degraded, name, target, *identity);
+            println!("MS2_ESCAPE requested={mode} attack={name} target={target} result={result}");
+            if !result.starts_with(&format!("{mode} ")) {
+                failures.push(format!("{mode} {name} {target}: ran {result}"));
+            }
+            if !killed(&result) {
+                failures.push(format!("{mode} {name} {target}: {result}"));
+            }
+        }
+    }
+    fn killed(line: &str) -> bool {
         line.ends_with(&format!(
             "{:?}",
             Err::<Kind, _>(Failure::Sandbox(MediaSandboxError::Crashed))
@@ -227,7 +257,8 @@ fn full_stack_escapes_are_killed_and_canaries_unchanged() {
     deadline::report_with(kinewright_media_client::diagnostics);
     #[cfg(feature = "slow-tests")]
     {
-        use support::{attack, killed, workspace};
+        use deadline::announce;
+        use support::{attack, attacks_in, workspace};
         rustix::process::setrlimit(
             rustix::process::Resource::Core,
             rustix::process::Rlimit {
@@ -262,14 +293,27 @@ fn full_stack_escapes_are_killed_and_canaries_unchanged() {
             ("signal", app.as_str()),
         ];
         let mut failures = Vec::new();
+        let mut ran = Vec::new();
         let mut identity = 0_u8;
         for (degraded, mode) in [(false, "primary"), (true, "degraded")] {
             identity += 1;
             let control = attack(&directory, degraded, "control", "", identity);
             println!("MS2_ESCAPE requested={mode} attack=control result={control}");
-            if !(control.starts_with(&format!("{mode} "))
-                || (!degraded && control.starts_with("degraded ")))
-            {
+            if !degraded && control.starts_with("degraded ") {
+                // No degraded run stands in for the primary pass. With a user
+                // manager answering, falling back is itself a failure.
+                if mode::user_manager() {
+                    failures.push(format!(
+                        "primary control: a user manager answers but ran {control}"
+                    ));
+                } else {
+                    announce(&format!(
+                        "MS2_PRIMARY_UNAVAILABLE binary=escape_native reason=no_user_manager result={control}"
+                    ));
+                }
+                continue;
+            }
+            if !control.starts_with(&format!("{mode} ")) {
                 failures.push(format!("{mode} control: ran {control}"));
             }
             if !control.ends_with(&format!(
@@ -278,17 +322,18 @@ fn full_stack_escapes_are_killed_and_canaries_unchanged() {
             )) {
                 failures.push(format!("{mode} control: not admitted: {control}"));
             }
-            for (name, target) in attacks {
-                identity += 1;
-                let result = attack(&directory, degraded, name, target, identity);
-                println!(
-                    "MS2_ESCAPE requested={mode} attack={name} target={target} result={result}"
-                );
-                if !killed(&result) {
-                    failures.push(format!("{mode} {name} {target}: {result}"));
-                }
-            }
+            attacks_in(&directory, degraded, &attacks, &mut identity, &mut failures);
+            ran.push(mode);
         }
+        announce(&format!(
+            "MS2_MODES_RAN binary=escape_native modes={} primary={}",
+            ran.join(","),
+            if ran.contains(&"primary") {
+                "ran"
+            } else {
+                "unavailable"
+            }
+        ));
         if std::fs::read(&png).unwrap() != source_before {
             failures.push("source changed".into());
         }
