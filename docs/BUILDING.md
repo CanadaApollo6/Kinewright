@@ -137,6 +137,10 @@ library resolution and admits a WAV fixture through the app's owned-media
 import path. The GUI check uses Xvfb and Mesa lavapipe. Use `--admission-only`
 to run the loader and import checks without starting the GUI.
 
+The test creates a temporary session directory beside the bundle and removes
+it on exit. To use another location, pass `--scratch-dir DIR` with an existing
+writable directory on Btrfs, ext4, or XFS.
+
 ## Windows (x86_64 MSVC)
 
 M0 targets 64-bit Windows with the MSVC Rust toolchain. The media crate links

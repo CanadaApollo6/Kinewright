@@ -3,22 +3,30 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 --bundle-dir DIR [--admission-only] [--startup-timeout-seconds N]" >&2
+    echo "Usage: $0 --bundle-dir DIR [--scratch-dir DIR] [--admission-only] [--startup-timeout-seconds N]" >&2
     exit 2
 }
 
 bundle_dir=""
+scratch_parent=""
 startup_timeout_seconds=8
 admission_only=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --bundle-dir)
-            bundle_dir="${2:-}"
+            [[ -n "${2:-}" && "$2" != --* ]] || usage
+            bundle_dir="$2"
+            shift 2
+            ;;
+        --scratch-dir)
+            [[ -n "${2:-}" && "$2" != --* ]] || usage
+            scratch_parent="$2"
             shift 2
             ;;
         --startup-timeout-seconds)
-            startup_timeout_seconds="${2:-}"
+            [[ -n "${2:-}" && "$2" != --* ]] || usage
+            startup_timeout_seconds="$2"
             shift 2
             ;;
         --admission-only)
@@ -40,14 +48,18 @@ if [[ ! "$startup_timeout_seconds" =~ ^[0-9]+$ ]] || [[ "$startup_timeout_second
 fi
 
 bundle_dir="$(cd -- "$bundle_dir" && pwd -P)"
+scratch_parent="$(cd -- "${scratch_parent:-$(dirname -- "$bundle_dir")}" && pwd -P)"
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
-for pattern in libavcodec.so libavformat.so libavutil.so libswresample.so libswscale.so libnemo_speech_asr.so libnemo_speech_asr_c.so; do
-    if ! compgen -G "$bundle_dir/lib/${pattern}*" >/dev/null; then
-        echo "Bundle is missing required library: $pattern" >&2
+shopt -s nullglob
+for library in libavcodec.so libavformat.so libavutil.so libswresample.so libswscale.so libnemo_speech_asr.so libnemo_speech_asr_c.so; do
+    matches=("$bundle_dir/lib/$library"*)
+    if [[ "${#matches[@]}" -eq 0 ]]; then
+        echo "Bundle is missing required library: $library" >&2
         exit 1
     fi
 done
+shopt -u nullglob
 ffmpeg_dependency='^[[:space:]]*lib(avcodec|avdevice|avfilter|avformat|avutil|swresample|swscale|postproc)\.so[^[:space:]]*[[:space:]]+=>[[:space:]]+(.*[^[:space:]])[[:space:]]+\(0x[[:xdigit:]]+\)$'
 for binary in Kinewright kinewright-media-helper kinewright-media-supervisor ffmpeg; do
     executable="$bundle_dir/$binary"
@@ -64,7 +76,7 @@ for binary in Kinewright kinewright-media-helper kinewright-media-supervisor ffm
     while IFS= read -r line; do
         if [[ "$line" =~ $ffmpeg_dependency ]]; then
             resolved="$(realpath -e -- "${BASH_REMATCH[2]}")"
-            if [[ "$resolved" != "$bundle_dir/lib/"* ]]; then
+            if [[ "${resolved#"$bundle_dir"/lib/}" == "$resolved" ]]; then
                 echo "$binary resolves FFmpeg outside the bundle: $resolved" >&2
                 exit 1
             fi
@@ -84,7 +96,7 @@ for binary in Kinewright kinewright-media-helper kinewright-media-supervisor ffm
 done
 echo 'App and helper resolve their FFmpeg libraries from the bundle. The supervisor has no FFmpeg dependency.'
 
-smoke_dir="$(mktemp -d "${TMPDIR:-/tmp}/Kinewright-bundle-smoke-XXXXXX")"
+smoke_dir="$(mktemp -d "$scratch_parent/Kinewright-bundle-smoke-XXXXXX")"
 trap 'rm -rf -- "$smoke_dir"' EXIT
 smoke_env=(
     env -i HOME="$smoke_dir" TMPDIR="$smoke_dir" LOCALAPPDATA="$smoke_dir"
