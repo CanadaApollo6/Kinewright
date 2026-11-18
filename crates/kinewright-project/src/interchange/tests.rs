@@ -239,7 +239,7 @@ fn abandoned_stats_are_replaced_and_offline_ids_are_last() {
     let (prepared, _) =
         prepare_with(Arc::new(fs), "timeline.otio", options, Preparation::LOCAL).unwrap();
     for _ in slow {
-        did_start.try_recv().unwrap();
+        did_start.recv().unwrap();
         release.send(()).unwrap();
     }
     for _ in slow {
@@ -277,7 +277,7 @@ fn each_probe_deadline_abandons_and_stops_at_the_next_observation() {
         };
         let (prepared, _) =
             prepare_with(Arc::new(fs), "timeline.otio", options, Preparation::LOCAL).unwrap();
-        did_start.try_recv().unwrap();
+        did_start.recv().unwrap();
         release.send(()).unwrap();
         assert!(did_stop.recv().unwrap());
         assert_eq!(prepared.record().media.timed_out, 1);
@@ -715,7 +715,7 @@ fn abandoning_the_worker_budget_reports_undispatched_locators_as_timeouts() {
     )
     .unwrap();
     for _ in slow {
-        did_start.try_recv().unwrap();
+        did_start.recv().unwrap();
         release.send(()).unwrap();
     }
     for _ in slow {
@@ -832,5 +832,214 @@ fn approving_one_windows_share_reaches_only_files_under_that_share() {
         let path = PathBuf::from(share_path(reference, Platform::Windows).unwrap().path);
         assert!(calls.contains(&Call::Stat(path.clone())));
         assert!(calls.contains(&Call::Probe(path)));
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StalledIo {
+    Open,
+    Read,
+    BundleDirectory,
+    EntryMetadata,
+    MediaRoot,
+}
+
+struct IoHold {
+    call: StalledIo,
+    arrived: Sender<()>,
+    release: Receiver<()>,
+}
+
+impl IoHold {
+    fn at(&self, call: StalledIo) {
+        if self.call == call {
+            self.arrived.send(()).unwrap();
+            self.release.recv().unwrap();
+        }
+    }
+}
+
+struct StalledFs {
+    hold: Arc<IoHold>,
+}
+
+struct StalledReader {
+    hold: Arc<IoHold>,
+    bytes: Cursor<Vec<u8>>,
+}
+
+impl Read for StalledReader {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if self.bytes.position() == 0 {
+            let prefix = out.len().min(16);
+            return self.bytes.read(&mut out[..prefix]);
+        }
+        self.hold.at(StalledIo::Read);
+        self.bytes.read(out)
+    }
+}
+
+struct StalledEntries {
+    hold: Arc<IoHold>,
+    next: Option<PathBuf>,
+}
+
+impl Iterator for StalledEntries {
+    type Item = io::Result<DirectoryEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let path = self.next.take()?;
+        self.hold.at(StalledIo::EntryMetadata);
+        Some(Ok(DirectoryEntry {
+            path,
+            kind: EntryKind::File,
+        }))
+    }
+}
+
+impl LocatorFs for StalledFs {
+    type Metadata = EntryKind;
+    type Probe = MediaAsset;
+    type Reader = StalledReader;
+    type Entry = DirectoryEntry;
+    type Directory = StalledEntries;
+
+    fn stat(&self, _: &Path) -> io::Result<EntryKind> {
+        Err(io::ErrorKind::NotFound.into())
+    }
+
+    fn open(&self, path: &Path) -> io::Result<StalledReader> {
+        self.hold.at(StalledIo::Open);
+        let input = if path.ends_with("Info.fcpxml") {
+            br#"<fcpxml version="1.13"><resources><format id="f" frameDuration="1/24s" width="64" height="36"/>
+                 <asset id="a" format="f" start="0s" duration="1s" hasVideo="1"><media-rep kind="original-media" src="shot.mov"/></asset>
+                 </resources><library><event><project name="Edit"><sequence format="f"><spine><asset-clip ref="a" duration="1s"/>
+                 </spine></sequence></project></event></library></fcpxml>"#.to_vec()
+        } else {
+            otio(&["shot.mov"])
+        };
+        Ok(StalledReader {
+            hold: Arc::clone(&self.hold),
+            bytes: Cursor::new(input),
+        })
+    }
+
+    fn probe(&self, _: &Path, _: &dyn ProbeObserver) -> Result<MediaAsset, MediaError> {
+        panic!("the stalled filesystem contains no probeable media");
+    }
+
+    fn read_dir(&self, path: &Path) -> io::Result<StalledEntries> {
+        self.hold.at(if path.ends_with("search") {
+            StalledIo::MediaRoot
+        } else {
+            StalledIo::BundleDirectory
+        });
+        Ok(StalledEntries {
+            hold: Arc::clone(&self.hold),
+            next: Some(path.join("TrackData")),
+        })
+    }
+}
+
+fn stalled_io_outcome(
+    call: StalledIo,
+    inspect: bool,
+    cancel: bool,
+) -> Result<ImportRecord, Refusal> {
+    let (arrived, at_call) = bounded(1);
+    let (release, blocked) = bounded(1);
+    let (finished, outcome) = bounded(1);
+    let control = PrepareControl::default();
+    let options = ImportOptions {
+        deadlines: MediaDeadlines {
+            stat: Duration::from_millis(100),
+            ..MediaDeadlines::default()
+        },
+        media_roots: (call == StalledIo::MediaRoot)
+            .then(|| "search".to_owned())
+            .into_iter()
+            .collect(),
+        control: control.clone(),
+        ..ImportOptions::default()
+    };
+    let fs = Arc::new(StalledFs {
+        hold: Arc::new(IoHold {
+            call,
+            arrived,
+            release: blocked,
+        }),
+    });
+    let path = if matches!(call, StalledIo::BundleDirectory | StalledIo::EntryMetadata) {
+        "edit.fcpxmld"
+    } else {
+        "edit.otio"
+    };
+    let request = std::thread::spawn(move || {
+        let result = if inspect {
+            inspect_with(fs, path, options, None).map(|report| report.record)
+        } else {
+            prepare_with(fs, path, options, Preparation::LOCAL).map(|(result, _)| result.record)
+        };
+        finished.send(result).unwrap();
+    });
+    at_call.recv().unwrap();
+    if cancel {
+        control.cancel();
+    }
+    // A watchdog makes a synchronous-I/O mutation fail instead of hanging libtest.
+    let result = outcome.recv_timeout(Duration::from_secs(2));
+    release.send(()).unwrap();
+    request.join().unwrap();
+    result.unwrap_or_else(|error| panic!("{call:?} did not leave the blocked filesystem: {error}"))
+}
+
+#[test]
+fn timeline_source_open_is_bounded_for_prepare_and_inspect() {
+    for inspect in [false, true] {
+        assert_eq!(
+            stalled_io_outcome(StalledIo::Open, inspect, false)
+                .unwrap_err()
+                .code,
+            RefusalCode::IoTimeout
+        );
+    }
+}
+
+#[test]
+fn stalled_source_reads_bundle_io_and_media_roots_finish_with_typed_outcomes() {
+    for inspect in [false, true] {
+        for call in [
+            StalledIo::Read,
+            StalledIo::BundleDirectory,
+            StalledIo::EntryMetadata,
+        ] {
+            assert_eq!(
+                stalled_io_outcome(call, inspect, false).unwrap_err().code,
+                RefusalCode::IoTimeout
+            );
+        }
+        assert_eq!(
+            stalled_io_outcome(StalledIo::MediaRoot, inspect, false)
+                .unwrap()
+                .media
+                .timed_out,
+            1
+        );
+    }
+}
+
+#[test]
+fn cancel_leaves_every_kind_of_blocked_interchange_io() {
+    for call in [
+        StalledIo::Open,
+        StalledIo::Read,
+        StalledIo::BundleDirectory,
+        StalledIo::EntryMetadata,
+        StalledIo::MediaRoot,
+    ] {
+        assert_eq!(
+            stalled_io_outcome(call, false, true).unwrap_err().code,
+            RefusalCode::Cancelled
+        );
     }
 }

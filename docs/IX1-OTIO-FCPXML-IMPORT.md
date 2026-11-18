@@ -594,10 +594,14 @@ as M41 requires. Ruling 27 adds an observer to the same implementation. It repor
 hashed bytes and the start of metadata. Either checkpoint can cancel the probe.
 
 *Workers and deadlines.* Stats and probes run on at most 4 workers, each under a deadline:
-- a stat must answer within 2 s;
+- each stat, source open or read, directory read and entry enumeration must make progress within
+  2 s;
 - the shared probe must finish its metadata phase within 10 s of its start event;
 - hashing must make progress at least every 10 s, starting at dispatch.
 
+Source and bundle operations share the media worker admission and abandonment caps. A stalled
+source or bundle call produces `io_timeout`; stalled media results produce `media_timeout`.
+Cancel returns while any blocked operating-system calls finish under the abandonment cap.
 These deadlines are configurable with the stated defaults. The same probe events drive hashing
 progress and cancellation. After abandonment the next observer checkpoint stops the probe.
 Metadata packet reads also check cancellation without restarting the metadata deadline.
@@ -688,7 +692,7 @@ There are two read-only registry capabilities, reached through `invoke_capabilit
 `unsupported_container`, `unsupported_format_version`, `too_large`, `too_deep`, `too_many_items`,
 `too_many_tracks`, `malformed` (with a JSON pointer or XML `line:col`), `dtd_not_allowed`,
 `ambiguous_timeline` (≤ 16 names), `project_rate_required`, `unsupported_rate`, `unrepresentable`,
-`nothing_to_import`, and `outside_roots` once AW1 file roots exist.
+`nothing_to_import`, `io_timeout`, and `outside_roots` once AW1 file roots exist.
 
 *Opening (ruling 1).* Agents only inspect in IX1, and there is no `request_open_interchange`.
 AW1's `open_project { path }` (`docs/AW1-HEADLESS-KINEWRIGHT.md:560`) is the only way in. When AW1
@@ -793,7 +797,8 @@ Named cases:
 
 **Media-dependent rows.** Probing, `source_clamped`, `source_origin_assumed`, A/V sync and
 `media_timeout` are proven by the lavfi fixtures, never by the corpus, whose files come without
-media. The timeout cases use a `LocatorFs` double that blocks.
+media. The timeout cases use a `LocatorFs` double that blocks source opens, reads, directory
+enumeration, entry metadata, media stats and probes.
 
 **Corpus (correction 1).** The lead downloads openly licensed public timelines into an untracked
 directory and treats them as untrusted input. "Real" excludes test-suite fixtures, such as the OTIO
@@ -946,6 +951,8 @@ Lead rulings (2026-11-17):
 28. **Share approval.** The import dialog can re-prepare with explicitly selected Windows share
     roots. Other remote locators never reach the import seam. Agent inspection has no approval
     parameter (§8.1).
+29. **Bounded filesystem work.** Source reads and bundle enumeration use the same
+    deadlines, cancellation and worker caps as media-root searches (§8.2).
 
 Open questions:
 1. **Marker colour switch.** Should `MARKER_COLOR_POLICY` ship as `LabelPrefix` or `Drop`? This is

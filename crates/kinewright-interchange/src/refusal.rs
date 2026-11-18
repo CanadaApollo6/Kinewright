@@ -23,6 +23,7 @@ pub enum RefusalCode {
     OutsideRoots,
     LoweringFailed,
     Cancelled,
+    IoTimeout,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

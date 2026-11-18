@@ -27,7 +27,10 @@ use kinewright_interchange::{
 };
 use serde::Serialize;
 
-use self::files::{DirectoryEntry, EntryKind, NativeLocatorFs};
+use self::{
+    files::{DirectoryEntry, EntryKind, NativeLocatorFs},
+    workers::{Ticket, Workers},
+};
 use crate::bundle::BundleWriteAdmission;
 
 pub use kinewright_interchange::{Refusal, RefusalCode, SitePage, SiteQuery, locator::ShareRoot};
@@ -218,12 +221,21 @@ pub fn inspect(
     options: ImportOptions,
     query: Option<SiteQuery>,
 ) -> Result<InterchangeInspection, Refusal> {
-    let (prepared, sites) = prepare_with(
+    inspect_with(
         Arc::new(NativeLocatorFs { analysis: None }),
         path,
         options,
-        Preparation::Inspect(query),
-    )?;
+        query,
+    )
+}
+
+fn inspect_with(
+    fs: Arc<impl ImportFs>,
+    path: &str,
+    options: ImportOptions,
+    query: Option<SiteQuery>,
+) -> Result<InterchangeInspection, Refusal> {
+    let (prepared, sites) = prepare_with(fs, path, options, Preparation::Inspect(query))?;
     Ok(InterchangeInspection {
         summary: ImportSummary {
             timeline: prepared.name,
@@ -320,8 +332,9 @@ fn prepare_with(
         return Err(cancelled());
     }
     let source = SourcePath::new(&path)?;
-    let mut timeline = read_timeline(&*fs, &source, &options)?;
-    let (media, table) = resolve::media(fs, &timeline, source.root(), roots, &options, mode)?;
+    let mut workers = Workers::new(&options.control, options.deadlines);
+    let mut timeline = read_timeline(&fs, &source, &options, &mut workers)?;
+    let (media, table) = resolve::media(fs, &timeline, source.root(), roots, &mut workers, mode)?;
     let lowered = lower_with_sites(&timeline, &table, mode.query())?;
     if options.control.is_cancelled() {
         return Err(cancelled());
@@ -404,11 +417,17 @@ impl SourcePath {
 }
 
 fn read_timeline(
-    fs: &impl ImportFs,
+    fs: &Arc<impl ImportFs>,
     source: &SourcePath,
     options: &ImportOptions,
+    workers: &mut Workers<'_>,
 ) -> Result<Timeline, Refusal> {
-    let bytes = read_main(fs, &source.main, &options.control)?;
+    let input_fs = Arc::clone(fs);
+    let bytes = workers.io(
+        source.main.clone(),
+        "The timeline file did not respond.",
+        move |path, ticket| read_main(&*input_fs, &path, ticket),
+    )?;
     let name = source
         .main
         .file_name()
@@ -441,20 +460,17 @@ fn read_timeline(
         }
     };
     if matches!(source.bundle, Some(Bundle::Fcpxml)) {
-        note_sidecars(fs, source, &mut timeline, &options.control)?;
+        note_sidecars(fs, source, &mut timeline, workers)?;
     }
     Ok(timeline)
 }
 
 fn note_sidecars(
-    fs: &impl ImportFs,
+    fs: &Arc<impl ImportFs>,
     source: &SourcePath,
     timeline: &mut Timeline,
-    control: &PrepareControl,
+    workers: &mut Workers<'_>,
 ) -> Result<(), Refusal> {
-    let Ok(entries) = fs.read_dir(source.root()) else {
-        return Ok(());
-    };
     let media: BTreeSet<_> = timeline
         .media
         .iter()
@@ -472,19 +488,13 @@ fn note_sidecars(
             })
         })
         .collect();
-    let mut sidecars = Vec::new();
-    for entry in entries.take(MAX_ROOT_ENTRIES).flatten() {
-        if control.is_cancelled() {
-            return Err(cancelled());
-        }
-        if let Some(name) = entry.path.file_name()
-            && Some(name) != source.main.file_name()
-            && !media.contains(name)
-        {
-            sidecars.push(name.to_string_lossy().into_owned());
-        }
-    }
-    sidecars.sort_unstable();
+    let directory_fs = Arc::clone(fs);
+    let main = source.main.file_name().map(ToOwned::to_owned);
+    let sidecars = workers.io(
+        source.root().to_owned(),
+        "The bundle directory did not respond.",
+        move |path, ticket| scan_sidecars(&*directory_fs, &path, main.as_deref(), &media, ticket),
+    )?;
     timeline.notes.extend(
         sidecars
             .iter()
@@ -493,24 +503,53 @@ fn note_sidecars(
     Ok(())
 }
 
-fn read_main(
+fn scan_sidecars(
     fs: &impl ImportFs,
-    path: &Path,
-    control: &PrepareControl,
-) -> Result<Vec<u8>, Refusal> {
-    let mut reader = fs
-        .open(path)
+    root: &Path,
+    main: Option<&std::ffi::OsStr>,
+    media: &BTreeSet<std::ffi::OsString>,
+    ticket: &Ticket,
+) -> Result<Vec<String>, Refusal> {
+    let entries = fs.read_dir(root);
+    io_progress(ticket)?;
+    let Ok(entries) = entries else {
+        return Ok(Vec::new());
+    };
+    let mut sidecars = Vec::new();
+    for entry in entries.take(MAX_ROOT_ENTRIES) {
+        io_progress(ticket)?;
+        if let Ok(entry) = entry
+            && let Some(name) = entry.path.file_name()
+            && Some(name) != main
+            && !media.contains(name)
+        {
+            sidecars.push(name.to_string_lossy().into_owned());
+        }
+    }
+    sidecars.sort_unstable();
+    Ok(sidecars)
+}
+
+fn io_progress(ticket: &Ticket) -> Result<(), Refusal> {
+    if ticket.note_io_progress() {
+        Ok(())
+    } else {
+        Err(cancelled())
+    }
+}
+
+fn read_main(fs: &impl ImportFs, path: &Path, ticket: &Ticket) -> Result<Vec<u8>, Refusal> {
+    let opened = fs.open(path);
+    io_progress(ticket)?;
+    let mut reader = opened
         .map_err(|error| source_refusal(&error))?
         .take(MAX_INPUT_BYTES as u64 + 1);
     let mut input = Vec::new();
     let mut buffer = [0; 16 * 1024];
     loop {
-        if control.is_cancelled() {
-            return Err(cancelled());
-        }
-        let count = reader
-            .read(&mut buffer)
-            .map_err(|error| source_refusal(&error))?;
+        let read = reader.read(&mut buffer);
+        io_progress(ticket)?;
+        let count = read.map_err(|error| source_refusal(&error))?;
         if count == 0 {
             break;
         }

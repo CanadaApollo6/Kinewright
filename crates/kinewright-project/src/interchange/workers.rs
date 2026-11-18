@@ -11,7 +11,7 @@ use std::{
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use kinewright_core::{ProbeEvent, ProbeObserver};
 
-use super::{MediaDeadlines, PREPARE_WORKERS, PrepareControl, Refusal, cancelled};
+use super::{MediaDeadlines, PREPARE_WORKERS, PrepareControl, Refusal, RefusalCode, cancelled};
 
 // Replacements are allowed until eight calls from one preparation have expired.
 const MAX_ABANDONED: usize = 8;
@@ -34,6 +34,18 @@ impl<'a> Workers<'a> {
             deadlines,
             abandoned: 0,
         }
+    }
+
+    pub(super) fn io<I: Send + 'static, O: Send + 'static>(
+        &mut self,
+        input: I,
+        timeout: &str,
+        work: impl Fn(I, &Ticket) -> Result<O, Refusal> + Send + Sync + 'static,
+    ) -> Result<O, Refusal> {
+        self.run(Phase::Stat, vec![input], work)?
+            .pop()
+            .flatten()
+            .ok_or_else(|| Refusal::new(RefusalCode::IoTimeout, timeout))?
     }
 
     /// Results preserve input order. A vacant result denotes a missed deadline.
@@ -276,7 +288,7 @@ impl Ticket {
         state.timeout.saturating_sub(state.changed.elapsed())
     }
 
-    pub(super) fn continue_search(&self) -> bool {
+    pub(super) fn note_io_progress(&self) -> bool {
         self.update(None)
     }
 

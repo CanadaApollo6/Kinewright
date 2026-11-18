@@ -14,8 +14,7 @@ use kinewright_interchange::{
 };
 
 use super::{
-    ImportFs, ImportOptions, MAX_ROOT_DEPTH, MAX_ROOT_ENTRIES, MediaEntry, MediaStatus,
-    Preparation, Refusal,
+    ImportFs, MAX_ROOT_DEPTH, MAX_ROOT_ENTRIES, MediaEntry, MediaStatus, Preparation, Refusal,
     files::EntryKind,
     workers::{Phase, Ticket, Workers},
 };
@@ -25,11 +24,10 @@ pub(super) fn media(
     timeline: &Timeline,
     base: &Path,
     roots: Vec<PathBuf>,
-    options: &ImportOptions,
+    workers: &mut Workers<'_>,
     mode: Preparation<'_>,
 ) -> Result<(Vec<MediaEntry>, MediaTable), Refusal> {
     let (mut entries, paths) = initial_entries(&timeline.media, base, mode);
-    let mut workers = Workers::new(&options.control, options.deadlines);
     let fs_for_stat = Arc::clone(&fs);
     let stats = workers.run(Phase::Stat, paths.paths, move |path, _| {
         fs_for_stat.stat(&path)
@@ -43,12 +41,12 @@ pub(super) fn media(
             None => MediaStatus::TimedOut,
         };
     }
-    search_roots(&fs, &mut workers, &mut entries, roots)?;
+    search_roots(&fs, workers, &mut entries, roots)?;
     let mut table = MediaTable {
         entries: entries.iter().map(availability).collect(),
     };
     if matches!(mode, Preparation::Probe { .. }) {
-        probe(fs, &mut workers, &mut entries, &mut table)?;
+        probe(fs, workers, &mut entries, &mut table)?;
     }
     for entry in &mut entries {
         if !entry.status.is_available() {
@@ -276,15 +274,19 @@ fn walk(
     let mut count = 0;
     let mut complete = true;
     while let Some((path, depth)) = directories.pop() {
-        if !ticket.continue_search() {
+        if !ticket.note_io_progress() {
             return (names, false);
         }
-        let Ok(entries) = fs.read_dir(&path) else {
+        let entries = fs.read_dir(&path);
+        if !ticket.note_io_progress() {
+            return (names, false);
+        }
+        let Ok(entries) = entries else {
             complete = false;
             continue;
         };
         for entry in entries {
-            if count == MAX_ROOT_ENTRIES || !ticket.continue_search() {
+            if count == MAX_ROOT_ENTRIES || !ticket.note_io_progress() {
                 return (names, false);
             }
             count += 1;
