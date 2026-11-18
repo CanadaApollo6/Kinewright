@@ -1,0 +1,32 @@
+# Standalone libFuzzer harness for the MS2 IPC strict framing. It is outside
+# the workspace members (its own empty [workspace]) and builds only with the
+# pinned nightly and cargo-fuzz's flags; see fuzz/README.md.
+[package]
+name = "kinewright-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+kinewright-core = { path = "../crates/kinewright-core" }
+kinewright-media-ipc = { path = "../crates/kinewright-media-ipc" }
+
+[[bin]]
+name = "ipc_framing"
+path = "fuzz_targets/ipc_framing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipc_framing_seeds"
+path = "src/seeds.rs"
+test = false
+doc = false
+bench = false
