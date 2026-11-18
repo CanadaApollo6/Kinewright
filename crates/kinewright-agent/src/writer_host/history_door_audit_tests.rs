@@ -644,6 +644,112 @@ fn source_descriptor(objects: usize) -> BorrowedSourceDescriptor {
 }
 
 #[test]
+fn source_request_at_http_limit_crosses_ingress() {
+    struct ProofReader;
+    impl BorrowedSourceReader for ProofReader {
+        fn prove_snapshot(
+            &mut self,
+            source: &BorrowedSourceDescriptor,
+            _snapshot: &BorrowedSnapshotBinding,
+        ) -> Result<(), BundleError> {
+            assert!(source.objects().count() > 10_000);
+            Ok(())
+        }
+        fn read_source(
+            &mut self,
+            _source: &BorrowedSourceDescriptor,
+            _object: &ObjectRef,
+            offset: u64,
+            buffer: &mut [u8],
+        ) -> Result<usize, BundleError> {
+            assert_eq!(offset, 0);
+            assert!(buffer.is_empty());
+            Ok(0)
+        }
+        fn inspect_destination(
+            &mut self,
+            _source: &BorrowedSourceDescriptor,
+            _path: &Path,
+        ) -> Result<kinewright_project::namespace::NamespaceIdentity, BundleError> {
+            unreachable!("the fixture only proves source and snapshot ownership")
+        }
+    }
+
+    let server = SourceServer::start(ProofReader).unwrap();
+    let instance = "source-capacity";
+    let mut remote = RemoteSource::new(
+        HostSourceBinding {
+            source: Some(source_descriptor(0)),
+            inputs: Some(DoorSamples::object(
+                kinewright_project::bundle_records::RecordKind::InputManifest,
+            )),
+            callback: server.bootstrap(),
+        },
+        instance,
+    )
+    .unwrap();
+    remote.prove().unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
+    let history = core.portable_history().unwrap();
+    let snapshot = BorrowedSnapshotBinding::from_history(&history).unwrap();
+    let request = |source| SourceRequest::SnapshotProof {
+        instance: instance.into(),
+        source,
+        snapshot: snapshot.clone(),
+    };
+    let bytes = |request: &SourceRequest| serde_json::to_vec(request).unwrap().len();
+    let one = bytes(&request(source_descriptor(1)));
+    let growth = bytes(&request(source_descriptor(2))) - one;
+    let objects = 1 + (SOURCE_BODY_BYTES - one) / growth;
+    let unpadded = request(source_descriptor(objects));
+    let padding = SOURCE_BODY_BYTES - bytes(&unpadded);
+    let SourceRequest::SnapshotProof { source, .. } = unpadded else {
+        unreachable!();
+    };
+    let mut wire = serde_json::to_value(source).unwrap();
+    // Every reference has a matching root. Widen their byte lengths together,
+    // then use the epoch for any odd byte.
+    wire["owner_epoch"] = serde_json::json!(if padding.is_multiple_of(2) { 0 } else { 10 });
+    let mut remaining = padding / 2;
+    for index in 0..objects {
+        if remaining == 0 {
+            break;
+        }
+        let digits = remaining.min(6);
+        let length = 10_u64.pow(u32::try_from(digits).unwrap());
+        wire["objects"][index]["reference"]["byte_length"] = length.into();
+        wire["roots"][index]["byte_length"] = length.into();
+        remaining -= digits;
+    }
+    assert_eq!(remaining, 0);
+    let at_limit = request(serde_json::from_value(wire.clone()).unwrap());
+    assert_eq!(bytes(&at_limit), SOURCE_BODY_BYTES);
+    remote.send(&at_limit).unwrap();
+
+    wire["extra_overlap_bytes"] = 10_u64.into();
+    let over = request(serde_json::from_value(wire).unwrap());
+    assert_eq!(bytes(&over), SOURCE_BODY_BYTES + 1);
+    remote.client = disconnected_client(&remote.client);
+    let expected = format!(
+        "this request is {} bytes and may carry at most {SOURCE_BODY_BYTES} bytes",
+        SOURCE_BODY_BYTES + 1
+    );
+    let refusal = remote.send(&over).err();
+    assert!(
+        matches!(&refusal, Some(HostError::Refused(error))
+            if error.code == "request_capacity" && error.message == expected),
+        "SOURCE_CAPACITY_REFUSED_BEFORE_POSTING: {refusal:?}"
+    );
+    let SourceRequest::SnapshotProof { source, .. } = over else {
+        unreachable!();
+    };
+    assert!(matches!(
+        remote.prove_snapshot(&source, &snapshot),
+        Err(BundleError::Capacity("source request bytes"))
+    ));
+}
+
+#[test]
 fn whole_snapshot_requests_refuse_oversized_source_descriptors_before_posting() {
     use kinewright_project::bundle_records::RecordKind;
     let core = Core::for_test(Document::default()).unwrap();

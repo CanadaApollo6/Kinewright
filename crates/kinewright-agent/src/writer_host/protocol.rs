@@ -13,6 +13,8 @@ use std::{net::SocketAddr, path::PathBuf};
 
 pub const HOST_PROTOCOL: u32 = 1;
 pub const HOST_BODY_BYTES: usize = 40 * 1024 * 1024;
+/// Maximum serialized body at the borrowed-source callback endpoint.
+pub(super) const SOURCE_BODY_BYTES: usize = 4 * 1024 * 1024;
 /// Every request outside the payload: editor, operation, project, roots and the
 /// command's own small fields. A request without a payload is refused above it.
 pub const HOST_ENVELOPE_BYTES: usize = 256 * 1024;
@@ -99,10 +101,7 @@ impl HostCommand {
         } else {
             "request_capacity"
         };
-        Err(HostRefusal::new(
-            code,
-            &format!("this request is {bytes} bytes and may carry at most {limit} bytes"),
-        ))
+        Err(HostRefusal::body_capacity(code, bytes, limit))
     }
 
     /// `None` for a command that carries no snapshot.
@@ -637,6 +636,12 @@ impl HostRefusal {
             message: message.into(),
             native_code: None,
         }
+    }
+    pub(super) fn body_capacity(code: &str, bytes: usize, limit: usize) -> Self {
+        Self::new(
+            code,
+            &format!("this request is {bytes} bytes and may carry at most {limit} bytes"),
+        )
     }
     pub(crate) fn roots(message: &str) -> Self {
         Self::new("root_refused", message)

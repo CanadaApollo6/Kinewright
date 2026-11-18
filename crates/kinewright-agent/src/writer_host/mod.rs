@@ -1143,7 +1143,7 @@ async fn source_request(State(state): State<Arc<SourceState>>, request: Request)
         *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
         return response;
     };
-    let Ok(bytes) = to_bytes(request.into_body(), 4 * 1024 * 1024).await else {
+    let Ok(bytes) = to_bytes(request.into_body(), SOURCE_BODY_BYTES).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
     let Ok(request) = serde_json::from_slice::<SourceRequest>(&bytes) else {
@@ -1281,8 +1281,16 @@ impl RemoteSource {
         })
     }
     fn send(&self, request: &SourceRequest) -> Result<SourceReply, HostError> {
-        let reply: SourceReply =
-            serde_json::from_slice(&self.client.post("source", &serde_json::to_vec(request)?)?)?;
+        let body = serde_json::to_vec(request)?;
+        if body.len() > SOURCE_BODY_BYTES {
+            return Err(HostRefusal::body_capacity(
+                "request_capacity",
+                body.len(),
+                SOURCE_BODY_BYTES,
+            )
+            .into());
+        }
+        let reply: SourceReply = serde_json::from_slice(&self.client.post("source", &body)?)?;
         if let Some(ref error) = reply.error {
             return Err(error.clone().into());
         }
@@ -1309,7 +1317,12 @@ impl BorrowedSourceReader for RemoteSource {
             snapshot: snapshot.clone(),
         })
         .map(|_| ())
-        .map_err(|error| BundleError::Identity(error.to_string()))
+        .map_err(|error| match &error {
+            HostError::Refused(refusal) if refusal.code == "request_capacity" => {
+                BundleError::Capacity("source request bytes")
+            }
+            _ => BundleError::Identity(error.to_string()),
+        })
     }
     fn inspect_destination(
         &mut self,
