@@ -415,6 +415,8 @@ quadratic.
      format.
 2. **`Track.name: Option<String>`.**
    - It is ≤ 64 bytes, skipped when `None`, and checked in `validate_document`.
+   - Ruling 25 makes the name model-visible. It adds 34 bytes per generated operation schema, and
+     the served tool list stays at 5,660 bytes.
    - `Track` reaches every `Operation`-embedding tool through `AddTrack`, so registry bytes move
      (§10).
    - Every `Track { … }` literal gains `name: None`.
@@ -688,8 +690,9 @@ agent reads `get_import_report`.
 - **the two capabilities, about 1.5 KB.** `inspect_interchange` is about 650 B of schema and 350 B
   of description. `code` is a plain string, so it adds no enum bytes. `get_import_report` is about
   60 B and 220 B. The two directory rows are about 220 B.
-- **`Track.name` (ruling 3), about 90 B on each `Operation`-embedding tool**, through `AddTrack`'s
-  `Track`. This is an estimate.
+- **Track names (rulings 3 and 25): 34 B per schema** through `AddTrack`'s `Track` definition.
+  All 64 generated operations expose it through `get_capability`, and the registry's `apply_edit_plan`
+  row also gains 34 B. The internal registry grows by 2,210 B.
 
 The slice measures both in the M36 ledger.
 

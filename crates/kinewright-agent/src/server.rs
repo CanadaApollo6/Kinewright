@@ -29398,6 +29398,13 @@ mod tests {
     ///   **1 848 392**, 128 734 + 703 = **129 437**. Counts `153 / 64 / 89` —
     ///   Part B's `(1,0,1)`. Served quad unchanged (`7 / 5 660 / 3 510 /
     ///   998`) — the twenty-third consecutive measurement.
+    ///
+    /// - **IX1 (ruling 25, track names): +2 210 / +2 210 / 0.** The optional
+    ///   `Track.name` adds 34 B to each of the 64 generated operation input
+    ///   schemas opened by `get_capability` and to the registry's `apply_edit_plan`
+    ///   schema. `Document.imported_from` adds no schema bytes. Registry
+    ///   totals are **2 005 164 / 1 850 602 / 129 437** and the served quad
+    ///   stays **7 / 5 660 / 3 510 / 998**.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -29423,11 +29430,11 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (2_002_954, 5_660),
+            (2_005_164, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_848_392,
+            registry_metrics.input_schema_bytes, 1_850_602,
             "registry={registry_metrics:?}"
         );
         assert_eq!(

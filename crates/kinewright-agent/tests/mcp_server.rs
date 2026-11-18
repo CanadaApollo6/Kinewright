@@ -2580,7 +2580,7 @@ async fn cc7_prepare_commit_and_compare(
 /// **registry-only** mutators, and MO2 Part B adds one **registry-only**
 /// inspector, `preview_solo`. The registry sextuple does move, to
 /// `153 / 64 / 89`, which is the count assertions below, and its three byte
-/// measures `2 002 954 / 1 848 392 / 129 437` are pinned beside the served
+/// measures `2 005 164 / 1 850 602 / 129 437` are pinned beside the served
 /// quad.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
@@ -2756,7 +2756,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
             registry_metrics.input_schema_bytes,
             registry_metrics.description_bytes
         ),
-        (153, 2_002_954, 1_848_392, 129_437),
+        (153, 2_005_164, 1_850_602, 129_437),
         "registry={registry_metrics:?}"
     );
 
@@ -10610,7 +10610,7 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
 /// §6.4 rules 12–13 and §9 clause 19: **three** registry-only capabilities, no
 /// served tool, for the **twenty-third** consecutive measurement.
 ///
-/// The registry sextuple is `153 / 64 / 89 / 2 002 954 / 1 848 392 / 129 437`,
+/// The registry sextuple is `153 / 64 / 89 / 2 005 164 / 1 850 602 / 129 437`,
 /// pinned byte for byte with its decomposition in
 /// `server::tests::served_surface_is_small_and_keeps_the_internal_registry_discoverable`;
 /// this test pins all six registry numbers and the served quad over the live
@@ -10689,7 +10689,7 @@ async fn mo2_the_served_quad_does_not_move_for_the_twenty_third_measurement() {
             registry_metrics.input_schema_bytes,
             registry_metrics.description_bytes
         ),
-        (153, 2_002_954, 1_848_392, 129_437),
+        (153, 2_005_164, 1_850_602, 129_437),
         "registry={registry_metrics:?}"
     );
     let state = registry
