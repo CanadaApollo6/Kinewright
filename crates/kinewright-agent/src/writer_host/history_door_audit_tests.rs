@@ -1005,16 +1005,19 @@ fn snapshot_over_its_door_cap_is_refused_at_the_client_before_sending() {
     host.shutdown().unwrap();
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn publish_barrier_capacity_refusal_keeps_edits_reopenable() {
     barrier_capacity_refusal_keeps_edits_reopenable(Door::PublishBarrier);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn confirm_barrier_capacity_refusal_keeps_edits_reopenable() {
     barrier_capacity_refusal_keeps_edits_reopenable(Door::ConfirmBarrier);
 }
 
+#[cfg(target_os = "linux")]
 #[allow(
     clippy::too_many_lines,
     reason = "one durable recovery sequence from an unacknowledged edit through cold open and Save"

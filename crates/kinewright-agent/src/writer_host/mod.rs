@@ -3802,7 +3802,7 @@ pub mod task_preparation_words;
 
 pub use task_mcp::consent::EditApproval;
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 fn document_for_test(core: &Core) -> Arc<Document> {
     let kinewright_core::Event::QueryResult(kinewright_core::QueryResult::Document(document)) =
         core.request(kinewright_core::Command::Query(
