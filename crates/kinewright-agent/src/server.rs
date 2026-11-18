@@ -1254,7 +1254,6 @@ impl KinewrightMcp {
             incidents,
             capability_denylist: &[],
             investigator: None,
-            imported_from: Vec::new(),
             served_tool_allowlist: None,
             host_scoped: false,
             task_endpoint: None,
