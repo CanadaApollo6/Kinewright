@@ -583,13 +583,18 @@ pub(crate) fn pending_journal_for_identity(
 /// Retire a base journal you own (F5): only data your session replayed
 /// and superseded. Headless never calls this.
 /// # Errors
-/// Any removal IO error other than absence.
+/// Any removal IO error other than absence or contention.
 pub fn retire_journal_for_project(recovery_dir: &Path, project_path: &Path) -> io::Result<bool> {
+    use crate::legacy_io::{LockedJournal, journal_removal_contended};
+
     let candidate = recovery_dir.join(journal_file_name(project_path));
-    match fs::remove_file(&candidate) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
+    match LockedJournal::open_for_removal(&candidate).and_then(|file| file.unlink(&candidate)) {
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound || journal_removal_contended(&error) =>
+        {
+            Ok(false)
+        }
+        result => result,
     }
 }
 
@@ -847,6 +852,17 @@ mod tests {
             Some(journal.clone()),
             "the stale journal pends"
         );
+        #[cfg(unix)]
+        {
+            let locked = crate::legacy_io::LockedJournal::lock(fs::File::open(&journal).unwrap())
+                .expect("the competing recorder locks its journal");
+            assert!(
+                !retire_journal_for_project(&recovery, &project)
+                    .expect("contention leaves the file"),
+            );
+            assert_eq!(fs::read(&journal).unwrap(), b"stale crash bytes");
+            drop(locked);
+        }
         assert!(
             retire_journal_for_project(&recovery, &project).expect("the retire lands"),
             "a present journal retires to true"
