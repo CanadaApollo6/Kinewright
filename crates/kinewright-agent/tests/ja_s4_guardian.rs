@@ -1299,6 +1299,33 @@ fn equipped_session(test: &str) -> bool {
     true
 }
 
+/// Witnesses whose observer moves a process into another cgroup (a
+/// fixture writing `cgroup.procs`, or the shim entering the containment
+/// cgroup from this process) need this test process inside the user
+/// manager's delegated subtree: the kernel checks write access on the
+/// common ancestor's `cgroup.procs`, and only that subtree is delegated to
+/// the user. A runner whose test process sits in a system service reports
+/// NOT RUN up front instead of failing with EACCES at the write.
+#[cfg(target_os = "linux")]
+fn migration_session(test: &str) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    if !equipped_session(test) {
+        return false;
+    }
+    let uid = fs::metadata("/proc/self").unwrap().uid();
+    let manager = format!("/user.slice/user-{uid}.slice/user@{uid}.service/");
+    let cgroup = fs::read_to_string("/proc/self/cgroup").unwrap();
+    let path = cgroup
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .unwrap_or_default();
+    if path.starts_with(&manager) {
+        return true;
+    }
+    println!("\nC2_NATIVE_NOT_RUN test={test} reason=outside_user_subtree cgroup={path}");
+    false
+}
+
 #[cfg(target_os = "linux")]
 fn migration_refused(outside: bool) {
     let root = root("migration");
@@ -1531,7 +1558,7 @@ fn s4_c2_launch_refuses_without_nsdelegate() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn s4_c2_blocked_guardian_exits_and_manager_kills() {
-    if !equipped_session("s4_c2_blocked_guardian_exits_and_manager_kills") {
+    if !migration_session("s4_c2_blocked_guardian_exits_and_manager_kills") {
         return;
     }
     let root = root("blocked-manager");
@@ -2070,7 +2097,7 @@ fn s4_c2_launch_refuses_without_pid_namespace() {
 )]
 fn s4_c2_init_reaps_and_exits_with_provider() {
     use std::io::{Read as _, Write as _};
-    if !equipped_session("s4_c2_init_reaps_and_exits_with_provider") {
+    if !migration_session("s4_c2_init_reaps_and_exits_with_provider") {
         return;
     }
     let root = root("init-status");
@@ -2305,7 +2332,7 @@ fn service_proof_refused(recovery_caller: bool, zombie: bool, isolate_events: bo
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn s4_c2_service_proof_session_live() {
-    if !equipped_session("s4_c2_service_proof_session_live") {
+    if !migration_session("s4_c2_service_proof_session_live") {
         return;
     }
     service_proof_refused(false, false, false);
@@ -2318,7 +2345,7 @@ fn s4_c2_service_proof_session_live() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn s4_c2_service_proof_recovery_live() {
-    if !equipped_session("s4_c2_service_proof_recovery_live") {
+    if !migration_session("s4_c2_service_proof_recovery_live") {
         return;
     }
     service_proof_refused(true, false, false);
@@ -2331,7 +2358,7 @@ fn s4_c2_service_proof_recovery_live() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn s4_c2_service_proof_session_zombie() {
-    if !equipped_session("s4_c2_service_proof_session_zombie") {
+    if !migration_session("s4_c2_service_proof_session_zombie") {
         return;
     }
     service_proof_refused(false, true, false);
@@ -2344,7 +2371,7 @@ fn s4_c2_service_proof_session_zombie() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn s4_c2_service_proof_recovery_zombie() {
-    if !equipped_session("s4_c2_service_proof_recovery_zombie") {
+    if !migration_session("s4_c2_service_proof_recovery_zombie") {
         return;
     }
     service_proof_refused(true, true, false);
@@ -2431,7 +2458,7 @@ impl Drop for ProductionClaimCleanup {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn s4_c2_service_events_session() {
-    if !equipped_session("s4_c2_service_events_session") {
+    if !migration_session("s4_c2_service_events_session") {
         return;
     }
     service_proof_refused(false, false, true);
@@ -2444,7 +2471,7 @@ fn s4_c2_service_events_session() {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn s4_c2_service_events_recovery() {
-    if !equipped_session("s4_c2_service_events_recovery") {
+    if !migration_session("s4_c2_service_events_recovery") {
         return;
     }
     service_proof_refused(true, false, true);

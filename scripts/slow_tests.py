@@ -369,7 +369,7 @@ def lint() -> int:
     lint_ignored(problems, {(b, p) for b, p, _, _ in entries})
     guardian_source = "crates/kinewright-agent/tests/ja_s4_guardian.rs"
     guardian_path = ROOT / guardian_source
-    guarded = set(re.findall(r'equipped_session\("(s4_\w+)"\)', guardian_path.read_text())) if guardian_path.is_file() else set()
+    guarded = set(re.findall(r'(?:equipped|migration)_session\("(s4_\w+)"\)', guardian_path.read_text())) if guardian_path.is_file() else set()
     listed_guardians = {p for b, p, f, scope in entries if b == "ja_s4_guardian" and f == guardian_source and scope.startswith("linux")}
     for name in sorted(guarded - listed_guardians):
         problems.append(f"equipped-session skip has no slow-tier accounting: {name}")
