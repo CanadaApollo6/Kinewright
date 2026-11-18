@@ -1,9 +1,10 @@
 # FF9: the project's own FFmpeg build at 9.0.2, joined with dq-native
 
 Branch `ff9`, from `origin/dq-native` (`5138cd5f`) with `origin/ms1` (`66a66cd1`) merged.
-Status: Linux gates green. CI run 44188673130 on `1df1c976` confirmed the Windows root
-cause (§4). The closing CI run on the TE1 PNG commit and the luma re-measure is pending.
-Windows' remaining 8-bit delivery terms have not been checked against our build yet (§8).
+Status: closed. CI run 44212971700 on `2f581345` is green on Linux and Windows, fast and
+slow tiers. Run 44188673130 on `1df1c976` confirmed the Windows root cause (§4). Run
+44201911758 measured the 14 remaining Windows 8-bit delivery values, all equal to Linux's,
+and run 44212971700 confirmed the 30 RGB diagnostic predictions (§8).
 
 ## 1. Merge resolutions
 
@@ -305,5 +306,12 @@ passes. `te15/README.md` names the PNG. `docs/reports/te1-1.md` is historical an
 
 ## 8. Open
 
-- The next Windows run will check the 30 eight-bit RGB diagnostic predictions (§4).
+- Done: Windows run 44212971700 checked the 30 eight-bit RGB diagnostic predictions (§4); all hold.
+- The manifest's `measurement` provenance block still describes the original FFmpeg 8 Linux
+  measurement (`99faee36`). The values were confirmed unchanged on 9.0.2 by the runs above; the
+  block is kept as the record of when each number was first taken.
+- `scripts/inspect-ffmpeg.py` does not enumerate protocols, hardware accelerators or external
+  libraries, and `check_components` proves requested names exist, not that nothing else was
+  added. Both predate this branch (MS1); `--disable-everything`, `--disable-network` and the
+  runtime protocol whitelist cover them today. Ticket MS-T1 adds the enumeration.
 - CC6 manifest: no per-system values.
