@@ -340,3 +340,158 @@ fn clip_end(document: &kinewright_core::Document, clip: &kinewright_core::Clip) 
         .checked_add(document.clip_duration(clip).unwrap())
         .unwrap()
 }
+
+#[test]
+fn available_media_can_force_a_cut_farther_than_one_source_frame() {
+    let bytes = include_bytes!("fixtures/snap-media-ended.otio");
+    let timeline = otio::parse(bytes, "snap-media-ended.otio", ParseOptions::default()).unwrap();
+    let (document, record) = lower(&timeline, &MediaTable::default()).unwrap();
+    assert_eq!(document.duration, TimeCode(24));
+    let snap = record
+        .rows
+        .iter()
+        .find(|row| row.code == LossCode::CutSnapped)
+        .unwrap();
+    assert_eq!(snap.bound, Some(LossBound::Frames(216)));
+}
+
+#[test]
+fn omitted_codes_retain_dropped_items_when_more_than_eight_codes_compete() {
+    let bytes = include_bytes!("fixtures/row-cap.otio");
+    let timeline = otio::parse(bytes, "row-cap.otio", ParseOptions::default()).unwrap();
+    let (_, record) = lower(&timeline, &MediaTable::default()).unwrap();
+    assert_eq!(record.rows.len(), 8);
+    assert!(record.omitted_codes.contains(&LossCode::UnknownItem));
+    assert_eq!(record.dropped, 9);
+}
+
+#[test]
+fn otio_audio_pairing_distinguishes_split_edits_and_collapses_dual_mono() {
+    for (bytes, matched, code) in [
+        (
+            include_bytes!("fixtures/split-edit.otio").as_slice(),
+            false,
+            LossCode::AvLinkUnpaired,
+        ),
+        (
+            include_bytes!("fixtures/dual-mono.otio").as_slice(),
+            true,
+            LossCode::ChannelMapDropped,
+        ),
+    ] {
+        let timeline = otio::parse(bytes, "sound.otio", ParseOptions::default()).unwrap();
+        let (document, record) = lower(&timeline, &MediaTable::default()).unwrap();
+        let original = &document.tracks[0].clips[0];
+        let audio: Vec<_> = document
+            .tracks
+            .iter()
+            .filter(|track| track.kind == TrackKind::Audio)
+            .flat_map(|track| &track.clips)
+            .collect();
+        assert_eq!(audio.len(), 1);
+        if matched {
+            assert!(original.link.is_some());
+            assert_eq!(original.link, audio[0].link);
+        } else {
+            assert_eq!((original.link, audio[0].link), (None, None));
+        }
+        assert!(record.rows.iter().any(|row| row.code == code));
+    }
+}
+
+#[test]
+fn linked_transition_heads_and_bodies_have_separate_groups_in_both_formats() {
+    for timeline in [
+        otio::parse(
+            include_bytes!("fixtures/linked-dissolve.otio"),
+            "av.otio",
+            ParseOptions::default(),
+        )
+        .unwrap(),
+        fcpxml::parse(
+            include_bytes!("fixtures/av-cross-dissolve.fcpxml"),
+            "av.fcpxml",
+            ParseOptions::default(),
+        )
+        .unwrap(),
+    ] {
+        let (document, _) = lower(&timeline, &MediaTable::default()).unwrap();
+        let main_video = &document.tracks[0];
+        let video_head = &document.tracks[1].clips[0];
+        let main_audio = &document.tracks[2];
+        let audio_head = &document.tracks[3].clips[0];
+        assert!(video_head.link.is_some());
+        assert_eq!(video_head.link, audio_head.link);
+        assert!(main_video.clips[1].link.is_some());
+        assert_eq!(main_video.clips[1].link, main_audio.clips[1].link);
+        assert_ne!(video_head.link, main_video.clips[1].link);
+    }
+}
+
+#[test]
+fn hostile_decoded_file_locators_become_offline_assets() {
+    let timeline = otio::parse(
+        include_bytes!("fixtures/remote-locators.otio"),
+        "remote.otio",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    let (document, record) = lower(&timeline, &MediaTable::default()).unwrap();
+    assert_eq!(
+        (
+            record.media.assets,
+            record.media.offline,
+            record.media.remote
+        ),
+        (2, 2, 2)
+    );
+    assert!(
+        document
+            .media_pool
+            .iter()
+            .all(|asset| asset.source_fingerprint.is_unknown())
+    );
+    assert_eq!(
+        document.media_pool[0].path.to_str(),
+        Some("file://localhost//host.invalid/share/a.mov")
+    );
+    assert!(
+        record
+            .rows
+            .iter()
+            .any(|row| row.code == LossCode::RemoteUrl && row.count == 2)
+    );
+}
+
+#[test]
+fn a_present_unprobed_asset_is_inspected_without_a_fingerprint_or_estimated_range() {
+    let timeline = otio::parse(
+        include_bytes!("fixtures/named-resolve.otio"),
+        "inspect.otio",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    let table = MediaTable {
+        entries: vec![kinewright_interchange::Availability::Unprobed {
+            path: "media/relinked.mov".into(),
+            relinked_by_name: true,
+        }],
+    };
+    let (document, record) = lower(&timeline, &table).unwrap();
+    assert_eq!(
+        (
+            record.media.assets,
+            record.media.online,
+            record.media.offline
+        ),
+        (1, 1, 0)
+    );
+    assert!(record.estimated_assets.is_empty());
+    assert!(document.media_pool[0].source_fingerprint.is_unknown());
+    assert!(
+        record
+            .rows
+            .iter()
+            .any(|row| row.code == LossCode::RelinkedByName)
+    );
+}

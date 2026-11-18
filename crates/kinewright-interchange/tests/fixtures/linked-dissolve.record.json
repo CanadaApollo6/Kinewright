@@ -1,0 +1,101 @@
+{
+  "format": "otio",
+  "format_version": "Timeline.1",
+  "source_name": "linked-dissolve.otio",
+  "source_sha256": "03ffd1f3d6c1d02f8febeb1eb2ac584f428f21529042097547235dead40df797",
+  "start_offset_frames": 0,
+  "items": 6,
+  "exact": 4,
+  "approximated": 2,
+  "dropped": 0,
+  "media": {
+    "assets": 2,
+    "online": 0,
+    "offline": 2,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 3
+    }
+  ],
+  "rows": [
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 2,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "transition_lane",
+      "fidelity": "approximated",
+      "count": 2,
+      "names": [],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/1",
+          "frame": 24
+        },
+        {
+          "source": "/tracks/children/1/children/1",
+          "frame": 24
+        }
+      ]
+    },
+    {
+      "code": "audio_crossfade_linear",
+      "fidelity": "approximated",
+      "count": 1,
+      "bound": {
+        "unit": "tenth_db",
+        "value": 30
+      },
+      "names": [],
+      "at": [
+        {
+          "source": "/tracks/children/1/children/1",
+          "frame": 24
+        }
+      ]
+    },
+    {
+      "code": "clip_names_dropped",
+      "fidelity": "dropped",
+      "count": 4,
+      "names": [
+        "CutA",
+        "CutB"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0,
+          "clip": 7
+        },
+        {
+          "source": "/tracks/children/0/children/2",
+          "frame": 24,
+          "clip": 8
+        }
+      ]
+    },
+    {
+      "code": "resolution_inferred",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    }
+  ],
+  "omitted_codes": []
+}

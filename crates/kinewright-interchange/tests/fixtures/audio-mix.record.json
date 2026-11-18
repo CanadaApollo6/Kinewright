@@ -1,0 +1,136 @@
+{
+  "format": "fcpxml",
+  "format_version": "1.13",
+  "source_name": "audio-mix.fcpxml",
+  "source_sha256": "daa84eeed096817601d91a826e970d1593caec75a8e058e341303a816d20723d",
+  "start_offset_frames": 0,
+  "items": 1,
+  "exact": 0,
+  "approximated": 0,
+  "dropped": 1,
+  "media": {
+    "assets": 1,
+    "online": 0,
+    "offline": 1,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 2
+    }
+  ],
+  "rows": [
+    {
+      "code": "pan_dropped",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [],
+      "at": [
+        {
+          "source": "11:9",
+          "frame": 1,
+          "clip": 5
+        }
+      ]
+    },
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "gain_clamped",
+      "fidelity": "approximated",
+      "count": 2,
+      "bound": {
+        "unit": "tenth_db",
+        "value": 200
+      },
+      "names": [],
+      "at": [
+        {
+          "source": "11:9",
+          "frame": 1,
+          "clip": 5
+        },
+        {
+          "source": "11:9",
+          "frame": 1,
+          "clip": 5
+        }
+      ]
+    },
+    {
+      "code": "fade_shape_linear",
+      "fidelity": "approximated",
+      "count": 2,
+      "names": [
+        "easeIn",
+        "easeOut"
+      ],
+      "at": [
+        {
+          "source": "11:9",
+          "frame": 1,
+          "clip": 5
+        },
+        {
+          "source": "11:9",
+          "frame": 1,
+          "clip": 5
+        }
+      ]
+    },
+    {
+      "code": "transition_fade_clamped",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": [
+        {
+          "source": "11:9",
+          "frame": 1,
+          "clip": 5
+        }
+      ]
+    },
+    {
+      "code": "gain_keys_mapped",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": [
+        {
+          "source": "11:9",
+          "frame": 1,
+          "clip": 5
+        }
+      ]
+    },
+    {
+      "code": "channel_map_dropped",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": [
+        {
+          "source": "11:9",
+          "frame": 1,
+          "clip": 5
+        }
+      ]
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    }
+  ],
+  "omitted_codes": []
+}

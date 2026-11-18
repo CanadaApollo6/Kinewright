@@ -179,6 +179,7 @@ struct Parser<'a> {
     media: Vec<Media>,
     media_ids: BTreeMap<(&'a str, &'a str), MediaId>,
     notes: Vec<Loss>,
+    fractional_values: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -295,6 +296,7 @@ impl<'a> Parser<'a> {
         depth: usize,
     ) -> Result<Placed, Refusal> {
         self.budget.item()?;
+        let enclosing_fractionals = std::mem::take(&mut self.fractional_values);
         node.layout_version(site)?;
         self.metadata(node);
         let mut notes = Vec::new();
@@ -355,6 +357,11 @@ impl<'a> Parser<'a> {
             },
         };
         let mut placed = Placed::new(at, item, site);
+        let fractional_values =
+            std::mem::replace(&mut self.fractional_values, enclosing_fractionals);
+        for _ in 0..fractional_values {
+            notes.push(Loss::approximation(LossCode::SubframeRounded));
+        }
         placed.notes = notes;
         Ok(placed)
     }
@@ -440,7 +447,7 @@ impl<'a> Parser<'a> {
                 Playback::Freeze(source.start)
             } else {
                 notes.push(Loss::approximation(LossCode::TimeWarpReading));
-                let ratio = Time::from_float(effect.time_scalar.unwrap_or(1.0))?;
+                let ratio = Time::decimal(&effect.time_scalar.unwrap_or(1.0).to_string())?;
                 match ratio.cmp(&Time::ZERO) {
                     std::cmp::Ordering::Equal => Playback::Freeze(source.start),
                     std::cmp::Ordering::Less => Playback::Reverse(ratio.abs()?),
@@ -526,14 +533,15 @@ impl<'a> Parser<'a> {
         for (index, effect) in node.effects.iter().enumerate() {
             self.budget.item()?;
             self.metadata(effect);
+            let site = format!("{path}/effects/{index}");
             if node.kind() == "Clip"
                 && !time_effect
                 && matches!(effect.schema.as_str(), "LinearTimeWarp.1" | "FreezeFrame.1")
             {
                 time_effect = true;
+                result.retained_effects.push(site);
                 continue;
             }
-            let site = format!("{path}/effects/{index}");
             result.effects.push(NamedEffect {
                 name: text(
                     effect
@@ -568,8 +576,7 @@ impl<'a> Parser<'a> {
         let value = if (raw.value - round).abs() <= 1e-6 {
             round
         } else {
-            self.notes
-                .push(Loss::approximation(LossCode::SubframeRounded));
+            self.fractional_values += 1;
             raw.value
         };
         Time::from_float(value)?.checked_div(Time::rate(rate))

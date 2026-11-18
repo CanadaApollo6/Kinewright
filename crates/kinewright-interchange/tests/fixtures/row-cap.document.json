@@ -1,0 +1,398 @@
+{
+  "tracks": [
+    {
+      "id": 7,
+      "kind": "Video",
+      "name": "A",
+      "clips": [
+        {
+          "id": 10,
+          "asset": 1,
+          "source_range": {
+            "start": 24,
+            "end": 48
+          },
+          "timeline_start": 0,
+          "effects": [],
+          "transition_in": null
+        },
+        {
+          "id": 11,
+          "asset": 2,
+          "source_range": {
+            "start": 24,
+            "end": 48
+          },
+          "timeline_start": 24,
+          "effects": [],
+          "transition_in": null
+        },
+        {
+          "id": 12,
+          "asset": 4,
+          "source_range": {
+            "start": 0,
+            "end": 48
+          },
+          "timeline_start": 104,
+          "effects": [],
+          "transition_in": null
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "kind": "Video",
+      "name": "A",
+      "clips": [
+        {
+          "id": 13,
+          "asset": 6,
+          "source_range": {
+            "start": 24,
+            "end": 48
+          },
+          "timeline_start": 0,
+          "effects": [],
+          "transition_in": null
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "kind": "Audio",
+      "name": "A",
+      "clips": [
+        {
+          "id": 14,
+          "asset": 5,
+          "source_range": {
+            "start": 24,
+            "end": 26
+          },
+          "timeline_start": 0,
+          "effects": [],
+          "transition_in": null,
+          "speed_percent": 10
+        }
+      ]
+    }
+  ],
+  "media_pool": [
+    {
+      "id": 1,
+      "path": "file:///media/Backward.mov",
+      "name": "Backward",
+      "duration": 7200,
+      "fps": {
+        "numerator": 24,
+        "denominator": 1
+      },
+      "kind": "Video",
+      "resolution": null,
+      "color_description": {
+        "primaries": "unknown",
+        "transfer": "unknown",
+        "matrix": "unknown",
+        "range": "unknown",
+        "white_point": "unknown",
+        "bit_depth": "unknown",
+        "confidence_basis_points": 0,
+        "provenance": "unknown"
+      }
+    },
+    {
+      "id": 2,
+      "path": "file:///media/Timed.mov",
+      "name": "Timed",
+      "duration": 7200,
+      "fps": {
+        "numerator": 24,
+        "denominator": 1
+      },
+      "kind": "Video",
+      "resolution": null,
+      "color_description": {
+        "primaries": "unknown",
+        "transfer": "unknown",
+        "matrix": "unknown",
+        "range": "unknown",
+        "white_point": "unknown",
+        "bit_depth": "unknown",
+        "confidence_basis_points": 0,
+        "provenance": "unknown"
+      }
+    },
+    {
+      "id": 3,
+      "path": "file:///media/TooShort.mov",
+      "name": "TooShort",
+      "duration": 2,
+      "fps": {
+        "numerator": 24,
+        "denominator": 1
+      },
+      "kind": "Video",
+      "resolution": null,
+      "color_description": {
+        "primaries": "unknown",
+        "transfer": "unknown",
+        "matrix": "unknown",
+        "range": "unknown",
+        "white_point": "unknown",
+        "bit_depth": "unknown",
+        "confidence_basis_points": 0,
+        "provenance": "unknown"
+      }
+    },
+    {
+      "id": 4,
+      "path": "file:///media/Survivor.mov",
+      "name": "Survivor",
+      "duration": 7200,
+      "fps": {
+        "numerator": 24,
+        "denominator": 1
+      },
+      "kind": "Video",
+      "resolution": null,
+      "color_description": {
+        "primaries": "unknown",
+        "transfer": "unknown",
+        "matrix": "unknown",
+        "range": "unknown",
+        "white_point": "unknown",
+        "bit_depth": "unknown",
+        "confidence_basis_points": 0,
+        "provenance": "unknown"
+      }
+    },
+    {
+      "id": 5,
+      "path": "file:///media/Motion.mov",
+      "name": "Motion",
+      "duration": 7200,
+      "fps": {
+        "numerator": 24,
+        "denominator": 1
+      },
+      "kind": "Audio",
+      "resolution": null,
+      "color_description": {
+        "primaries": "unknown",
+        "transfer": "unknown",
+        "matrix": "unknown",
+        "range": "unknown",
+        "white_point": "unknown",
+        "bit_depth": "unknown",
+        "confidence_basis_points": 0,
+        "provenance": "unknown"
+      }
+    },
+    {
+      "id": 6,
+      "path": "file:///media/Blue.mov",
+      "name": "Blue",
+      "duration": 7200,
+      "fps": {
+        "numerator": 24,
+        "denominator": 1
+      },
+      "kind": "Video",
+      "resolution": null,
+      "color_description": {
+        "primaries": "unknown",
+        "transfer": "unknown",
+        "matrix": "unknown",
+        "range": "unknown",
+        "white_point": "unknown",
+        "bit_depth": "unknown",
+        "confidence_basis_points": 0,
+        "provenance": "unknown"
+      }
+    }
+  ],
+  "color_context": {
+    "pipeline_state": "managed_sdr_v1",
+    "working": {
+      "primaries": "bt709",
+      "transfer": "linear",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "monitoring": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "delivery": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "bt709",
+      "range": "limited",
+      "white_point": "d65",
+      "bit_depth": 8,
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    }
+  },
+  "imported_from": [
+    {
+      "format": "otio",
+      "format_version": "Timeline.1",
+      "source_name": "row-cap.otio",
+      "source_sha256": "a3ddcd35949b3133b992f3179afa42181a53b2f2269275f9de5fed34acccb17d",
+      "start_offset_frames": 0,
+      "items": 14,
+      "exact": 5,
+      "approximated": 0,
+      "dropped": 9,
+      "media": {
+        "assets": 6,
+        "online": 0,
+        "offline": 6,
+        "remote": 0,
+        "timed_out": 0
+      },
+      "estimated_assets": [
+        {
+          "start": 1,
+          "end": 7
+        }
+      ],
+      "rows": [
+        {
+          "code": "clip_too_short",
+          "fidelity": "dropped",
+          "count": 1,
+          "names": [],
+          "at": [
+            {
+              "source": "/tracks/children/0/children/5",
+              "frame": 104
+            }
+          ]
+        },
+        {
+          "code": "outside_window",
+          "fidelity": "dropped",
+          "count": 1,
+          "names": [],
+          "at": [
+            {
+              "source": "/tracks/children/2/children/0",
+              "frame": 0
+            }
+          ]
+        },
+        {
+          "code": "reverse_dropped",
+          "fidelity": "dropped",
+          "count": 1,
+          "names": [],
+          "at": [
+            {
+              "source": "/tracks/children/0/children/0",
+              "frame": 0,
+              "clip": 10
+            }
+          ]
+        },
+        {
+          "code": "retimed_audio_muted",
+          "fidelity": "dropped",
+          "count": 1,
+          "names": [],
+          "at": [
+            {
+              "source": "/tracks/children/1/children/0",
+              "frame": 0,
+              "clip": 14
+            }
+          ]
+        },
+        {
+          "code": "marker_outside_item",
+          "fidelity": "dropped",
+          "count": 1,
+          "names": [],
+          "at": [
+            {
+              "source": "/tracks/children/0/children/1/markers/0",
+              "frame": 200
+            }
+          ]
+        },
+        {
+          "code": "effect_dropped",
+          "fidelity": "dropped",
+          "count": 1,
+          "names": [
+            "Blur"
+          ],
+          "at": [
+            {
+              "source": "/tracks/children/0/children/1/effects/0",
+              "frame": 0
+            }
+          ]
+        },
+        {
+          "code": "generator_dropped",
+          "fidelity": "dropped",
+          "count": 1,
+          "names": [
+            "GeneratorReference.1"
+          ],
+          "at": [
+            {
+              "source": "/tracks/children/0/children/2",
+              "frame": 48
+            }
+          ]
+        },
+        {
+          "code": "image_sequence_dropped",
+          "fidelity": "dropped",
+          "count": 1,
+          "names": [
+            "ImageSequenceReference.1"
+          ],
+          "at": [
+            {
+              "source": "/tracks/children/0/children/3",
+              "frame": 72
+            }
+          ]
+        }
+      ],
+      "omitted_codes": [
+        "unknown_item",
+        "media_offline",
+        "cut_snapped",
+        "clip_names_dropped",
+        "time_warp_reading",
+        "resolution_inferred",
+        "color_space_default"
+      ]
+    }
+  ],
+  "fps": {
+    "numerator": 24,
+    "denominator": 1
+  },
+  "resolution": [
+    1920,
+    1080
+  ],
+  "duration": 152
+}

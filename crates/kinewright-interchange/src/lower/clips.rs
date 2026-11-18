@@ -102,9 +102,20 @@ pub(super) fn decide(
         } else {
             LossCode::SourceOriginAssumed
         };
-        losses.push(Loss::approximation(loss).bounded(LossBound::Frames(
-            wanted_span.saturating_sub(available_span).unsigned_abs(),
-        )));
+        let shortened = wanted_span
+            .saturating_sub(available_span)
+            .max(0)
+            .unsigned_abs();
+        let in_point_shift = if rounded < 0 {
+            let source_shift = TimeCode(rounded.saturating_abs());
+            kinewright_core::map_frames(source_shift, effective, input.project)
+                .map_or(u64::MAX, |shift| shift.0.unsigned_abs())
+        } else {
+            0
+        };
+        losses.push(
+            Loss::approximation(loss).bounded(LossBound::Frames(shortened.max(in_point_shift))),
+        );
     }
     let Some(source_end) = grid.nearest_end(
         source_start,
@@ -237,7 +248,7 @@ fn speed(
         };
         losses.push(Loss::approximation(code).bounded(bound));
         let drift = error
-            .checked_mul(input.raw.span)?
+            .checked_mul(input.raw.span.checked_div(input.transform_speed)?)?
             .ceil_frame(input.asset.fps)?
             .0
             .unsigned_abs();

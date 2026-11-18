@@ -99,3 +99,67 @@ fn format_rates_over_the_cap_and_magnitudes_over_i64_are_typed() {
         );
     }
 }
+
+#[test]
+fn the_dom_refuses_a_node_count_over_its_cap() {
+    let mut xml = String::from(r#"<fcpxml version="1.13">"#);
+    for _ in 0..kinewright_interchange::MAX_XML_NODES {
+        xml.push_str("<z/>");
+    }
+    xml.push_str("</fcpxml>");
+    let error = fcpxml::parse(xml.as_bytes(), "nodes.fcpxml", ParseOptions::default()).unwrap_err();
+    assert_eq!(error.code, RefusalCode::TooManyItems);
+}
+
+#[test]
+fn distinct_active_multicam_picture_and_sound_angles_are_both_lowered() {
+    let input = br#"<fcpxml version="1.13">
+      <resources>
+        <format id="fmt" frameDuration="1/25s" width="1920" height="1080"/>
+        <asset id="a" format="fmt" name="Camera" duration="4s" hasVideo="1" hasAudio="1">
+          <media-rep kind="original-media" src="file:///camera.mov"/>
+        </asset>
+        <asset id="b" format="fmt" name="Recorder" duration="4s" hasVideo="1" hasAudio="1">
+          <media-rep kind="original-media" src="file:///recorder.mov"/>
+        </asset>
+        <media id="mc"><multicam>
+          <mc-angle angleID="a"><asset-clip ref="a" duration="4s"/></mc-angle>
+          <mc-angle angleID="b"><asset-clip ref="b" duration="4s"/></mc-angle>
+        </multicam></media>
+      </resources>
+      <project><sequence format="fmt"><spine>
+        <mc-clip ref="mc" start="1s" duration="1s">
+          <mc-source angleID="a" srcEnable="video"/><mc-source angleID="b" srcEnable="audio"/>
+        </mc-clip>
+      </spine></sequence></project>
+    </fcpxml>"#;
+    let timeline = fcpxml::parse(input, "mc.fcpxml", ParseOptions::default()).unwrap();
+    let (document, record) =
+        kinewright_interchange::lower(&timeline, &kinewright_interchange::MediaTable::default())
+            .unwrap();
+    let kinds: Vec<_> = document
+        .tracks
+        .iter()
+        .flat_map(|track| {
+            track.clips.iter().map(|clip| {
+                (
+                    track.kind,
+                    document.asset(clip.asset).unwrap().name.as_str(),
+                )
+            })
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (kinewright_core::TrackKind::Video, "Camera"),
+            (kinewright_core::TrackKind::Audio, "Recorder")
+        ]
+    );
+    assert!(
+        record
+            .rows
+            .iter()
+            .any(|row| row.code == LossCode::MulticamActiveAngle && row.count == 2)
+    );
+}

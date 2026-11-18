@@ -1,0 +1,74 @@
+{
+  "format": "otio",
+  "format_version": "Timeline.1",
+  "source_name": "trailing-gap.otio",
+  "source_sha256": "98ab2189feb097bfeca6ff6937c07f144aeded85db6303f9546636648b480c2c",
+  "start_offset_frames": 0,
+  "items": 1,
+  "exact": 1,
+  "approximated": 0,
+  "dropped": 0,
+  "media": {
+    "assets": 1,
+    "online": 0,
+    "offline": 1,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 2
+    }
+  ],
+  "rows": [
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "resolution_inferred",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "clip_names_dropped",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [
+        "Picture"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0,
+          "clip": 3
+        }
+      ]
+    },
+    {
+      "code": "trailing_gap_trimmed",
+      "fidelity": "approximated",
+      "count": 1,
+      "bound": {
+        "unit": "frames",
+        "value": 24
+      },
+      "names": [],
+      "at": []
+    }
+  ],
+  "omitted_codes": []
+}

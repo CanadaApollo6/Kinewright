@@ -1,0 +1,82 @@
+{
+  "format": "fcpxml",
+  "format_version": "1.13",
+  "source_name": "anchored-nest-order.fcpxml",
+  "source_sha256": "74b755484dae58db0856d1367c89eb09e749224fbe3abde22b117480d803c8da",
+  "start_offset_frames": 0,
+  "items": 5,
+  "exact": 3,
+  "approximated": 2,
+  "dropped": 0,
+  "media": {
+    "assets": 2,
+    "online": 0,
+    "offline": 2,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 3
+    }
+  ],
+  "rows": [
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 2,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "cut_snapped",
+      "fidelity": "approximated",
+      "count": 1,
+      "bound": {
+        "unit": "frames",
+        "value": 1
+      },
+      "names": [],
+      "at": [
+        {
+          "source": "13:4",
+          "frame": 13,
+          "clip": 10
+        }
+      ]
+    },
+    {
+      "code": "nest_flattened",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": [
+        {
+          "source": "11:9",
+          "frame": 0
+        }
+      ]
+    },
+    {
+      "code": "lane_added",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": [
+        {
+          "source": "11:9",
+          "frame": 0
+        }
+      ]
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    }
+  ],
+  "omitted_codes": []
+}

@@ -1,0 +1,170 @@
+{
+  "tracks": [
+    {
+      "id": 2,
+      "kind": "Video",
+      "name": "A",
+      "clips": [
+        {
+          "id": 3,
+          "asset": 1,
+          "source_range": {
+            "start": 0,
+            "end": 24
+          },
+          "timeline_start": 0,
+          "effects": [],
+          "transition_in": null
+        }
+      ]
+    }
+  ],
+  "media_pool": [
+    {
+      "id": 1,
+      "path": "file:///media/Exhausted.mov",
+      "name": "Exhausted",
+      "duration": 24,
+      "fps": {
+        "numerator": 24,
+        "denominator": 1
+      },
+      "kind": "Video",
+      "resolution": null,
+      "color_description": {
+        "primaries": "unknown",
+        "transfer": "unknown",
+        "matrix": "unknown",
+        "range": "unknown",
+        "white_point": "unknown",
+        "bit_depth": "unknown",
+        "confidence_basis_points": 0,
+        "provenance": "unknown"
+      }
+    }
+  ],
+  "color_context": {
+    "pipeline_state": "managed_sdr_v1",
+    "working": {
+      "primaries": "bt709",
+      "transfer": "linear",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "monitoring": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "delivery": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "bt709",
+      "range": "limited",
+      "white_point": "d65",
+      "bit_depth": 8,
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    }
+  },
+  "imported_from": [
+    {
+      "format": "otio",
+      "format_version": "Timeline.1",
+      "source_name": "snap-media-ended.otio",
+      "source_sha256": "2c425872e22c8d8e96f2e66426fd0152a14289b1d8ef530127183dc232e2adc1",
+      "start_offset_frames": 0,
+      "items": 1,
+      "exact": 0,
+      "approximated": 1,
+      "dropped": 0,
+      "media": {
+        "assets": 1,
+        "online": 0,
+        "offline": 1,
+        "remote": 0,
+        "timed_out": 0
+      },
+      "estimated_assets": [
+        {
+          "start": 1,
+          "end": 2
+        }
+      ],
+      "rows": [
+        {
+          "code": "media_offline",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": []
+        },
+        {
+          "code": "cut_snapped",
+          "fidelity": "approximated",
+          "count": 1,
+          "bound": {
+            "unit": "frames",
+            "value": 216
+          },
+          "names": [],
+          "at": [
+            {
+              "source": "/tracks/children/0/children/0",
+              "frame": 0,
+              "clip": 3
+            }
+          ]
+        },
+        {
+          "code": "resolution_inferred",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": []
+        },
+        {
+          "code": "color_space_default",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": []
+        },
+        {
+          "code": "clip_names_dropped",
+          "fidelity": "dropped",
+          "count": 1,
+          "names": [
+            "Exhausted"
+          ],
+          "at": [
+            {
+              "source": "/tracks/children/0/children/0",
+              "frame": 0,
+              "clip": 3
+            }
+          ]
+        }
+      ],
+      "omitted_codes": []
+    }
+  ],
+  "fps": {
+    "numerator": 24,
+    "denominator": 1
+  },
+  "resolution": [
+    1920,
+    1080
+  ],
+  "duration": 24
+}

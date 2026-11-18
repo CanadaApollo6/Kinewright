@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.13">
+  <resources>
+    <format id="fmt" frameDuration="1/25s" width="1920" height="1080"/>
+    <asset id="a" name="a" format="fmt" start="0s" duration="180s" ><media-rep kind="original-media" src="file:///media/a.mov"/></asset><effect id="ef" name="Glow"/>
+  </resources>
+  <library><event name="Cuts"><project name="titles-and-markers">
+    <sequence format="fmt" >
+      <spine>
+        <title offset="0s" duration="1s" name="Opening"><text><text-style>Hello</text-style><text-style> world</text-style></text></title>
+ <asset-clip ref="a" offset="1s" start="1s" duration="2s">
+   <marker start="1s" value="Do this" completed="0"/><chapter-marker start="2s" value="Next"/>
+   <keyword start="1s" duration="1s" value="B-roll"/><rating start="1s" duration="1s" value="favorite"/>
+   <filter-video ref="ef"/><note>Scene 4</note>
+ </asset-clip>
+      </spine>
+    </sequence>
+  </project></event></library>
+</fcpxml>

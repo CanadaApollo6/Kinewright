@@ -1,0 +1,220 @@
+{
+  "tracks": [
+    {
+      "id": 3,
+      "kind": "Video",
+      "clips": [
+        {
+          "id": 5,
+          "asset": 1,
+          "source_range": {
+            "start": 0,
+            "end": 100
+          },
+          "timeline_start": 250,
+          "effects": [],
+          "transition_in": null
+        },
+        {
+          "id": 6,
+          "asset": 1,
+          "source_range": {
+            "start": 100,
+            "end": 249
+          },
+          "timeline_start": 350,
+          "effects": [],
+          "transition_in": null,
+          "speed_percent": 200
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "kind": "Video",
+      "name": "video.anchor",
+      "clips": [
+        {
+          "id": 7,
+          "asset": 2,
+          "source_range": {
+            "start": 125,
+            "end": 150
+          },
+          "timeline_start": 300,
+          "effects": [],
+          "transition_in": null
+        },
+        {
+          "id": 8,
+          "asset": 2,
+          "source_range": {
+            "start": 0,
+            "end": 25
+          },
+          "timeline_start": 375,
+          "effects": [],
+          "transition_in": null
+        }
+      ]
+    }
+  ],
+  "media_pool": [
+    {
+      "id": 1,
+      "path": "file:///Media/primary.mov",
+      "name": "Primary",
+      "duration": 2500,
+      "fps": {
+        "numerator": 25,
+        "denominator": 1
+      },
+      "kind": "Video",
+      "resolution": [
+        1920,
+        1080
+      ],
+      "color_description": {
+        "primaries": "unknown",
+        "transfer": "unknown",
+        "matrix": "unknown",
+        "range": "unknown",
+        "white_point": "unknown",
+        "bit_depth": "unknown",
+        "confidence_basis_points": 0,
+        "provenance": "unknown"
+      }
+    },
+    {
+      "id": 2,
+      "path": "file:///Media/anchor.mov",
+      "name": "Anchor",
+      "duration": 2500,
+      "fps": {
+        "numerator": 25,
+        "denominator": 1
+      },
+      "kind": "Video",
+      "resolution": [
+        1920,
+        1080
+      ],
+      "color_description": {
+        "primaries": "unknown",
+        "transfer": "unknown",
+        "matrix": "unknown",
+        "range": "unknown",
+        "white_point": "unknown",
+        "bit_depth": "unknown",
+        "confidence_basis_points": 0,
+        "provenance": "unknown"
+      }
+    }
+  ],
+  "color_context": {
+    "pipeline_state": "managed_sdr_v1",
+    "working": {
+      "primaries": "bt709",
+      "transfer": "linear",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "monitoring": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "delivery": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "bt709",
+      "range": "limited",
+      "white_point": "d65",
+      "bit_depth": 8,
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    }
+  },
+  "imported_from": [
+    {
+      "format": "fcpxml",
+      "format_version": "1.13",
+      "source_name": "anchors-and-retime.fcpxml",
+      "source_sha256": "3fe60f37ae33775b8f2789a27b36390fe2153c69de15a96fbc5490a23cf52752",
+      "start_offset_frames": 0,
+      "items": 4,
+      "exact": 4,
+      "approximated": 0,
+      "dropped": 0,
+      "media": {
+        "assets": 2,
+        "online": 0,
+        "offline": 2,
+        "remote": 0,
+        "timed_out": 0
+      },
+      "estimated_assets": [
+        {
+          "start": 1,
+          "end": 3
+        }
+      ],
+      "rows": [
+        {
+          "code": "media_offline",
+          "fidelity": "approximated",
+          "count": 2,
+          "names": [],
+          "at": []
+        },
+        {
+          "code": "color_space_default",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": []
+        },
+        {
+          "code": "track_names_dropped",
+          "fidelity": "dropped",
+          "count": 1,
+          "names": [],
+          "at": []
+        },
+        {
+          "code": "anchor_retime_reading",
+          "fidelity": "approximated",
+          "count": 1,
+          "unverified": true,
+          "names": [],
+          "at": [
+            {
+              "source": "25:13",
+              "frame": 375,
+              "clip": 8
+            }
+          ]
+        }
+      ],
+      "omitted_codes": []
+    }
+  ],
+  "fps": {
+    "numerator": 25,
+    "denominator": 1
+  },
+  "resolution": [
+    1920,
+    1080
+  ],
+  "duration": 425
+}

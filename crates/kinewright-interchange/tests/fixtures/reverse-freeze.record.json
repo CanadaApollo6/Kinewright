@@ -1,0 +1,96 @@
+{
+  "format": "otio",
+  "format_version": "Timeline.1",
+  "source_name": "reverse-freeze.otio",
+  "source_sha256": "e91f2d0359fbb3b48b2d3a6e704ec019afe34912759a6b1401b95d25fdcab2f3",
+  "start_offset_frames": 0,
+  "items": 4,
+  "exact": 3,
+  "approximated": 0,
+  "dropped": 1,
+  "media": {
+    "assets": 2,
+    "online": 0,
+    "offline": 2,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 3
+    }
+  ],
+  "rows": [
+    {
+      "code": "reverse_dropped",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0,
+          "clip": 4
+        }
+      ]
+    },
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 2,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "clip_names_dropped",
+      "fidelity": "dropped",
+      "count": 2,
+      "names": [
+        "Backward",
+        "Hold"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0,
+          "clip": 4
+        },
+        {
+          "source": "/tracks/children/0/children/1",
+          "frame": 24,
+          "clip": 5
+        }
+      ]
+    },
+    {
+      "code": "resolution_inferred",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "time_warp_reading",
+      "fidelity": "approximated",
+      "count": 1,
+      "unverified": true,
+      "names": [],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0,
+          "clip": 4
+        }
+      ]
+    }
+  ],
+  "omitted_codes": []
+}

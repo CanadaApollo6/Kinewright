@@ -18,28 +18,7 @@ pub(crate) fn time(value: &str) -> Result<Time, Refusal> {
             denominator.parse().map_err(|_| Refusal::arithmetic())?,
         );
     }
-    decimal(value)
-}
-
-pub(crate) fn decimal(value: &str) -> Result<Time, Refusal> {
-    let Some((whole, fraction)) = value.split_once('.') else {
-        return value
-            .parse()
-            .map(Time::integer)
-            .map_err(|_| Refusal::arithmetic());
-    };
-    let digits = u32::try_from(fraction.len()).map_err(|_| Refusal::arithmetic())?;
-    let denominator = 10_u64.checked_pow(digits).ok_or_else(Refusal::arithmetic)?;
-    let remainder = Time::new(
-        fraction.parse().map_err(|_| Refusal::arithmetic())?,
-        denominator,
-    )?;
-    let integer = Time::integer(whole.parse().map_err(|_| Refusal::arithmetic())?);
-    if whole.starts_with('-') {
-        integer.checked_sub(remainder)
-    } else {
-        integer.checked_add(remainder)
-    }
+    Time::decimal(value)
 }
 
 pub(crate) fn site(node: Xml<'_, '_>) -> String {
@@ -163,7 +142,7 @@ fn conform_fps(value: &str) -> Result<Rational, Refusal> {
         "29.97" => Time::new(30_000, 1_001)?,
         "47.95" | "47.952" => Time::new(48_000, 1_001)?,
         "59.94" => Time::new(60_000, 1_001)?,
-        value => decimal(value)?,
+        value => Time::decimal(value)?,
     }
     .as_rate()
 }

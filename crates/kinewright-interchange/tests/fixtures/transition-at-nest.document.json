@@ -1,0 +1,260 @@
+{
+  "tracks": [
+    {
+      "id": 4,
+      "kind": "Video",
+      "name": "A",
+      "clips": [
+        {
+          "id": 6,
+          "asset": 1,
+          "source_range": {
+            "start": 24,
+            "end": 48
+          },
+          "timeline_start": 0,
+          "effects": [],
+          "transition_in": null
+        },
+        {
+          "id": 7,
+          "asset": 2,
+          "source_range": {
+            "start": 24,
+            "end": 48
+          },
+          "timeline_start": 24,
+          "effects": [],
+          "transition_in": null
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "kind": "Video",
+      "name": "A",
+      "clips": [
+        {
+          "id": 8,
+          "asset": 3,
+          "source_range": {
+            "start": 24,
+            "end": 48
+          },
+          "timeline_start": 24,
+          "effects": [],
+          "transition_in": null
+        }
+      ]
+    }
+  ],
+  "media_pool": [
+    {
+      "id": 1,
+      "path": "file:///media/CutA.mov",
+      "name": "CutA",
+      "duration": 7200,
+      "fps": {
+        "numerator": 24,
+        "denominator": 1
+      },
+      "kind": "Video",
+      "resolution": null,
+      "color_description": {
+        "primaries": "unknown",
+        "transfer": "unknown",
+        "matrix": "unknown",
+        "range": "unknown",
+        "white_point": "unknown",
+        "bit_depth": "unknown",
+        "confidence_basis_points": 0,
+        "provenance": "unknown"
+      }
+    },
+    {
+      "id": 2,
+      "path": "file:///media/InnerLower.mov",
+      "name": "InnerLower",
+      "duration": 7200,
+      "fps": {
+        "numerator": 24,
+        "denominator": 1
+      },
+      "kind": "Video",
+      "resolution": null,
+      "color_description": {
+        "primaries": "unknown",
+        "transfer": "unknown",
+        "matrix": "unknown",
+        "range": "unknown",
+        "white_point": "unknown",
+        "bit_depth": "unknown",
+        "confidence_basis_points": 0,
+        "provenance": "unknown"
+      }
+    },
+    {
+      "id": 3,
+      "path": "file:///media/InnerUpper.mov",
+      "name": "InnerUpper",
+      "duration": 7200,
+      "fps": {
+        "numerator": 24,
+        "denominator": 1
+      },
+      "kind": "Video",
+      "resolution": null,
+      "color_description": {
+        "primaries": "unknown",
+        "transfer": "unknown",
+        "matrix": "unknown",
+        "range": "unknown",
+        "white_point": "unknown",
+        "bit_depth": "unknown",
+        "confidence_basis_points": 0,
+        "provenance": "unknown"
+      }
+    }
+  ],
+  "color_context": {
+    "pipeline_state": "managed_sdr_v1",
+    "working": {
+      "primaries": "bt709",
+      "transfer": "linear",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "monitoring": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "delivery": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "bt709",
+      "range": "limited",
+      "white_point": "d65",
+      "bit_depth": 8,
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    }
+  },
+  "imported_from": [
+    {
+      "format": "otio",
+      "format_version": "Timeline.1",
+      "source_name": "transition-at-nest.otio",
+      "source_sha256": "54b0bc89fbad61e29dc6be4a3b44b2e3a87fe970fffadf24cf831746447028e1",
+      "start_offset_frames": 0,
+      "items": 5,
+      "exact": 3,
+      "approximated": 2,
+      "dropped": 0,
+      "media": {
+        "assets": 3,
+        "online": 0,
+        "offline": 3,
+        "remote": 0,
+        "timed_out": 0
+      },
+      "estimated_assets": [
+        {
+          "start": 1,
+          "end": 4
+        }
+      ],
+      "rows": [
+        {
+          "code": "media_offline",
+          "fidelity": "approximated",
+          "count": 3,
+          "names": [],
+          "at": []
+        },
+        {
+          "code": "nest_flattened",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": [
+            {
+              "source": "/tracks/children/0/children/2",
+              "frame": 24
+            }
+          ]
+        },
+        {
+          "code": "transition_at_nest_cut",
+          "fidelity": "approximated",
+          "count": 1,
+          "bound": {
+            "unit": "frames",
+            "value": 6
+          },
+          "names": [],
+          "at": [
+            {
+              "source": "/tracks/children/0/children/1",
+              "frame": 24
+            }
+          ]
+        },
+        {
+          "code": "clip_names_dropped",
+          "fidelity": "dropped",
+          "count": 3,
+          "names": [
+            "CutA",
+            "InnerLower"
+          ],
+          "at": [
+            {
+              "source": "/tracks/children/0/children/0",
+              "frame": 0,
+              "clip": 6
+            },
+            {
+              "source": "/tracks/children/0/children/2/children/0/children/0",
+              "frame": 24,
+              "clip": 7
+            }
+          ]
+        },
+        {
+          "code": "resolution_inferred",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": []
+        },
+        {
+          "code": "color_space_default",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": []
+        }
+      ],
+      "omitted_codes": []
+    }
+  ],
+  "fps": {
+    "numerator": 24,
+    "denominator": 1
+  },
+  "resolution": [
+    1920,
+    1080
+  ],
+  "duration": 48
+}

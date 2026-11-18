@@ -1,0 +1,63 @@
+{
+  "format": "otio",
+  "format_version": "Timeline.1",
+  "source_name": "still-legacy.otio",
+  "source_sha256": "045744e24b5b89ad257cc0fad658e8a6a25c6185c24cab82630c29c270da3060",
+  "start_offset_frames": 0,
+  "items": 2,
+  "exact": 2,
+  "approximated": 0,
+  "dropped": 0,
+  "media": {
+    "assets": 1,
+    "online": 0,
+    "offline": 1,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 2
+    }
+  ],
+  "rows": [
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "resolution_inferred",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "clip_names_dropped",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [
+        "Photo"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/1",
+          "frame": 3,
+          "clip": 3
+        }
+      ]
+    }
+  ],
+  "omitted_codes": []
+}

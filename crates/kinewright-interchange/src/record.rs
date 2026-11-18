@@ -121,6 +121,15 @@ impl Report {
     }
 
     pub fn finish(self, record: &mut ImportRecord) -> Result<SitePage, Refusal> {
+        if self
+            .items
+            .values()
+            .map(|(count, _)| u64::from(*count))
+            .sum::<u64>()
+            > u64::try_from(crate::MAX_ITEMS).map_err(|_| Refusal::arithmetic())?
+        {
+            return Err(crate::parse::too_many_items());
+        }
         for (count, fidelity) in self.items.values() {
             match fidelity {
                 None => record.exact += count,
@@ -194,4 +203,104 @@ fn trim_record(record: &mut ImportRecord) -> Result<(), Refusal> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use kinewright_core::{InterchangeFormat, MediaCounts};
+    use proptest::prelude::*;
+
+    use super::*;
+
+    fn empty_record(source_name: String) -> ImportRecord {
+        ImportRecord {
+            format: InterchangeFormat::Otio,
+            format_version: "Timeline.1".into(),
+            source_name,
+            source_sha256: ImportRecord::hash_source(b"record test"),
+            start_offset_frames: 0,
+            items: 0,
+            exact: 0,
+            approximated: 0,
+            dropped: 0,
+            media: MediaCounts::default(),
+            estimated_assets: Vec::new(),
+            retimed_source_end_drift_frames: None,
+            rows: Vec::new(),
+            omitted_codes: Vec::new(),
+        }
+    }
+
+    const CODES: [LossCode; 10] = [
+        LossCode::ClipTooShort,
+        LossCode::OutsideWindow,
+        LossCode::BeforeStartTrimmed,
+        LossCode::ReverseDropped,
+        LossCode::NestRetimeUnsupported,
+        LossCode::RetimedAudioMuted,
+        LossCode::EffectDropped,
+        LossCode::GeneratorDropped,
+        LossCode::ImageSequenceDropped,
+        LossCode::UnknownItem,
+    ];
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 256, failure_persistence: None, ..ProptestConfig::default() })]
+
+        #[test]
+        fn worst_case_escaped_report_samples_keep_the_record_valid(
+            control in 0_u8..=0x1f,
+            site_len in 160_usize..512,
+            repetitions in 1_u32..1_000,
+        ) {
+            let mut report = Report::new(None);
+            let name = char::from(control).to_string().repeat(24);
+            let mut record = empty_record(name.repeat(6).chars().take(128).collect());
+            for (index, code) in CODES.into_iter().enumerate() {
+                for sample in ["x","y"] {
+                    let source = format!("{index}:{sample}-{}", name.repeat(site_len / name.len()));
+                    report.item(&source, repetitions);
+                    let mut label = name.clone();
+                    label.replace_range(0..1, sample);
+                    report.loss_many(&Loss::dropped(code).named(&label), &source, 0, None, repetitions);
+                }
+            }
+            report.finish(&mut record).unwrap();
+            let serialized = serde_json::to_vec(&record).unwrap();
+            prop_assert!(serialized.len() <= IMPORT_RECORD_MAX_BYTES);
+            prop_assert_eq!(record.validate(), Ok(()));
+            prop_assert_eq!(record.items, 20 * repetitions);
+            prop_assert_eq!(record.items, record.dropped);
+            let got: std::collections::BTreeSet<_> = record.rows.iter().map(|row| row.code)
+                .chain(record.omitted_codes.iter().copied()).collect();
+            prop_assert_eq!(got, CODES.into_iter().collect());
+            prop_assert!(record.omitted_codes.contains(&LossCode::UnknownItem));
+        }
+    }
+
+    #[test]
+    fn paging_keeps_the_requested_occurrences_beyond_the_record_samples() {
+        let query = SiteQuery {
+            code: LossCode::UnknownItem,
+            after: 3,
+        };
+        let mut report = Report::new(Some(query));
+        let mut record = empty_record("paging.otio".into());
+        for occurrence in 0..80 {
+            let site = format!("V1#{occurrence}");
+            report.item(&site, 1);
+            report.loss(
+                &Loss::dropped(LossCode::UnknownItem),
+                &site,
+                occurrence,
+                None,
+            );
+        }
+        let page = report.finish(&mut record).unwrap();
+        assert_eq!(record.rows[0].at.len(), 2);
+        assert_eq!(page.sites.len(), 64);
+        assert_eq!(page.sites[0].source, "V1#3");
+        assert_eq!(page.sites[63].source, "V1#66");
+        assert_eq!(page.next, Some(67));
+    }
 }

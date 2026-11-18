@@ -83,6 +83,9 @@ impl State {
                 None,
             );
         }
+        for effect in &decorations.retained_effects {
+            self.report.item(effect, 1);
+        }
         for marker in &decorations.markers {
             let frame = map.to_parent(marker.at)?.frame(self.project)?.0;
             self.marker(marker, frame, window);

@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use kinewright_core::{
-    AutomationCurve, ClipId, Effect, EffectId, LossBound, LossCode, MAX_KEY_FRAME_OFFSET,
-    ParamValue, Rational, TimeCode, TrackKind, Transition,
+    AutomationCurve, ClipContent, ClipId, Effect, EffectId, LossBound, LossCode,
+    MAX_KEY_FRAME_OFFSET, ParamValue, Rational, TimeCode, TrackKind, Transition,
 };
 
 use crate::{Refusal, ir::Loss};
@@ -127,7 +127,7 @@ fn split(
     let full_len = before + after;
     let mut head = blank(
         input.head_id,
-        entering.clip.content.clone(),
+        ClipContent::Media,
         cut - before,
         TimeCode(head_source)..TimeCode(trim),
     );

@@ -160,6 +160,8 @@ pub trait LocatorFs {
     type Metadata;
     type Probe;
     type Reader: io::Read;
+    type Entry;
+    type Directory: Iterator<Item = io::Result<Self::Entry>>;
 
     /// # Errors
     /// Returns an I/O error when metadata is unavailable.
@@ -170,6 +172,9 @@ pub trait LocatorFs {
     /// # Errors
     /// Returns an I/O error when the media cannot be probed.
     fn probe(&self, path: &Path) -> io::Result<Self::Probe>;
+    /// # Errors
+    /// Returns an I/O error when the search directory cannot be read.
+    fn read_dir(&self, path: &Path) -> io::Result<Self::Directory>;
 }
 
 /// # Errors
@@ -204,6 +209,8 @@ mod tests {
         type Metadata = ();
         type Probe = ();
         type Reader = io::Empty;
+        type Entry = ();
+        type Directory = std::iter::Empty<io::Result<()>>;
 
         fn stat(&self, _: &Path) -> io::Result<()> {
             self.0.borrow_mut().push("stat");
@@ -218,6 +225,11 @@ mod tests {
         fn probe(&self, _: &Path) -> io::Result<()> {
             self.0.borrow_mut().push("probe");
             Ok(())
+        }
+
+        fn read_dir(&self, _: &Path) -> io::Result<Self::Directory> {
+            self.0.borrow_mut().push("read_dir");
+            Ok(std::iter::empty())
         }
     }
 
@@ -245,6 +257,7 @@ mod tests {
                     fs.stat(path).unwrap();
                     fs.open(path).unwrap();
                     fs.probe(path).unwrap();
+                    assert_eq!(fs.read_dir(path).unwrap().count(), 0);
                 });
                 assert_eq!(access.unwrap_err().code, RefusalCode::RemotePath, "{path}");
             }

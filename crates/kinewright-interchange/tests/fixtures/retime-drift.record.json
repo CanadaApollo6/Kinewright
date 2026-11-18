@@ -1,0 +1,95 @@
+{
+  "format": "otio",
+  "format_version": "Timeline.1",
+  "source_name": "retime-drift.otio",
+  "source_sha256": "7ef51dd2f263da6b23d4864ccf4a67830fbf435b2d736e7341fa0e3907f401c1",
+  "start_offset_frames": 0,
+  "items": 2,
+  "exact": 1,
+  "approximated": 1,
+  "dropped": 0,
+  "media": {
+    "assets": 1,
+    "online": 0,
+    "offline": 1,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 2
+    }
+  ],
+  "retimed_source_end_drift_frames": 12,
+  "rows": [
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "speed_rounded",
+      "fidelity": "approximated",
+      "count": 1,
+      "bound": {
+        "unit": "speed_tenth_percent",
+        "value": 4
+      },
+      "names": [],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0,
+          "clip": 3
+        }
+      ]
+    },
+    {
+      "code": "resolution_inferred",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "clip_names_dropped",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [
+        "Speed"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0,
+          "clip": 3
+        }
+      ]
+    },
+    {
+      "code": "time_warp_reading",
+      "fidelity": "approximated",
+      "count": 1,
+      "unverified": true,
+      "names": [],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0,
+          "clip": 3
+        }
+      ]
+    }
+  ],
+  "omitted_codes": []
+}

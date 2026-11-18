@@ -209,9 +209,11 @@ project frames. `subframe_rounded` records the input value rounding in §4.1.
 outgoing clip at its effective rate, and `r = asset fps ÷ project fps`.
 - The first start and each start after a gap are within ½ project frame of the IR.
 - When the nearest achievable cut is admissible, its error is at most ½ + P/2 project frames.
-- If the limits exclude the nearest cut, the shorter admissible cut is within one source
-  frame when one exists. The cut error is at most ½ + P project frames.
-- At 100% speed, the source end is within 1 + r source frames of the IR.
+- A next-item limit that excludes the nearest cut leaves the adjacent earlier cut, when
+  it is positive and inside the media. Its error is at most ½ + P project frames.
+- Media exhaustion can exclude several source boundaries. The report records the actual
+  cut error, and a verified media clamp is reported separately (§8.2).
+- At 100% speed with sufficient media, the source end is within 1 + r source frames of the IR.
 - For a retimed clip, report the source-end drift from speed quantization separately (§4.3).
 
 **Audio-only assets** probe at 30 fps (`crates/kinewright-media/src/au6_sources.rs:1012`). A
@@ -746,6 +748,8 @@ Named cases:
 - constrained cut snap at 10% speed with a 30 fps asset in a 60 fps project. Two clips
   abut at frame 38 and the second ends at 39. The first clip's achievable ends are 20 and
   40, so the limit at 39 decides the cut at 20 and the report records 18 frames;
+- an available media range ending at frame 24 with a requested end at frame 240, reporting
+  a 216-frame snap instead of a source-grid-only bound;
 - retimed source-end drift over 100 seconds of 1.004× playback at 30 fps;
 - an OTIO track with red frames 0–24 and blue frames 24–48, windowed to 24–48, importing
   blue alone at frame zero;

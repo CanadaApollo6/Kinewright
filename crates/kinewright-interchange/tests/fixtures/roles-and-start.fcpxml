@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.13">
+  <resources>
+    <format id="fmt" frameDuration="1/25s" width="1920" height="1080"/>
+    <asset id="a" name="a" format="fmt" start="0s" duration="180s" ><media-rep kind="original-media" src="file:///media/a.mov"/></asset><asset id="b" name="b" format="fmt" start="0s" duration="180s" ><media-rep kind="original-media" src="file:///media/b.mov"/></asset>
+  </resources>
+  <library><event name="Cuts"><project name="roles-and-start">
+    <sequence format="fmt" tcStart="3600s" tcFormat="DF">
+      <spine>
+        <asset-clip ref="a" name="Establishing" offset="3600s" duration="1s" videoRole="video.story"/><asset-clip ref="b" offset="3601s" duration="1s" videoRole="video.story"/>
+      </spine>
+    </sequence>
+  </project></event></library>
+</fcpxml>

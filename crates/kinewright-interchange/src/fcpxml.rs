@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use kinewright_core::{InterchangeFormat, LossCode, MediaKind, Rational, TrackKind};
+use kinewright_core::{InterchangeFormat, LossBound, LossCode, MediaKind, Rational, TrackKind};
 
 use crate::{
     MAX_MEDIA, MAX_NEST_DEPTH, MAX_TEXT_BYTES, MAX_TRACKS_PER_KIND, Refusal, RefusalCode, Time,
     check_rate, fcpxml_syntax,
-    fcpxml_time::{self, duration, optional, site, source_map},
+    fcpxml_time::{duration, optional, site, source_map},
     ir::{
         Anchor, Clip, ContainerTime, Decorations, GainKey, Item, Loss, Marker, MarkerKind, Media,
         MediaId, NamedEffect, ParseOptions, Placed, Playback, Source, Stack, Timeline, Track,
@@ -279,6 +279,7 @@ impl<'a, 'input> Parser<'a, 'input> {
                     .push(placed);
             }
         }
+        mirror_audio_transitions(&mut tracks);
         let mut stack = Stack {
             tracks: tracks.into_values().collect(),
             ..Stack::default()
@@ -614,8 +615,28 @@ impl<'a, 'input> Parser<'a, 'input> {
             let end = in_point.checked_add(span.checked_mul(speed)?)?;
             parse::apply_window(&mut stack, in_point..end)?;
             stack.time.speed = speed;
-            if matches!(playback, Playback::Variable(_)) {
-                notes.push(Loss::approximation(LossCode::VariableSpeedAveraged));
+            if let Playback::Variable(points) = playback {
+                let mut maximum = 0;
+                if let Some(first) = points.first() {
+                    for point in points {
+                        let averaged = point
+                            .at
+                            .checked_sub(first.at)?
+                            .checked_mul(speed)?
+                            .checked_add(first.value)?;
+                        let error = point
+                            .value
+                            .checked_sub(averaged)?
+                            .abs()?
+                            .checked_div(speed)?;
+                        maximum =
+                            maximum.max(error.ceil_frame(self.project_rate)?.0.unsigned_abs());
+                    }
+                }
+                notes.push(
+                    Loss::approximation(LossCode::VariableSpeedAveraged)
+                        .bounded(LossBound::Frames(maximum)),
+                );
             }
         } else {
             stack.time.speed = Time::ZERO;
@@ -640,27 +661,67 @@ impl<'a, 'input> Parser<'a, 'input> {
                 let spine = child(sequence, "spine")
                     .ok_or_else(|| malformed(site(sequence), "A compound has no spine."))?;
                 let origin = optional(sequence, "tcStart")?.unwrap_or(Time::ZERO);
-                self.spine(spine, origin, depth)
+                let mut stack = self.spine(spine, origin, depth)?;
+                stack.decorations = self.decorations(sequence, Time::ZERO)?;
+                prefix_stack_sites(&self.place(node), &mut stack);
+                Ok(stack)
             }
             "mc-clip" => {
                 let resource = self.resource(node)?;
                 let multicam = child(resource, "multicam").ok_or_else(|| {
                     malformed(site(node), "A multicam clip has no multicam resource.")
                 })?;
-                let angle_id =
-                    child(node, "mc-source").and_then(|source| source.attribute("angleID"));
-                let angle = multicam
+                let choices: Vec<_> = node
                     .children()
-                    .filter(|child| child.has_tag_name("mc-angle"))
-                    .find(|angle| angle_id.is_none() || angle.attribute("angleID") == angle_id)
-                    .ok_or_else(|| {
-                        malformed(site(node), "The active multicam angle is missing.")
-                    })?;
-                notes.push(
-                    Loss::approximation(LossCode::MulticamActiveAngle)
-                        .named(angle.attribute("name").unwrap_or("angle")),
-                );
-                self.spine(child(angle, "spine").unwrap_or(angle), Time::ZERO, depth)
+                    .filter(|source| source.has_tag_name("mc-source"))
+                    .collect();
+                let angle = |kind| {
+                    if choices.is_empty() {
+                        return multicam
+                            .children()
+                            .find(|angle| angle.has_tag_name("mc-angle"));
+                    }
+                    let chosen = choices
+                        .iter()
+                        .find(|source| {
+                            source
+                                .attribute("srcEnable")
+                                .is_none_or(|enabled| enabled == "all" || enabled == kind)
+                        })?
+                        .attribute("angleID")?;
+                    multicam.children().find(|angle| {
+                        angle.has_tag_name("mc-angle") && angle.attribute("angleID") == Some(chosen)
+                    })
+                };
+                let video = angle("video");
+                let audio = angle("audio");
+                if video.is_none() && audio.is_none() {
+                    return Err(malformed(
+                        site(node),
+                        "The active multicam angle is missing.",
+                    ));
+                }
+                let mut stack = Stack::default();
+                for (kind, angle) in [(TrackKind::Video, video), (TrackKind::Audio, audio)] {
+                    let Some(angle) = angle else {
+                        continue;
+                    };
+                    if kind == TrackKind::Audio && audio == video {
+                        continue;
+                    }
+                    notes.push(
+                        Loss::approximation(LossCode::MulticamActiveAngle)
+                            .named(angle.attribute("name").unwrap_or("angle")),
+                    );
+                    let mut take =
+                        self.spine(child(angle, "spine").unwrap_or(angle), Time::ZERO, depth)?;
+                    if video != audio {
+                        retain_angle_kind(&mut take, kind);
+                    }
+                    stack.tracks.append(&mut take.tracks);
+                }
+                prefix_stack_sites(&self.place(node), &mut stack);
+                Ok(stack)
             }
             "audition" => {
                 let mut stack = Stack::default();
@@ -833,6 +894,117 @@ impl<'a, 'input> Parser<'a, 'input> {
     }
 }
 
+fn retain_angle_kind(stack: &mut Stack, kind: TrackKind) {
+    for track in &mut stack.tracks {
+        track.items.retain_mut(|placed| {
+            placed.anchors.retain(|anchor| anchor.track.kind == kind);
+            if let Item::Nested { stack, .. } = &mut placed.item {
+                retain_angle_kind(stack, kind);
+                !stack.tracks.is_empty()
+            } else {
+                if track.kind == kind {
+                    placed.counts_item = true;
+                }
+                track.kind == kind
+            }
+        });
+    }
+    stack.tracks.retain(|track| !track.items.is_empty());
+}
+
+fn prefix_stack_sites(prefix: &str, stack: &mut Stack) {
+    prefix_decoration_sites(prefix, &mut stack.decorations);
+    for track in &mut stack.tracks {
+        prefix_track_sites(prefix, track);
+    }
+}
+
+fn prefix_track_sites(prefix: &str, track: &mut Track) {
+    prefix_decoration_sites(prefix, &mut track.decorations);
+    for placed in &mut track.items {
+        placed.site = format!("{prefix}/{}", placed.site);
+        prefix_decoration_sites(prefix, &mut placed.decorations);
+        match &mut placed.item {
+            Item::Nested { stack, .. } => prefix_stack_sites(prefix, stack),
+            Item::Clip(clip) => prefix_decoration_sites(prefix, &mut clip.decorations),
+            Item::Title { decorations, .. } => prefix_decoration_sites(prefix, decorations),
+            _ => {}
+        }
+        for anchor in &mut placed.anchors {
+            prefix_track_sites(prefix, &mut anchor.track);
+        }
+    }
+}
+
+fn prefix_decoration_sites(prefix: &str, decorations: &mut Decorations) {
+    for site in decorations
+        .markers
+        .iter_mut()
+        .map(|marker| &mut marker.site)
+        .chain(
+            decorations
+                .effects
+                .iter_mut()
+                .map(|effect| &mut effect.site),
+        )
+        .chain(
+            decorations
+                .removed
+                .iter_mut()
+                .map(|removed| &mut removed.site),
+        )
+        .chain(&mut decorations.retained_effects)
+    {
+        *site = format!("{prefix}/{site}");
+    }
+}
+
+fn mirror_audio_transitions(tracks: &mut BTreeMap<(bool, bool, i64), Track>) {
+    let mut pairs = Vec::new();
+    for ((audio, _, lane), track) in &*tracks {
+        if *audio {
+            continue;
+        }
+        let transitions: Vec<_> = track
+            .items
+            .iter()
+            .filter(|placed| matches!(placed.item, Item::Transition { .. }))
+            .map(|placed| {
+                let mut copy = Placed::new(placed.at, placed.item.clone(), &placed.site);
+                copy.counts_item = false;
+                copy
+            })
+            .collect();
+        if !transitions.is_empty() {
+            pairs.push((*lane, transitions));
+        }
+    }
+    for (lane, transitions) in pairs {
+        let Some(audio) = tracks.get_mut(&(true, lane != 0, lane)) else {
+            continue;
+        };
+        let boundaries: BTreeSet<_> = audio
+            .items
+            .iter()
+            .flat_map(|placed| {
+                [
+                    Some(placed.at),
+                    placed.at.checked_add(placed.item.span()).ok(),
+                ]
+            })
+            .flatten()
+            .collect();
+        audio.items.extend(
+            transitions
+                .into_iter()
+                .filter(|placed| boundaries.contains(&placed.at)),
+        );
+        audio
+            .items
+            .sort_by_key(|placed| (placed.at, !matches!(placed.item, Item::Transition { .. })));
+    }
+}
+
 fn is_story(node: Xml<'_, '_>) -> bool {
     matches!(
         element_name(node),
@@ -886,5 +1058,5 @@ fn tenth_db(value: &str) -> Result<i64, Refusal> {
         return Ok(i64::MIN);
     }
     let rate = Rational::new(10, 1).map_err(|_| Refusal::arithmetic())?;
-    Ok(fcpxml_time::decimal(value)?.frame(rate)?.0)
+    Ok(Time::decimal(value)?.frame(rate)?.0)
 }

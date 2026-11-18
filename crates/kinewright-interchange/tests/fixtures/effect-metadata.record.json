@@ -1,0 +1,98 @@
+{
+  "format": "otio",
+  "format_version": "Timeline.1",
+  "source_name": "effect-metadata.otio",
+  "source_sha256": "2548e9859a0f2d1f99a92ffb4adfdf8a86fd8dc9f676cb10944c17eab478709c",
+  "start_offset_frames": 0,
+  "items": 3,
+  "exact": 1,
+  "approximated": 0,
+  "dropped": 2,
+  "media": {
+    "assets": 1,
+    "online": 0,
+    "offline": 1,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 2
+    }
+  ],
+  "rows": [
+    {
+      "code": "effect_dropped",
+      "fidelity": "dropped",
+      "count": 2,
+      "names": [
+        "Blur",
+        "Future Glow"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0/effects/0",
+          "frame": 0
+        },
+        {
+          "source": "/tracks/children/0/children/0/effects/1",
+          "frame": 0
+        }
+      ]
+    },
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "metadata_dropped",
+      "fidelity": "dropped",
+      "count": 2,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "resolution_inferred",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "track_names_dropped",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [
+        "éééééééééééé"
+      ],
+      "at": []
+    },
+    {
+      "code": "clip_names_dropped",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [
+        "Archive"
+      ],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/0",
+          "frame": 0,
+          "clip": 3
+        }
+      ]
+    }
+  ],
+  "omitted_codes": []
+}

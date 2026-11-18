@@ -82,7 +82,10 @@ impl Track {
 
     #[must_use]
     pub fn population(&self) -> u32 {
-        self.decorations.population() + self.items.iter().map(Placed::population).sum::<u32>()
+        self.items
+            .iter()
+            .map(Placed::population)
+            .fold(self.decorations.population(), u32::saturating_add)
     }
 }
 
@@ -124,7 +127,7 @@ impl Placed {
                 .anchors
                 .iter()
                 .map(|anchor| anchor.track.population())
-                .sum::<u32>()
+                .fold(0_u32, u32::saturating_add)
     }
 }
 
@@ -182,9 +185,9 @@ impl Item {
     pub fn population(&self) -> u32 {
         match self {
             Self::Discarded { count, .. } => *count,
-            Self::Clip(clip) => 1 + clip.decorations.population(),
-            Self::Nested { stack, .. } => 1 + stack.population(),
-            Self::Title { decorations, .. } => 1 + decorations.population(),
+            Self::Clip(clip) => 1_u32.saturating_add(clip.decorations.population()),
+            Self::Nested { stack, .. } => 1_u32.saturating_add(stack.population()),
+            Self::Title { decorations, .. } => 1_u32.saturating_add(decorations.population()),
             _ => 1,
         }
     }
@@ -193,7 +196,12 @@ impl Item {
 impl Stack {
     #[must_use]
     pub fn population(&self) -> u32 {
-        self.decorations.population() + self.tracks.iter().map(Track::population).sum::<u32>()
+        self.decorations.population()
+            + self
+                .tracks
+                .iter()
+                .map(Track::population)
+                .fold(0_u32, u32::saturating_add)
     }
 }
 
@@ -330,6 +338,7 @@ impl ContainerTime {
 pub struct Decorations {
     pub markers: Vec<Marker>,
     pub effects: Vec<NamedEffect>,
+    pub retained_effects: Vec<String>,
     pub removed: Vec<Discarded>,
 }
 
@@ -339,15 +348,21 @@ impl Decorations {
         Self {
             markers: Vec::new(),
             effects: Vec::new(),
+            retained_effects: Vec::new(),
             removed: Vec::new(),
         }
     }
 
     #[must_use]
     pub fn population(&self) -> u32 {
-        u32::try_from(self.markers.len() + self.effects.len())
+        u32::try_from(self.markers.len() + self.effects.len() + self.retained_effects.len())
             .unwrap_or(u32::MAX)
-            .saturating_add(self.removed.iter().map(|discard| discard.count).sum())
+            .saturating_add(
+                self.removed
+                    .iter()
+                    .map(|discard| discard.count)
+                    .fold(0_u32, u32::saturating_add),
+            )
     }
 }
 

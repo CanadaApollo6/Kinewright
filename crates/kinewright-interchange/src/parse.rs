@@ -118,6 +118,9 @@ fn window_item(placed: &mut Placed, window: &Range<Time>) -> Result<(), Refusal>
         } else if begin < window.start || end > window.end || !window.contains(&placed.at) {
             placed
                 .notes
+                .push(Loss::approximation(LossCode::OutsideWindow));
+            placed
+                .notes
                 .push(Loss::approximation(LossCode::TransitionAtNestCut).named(kind));
             placed.item = Item::Gap {
                 duration: Time::ZERO,

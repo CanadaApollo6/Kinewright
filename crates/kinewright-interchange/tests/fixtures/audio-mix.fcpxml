@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.13">
+  <resources>
+    <format id="fmt" frameDuration="1/25s" width="1920" height="1080"/>
+    <asset id="a" name="a" format="fmt" start="0s" duration="180s" hasVideo="1" hasAudio="1"><media-rep kind="original-media" src="file:///media/a.mov"/></asset>
+  </resources>
+  <library><event name="Cuts"><project name="audio-mix">
+    <sequence format="fmt" >
+      <spine>
+        <asset-clip ref="a" offset="0s" start="2s" duration="4s" audioStart="51/25s" audioDuration="3s" audioRole="dialogue.main">
+   <adjust-volume amount="15.4dB"><param name="amount">
+     <keyframeAnimation><keyframe time="1s" value="-80dB"/><keyframe time="3s" value="-2.5dB"/></keyframeAnimation>
+     <fadeIn duration="5s" type="easeIn"/><fadeOut duration="1s" type="easeOut"/>
+   </param></adjust-volume>
+   <audio-channel-source srcCh="1" role="dialogue.main"/><adjust-panner amount="20"/>
+ </asset-clip>
+      </spine>
+    </sequence>
+  </project></event></library>
+</fcpxml>

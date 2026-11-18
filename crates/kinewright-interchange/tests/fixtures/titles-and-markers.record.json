@@ -1,0 +1,110 @@
+{
+  "format": "fcpxml",
+  "format_version": "1.13",
+  "source_name": "titles-and-markers.fcpxml",
+  "source_sha256": "559689b2815ba03f3c2d054a998360a04a34d1e457dced21e29bdcd5dd2424dc",
+  "start_offset_frames": 0,
+  "items": 7,
+  "exact": 1,
+  "approximated": 3,
+  "dropped": 3,
+  "media": {
+    "assets": 1,
+    "online": 0,
+    "offline": 1,
+    "remote": 0,
+    "timed_out": 0
+  },
+  "estimated_assets": [
+    {
+      "start": 1,
+      "end": 2
+    }
+  ],
+  "rows": [
+    {
+      "code": "keyword_rating_dropped",
+      "fidelity": "dropped",
+      "count": 2,
+      "names": [
+        "B-roll",
+        "favorite"
+      ],
+      "at": [
+        {
+          "source": "14:4",
+          "frame": 25
+        },
+        {
+          "source": "14:54",
+          "frame": 25
+        }
+      ]
+    },
+    {
+      "code": "effect_dropped",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [
+        "Glow"
+      ],
+      "at": [
+        {
+          "source": "15:4",
+          "frame": 0
+        }
+      ]
+    },
+    {
+      "code": "media_offline",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "item_marker_pinned",
+      "fidelity": "approximated",
+      "count": 2,
+      "names": [],
+      "at": [
+        {
+          "source": "13:4",
+          "frame": 25
+        },
+        {
+          "source": "13:54",
+          "frame": 50
+        }
+      ]
+    },
+    {
+      "code": "title_style_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": [
+        {
+          "source": "11:9",
+          "frame": 0,
+          "clip": 3
+        }
+      ]
+    },
+    {
+      "code": "color_space_default",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": []
+    },
+    {
+      "code": "metadata_dropped",
+      "fidelity": "dropped",
+      "count": 1,
+      "names": [],
+      "at": []
+    }
+  ],
+  "omitted_codes": []
+}

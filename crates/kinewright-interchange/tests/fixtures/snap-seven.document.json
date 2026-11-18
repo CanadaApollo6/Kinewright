@@ -1,0 +1,177 @@
+{
+  "tracks": [
+    {
+      "id": 2,
+      "kind": "Video",
+      "name": "A",
+      "clips": [
+        {
+          "id": 3,
+          "asset": 1,
+          "source_range": {
+            "start": 0,
+            "end": 3
+          },
+          "timeline_start": 0,
+          "effects": [],
+          "transition_in": null
+        }
+      ]
+    }
+  ],
+  "media_pool": [
+    {
+      "id": 1,
+      "path": "file:///media/SlowGrid.mov",
+      "name": "SlowGrid",
+      "duration": 7200,
+      "fps": {
+        "numerator": 24000,
+        "denominator": 1001
+      },
+      "kind": "Video",
+      "resolution": null,
+      "color_description": {
+        "primaries": "unknown",
+        "transfer": "unknown",
+        "matrix": "unknown",
+        "range": "unknown",
+        "white_point": "unknown",
+        "bit_depth": "unknown",
+        "confidence_basis_points": 0,
+        "provenance": "unknown"
+      }
+    }
+  ],
+  "color_context": {
+    "pipeline_state": "managed_sdr_v1",
+    "working": {
+      "primaries": "bt709",
+      "transfer": "linear",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "monitoring": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "delivery": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "bt709",
+      "range": "limited",
+      "white_point": "d65",
+      "bit_depth": 8,
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    }
+  },
+  "imported_from": [
+    {
+      "format": "otio",
+      "format_version": "Timeline.1",
+      "source_name": "snap-seven.otio",
+      "source_sha256": "df922eb62009467573f989fd62586e5fbf637cafeef3366f87836571284c8638",
+      "start_offset_frames": 0,
+      "items": 1,
+      "exact": 0,
+      "approximated": 1,
+      "dropped": 0,
+      "media": {
+        "assets": 1,
+        "online": 0,
+        "offline": 1,
+        "remote": 0,
+        "timed_out": 0
+      },
+      "estimated_assets": [
+        {
+          "start": 1,
+          "end": 2
+        }
+      ],
+      "rows": [
+        {
+          "code": "media_offline",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": []
+        },
+        {
+          "code": "cut_snapped",
+          "fidelity": "approximated",
+          "count": 1,
+          "bound": {
+            "unit": "frames",
+            "value": 1
+          },
+          "names": [],
+          "at": [
+            {
+              "source": "/tracks/children/0/children/0",
+              "frame": 0,
+              "clip": 3
+            }
+          ]
+        },
+        {
+          "code": "rate_snapped",
+          "fidelity": "approximated",
+          "count": 3,
+          "names": [],
+          "at": []
+        },
+        {
+          "code": "resolution_inferred",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": []
+        },
+        {
+          "code": "color_space_default",
+          "fidelity": "approximated",
+          "count": 1,
+          "names": [],
+          "at": []
+        },
+        {
+          "code": "clip_names_dropped",
+          "fidelity": "dropped",
+          "count": 1,
+          "names": [
+            "SlowGrid"
+          ],
+          "at": [
+            {
+              "source": "/tracks/children/0/children/0",
+              "frame": 0,
+              "clip": 3
+            }
+          ]
+        }
+      ],
+      "omitted_codes": []
+    }
+  ],
+  "fps": {
+    "numerator": 60,
+    "denominator": 1
+  },
+  "resolution": [
+    1920,
+    1080
+  ],
+  "duration": 8
+}

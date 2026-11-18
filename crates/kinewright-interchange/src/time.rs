@@ -211,6 +211,27 @@ impl Time {
         )
     }
 
+    pub(crate) fn decimal(value: &str) -> Result<Self, Refusal> {
+        let Some((whole, fraction)) = value.split_once('.') else {
+            return value
+                .parse()
+                .map(Self::integer)
+                .map_err(|_| Refusal::arithmetic());
+        };
+        let digits = u32::try_from(fraction.len()).map_err(|_| Refusal::arithmetic())?;
+        let denominator = 10_u64.checked_pow(digits).ok_or_else(Refusal::arithmetic)?;
+        let remainder = Self::new(
+            fraction.parse().map_err(|_| Refusal::arithmetic())?,
+            denominator,
+        )?;
+        let integer = Self::integer(whole.parse().map_err(|_| Refusal::arithmetic())?);
+        if whole.starts_with('-') {
+            integer.checked_sub(remainder)
+        } else {
+            integer.checked_add(remainder)
+        }
+    }
+
     /// # Errors
     /// Refuses a non-finite or unrepresentable floating-point time.
     pub fn from_float(value: f64) -> Result<Self, Refusal> {

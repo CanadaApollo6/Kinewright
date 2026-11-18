@@ -71,3 +71,54 @@ fn nesting_is_bounded_before_serde_builds_the_tree() {
     let error = otio::parse(input.as_bytes(), "bad.otio", ParseOptions::default()).unwrap_err();
     assert_eq!(error.code, RefusalCode::TooDeep);
 }
+
+#[test]
+fn item_cap_is_checked_before_deserializing_all_items() {
+    let mut node = String::from("[");
+    for _ in 0..=kinewright_interchange::MAX_ITEMS {
+        node.push_str(r#"{"OTIO_SCHEMA":"Clip.1"},"#);
+    }
+    node.push(']');
+    let error = otio::parse(node.as_bytes(), "items.otio", ParseOptions::default()).unwrap_err();
+    assert_eq!(error.code, RefusalCode::TooManyItems);
+}
+
+#[test]
+fn a_window_edge_turns_a_dissolve_into_a_reported_cut() {
+    let mut input: serde_json::Value = serde_json::from_slice(WINDOW).unwrap();
+    let children = input["tracks"]["children"][0]["children"]
+        .as_array_mut()
+        .unwrap();
+    children.insert(
+        1,
+        serde_json::json!({
+            "OTIO_SCHEMA": "Transition.1", "transition_type": "SMPTE_Dissolve",
+            "in_offset": { "value": 2, "rate": 24 }, "out_offset": { "value": 2, "rate": 24 }
+        }),
+    );
+    let bytes = serde_json::to_vec(&input).unwrap();
+    let timeline = otio::parse(&bytes, "window.otio", ParseOptions::default()).unwrap();
+    let affected = &timeline.root.tracks[0].items[1];
+    assert!(matches!(
+        affected.item,
+        Item::Gap {
+            duration: Time::ZERO
+        }
+    ));
+    assert!(
+        affected
+            .notes
+            .iter()
+            .any(|loss| loss.code == LossCode::OutsideWindow)
+    );
+    let (document, record) =
+        kinewright_interchange::lower(&timeline, &kinewright_interchange::MediaTable::default())
+            .unwrap();
+    assert!(document.tracks[0].clips[0].transition_in.is_none());
+    assert!(
+        record
+            .rows
+            .iter()
+            .any(|row| row.code == LossCode::TransitionAtNestCut)
+    );
+}
