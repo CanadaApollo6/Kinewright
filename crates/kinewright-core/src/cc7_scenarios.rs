@@ -1909,32 +1909,19 @@ pub const CC7_MEASURED_DEEP_SHADOW_OUT_OF_GAMUT_PIXELS: i64 = 192;
 /// scene (Implementer C erratum C-E8), not probe-1's P7 figures, which were
 /// taken on the pre-A1 scene and on the two-clip (a) document only. "Worst"
 /// is the maximum for a ceiling term and the minimum for the PSNR floor. The
-/// per-scenario triples live in the manifest's `budgets.delivery`, and
-/// `assert_cc7_delivery_lane` asserts every lane against them, so these five
-/// numbers cannot go stale again (R4-M2).
+/// per-scenario triples live in the manifest's `budgets.delivery`. The
+/// delivery gate checks them against live results, and the manifest check
+/// ties their worst cases to this summary (R4-M2).
 ///
 /// The luma mean is the worst row in the whole slice: scenario (e) measures
 /// 377 538 against CC6's 400 000, a **1.06x** margin, which is why its
 /// `CC7_BUDGETS` row is a [`Cc7BudgetKind::RecordedMargin`]. CC7 never
 /// re-baselines a CC6 constant (§4.1 note 2, §4(g)(1)).
-/// **Per operating system** (AU3 §0 E59): the worst row of a column is a
-/// property of the column, and the two systems' columns differ in 16 of 60
-/// rows. Linux — `mifi/ffmpeg-builds 8.0-1`, measured at `99faee36`.
-#[cfg(not(target_os = "windows"))]
-pub const CC7_MEASURED_DELIVERY_EIGHT: [i64; 5] = [2, 1_000_000, 377_538, 855_810, 4_059];
-/// See the Linux arm above. Windows — `System233/ffmpeg-msvc-prebuilt
-/// ffmpeg-8.0.1-r3`, taken from the per-scenario column harvested on
-/// `windows-latest` in CI run 34693346093. Two of the five terms differ from
-/// Linux's and both differ in Windows' favour: the RGB mean is **787 598**
-/// against 855 810 and the PSNR floor **4 070** against 4 059. The other
-/// three were measured here and found equal, not copied.
 ///
-/// The luma mean is the worst row on this system too, and it is the **same**
-/// number: scenario (e) measures 377 538 against CC6's 400 000 on both
-/// builds, a 1.06x margin, which is why its `CC7_BUDGETS` row is a
-/// [`Cc7BudgetKind::RecordedMargin`] regardless of platform.
-#[cfg(target_os = "windows")]
-pub const CC7_MEASURED_DELIVERY_EIGHT: [i64; 5] = [2, 1_000_000, 377_538, 787_598, 4_070];
+/// Windows matches the Linux delivery column with the project's `FFmpeg` 9.0.2
+/// build (CI run 44201911758), including scenario (e)'s RGB mean of 855 810
+/// and PSNR of 4 059.
+pub const CC7_MEASURED_DELIVERY_EIGHT: [i64; 5] = [2, 1_000_000, 377_538, 855_810, 4_059];
 /// The same at Ten, worst per term over the six scenarios (C-E8). The luma
 /// P99 measured **exactly zero** on every scenario.
 ///

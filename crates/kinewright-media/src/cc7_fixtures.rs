@@ -2638,6 +2638,39 @@ fn assert_cc7_delivery_lane(
             findings,
         );
     }
+    if depth == DeliveryEncodeDepth::Eight {
+        let path = format!("budgets.delivery.{spec_id}.{depth_key}.rgb_diagnostics");
+        for (term, measured) in [
+            (
+                "rgb_max_code",
+                i64::from(comparison.combined.maximum_code_diff),
+            ),
+            (
+                "rgb_p99_code_millionths",
+                comparison.combined.p99_code_diff_millionths,
+            ),
+            (
+                "red_mean_code_millionths",
+                comparison.red.mean_code_diff_millionths,
+            ),
+            (
+                "green_mean_code_millionths",
+                comparison.green.mean_code_diff_millionths,
+            ),
+            (
+                "blue_mean_code_millionths",
+                comparison.blue.mean_code_diff_millionths,
+            ),
+        ] {
+            check_cc7_measurement(
+                &declared["rgb_diagnostics"],
+                term,
+                measured,
+                &path,
+                findings,
+            );
+        }
+    }
 
     json!({
         "scenario": cc7_spec(measurement.scenario).id,
@@ -2700,9 +2733,7 @@ fn assert_cc7_every_scenario_verifies(depth: DeliveryEncodeDepth, fixture: &str)
     if !findings.harvest.is_empty() {
         report.push(format!(
             "`{}` has no measured column in `cc7_manifest.json` for these terms. Record them \
-             under the `\"{}\"` key of each row's `measured` object, measured on this system \
-             and optimized there — never by copying another system's number and never by \
-             widening a shared one:\n{}",
+             at the paths below. Use an `\"{}\"` entry for values that differ by system:\n{}",
             cc7_os(),
             cc7_os(),
             findings.harvest.join("\n")
@@ -3161,22 +3192,13 @@ fn assert_manifest_i64(parent: &Value, key: &str, expected: i64) {
     );
 }
 
-/// The operating system a measured column belongs to.
-///
-/// **A measured number belongs to the machine that produced it.** CC7's
-/// encoded lanes run a *different `FFmpeg` package* per operating system —
-/// `System233/ffmpeg-msvc-prebuilt` on Windows against `mifi/ffmpeg-builds`
-/// on Linux — so one number cannot be true of both, and a budget widened
-/// until it spanned both would gate neither. AU3 §0 E55, CC6 §6.3 and AU6
-/// §10.6 as amended: **each operating system carries its own individually
-/// measured column, optimized on that system; never one loosened constant.**
+/// The operating system a measured column belongs to (AU3 §0 E55).
 fn cc7_os() -> &'static str {
     std::env::consts::OS
 }
 
-/// One declared integer, which is either a **scalar** — measured on every
-/// supported system and found equal, so there is nothing to split — or an
-/// **object keyed by operating system**, measured separately on each.
+/// One declared integer, either a shared scalar or an object keyed by
+/// operating system. The delivery gate checks both against live measurements.
 ///
 /// Returns `None` when the value is an object with no entry for the running
 /// system, which is what makes an unmeasured platform loud rather than green.
@@ -3191,8 +3213,7 @@ fn cc7_declared_i64(parent: &Value, key: &str) -> Option<i64> {
 /// rather than panicking, both when the running system has no column yet and
 /// when its declared value differs.
 ///
-/// The delivery table is 5 terms x 6 scenarios per depth. Panicking on the
-/// first missing or differing entry would surrender one number per CI run;
+/// Panicking on the first missing or differing entry would surrender one number per CI run;
 /// collecting them lets one run report the whole column, which the caller
 /// fails on once, after every scenario has been measured.
 fn check_cc7_measurement(
@@ -3798,6 +3819,31 @@ fn cc7_manifest_declares_every_required_fixture_and_constant() {
                 );
             }
         }
+    }
+    // The live gate compares each scenario once. Check that the summary uses
+    // the worst of those same expectations for each term.
+    for (term, summary) in [
+        ("luma_max_code", "delivery, 8-bit luma max"),
+        ("luma_p99_code_millionths", "delivery, 8-bit luma P99"),
+        ("luma_mean_code_millionths", "delivery, 8-bit luma mean"),
+        ("rgb_mean_code_millionths", "delivery, 8-bit RGB mean"),
+        ("psnr_db_hundredths", "delivery, 8-bit PSNR"),
+    ] {
+        let measurements = CC7_SCENARIOS.map(|scenario| {
+            let spec = cc7_spec(scenario);
+            cc7_declared_i64(&delivery[spec.id]["eight_bit"][term], "measured")
+                .unwrap_or_else(|| panic!("scenario {} must declare an eight-bit {term}", spec.id))
+        });
+        let worst = if term == "psnr_db_hundredths" {
+            measurements.into_iter().min()
+        } else {
+            measurements.into_iter().max()
+        };
+        assert_eq!(
+            cc7_declared_i64(&budgets["terms"][summary], "measured"),
+            worst,
+            "{summary} must match the worst scenario for {term}"
+        );
     }
     assert_eq!(
         budgets["delivery_note"],

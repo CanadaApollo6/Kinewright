@@ -1013,27 +1013,15 @@
       "delivery, 8-bit RGB mean": {
         "constant": "DELIVERY_RGB_MEAN_CODE_8BIT_MILLIONTHS",
         "budget": 1750000,
-        "measured": {
-          "linux": 855810,
-          "windows": 787598
-        },
-        "margin": {
-          "linux": 2.0448,
-          "windows": 2.2219
-        },
+        "measured": 855810,
+        "margin": 2.0448,
         "note": "re-pinned from probe-1's pre-A1 499 781 to the worst per-scenario amended-scene measurement, 855 810 on (e). It still clears the 2x bar, by 2.2 percent of the budget, so it stays a ratio row (R4-M2)."
       },
       "delivery, 8-bit PSNR": {
         "constant": "DELIVERY_PSNR_FLOOR_DB_HUNDREDTHS_8BIT",
         "budget": 3300,
-        "measured": {
-          "linux": 4059,
-          "windows": 4070
-        },
-        "margin": {
-          "linux": 759,
-          "windows": 770
-        },
+        "measured": 4059,
+        "margin": 759,
         "note": "re-pinned from probe-1's pre-A1 4 148 to the worst per-scenario amended-scene measurement, 4 059 on (e). A floor row: the margin is a code distance, never a ratio (R4-M2)."
       },
       "delivery, 10-bit luma max": {
@@ -1085,14 +1073,8 @@
           },
           "luma_mean_code_millionths": {
             "budget": 400000,
-            "measured": {
-              "linux": 18677,
-              "windows": 18677
-            },
-            "margin": {
-              "linux": 21.4167,
-              "windows": 21.4167
-            },
+            "measured": 18677,
+            "margin": 21.4167,
             "windows_remeasure": {
               "before": 18688,
               "after": 18677,
@@ -1102,27 +1084,15 @@
           },
           "rgb_mean_code_millionths": {
             "budget": 1750000,
-            "measured": {
-              "linux": 402050,
-              "windows": 296109
-            },
-            "margin": {
-              "linux": 4.3527,
-              "windows": 5.91
-            }
+            "measured": 402050,
+            "margin": 4.3527
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": {
-              "linux": 4204,
-              "windows": 4225
-            },
-            "margin": {
-              "linux": 904,
-              "windows": 925
-            }
+            "measured": 4204,
+            "margin": 904
           },
-          "reported_not_gated": {
+          "rgb_diagnostics": {
             "rgb_max_code": 62,
             "rgb_p99_code_millionths": 3000000,
             "red_mean_code_millionths": 243559,
@@ -1197,38 +1167,20 @@
           },
           "luma_mean_code_millionths": {
             "budget": 400000,
-            "measured": {
-              "linux": 38177,
-              "windows": 38160
-            },
-            "margin": {
-              "linux": 10.4775,
-              "windows": 10.4822
-            }
+            "measured": 38177,
+            "margin": 10.4775
           },
           "rgb_mean_code_millionths": {
             "budget": 1750000,
-            "measured": {
-              "linux": 458622,
-              "windows": 402744
-            },
-            "margin": {
-              "linux": 3.8158,
-              "windows": 4.3452
-            }
+            "measured": 458622,
+            "margin": 3.8158
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": {
-              "linux": 4129,
-              "windows": 4142
-            },
-            "margin": {
-              "linux": 829,
-              "windows": 842
-            }
+            "measured": 4129,
+            "margin": 829
           },
-          "reported_not_gated": {
+          "rgb_diagnostics": {
             "rgb_max_code": 62,
             "rgb_p99_code_millionths": 3000000,
             "red_mean_code_millionths": 453472,
@@ -1309,38 +1261,20 @@
           },
           "luma_mean_code_millionths": {
             "budget": 400000,
-            "measured": {
-              "linux": 195351,
-              "windows": 195326
-            },
-            "margin": {
-              "linux": 2.0476,
-              "windows": 2.0479
-            }
+            "measured": 195351,
+            "margin": 2.0476
           },
           "rgb_mean_code_millionths": {
             "budget": 1750000,
-            "measured": {
-              "linux": 512581,
-              "windows": 388796
-            },
-            "margin": {
-              "linux": 3.4141,
-              "windows": 4.5011
-            }
+            "measured": 512581,
+            "margin": 3.4141
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": {
-              "linux": 4126,
-              "windows": 4148
-            },
-            "margin": {
-              "linux": 826,
-              "windows": 848
-            }
+            "measured": 4126,
+            "margin": 826
           },
-          "reported_not_gated": {
+          "rgb_diagnostics": {
             "rgb_max_code": 61,
             "rgb_p99_code_millionths": 3000000,
             "red_mean_code_millionths": 444010,
@@ -1420,27 +1354,15 @@
           },
           "rgb_mean_code_millionths": {
             "budget": 1750000,
-            "measured": {
-              "linux": 349950,
-              "windows": 162581
-            },
-            "margin": {
-              "linux": 5.0007,
-              "windows": 10.7639
-            }
+            "measured": 349950,
+            "margin": 5.0007
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": {
-              "linux": 4103,
-              "windows": 4132
-            },
-            "margin": {
-              "linux": 803,
-              "windows": 832
-            }
+            "measured": 4103,
+            "margin": 803
           },
-          "reported_not_gated": {
+          "rgb_diagnostics": {
             "rgb_max_code": 62,
             "rgb_p99_code_millionths": 2000000,
             "red_mean_code_millionths": 234490,
@@ -1520,27 +1442,15 @@
           },
           "rgb_mean_code_millionths": {
             "budget": 1750000,
-            "measured": {
-              "linux": 855810,
-              "windows": 787598
-            },
-            "margin": {
-              "linux": 2.0448,
-              "windows": 2.2219
-            }
+            "measured": 855810,
+            "margin": 2.0448
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": {
-              "linux": 4059,
-              "windows": 4070
-            },
-            "margin": {
-              "linux": 759,
-              "windows": 770
-            }
+            "measured": 4059,
+            "margin": 759
           },
-          "reported_not_gated": {
+          "rgb_diagnostics": {
             "rgb_max_code": 64,
             "rgb_p99_code_millionths": 3000000,
             "red_mean_code_millionths": 1083160,
@@ -1620,27 +1530,15 @@
           },
           "rgb_mean_code_millionths": {
             "budget": 1750000,
-            "measured": {
-              "linux": 271299,
-              "windows": 78742
-            },
-            "margin": {
-              "linux": 6.4504,
-              "windows": 22.2245
-            }
+            "measured": 271299,
+            "margin": 6.4504
           },
           "psnr_db_hundredths": {
             "budget": 3300,
-            "measured": {
-              "linux": 4579,
-              "windows": 4668
-            },
-            "margin": {
-              "linux": 1279,
-              "windows": 1368
-            }
+            "measured": 4579,
+            "margin": 1279
           },
-          "reported_not_gated": {
+          "rgb_diagnostics": {
             "rgb_max_code": 64,
             "rgb_p99_code_millionths": 2000000,
             "red_mean_code_millionths": 145667,
@@ -1712,6 +1610,71 @@
       }
     },
     "delivery_note": "CC6 owns these constants; CC7 measures against them and never re-baselines one",
+    "windows_remeasure": {
+      "ci_run": 44201911758,
+      "commit": "fe8d66a80cda5d99c52737159b88c0d845c93f23",
+      "measured": "windows-latest, the project’s own FFmpeg 9.0.2 MSVC build, software_fallback lane",
+      "reason": "FFmpeg 8 on MSVC did not select the dithered yuv2yuvX vertical scaler because it depended on inline assembly. FFmpeg 9 selects it from external nasm SIMD on x86, so the measured Windows values match the Linux column. See docs/reports/ff9-own-build.md section 4.",
+      "eight_bit_changes": {
+        "a.rgb_mean_code_millionths": {
+          "before": 296109,
+          "after": 402050
+        },
+        "a.psnr_db_hundredths": {
+          "before": 4225,
+          "after": 4204
+        },
+        "b.luma_mean_code_millionths": {
+          "before": 38160,
+          "after": 38177
+        },
+        "b.rgb_mean_code_millionths": {
+          "before": 402744,
+          "after": 458622
+        },
+        "b.psnr_db_hundredths": {
+          "before": 4142,
+          "after": 4129
+        },
+        "c.luma_mean_code_millionths": {
+          "before": 195326,
+          "after": 195351
+        },
+        "c.rgb_mean_code_millionths": {
+          "before": 388796,
+          "after": 512581
+        },
+        "c.psnr_db_hundredths": {
+          "before": 4148,
+          "after": 4126
+        },
+        "d.rgb_mean_code_millionths": {
+          "before": 162581,
+          "after": 349950
+        },
+        "d.psnr_db_hundredths": {
+          "before": 4132,
+          "after": 4103
+        },
+        "e.rgb_mean_code_millionths": {
+          "before": 787598,
+          "after": 855810
+        },
+        "e.psnr_db_hundredths": {
+          "before": 4070,
+          "after": 4059
+        },
+        "f.rgb_mean_code_millionths": {
+          "before": 78742,
+          "after": 271299
+        },
+        "f.psnr_db_hundredths": {
+          "before": 4668,
+          "after": 4579
+        }
+      },
+      "eight_bit_rgb_diagnostics": "The recorded Linux values are predictions for Windows on FFmpeg 9. The eight-bit delivery gate compares all five diagnostics per scenario against live results."
+    },
     "failing_direction": {
       "neutral spread (1)": {
         "fixture": "cc7_a_the_unmatched_candidate_exceeds_the_neutral_spread_budget",
@@ -1805,7 +1768,7 @@
         "matched_b": 208.0,
         "unmatched_b": 201.0
       },
-      "rgb_extremes_note": "DELIVERY_RGB_EXTREMES_NOTE covers the 4:2:0 hard-edge terms; they are recorded per scenario in budgets.delivery[*].reported_not_gated"
+      "rgb_extremes_note": "DELIVERY_RGB_EXTREMES_NOTE covers the 4:2:0 hard-edge terms. The eight-bit delivery gate checks their exact regression values in rgb_diagnostics, independent of the delivery budgets. Ten-bit diagnostics are recorded under reported_not_gated in each scenario."
     },
     "measurement": {
       "linux": {
