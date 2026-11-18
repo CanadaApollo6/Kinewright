@@ -814,6 +814,7 @@ enum PendingAction {
     Restore(usize),
     Discard(usize),
     DiscardUnreadable,
+    DismissUnchecked,
 }
 
 /// What one `show_dialog` frame decided and rendered.
@@ -1159,6 +1160,10 @@ impl Recovery {
                     });
                     self.pending = pending;
                 }
+                Some(PendingAction::DismissUnchecked) => {
+                    self.pending
+                        .retain(|entry| !matches!(entry.state, PendingState::Unchecked(_)));
+                }
                 None => {}
             }
         }
@@ -1254,11 +1259,10 @@ impl Recovery {
                 action = Some(PendingAction::DiscardUnreadable);
             }
         }
-        self.show_unchecked(ui);
-        action
+        self.show_unchecked(ui).or(action)
     }
 
-    fn show_unchecked(&self, ui: &mut egui::Ui) {
+    fn show_unchecked(&self, ui: &mut egui::Ui) -> Option<PendingAction> {
         let unchecked = || {
             self.pending.iter().filter_map(|entry| match &entry.state {
                 PendingState::Unchecked(reason) => {
@@ -1269,7 +1273,7 @@ impl Recovery {
         };
         let count = unchecked().count();
         if count == 0 {
-            return;
+            return None;
         }
         let (plural, pronoun) = if count == 1 {
             ("", "It is")
@@ -1277,10 +1281,16 @@ impl Recovery {
             ("s", "They are")
         };
         ui.separator();
-        let label = ui.label(format!(
-            "{count} recovery file{plural} couldn't be checked this time. \
-             {pronoun} kept and will be checked again when Kinewright next starts."
-        ));
+        let (dismiss, label) = ui
+            .horizontal_top(|ui| {
+                let dismiss = ui.button("OK").clicked();
+                let label = ui.label(format!(
+                    "{count} recovery file{plural} couldn't be checked this time. \
+                 {pronoun} kept and will be checked again when Kinewright next starts."
+                ));
+                (dismiss, label)
+            })
+            .inner;
 
         // The default hover tooltip closes on wheel input. Keep this one open
         // while the pointer is on the row or over the file list itself.
@@ -1306,6 +1316,7 @@ impl Recovery {
                 ui.data_mut(|data| data.insert_temp(region_id, tooltip.response.rect));
             }
         }
+        dismiss.then_some(PendingAction::DismissUnchecked)
     }
 
     pub(crate) fn show_unavailable(&mut self, ctx: &egui::Context) -> Option<String> {
@@ -2576,6 +2587,57 @@ mod tests {
         }));
         assert_eq!(fs::read(&readable).unwrap(), good);
         assert!(unreadable.iter().all(|path| !path.exists()));
+    }
+
+    #[test]
+    fn ok_dismisses_unchecked_journals_for_this_session() {
+        for keep_readable in [true, false] {
+            let dir = TestDirectory::new("dismiss-unchecked");
+            let unchecked = dir.0.join("a-unchecked.journal");
+            let bytes = encoded_journal(&Document::default(), &representative_commands());
+            fs::write(&unchecked, &bytes).unwrap();
+            let readable = dir.0.join("readable.journal");
+            if keep_readable {
+                fs::write(&readable, encoded_journal(&Document::default(), &[])).unwrap();
+            }
+
+            let mut recovery = Recovery::read_only();
+            REFUSE_NEXT_REPLAY_SPAWN.set(true);
+            recovery.pending = scan_directory(&dir.0);
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            let mut frame = |events| recovery_frame(&ctx, &mut recovery, events);
+            let _ = frame(vec![]);
+            let _ = frame(vec![]);
+            let target = painted_label_center(&frame(vec![]), "OK");
+            let click = |pressed| egui::Event::PointerButton {
+                pos: target,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let _ = frame(vec![egui::Event::PointerMoved(target), click(true)]);
+            let _ = frame(vec![click(false)]);
+            let labels = crate::theme::painted_text(&frame(vec![]));
+
+            assert_eq!(
+                recovery.pending.len(),
+                usize::from(keep_readable),
+                "HX_T5_OK_CLEARS_UNCHECKED"
+            );
+            assert_eq!(fs::read(&unchecked).unwrap(), bytes);
+            assert!(!labels.iter().any(|label| label == "OK"));
+            assert_eq!(
+                labels.iter().any(|label| label == "Recover unsaved work?"),
+                keep_readable
+            );
+            if keep_readable {
+                let entry = &recovery.pending[0];
+                assert_eq!(entry.journal_path, readable);
+                assert!(matches!(entry.state, PendingState::Recoverable(_)));
+                assert!(labels.iter().any(|label| label == "Restore"));
+            }
+        }
     }
 
     #[test]
