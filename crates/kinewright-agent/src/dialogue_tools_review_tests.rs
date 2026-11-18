@@ -117,20 +117,13 @@ fn tail_value(ntsc: bool, sounding_tail: bool) -> Arc<BoundDialogue> {
 fn assert_refused_unchanged(
     s: &KinewrightMcp,
     before: &(TimelineRevision, Arc<Document>),
-    history: &(
-        kinewright_core::HistoryChangeId,
-        kinewright_core::HistorySnapshot,
-    ),
+    history: &(ChangeId, SnapshotIdentity),
     r: &CallToolResult,
     marker: &str,
 ) {
     assert_eq!(r.is_error, Some(true), "{marker}: {r:?}");
     assert_eq!(&s.snapshot().unwrap(), before, "{marker}");
-    assert_eq!(
-        &s.core.export_history_identified().unwrap(),
-        history,
-        "{marker}"
-    );
+    assert_eq!(&history_identity(s), history, "{marker}");
 }
 #[test]
 fn dq_tools_review_unselected_sounding_tail_is_preserved() {
@@ -145,7 +138,7 @@ fn dq_tools_review_unselected_sounding_tail_is_preserved() {
         );
         let s = service(doc, Arc::clone(&v));
         let before = s.snapshot().unwrap();
-        let history = s.core.export_history_identified().unwrap();
+        let history = history_identity(&s);
         let r = cut(&s, args(vec![words(&v, 1)]), true);
         println!("DQ_RETAINED_TAIL copies={copies} {}", content(&r));
         if r.is_error == Some(true) {
@@ -199,7 +192,7 @@ fn dq_tools_review_ntsc_quiet_loss_is_reported_and_sound_loss_refuses() {
         doc.media_pool[0].duration = TimeCode(603);
         let s = service(doc, Arc::clone(&v));
         let before = s.snapshot().unwrap();
-        let history = s.core.export_history_identified().unwrap();
+        let history = history_identity(&s);
         let r = cut(&s, args(vec![words(&v, 1)]), true);
         println!("DQ_NTSC_TAIL sound={sounding} {}", content(&r));
         if sounding {
@@ -344,7 +337,7 @@ fn dq_tools_review_one_frame_is_structurally_refused() {
     let fps = Rational::new(10, 1).unwrap();
     let s = service(document(fps, fps, 0, 40), Arc::clone(&v));
     let before = s.snapshot().unwrap();
-    let history = s.core.export_history_identified().unwrap();
+    let history = history_identity(&s);
     let r = cut(
         &s,
         args(vec![
@@ -393,7 +386,7 @@ fn dq_tools_review_sync_tracks_and_atomic_undo() {
 fn dq_tools_review_binding_changes_during_confirmation() {
     let (s, v) = fixture();
     let before = s.snapshot().unwrap();
-    let history = s.core.export_history_identified().unwrap();
+    let history = history_identity(&s);
     let changed = value(said(), 4_000_000, |_| level(true));
     thread::scope(|scope| {
         let worker = scope.spawn(|| invoke(&s, "cut_dialogue", args(vec![words(&v, 1)])));
@@ -451,7 +444,7 @@ fn dq_tools_review_stale_before_confirmation_never_prompts() {
         reads: std::sync::atomic::AtomicUsize::new(0),
     }));
     let before = s.snapshot().unwrap();
-    let history = s.core.export_history_identified().unwrap();
+    let history = history_identity(&s);
     thread::scope(|scope| {
         let worker = scope.spawn(|| invoke(&s, "cut_dialogue", args(vec![words(&v, 1)])));
         let mut prompted = false;
@@ -695,7 +688,7 @@ fn dq_tools_review_adjacent_overrule_does_not_cover_the_backed_off_edge() {
         Arc::clone(&v),
     );
     let before = s.snapshot().unwrap();
-    let history = s.core.export_history_identified().unwrap();
+    let history = history_identity(&s);
     let r = cut(
         &s,
         args(vec![
@@ -795,7 +788,7 @@ fn dq_tools_review_two_cuts_and_unmeasured_sync_extents() {
     doc.validate().unwrap();
     let s = service(doc, Arc::clone(&v));
     let before = s.snapshot().unwrap();
-    let history = s.core.export_history_identified().unwrap();
+    let history = history_identity(&s);
     let r = cut(&s, args(vec![words(&v, 1)]), true);
     if r.is_error == Some(true) {
         assert_refused_unchanged(
@@ -863,7 +856,7 @@ fn dq_tools_review_growth_is_reported_and_its_edge_is_guarded_even_with_overrule
             Arc::clone(&v),
         );
         let before = s.snapshot().unwrap();
-        let history = s.core.export_history_identified().unwrap();
+        let history = history_identity(&s);
         assert_eq!(
             dq::spans(&before.1).unwrap()[0].source.end,
             kinewright_core::ExactMicros::integer(4_000_000)
@@ -970,7 +963,7 @@ fn dq_tools_review_quiet_edge_cannot_hide_sound_later_in_the_lost_stretch() {
         Arc::clone(&measurement),
     );
     let before = server.snapshot().unwrap();
-    let history = server.core.export_history_identified().unwrap();
+    let history = history_identity(&server);
     let reply = cut(&server, args(vec![words(&measurement, 1)]), true);
     assert_refused_unchanged(
         &server,

@@ -1,8 +1,9 @@
 //! Studio controls. The GUI keeps its originating source and manual actors until explicit Close.
 use eframe::egui;
 use kinewright_core::{
-    AttachmentState, Command, Core, Document, Event, Query, QueryResult, TimelineRevision,
+    AttachmentState, Command, Document, Event, Query, QueryResult, TimelineRevision,
 };
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{BundleError, PublicationState},
     bundle_copy::CopyStatus,
@@ -43,7 +44,7 @@ fn manual_status_message(message: &str, has_manual_gate: bool) -> String {
 
 pub(crate) struct PreparedView {
     pub core: Core,
-    pub events: crossbeam_channel::Receiver<Event>,
+    pub events: crossbeam_channel::Receiver<kinewright_project::operation_actor::Notification>,
     pub document: Arc<Document>,
     pub revision: TimelineRevision,
 }
@@ -84,7 +85,7 @@ pub(crate) enum Action {
     OpenRecovery,
     Abandon,
     PreviewRescue,
-    ConsentTrim,
+
     ConsentOmission,
     RescueTo(PathBuf),
     Cancel,
@@ -122,7 +123,6 @@ impl Action {
             | Self::OpenRecovery
             | Self::Abandon
             | Self::PreviewRescue
-            | Self::ConsentTrim
             | Self::ConsentOmission
             | Self::RescueTo(_)
             | Self::Cancel
@@ -153,7 +153,6 @@ impl Action {
                 | Self::PreviewRetirement(_)
                 | Self::PreviewForget
                 | Self::PreviewRelease(_)
-                | Self::ConsentTrim
                 | Self::ConsentOmission
                 | Self::Cancel
         )
@@ -165,7 +164,7 @@ enum Choice {
     Rescue {
         selection: Box<RescueSelection>,
         consent: RescueConsent,
-        trim: bool,
+
         omission: bool,
     },
     Remove {
@@ -183,7 +182,7 @@ enum Choice {
 /// inside the actor. No UI producer waits for durable IO.
 pub(crate) struct ManualProducerGate {
     actor: kinewright_core::ActorIdentity,
-    permit: kinewright_core::ManualPermit,
+    permit: kinewright_project::operation_actor::ManualPermit,
 }
 
 #[allow(
@@ -232,13 +231,6 @@ pub(crate) struct Ja1Attachment {
     before_host_reply: Option<fn(&mut kinewright_agent::writer_host::HostReply)>,
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fixture_host: Option<kinewright_agent::writer_host::WriterHost>,
-    host_history_digest: std::cell::RefCell<
-        Option<(
-            kinewright_core::ActorIdentity,
-            kinewright_core::HistoryChangeId,
-            String,
-        )>,
-    >,
     known_agent_effects: std::collections::BTreeSet<PathBuf>,
     save_disclosure: String,
     #[cfg(test)]
@@ -251,8 +243,20 @@ pub(crate) struct Ja1Attachment {
     last_retirement: Option<kinewright_project::bundle::BundleSaveReport>,
 }
 impl Ja1Attachment {
-    pub fn open(path: &Path) -> Result<Self, BundleError> {
-        Self::new(Ja1EditingSession::open(path)?)
+    pub fn open(
+        path: &Path,
+        pool: &kinewright_project::operation_history::HistoryPool,
+    ) -> Result<Self, BundleError> {
+        Self::new(Ja1EditingSession::open(path, pool)?)
+    }
+    pub fn open_document_view(
+        path: &Path,
+        view: &Core,
+        inspection: &kinewright_core::Document,
+    ) -> Result<Self, BundleError> {
+        Self::new(Ja1EditingSession::open_document_view(
+            path, view, inspection,
+        )?)
     }
     pub fn new(owner: Ja1EditingSession) -> Result<Self, BundleError> {
         let view = Some(PreparedView::prepare(owner.core())?);
@@ -289,7 +293,6 @@ impl Ja1Attachment {
             before_host_reply: None,
             #[cfg(all(test, target_os = "linux"))]
             fixture_host: None,
-            host_history_digest: std::cell::RefCell::new(None),
             known_agent_effects: std::collections::BTreeSet::new(),
             save_disclosure: String::new(),
             #[cfg(test)]
@@ -332,30 +335,16 @@ impl Ja1Attachment {
             return true;
         }
         if let Some(host) = &self.host {
-            let Some(saved) = &host.status.saved_digest else {
+            let Some(_saved) = &host.status.saved_digest else {
                 return true;
             };
             let core = self.owner.core();
-            let Ok(change) = core.history_change_id() else {
+            let Ok(change) = core.change_id() else {
                 return true;
             };
-            if let Some((actor, cached, digest)) = &*self.host_history_digest.borrow()
-                && *actor == core.actor_identity()
-                && *cached == change
-            {
-                return digest != saved;
-            }
-            let Ok((identified, history)) = core.export_history_identified() else {
-                return true;
-            };
-            let Ok(bytes) = serde_json::to_vec(&history) else {
-                return true;
-            };
-            let digest = kinewright_media::sha256_bytes(&bytes);
-            let dirty = &digest != saved;
-            *self.host_history_digest.borrow_mut() =
-                Some((core.actor_identity(), identified, digest));
-            return dirty;
+            // Host status names the exact last durable accepted position. A
+            // changed counter is dirty; hashing belongs only to Save/install.
+            return host.status.saved_position != Some(change.position);
         }
         self.owner.dirty().unwrap_or(true)
     }
@@ -646,6 +635,7 @@ impl Ja1Attachment {
                 }
                 self.message.clone_from(&host.status.message);
                 self.host = Some(host);
+                self.view = Some(PreparedView::prepare(self.owner.core())?);
                 self.start_host_manual()
             }
             Err(error) => {
@@ -814,7 +804,7 @@ impl Ja1Attachment {
     #[cfg(test)]
     pub(crate) fn manual_pending_for_test(
         &self,
-    ) -> Result<Vec<kinewright_core::AcceptedHistory>, String> {
+    ) -> Result<Vec<kinewright_project::operation_protocol::EncodedMessage>, String> {
         self.host
             .as_ref()
             .and_then(|h| h.manual.as_ref())
@@ -916,23 +906,24 @@ impl Ja1Attachment {
     pub(crate) fn studio_lineage(
         &self,
         key: &kinewright_project::studio_records::SnapshotKey,
-    ) -> Result<kinewright_project::bundle_records::LineageRecord, BundleError> {
-        if self.host.is_some() {
-            let reader = self.studio_snapshot_reader(key)?;
-            let lineage = reader.descriptor().lineage_ref.clone();
-            Ok((*reader
-                .read_record::<kinewright_project::bundle_records::LineageRecord>(&lineage)?)
-            .clone())
+    ) -> Result<kinewright_project::operation_history::OwnerBoundary, BundleError> {
+        let history = if self.host.is_some() {
+            self.studio_snapshot_reader(key)?
+                .owner_history(self.owner.core().history_pool())?
         } else {
             let snapshot = self.owner.read_snapshot(key)?;
-            Ok((*self
+            let checkpoint = self
                 .owner
                 .store()?
-                .read_record::<kinewright_project::bundle_records::LineageRecord>(
-                    &snapshot.descriptor.lineage_ref,
-                )?)
-            .clone())
-        }
+                .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(
+                &snapshot.descriptor.checkpoint_ref,
+            )?;
+            checkpoint
+                .open(self.owner.store()?, self.owner.core().history_pool())?
+                .into_reader()?
+        };
+        let depth = history.history().undo().len();
+        history.into_boundary(depth).map_err(BundleError::from)
     }
     pub(crate) fn studio_edit_copy(
         &mut self,
@@ -1105,7 +1096,7 @@ impl Ja1Attachment {
                 .manual_inputs
                 .take()
                 .ok_or(BundleError::HistoryChanged)?;
-            let digest = lease.history_sha256.clone();
+            let digest = lease.snapshot.to_string();
             let endpoint = self.owner.manual_recovery_endpoint(cut, vec![])?;
             let permit = endpoint.finish(lease, inputs, Arc::clone(&self.originating_context))?;
             self.owner.finish_host_manual_recovery(&digest)?;
@@ -1129,7 +1120,7 @@ impl Ja1Attachment {
                         asset: asset.clone(),
                     }
                 })))
-                .map_err(|_| BundleError::HistoryChanged)?;
+                .map_err(BundleError::from)?;
             match event {
                 Event::DocumentChanged { .. } => {}
                 Event::MutationRefused { reason, .. } => {
@@ -1149,22 +1140,10 @@ impl Ja1Attachment {
         }
         if let Some(committed) = &reply.switch_attachment {
             if reply.error.is_some()
-                && host.cut.as_ref().is_some_and(|cut| {
-                    if committed.history == *cut.history() {
-                        return false;
-                    }
-                    let discarded = committed
-                        .history
-                        .floor_offset
-                        .saturating_sub(cut.history().floor_offset);
-                    usize::try_from(discarded)
-                        .ok()
-                        .filter(|n| *n > 0)
-                        .and_then(|n| {
-                            kinewright_core::HistoryTransition::floor(cut.history().clone(), n).ok()
-                        })
-                        .is_none_or(|floor| floor.after() != &committed.history)
-                })
+                && host
+                    .cut
+                    .as_ref()
+                    .is_some_and(|cut| committed.history.identity() != cut.identity())
             {
                 self.frozen = true;
                 return Err(BundleError::HistoryChanged);
@@ -1176,7 +1155,7 @@ impl Ja1Attachment {
                     .association
                     .as_deref()
                     .ok_or(BundleError::HistoryChanged)?,
-                &committed.current.history_digest,
+                &committed.current.history_digest.to_string(),
             )?;
             self.view = Some(view);
             self.message.clone_from(&confirmed.status.message);
@@ -1193,11 +1172,9 @@ impl Ja1Attachment {
             || reply.status.message.clone(),
             |error| error.message.clone(),
         );
-        if let Some(saved) = &reply.saved
-            && !saved.floor_disclosure.is_empty()
-        {
-            self.message.push(' ');
-            self.message.push_str(&saved.floor_disclosure);
+        if reply.manual_unattempted.is_some() {
+            self.message
+                .push_str(" Retry to resend the retained hand edits.");
         }
         let manual_failed = reply
             .error
@@ -1227,7 +1204,7 @@ impl Ja1Attachment {
             if reply
                 .history
                 .as_ref()
-                .is_some_and(|history| history != cut.history())
+                .is_some_and(|history| history.identity() != cut.identity())
                 && digest.is_none()
             {
                 self.operation_panicked();
@@ -1383,6 +1360,9 @@ impl Ja1Attachment {
         }
         self.host.as_mut().is_none_or(host::HostAttachment::close)
     }
+    pub(crate) fn retire_closed_history(&self) -> Result<(), BundleError> {
+        self.owner.retire_closed_history()
+    }
     pub(crate) fn continuation_pending(&self) -> bool {
         self.host
             .as_ref()
@@ -1433,12 +1413,12 @@ impl Ja1Attachment {
                         "media interpretation operation".into(),
                     ));
                 };
-                let mut document = self
+                let document = self
                     .owner
                     .core()
                     .export_history()
-                    .map_err(|_| BundleError::HistoryChanged)?
-                    .document;
+                    .map_err(|_| BundleError::HistoryChanged)?;
+                let mut document = Arc::clone(&document.history().document);
                 let document = std::sync::Arc::make_mut(&mut document);
                 operation
                     .apply(document)
@@ -1615,23 +1595,11 @@ impl Ja1Attachment {
                 self.choice = Some(Choice::Rescue {
                     selection: Box::new(selection),
                     consent,
-                    trim: false,
+
                     omission: false,
                 });
             }
-            Action::ConsentTrim => {
-                let Some(Choice::Rescue {
-                    selection,
-                    consent,
-                    trim,
-                    ..
-                }) = &mut self.choice
-                else {
-                    return Err(BundleError::HistoryChanged);
-                };
-                selection.consent_trim(consent)?;
-                *trim = true;
-            }
+
             Action::ConsentOmission => {
                 let Some(Choice::Rescue {
                     selection,
@@ -1729,10 +1697,20 @@ impl Ja1Attachment {
                 }
                 if state == PublicationState::Committed && self.owner.is_capture_destination(&path)
                 {
-                    self.message.push_str(" This destination holds a copy as of capture. Editing continues in the current session; you can open it separately read-only. A separate editable open requires explicit release of its completed destination owner.");
+                    self.message.push_str(" This destination holds a copy as of capture. Editing continues in the current session; you can open it separately read-only.");
+                    if self.owner.completed_capture_backs_recovery(&path)? {
+                        self.message.push_str(" It retains archived recovery states; close this editing context before opening the copy for editing.");
+                    } else {
+                        self.message.push_str(" A separate editable open requires explicit release of its completed destination owner.");
+                    }
                 }
             }
             Action::PreviewRelease(path) => {
+                if self.owner.completed_capture_backs_recovery(&path)? {
+                    self.message = "This copy retains archived recovery states. Keep it while this editing context is open. You can open it separately read-only; close this context before opening the copy for editing.".into();
+                    self.choice = None;
+                    return Ok(());
+                }
                 self.message = format!(
                     "Release {} for a separate editable open, only after verified commit. This will not switch editing, release A's source data or refund rescue slots.",
                     path.display()
@@ -1862,18 +1840,10 @@ impl Ja1Attachment {
             }
             Some(Choice::Rescue {
                 selection,
-                trim,
                 omission,
                 ..
             }) => {
-                if selection.removed_undo() > 0
-                    && !trim
-                    && ui.button("Remove this older Undo history in B").clicked()
-                {
-                    action = Some(Action::ConsentTrim);
-                }
                 if !selection.omissions().is_empty()
-                    && (selection.removed_undo() == 0 || *trim)
                     && !omission
                     && ui
                         .button("Omit these unavailable recovery points")
@@ -1881,8 +1851,7 @@ impl Ja1Attachment {
                 {
                     action = Some(Action::ConsentOmission);
                 }
-                if (selection.removed_undo() == 0 || *trim)
-                    && (selection.omissions().is_empty() || *omission)
+                if (selection.omissions().is_empty() || *omission)
                     && ui.button("Save rescue copy to…").clicked()
                     && let Some(path) = rfd::FileDialog::new()
                         .add_filter("Kinewright project", &["kinewright"])
@@ -2059,15 +2028,7 @@ fn copy_text(status: &CopyStatus) -> String {
     }
 }
 fn rescue_preview(selection: &RescueSelection) -> String {
-    let mut text = if selection.removed_undo() > 0 {
-        format!(
-            "Save a rescue copy with older Undo history removed in B. Undo before step {} will be unavailable there; {} oldest Undo entries are removed. Current edits, Redo, and the open gesture are kept. A is unchanged. ",
-            selection.undo_floor(),
-            selection.removed_undo()
-        )
-    } else {
-        "Save a rescue copy with all Undo and Redo kept. ".into()
-    };
+    let mut text = String::from("Save a rescue copy with all Undo and Redo kept. ");
     if !selection.omissions().is_empty() {
         text.push_str("Older recovery points from A are not in the rescue copy. ");
         for omission in selection.omissions() {
@@ -2145,7 +2106,7 @@ impl Ja1Attachment {
             })
         }
         .map_err(|error| BundleError::Corrupt(error.to_string()))?;
-        let writer = WriterHost::start_protocol_fixture(
+        let (writer, issuer) = WriterHost::start_protocol_fixture_with_issuer(
             HostConfig {
                 data_dir: Some(scheduler.with_extension("voice-data")),
                 scheduler_settings: Some(scheduler),
@@ -2153,8 +2114,10 @@ impl Ja1Attachment {
                 path: transfer.named_path,
                 roots,
                 origin: HostOrigin::Gui {
-                    initial_snapshot: HostSnapshot::from_history(transfer.history)
-                        .map_err(|error| BundleError::Corrupt(error.to_string()))?,
+                    initial_snapshot: Some(
+                        HostSnapshot::from_history(transfer.history)
+                            .map_err(|error| BundleError::Corrupt(error.to_string()))?,
+                    ),
                     retention: HostSourceBinding {
                         inputs: transfer.source.as_ref().map(|_| transfer.inputs.clone()),
                         source: transfer.source.clone(),
@@ -2176,6 +2139,11 @@ impl Ja1Attachment {
             server,
             retained_context,
         )?);
+        self.host
+            .as_mut()
+            .expect("connected fixture")
+            .set_fixture_issuer(issuer);
+        self.view = Some(PreparedView::prepare(self.owner.core())?);
         self.start_host_manual()?;
         Ok(writer)
     }

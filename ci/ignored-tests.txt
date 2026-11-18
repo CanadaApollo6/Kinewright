@@ -42,10 +42,6 @@ kinewright_app ja_harness::tests::run_fixture_from_env crates/kinewright-app/src
 kinewright_app project::tests::is_dirty_memoized_poll_release_perf crates/kinewright-app/src/project.rs any on-demand  # manual release performance measurement
 kinewright_app recovery::tests::crash_child_process crates/kinewright-app/src/recovery.rs any on-demand  # invoked as the deliberately crashing subprocess
 
-# kinewright_core
-kinewright_core actor::tests::performance_batch_workloads crates/kinewright-core/src/actor.rs any on-demand  # manual release performance measurement
-ownership_measure h1_coalesced_drag_edit_cost crates/kinewright-core/tests/ownership_measure.rs any on-demand  # on-demand measurement
-
 # kinewright_eval
 kinewright_eval tests::cc7_every_color_fixture_builds_a_valid_document crates/kinewright-agent/src/bin/kinewright-eval.rs any inherited-gap  # INHERITED GAP: a regression guard skipped because the media engine it builds raises a SIGSEGV at process-exit teardown; unskip once teardown is fixed
 kinewright_eval tests::v3_fixture_builds_with_authored_and_recognized_truth crates/kinewright-agent/src/bin/kinewright-eval.rs any on-demand  # requires local speech synthesis and NeMo analysis
@@ -172,7 +168,7 @@ ja_s4_connector s4b_installed_codex_local_policy crates/kinewright-agent/tests/j
 
 ja_s4_connector s4b_installed_codex_network crates/kinewright-agent/tests/ja_s4_connector.rs linux on-demand # C5c unpaid native DNS TCP TLS witness
 
-kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded crates/kinewright-agent/src/writer_host/c5e_tests.rs linux on-demand # C5 maximal durable run and bounded graph depth
+kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_maximal_run_keeps_depth_stop_and_recovery_bounded crates/kinewright-agent/src/writer_host/c5e_tests.rs linux on-demand # --release: exactly 256 approve/delete/Undo cycles, complete maximal tail and seven cold opens inside the original 3600-second authority
 
 ja_s4_guardian s4b_c5_fix1_guardian_execs_sealed_image_after_source_barrier crates/kinewright-agent/tests/ja_s4_guardian.rs linux on-demand # C5 fix1 sealed-image native barrier; explicitly run in its gate
 ja_s4_guardian s4b_c5_fix4_provider_cannot_read_namespace_init crates/kinewright-agent/tests/ja_s4_guardian.rs linux on-demand # C5 fix4 non-dumpable namespace init and /proc/1 probes; explicitly run in its gate
@@ -224,8 +220,6 @@ kinewright_agent writer_host::hooks_tests::tests::history_capacity_1200_lifecycl
 
 history_fix2_cost history_fix2_startup_sample crates/kinewright-agent/tests/history_fix2_cost.rs linux on-demand # Alternating debug host startup probe at 4000 and 12000 edits; actual five-second launch limit and exact history comparison
 history_fix2_cost history_fix2_edit_and_save_sample crates/kinewright-agent/tests/history_fix2_cost.rs linux on-demand # Debug manual admission and changed publication timing at 1000 and 12000 edits
-manual_history_capacity manual_history_heavy_copy_capacity_census crates/kinewright-project/tests/manual_history_capacity.rs linux on-demand # Exact ordinary heavy-copy peak and largest accepted fanout measurement
-
 kinewright_media recognizer::real::dq1_real_ami_short_keeps_um_and_known_words crates/kinewright-media/src/recognizer/real.rs any on-demand  # pinned EN model; explicitly run in the recognition slow job
 
 kinewright_media recognizer::real::dq1_real_ami8_whole_equals_pause_commits crates/kinewright-media/src/recognizer/real.rs any on-demand  # pinned EN model and KINEWRIGHT_ASR_AMI8 fixture
@@ -244,3 +238,6 @@ kinewright_media sound_profile::recognition_benchmark::dq_media_recognition_and_
 kinewright_agent server::tests::dialogue_tool_tests::dq_tools_review_scratch_cost crates/kinewright-agent/src/dialogue_tools_review_tests.rs any on-demand # Dialogue planner timing on a 3000-clip document and all 512 failed trials
 
 kinewright_agent server::tests::dialogue_rehearsal_tests::dq_media_real_recording_rehearsal crates/kinewright-agent/src/dialogue_rehearsal_tests.rs any on-demand # explicit AMI audio, pinned EN model, private data and output roots; no downloads
+
+kinewright_project operation_history::sizing_tests::two_thousand_four_track_removals_fit_one_task_and_its_merges crates/kinewright-project/src/operation_history/sizing_tests.rs any on-demand  # release qualification of the fixed 2000-removal task and both merge legs
+kinewright_project operation_history::stored::codec_tests::spare_baseline_capacity_preserves_save_open_and_fresh_merge_fit crates/kinewright-project/src/operation_history/stored_codec_tests.rs any on-demand  # release qualification of baseline allocation shape across a long split stream

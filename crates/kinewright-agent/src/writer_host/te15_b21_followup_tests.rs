@@ -43,7 +43,7 @@ mod tests {
                 scope: brief.scope.clone(),
             }
             .validate_batch(
-                &b.core.export_history().unwrap().document,
+                &b.core.export_history().unwrap().history().document,
                 std::slice::from_ref(&operation),
             )
             .expect("FOL_LEGACY_ALLOWED_BASELINE");
@@ -85,7 +85,7 @@ mod tests {
         let added = b.core.export_history().unwrap();
         let r = step(&b, false);
         assert_eq!(r.is_error, Some(false), "FOL_HISTORY_ALLOWED {r:?}");
-        assert_eq!(b.core.export_history().unwrap().document, initial.document);
+        assert_eq!(b.core.export_history().unwrap().history().document, initial.history().document);
         let page = b201_page(&b.f, &b.run);
         assert!(
             page.edit_approvals
@@ -95,7 +95,7 @@ mod tests {
         );
         let r = step(&b, true);
         assert_eq!(r.is_error, Some(false), "FOL_REDO_ALLOWED {r:?}");
-        assert_eq!(b.core.export_history().unwrap().document, added.document);
+        assert_eq!(b.core.export_history().unwrap().history().document, added.history().document);
         let state = b.f.projection(&b.run);
         let owner = b.f.host.owner.upgrade().unwrap();
         let mut host = owner.lock().unwrap();
@@ -136,7 +136,7 @@ mod tests {
             b.core
                 .export_history()
                 .unwrap()
-                .document
+                .history().document
                 .tracks
                 .iter()
                 .any(|t| t.id.0 == 88),
@@ -148,7 +148,7 @@ mod tests {
     ) -> (
         B21,
         rmcp::model::CallToolResult,
-        kinewright_core::HistorySnapshot,
+        kinewright_project::operation_history::OwnerSnapshot,
     ) {
         let b = b21_start();
         let before = b.core.export_history().unwrap();
@@ -217,7 +217,7 @@ mod tests {
         assert!(!page.edit_approvals[0].applied, "FOL_NOT_APPLIED");
         assert!(b.f.projection(&b.run).edit_applications.is_empty());
         assert_eq!(
-            b.core.export_history().unwrap().document.tracks[0]
+            b.core.export_history().unwrap().history().document.tracks[0]
                 .clips
                 .len(),
             3
@@ -464,7 +464,7 @@ mod tests {
             &b,
             &serde_json::json!([{"op":"split_clip","clip":3,"at":25},{"op":"delete_clip","clip":4},{"op":"trim_clip","clip":3,"new_source":{"start":0,"end":10}}]),
         );
-        assert_eq!(b.core.export_history().unwrap().document, before.document);
+        assert_eq!(b.core.export_history().unwrap().history().document, before.history().document);
         assert!(
             b.f.projection(&b.run).edit_approvals.is_empty(),
             "B2B_NO_ZERO_APPROVAL"
@@ -538,7 +538,7 @@ mod tests {
             "B2B_SUCCESS_SURVIVES_AUDIT_FAILURE {result:?}"
         );
         assert_eq!(
-            b.core.export_history().unwrap().document.tracks[0]
+            b.core.export_history().unwrap().history().document.tracks[0]
                 .clips
                 .len(),
             1

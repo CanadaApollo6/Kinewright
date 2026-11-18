@@ -1,6 +1,7 @@
 #![cfg(all(feature = "test-util", target_os = "linux"))]
-use kinewright_core::{Command, Core, Event, Operation, TimeCode, TrackId};
+use kinewright_core::{Command, Event, Operation, TimeCode, TrackId};
 use kinewright_media::test_support::TempDirectory;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{LoadedBundle, ProjectBundle},
     bundle_records::{BranchId, ObjectRef, RecordKind},
@@ -68,12 +69,21 @@ fn publish(b: &mut ProjectBundle, branch: &BranchId) -> SnapshotKey {
 }
 fn feedback(b: &mut ProjectBundle, key: SnapshotKey, clip: kinewright_core::ClipId) -> ObjectRef {
     let snapshot = b.read_snapshot(&key).unwrap();
-    let lineage = b
+    let checkpoint = b
         .store()
-        .read_record::<kinewright_project::bundle_records::LineageRecord>(
-            &snapshot.descriptor.lineage_ref,
+        .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(
+            &snapshot.descriptor.checkpoint_ref,
         )
         .unwrap();
+    let reader = checkpoint
+        .open(b.store(), b.history_pool())
+        .unwrap()
+        .into_reader()
+        .unwrap();
+    let depth = reader.history().undo().len();
+    let lineage = reader.into_boundary(depth).unwrap();
+    let occurrence = lineage.lineage().occurrences[&clip].clone();
+    drop(lineage);
     let text = blob(b, b"move this chart");
     let strokes = blob(b, b"[[0.25,0.75]]");
     let proof = blob(b, b"original frame six");
@@ -92,7 +102,7 @@ fn feedback(b: &mut ProjectBundle, key: SnapshotKey, clip: kinewright_core::Clip
             orientation: Orientation::Upright,
             target: Some(FeedbackTarget {
                 local_clip_id: clip,
-                occurrence_id: Some(lineage.current[&clip].clone()),
+                occurrence_id: Some(occurrence),
                 local_frame: Some(6),
             }),
             source_ref: None,
@@ -142,15 +152,20 @@ impl FeedbackBeatOwner for Beats {
 fn s3_old_feedback_reverse_split_ancestry() {
     let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "s3-reverse-split");
     let [fixture, _] = build_c0_fixture_pair(temp.root()).unwrap();
-    let mut owner = LoadedBundle::read(&fixture.path)
-        .unwrap()
-        .into_writer()
-        .unwrap();
+    let mut owner = LoadedBundle::read(
+        &fixture.path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
     let branch = owner.manual_branch_id().clone();
     let baseline = owner.branch_history(&branch).unwrap();
-    let parent = baseline.document.tracks[0].clips[0].id;
-    let core = Core::spawn((*baseline.document).clone()).unwrap();
-    core.restore_history((*baseline).clone()).unwrap();
+    let parent = baseline.history().document().tracks[0].clips[0].id;
+    drop(baseline);
+    let core = open_branch(&owner, &branch);
     apply(
         &core,
         Operation::SplitClip {
@@ -160,13 +175,14 @@ fn s3_old_feedback_reverse_split_ancestry() {
     );
     owner.save_branch(&branch, &core).unwrap();
     let split = owner.branch_history(&branch).unwrap();
-    let child = split.document.tracks[0]
+    let child = split.history().document().tracks[0]
         .clips
         .iter()
         .find(|clip| clip.timeline_start == TimeCode(6))
         .unwrap()
         .id;
     assert_ne!(parent, child);
+    drop(split);
     let key = publish(&mut owner, &branch);
     let original = feedback(&mut owner, key, child);
     core.request(Command::Undo).unwrap();
@@ -209,14 +225,19 @@ fn s3_old_feedback_reverse_split_ancestry() {
 fn s3_old_feedback_mapping() {
     let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "s3-lineage");
     let [fixture, _other] = build_c0_fixture_pair(temp.root()).unwrap();
-    let mut b = LoadedBundle::read(&fixture.path)
-        .unwrap()
-        .into_writer()
-        .unwrap();
+    let mut b = LoadedBundle::read(
+        &fixture.path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
     let manual = b.manual_branch_id().clone();
     let baseline = b.branch_history(&manual).unwrap();
-    let clip = baseline.document.tracks[0].clips[0].id;
-    let asset = baseline.document.tracks[0].clips[0].asset;
+    let clip = baseline.history().document().tracks[0].clips[0].id;
+    let asset = baseline.history().document().tracks[0].clips[0].asset;
     let key = publish(&mut b, &manual);
     let original = feedback(&mut b, key, clip);
     let original_bytes = b
@@ -228,10 +249,11 @@ fn s3_old_feedback_mapping() {
     let branch = b
         .fork_branch(
             &manual,
-            kinewright_project::history_record::HistoryRole::Ordinary,
+            kinewright_project::operation_history::Role::Ordinary,
         )
         .unwrap();
-    let core = Core::spawn((*baseline.document).clone()).unwrap();
+    drop(baseline);
+    let core = open_branch(&b, &branch);
     let exact = b
         .resolve_feedback(&request(&b, &original, &branch), None)
         .unwrap();
@@ -299,13 +321,14 @@ fn s3_old_feedback_mapping() {
             .candidates,
         split.candidates
     );
+    drop(core);
     let geometry_branch = b
         .fork_branch(
             &manual,
-            kinewright_project::history_record::HistoryRole::Ordinary,
+            kinewright_project::operation_history::Role::Ordinary,
         )
         .unwrap();
-    let geometry_core = Core::spawn((*baseline.document).clone()).unwrap();
+    let geometry_core = open_branch(&b, &geometry_branch);
     let transform: kinewright_core::Effect = serde_json::from_value(serde_json::json!({
         "id": 100, "name": "transform", "parameters": {},
         "keyframes": { "scale_percent": { "keyframes": [
@@ -369,17 +392,23 @@ fn s3_old_feedback_mapping() {
         (TemporalStatus::Exact, SpatialStatus::Unresolved)
     );
 
+    drop(geometry_core);
     let sibling = b
         .fork_branch(
             &manual,
-            kinewright_project::history_record::HistoryRole::Ordinary,
+            kinewright_project::operation_history::Role::Ordinary,
         )
         .unwrap();
-    let recreated = Core::spawn((*baseline.document).clone()).unwrap();
-    for track in &baseline.document.tracks {
-        for old in &track.clips {
-            apply(&recreated, Operation::DeleteClip { clip: old.id });
-        }
+    let recreated = open_branch(&b, &sibling);
+    let clips: Vec<_> = recreated
+        .baseline_document()
+        .unwrap()
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter().map(|clip| clip.id))
+        .collect();
+    for clip in &clips {
+        apply(&recreated, Operation::DeleteClip { clip: *clip });
     }
     apply(
         &recreated,
@@ -392,7 +421,14 @@ fn s3_old_feedback_mapping() {
     );
     b.save_branch(&sibling, &recreated).unwrap();
     assert_eq!(
-        recreated.export_history().unwrap().document.tracks[0].clips[0].id,
+        recreated
+            .export_history()
+            .unwrap()
+            .history()
+            .document
+            .tracks[0]
+            .clips[0]
+            .id,
         clip
     );
     let removed = b
@@ -407,10 +443,25 @@ fn s3_old_feedback_mapping() {
     let other_sibling = b
         .fork_branch(
             &manual,
-            kinewright_project::history_record::HistoryRole::Ordinary,
+            kinewright_project::operation_history::Role::Ordinary,
         )
         .unwrap();
-    b.save_branch(&other_sibling, &recreated).unwrap();
+    drop(recreated);
+    let independent = open_branch(&b, &other_sibling);
+    for clip in clips {
+        apply(&independent, Operation::DeleteClip { clip });
+    }
+    apply(
+        &independent,
+        Operation::AddClip {
+            track: TrackId(1),
+            asset,
+            at: TimeCode::ZERO,
+            source: TimeCode::ZERO..TimeCode(12),
+        },
+    );
+    b.save_branch(&other_sibling, &independent).unwrap();
+    drop(independent);
     let collision = b
         .resolve_feedback(&request(&b, &sibling_feedback, &other_sibling), None)
         .unwrap();
@@ -482,14 +533,18 @@ fn s3_old_feedback_mapping_take_replacement_and_removal() {
     use kinewright_project::editing_session::Ja1EditingSession;
     let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "s3-take-mapping");
     let [fixture, _other] = build_c0_fixture_pair(temp.root()).unwrap();
-    let mut b = LoadedBundle::read(&fixture.path)
-        .unwrap()
-        .into_writer()
-        .unwrap();
+    let mut b = LoadedBundle::read(
+        &fixture.path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
     let manual = b.manual_branch_id().clone();
-    let core = Core::spawn(kinewright_core::Document::default()).unwrap();
-    core.restore_history(fixture.history).unwrap();
-    let clip = core.export_history().unwrap().document.tracks[0].clips[0].id;
+    let core = open_branch(&b, &manual);
+    let clip = core.export_history().unwrap().history().document.tracks[0].clips[0].id;
     let key = publish(&mut b, &manual);
     let original = feedback(&mut b, key, clip);
     let inputs = b.checkpoint(&manual).unwrap().input_manifest_ref.clone();
@@ -539,10 +594,15 @@ fn s3_old_feedback_mapping_take_replacement_and_removal() {
     session.save_active().unwrap();
     drop(session);
     drop(core);
-    let mut b = LoadedBundle::read(&fixture.path)
-        .unwrap()
-        .into_writer()
-        .unwrap();
+    let mut b = LoadedBundle::read(
+        &fixture.path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
     let manual = b.manual_branch_id().clone();
     let mut target = request(&b, &original, &manual);
     assert_eq!(
@@ -568,11 +628,11 @@ fn s3_old_feedback_mapping_take_replacement_and_removal() {
     let branch = b
         .fork_branch(
             &manual,
-            kinewright_project::history_record::HistoryRole::Ordinary,
+            kinewright_project::operation_history::Role::Ordinary,
         )
         .unwrap();
-    let document = b.branch_history(&manual).unwrap().document.clone();
-    let removed = Core::spawn((*document).clone()).unwrap();
+    let document = std::sync::Arc::clone(b.branch_history(&manual).unwrap().history().document());
+    let removed = Core::for_test((*document).clone()).unwrap();
     apply(&removed, Operation::DeleteClip { clip });
     b.save_branch(&branch, &removed).unwrap();
     let resolution = b
@@ -612,52 +672,77 @@ fn compact_lineage_keeps_original_occurrences_when_a_clip_id_is_reused() {
         color: SolidColor { r: red, g: 0, b: 0 },
     };
     solid(0).apply(&mut document).unwrap();
-    let core = Core::spawn(document).unwrap();
-    let mut owner = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let core = Core::for_test(document).unwrap();
+    let mut owner = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let inputs = owner.empty_inputs().unwrap();
     owner.save(&core, &inputs.reference).unwrap();
     let branch = owner.manual_branch_id().clone();
     let clip = kinewright_core::ClipId(1);
-    let original = owner.branch_lineage(&branch).unwrap().current[&clip].clone();
+    let original = owner.branch_lineage(&branch).unwrap().lineage().occurrences[&clip].clone();
     apply(&core, Operation::DeleteClip { clip });
     apply(&core, solid(255));
     owner.save(&core, &inputs.reference).unwrap();
-    let recreated = owner.branch_lineage(&branch).unwrap().current[&clip].clone();
+    let recreated = owner.branch_lineage(&branch).unwrap().lineage().occurrences[&clip].clone();
     assert_ne!(
         recreated, original,
         "REUSED_CLIP_GETS_A_DISTINCT_OCCURRENCE"
     );
-    assert_eq!(
-        recreated.creation_batch_id,
-        owner.checkpoint(&branch).unwrap().batch_ids[1]
-    );
     core.request(Command::Undo).unwrap();
     owner.save(&core, &inputs.reference).unwrap();
     let expected = owner.branch_lineage(&branch).unwrap();
-    assert_eq!(expected.baseline[&clip], original);
-    assert_eq!(expected.redo[0][&clip], recreated);
-    let wire = serde_json::to_vec(&*expected).unwrap();
-    let restored: kinewright_project::bundle_records::LineageRecord =
+    assert!(!expected.lineage().occurrences.contains_key(&clip));
+    let baseline = core.boundary(0).unwrap();
+    assert_eq!(baseline.lineage().occurrences[&clip], original);
+    let wire = serde_json::to_vec(baseline.lineage()).unwrap();
+    let restored: kinewright_project::operation_history::Lineage =
         serde_json::from_slice(&wire).unwrap();
-    assert_eq!(&restored, &*expected);
+    assert_eq!(&restored, baseline.lineage());
+    drop(baseline);
     let expected_history = core.export_history().unwrap();
     drop(expected);
     drop(inputs);
     drop(owner);
-    let loaded = LoadedBundle::read(&path).unwrap();
-    let resumed = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&resumed).unwrap();
-    assert_eq!(resumed.export_history().unwrap(), expected_history);
-    let mut owner = loaded.into_writer().unwrap();
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let resumed = loaded.open_manual().unwrap();
     assert_eq!(
-        owner.branch_lineage(&branch).unwrap().redo[0][&clip],
-        recreated
+        resumed.snapshot_identity().unwrap(),
+        expected_history.identity().unwrap()
+    );
+    let mut owner = loaded.into_writer().unwrap();
+    assert!(
+        !owner
+            .branch_lineage(&branch)
+            .unwrap()
+            .lineage()
+            .occurrences
+            .contains_key(&clip)
     );
     resumed.request(Command::Redo).unwrap();
     let inputs = owner.empty_inputs().unwrap();
     owner.save(&resumed, &inputs.reference).unwrap();
     assert_eq!(
-        owner.branch_lineage(&branch).unwrap().current[&clip],
+        owner.branch_lineage(&branch).unwrap().lineage().occurrences[&clip],
         recreated
     );
+}
+
+fn open_branch(b: &ProjectBundle, branch: &BranchId) -> Core {
+    let checkpoint = b.checkpoint(branch).unwrap();
+    Core::open(
+        checkpoint.open(b.store(), b.history_pool()).unwrap(),
+        branch.clone(),
+        checkpoint.revision,
+    )
+    .unwrap()
 }

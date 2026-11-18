@@ -562,7 +562,7 @@ fn b201_receipt_check(mode: &str) {
     let ReceiptLookup::Committed(mut receipt) = owner
         .owner()
         .unwrap()
-        .manual_transition_receipt(&envelope)
+        .command_receipt(&envelope)
         .unwrap()
     else {
         panic!("committed")

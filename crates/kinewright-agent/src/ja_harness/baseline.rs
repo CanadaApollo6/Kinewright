@@ -8,8 +8,9 @@ use std::{
 };
 
 use kinewright_core::{
-    Command, Core, Document, Event, JournalCommand, Query, QueryResult, TimelineRevision,
+    Command, Document, Event, JournalCommand, Query, QueryResult, TimelineRevision,
 };
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     ProjectFile, io_observer, load_document, serialize_project_document, write_project_document,
 };
@@ -19,6 +20,7 @@ use super::protocol::{Call, CurrentQuery, LoadedFixture, unique_json};
 use crate::TimelineBranch;
 
 pub struct Baseline {
+    pub pool: kinewright_project::operation_history::HistoryPool,
     pub core: Option<Core>,
     branches: BTreeMap<String, TimelineBranch>,
     pub root: PathBuf,
@@ -31,6 +33,9 @@ impl Baseline {
     pub fn new(root: &Path) -> Result<Self, String> {
         fs::create_dir_all(root).map_err(|e| e.to_string())?;
         Ok(Self {
+            pool: kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
             core: None,
             branches: BTreeMap::new(),
             root: root.to_path_buf(),
@@ -38,6 +43,26 @@ impl Baseline {
             server: None,
             media: None,
         })
+    }
+
+    pub(super) fn recorded_core(
+        &self,
+        document: Document,
+        revision: TimelineRevision,
+    ) -> Result<Core, String> {
+        Core::spawn_recording_at_revision(
+            &self.pool,
+            kinewright_project::operation_history::Role::Ordinary,
+            kinewright_project::operation_history::CreationOrigin {
+                branch: kinewright_project::bundle_records::BranchId::fresh()
+                    .map_err(|error| error.to_string())?,
+                batch: kinewright_project::bundle_records::BatchId::fresh()
+                    .map_err(|error| error.to_string())?,
+            },
+            document,
+            revision,
+        )
+        .map_err(|error| error.to_string())
     }
 
     pub fn core(&self) -> Result<&Core, String> {
@@ -152,10 +177,11 @@ impl Baseline {
                     None => Document::default(),
                     Some(role) => parse_project(fixture, role)?.document,
                 };
-                self.core = Some(
-                    Core::spawn_at(document, TimelineRevision(fixture.fixture.initial.revision))
-                        .map_err(|e| e.to_string())?,
-                );
+                self.core =
+                    Some(self.recorded_core(
+                        document,
+                        TimelineRevision(fixture.fixture.initial.revision),
+                    )?);
                 self.history()
             }
             Call::CoreSend(args) => {
@@ -200,26 +226,21 @@ impl Baseline {
                     Ok(json!({"revision":revision,"document":document}))
                 }
                 CurrentQuery::AppliedOperations | CurrentQuery::OpLog => {
-                    let query = if matches!(args.query, CurrentQuery::AppliedOperations) {
-                        Query::AppliedOperations
-                    } else {
-                        Query::OpLog
-                    };
-                    Ok(event_value(
-                        self.target(args.branch.as_deref())?
-                            .request(Command::Query(query))
-                            .map_err(|e| e.to_string())?,
-                    ))
+                    let recorded = matches!(args.query, CurrentQuery::OpLog);
+                    let operations = self
+                        .target(args.branch.as_deref())?
+                        .operations(recorded)
+                        .map_err(|error| error.to_string())?;
+                    Ok(json!({"operations":operations}))
                 }
             },
             Call::BranchCreate(args) => {
                 if self.branches.len() >= 64 || self.branches.contains_key(&args.name) {
                     return Err("duplicate/too many branches".into());
                 }
-                let (revision, document) = self.snapshot()?;
                 self.branches.insert(
                     args.name.clone(),
-                    TimelineBranch::new(args.name.as_str(), revision, document)
+                    TimelineBranch::fork(args.name.as_str(), self.core()?, true)
                         .map_err(|e| e.to_string())?,
                 );
                 self.branch(&args.name)
@@ -436,7 +457,7 @@ impl Baseline {
                 let same_document = before
                     .as_ref()
                     .is_some_and(|(_, before)| **before == document);
-                self.core = Some(Core::spawn(document).map_err(|e| e.to_string())?);
+                self.core = Some(self.recorded_core(document, TimelineRevision::default())?);
                 Ok(
                     json!({"loaded":true,"read_version":version,"can_overwrite":true,
                     "same_document":same_document,"writer_round_trip_equal":serialized.as_bytes() == raw,
@@ -457,8 +478,10 @@ impl Drop for Baseline {
 }
 
 pub(super) fn history_value(core: &Core) -> Result<Value, String> {
-    let history = core.observe_history().map_err(|e| e.to_string())?;
-    Ok(json!({"undo_count":history.undo.len(),"redo_count":history.redo.len(),"trace":history}))
+    let history = core.export_history().map_err(|e| e.to_string())?;
+    Ok(
+        json!({"undo_count":history.history().undo.len(),"redo_count":history.history().redo.len(),"trace":history}),
+    )
 }
 
 fn parse_project(fixture: &LoadedFixture, role: &str) -> Result<ProjectFile, String> {
@@ -490,9 +513,6 @@ fn event_value(event: Event) -> Value {
             ..
         } => {
             json!({"accepted":true,"revision":revision,"document":doc,"journal_command":journal_command})
-        }
-        Event::QueryResult(QueryResult::AppliedOperations(ops) | QueryResult::OpLog(ops)) => {
-            json!({"operations":ops})
         }
         other => json!({"accepted":false,"event":format!("{other:?}")}),
     }

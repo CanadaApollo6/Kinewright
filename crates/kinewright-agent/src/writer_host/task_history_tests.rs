@@ -114,7 +114,7 @@ fn s4b_c3b_exact_task_history_continues_restarts_merges_and_stops() {
         owner.owner_mut().unwrap().save_active().unwrap();
         owner.core().export_history().unwrap()
     };
-    assert!(!manual.cursor.redo.is_empty());
+    assert!(!manual.history().redo.is_empty());
     let start = f.start();
     let run: RunId = start.envelope.identity("run").unwrap();
     let claim = crate::execution_claim::MachineClaim::acquire_fixture(
@@ -129,7 +129,7 @@ fn s4b_c3b_exact_task_history_continues_restarts_merges_and_stops() {
         let _gate = first_endpoint.admit().unwrap();
         first_endpoint
             .validate_batch(
-                &core.export_history().unwrap().document,
+                &core.export_history().unwrap().history().document,
                 std::slice::from_ref(&operation),
             )
             .unwrap();
@@ -137,7 +137,7 @@ fn s4b_c3b_exact_task_history_continues_restarts_merges_and_stops() {
     }
     core.request(Command::Undo).unwrap();
     let expected = core.export_history().unwrap();
-    assert!(!expected.cursor.redo.is_empty());
+    assert!(!expected.history().redo.is_empty());
     let saved = {
         let producer = f.producer(&run);
         f.host
@@ -279,7 +279,17 @@ fn s4b_c3b_exact_task_history_continues_restarts_merges_and_stops() {
         fourth_endpoint.admit().is_err(),
         "C3_FROZEN_ATTEMPT_STAYS_CLOSED"
     );
-    assert_eq!(fourth_core.export_history().unwrap(), expected);
+    assert!(matches!(fourth_core.export_history(), Err(kinewright_project::operation_actor::Error::Retired)),
+        "SETTLED_TASK_RELEASES_ITS_RESIDENT_HISTORY_LEASE");
+    let cold = {
+        let host = f.host.owner.upgrade().unwrap();
+        let owner = host.lock().unwrap();
+        let store = owner.owner().unwrap().store().unwrap();
+        let checkpoint = store.read_record::<kinewright_project::bundle_records::BranchCheckpoint>(&merged.source.checkpoint).unwrap();
+        checkpoint.open(store, fourth_core.history_pool()).unwrap().into_reader().unwrap().into_capture().unwrap()
+    };
+    assert_eq!(cold, expected, "SETTLED_TASK_REOPENS_ITS_EXACT_SAVED_OWNER");
+    drop(cold);
     drop(third_core);
     drop(fourth_core);
     drop(claim);
@@ -334,7 +344,7 @@ fn s4b_c3b_exact_task_history_continues_restarts_merges_and_stops() {
     drop(fifth_core);
     let Fixture { host, temp, .. } = f;
     drop(host);
-    let mut owner = Ja1EditingSession::open(&temp.path("project.kinewright")).unwrap();
+    let mut owner = Ja1EditingSession::open(&temp.path("project.kinewright"), &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
     assert_eq!(
         owner.core().export_history().unwrap(),
         manual,
@@ -367,7 +377,7 @@ fn s4b_c3b_exact_task_history_continues_restarts_merges_and_stops() {
     );
     assert_eq!(
         owner
-            .manual_transition_receipt(final_record.merge_envelope.as_ref().unwrap())
+            .command_receipt(final_record.merge_envelope.as_ref().unwrap())
             .unwrap(),
         receipt
     );

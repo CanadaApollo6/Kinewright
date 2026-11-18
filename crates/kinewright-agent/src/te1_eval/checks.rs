@@ -1,16 +1,21 @@
 //! Behavior checks over the durable output, production preview and exported PCM.
+#[cfg(any(target_os = "linux", test))]
+use super::error;
 #[cfg(target_os = "linux")]
-use super::{Call, Trace, error, fixtures};
+use super::{Call, Trace, fixtures};
 #[cfg(target_os = "linux")]
-use kinewright_core::{
-    Core, Document, Export, ExportCancellation, ExportSettings, Playback, TimeCode,
-};
+use kinewright_core::{Document, Export, ExportCancellation, ExportSettings, Playback, TimeCode};
+#[cfg(target_os = "linux")]
+use kinewright_project::operation_history::{HistoryPool, SnapshotTransport};
+#[cfg(any(target_os = "linux", test))]
+use kinewright_project::{operation_actor::Core, operation_history::SnapshotIdentity};
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
 use serde_json::Value;
+#[cfg(any(target_os = "linux", test))]
+use std::io;
 #[cfg(target_os = "linux")]
 use std::{
-    io,
     path::Path,
     sync::Arc,
     time::{Duration, Instant},
@@ -51,10 +56,20 @@ pub(super) fn verify(
     folder: &Path,
     case: u8,
     data: &Value,
-    actual: &Document,
-    history: &Value,
+    history: &SnapshotTransport,
+    pool: &HistoryPool,
     trace: &Trace,
 ) -> io::Result<Correctness> {
+    let core = Core::open(
+        history
+            .validate_shared(pool, history.role())
+            .map_err(error)?,
+        kinewright_project::bundle_records::BranchId::fresh().map_err(error)?,
+        kinewright_core::TimelineRevision(0),
+    )
+    .map_err(error)?;
+    let original_state = core.export_history().map_err(error)?;
+    let actual = original_state.history().document.as_ref();
     let mut oracle = kinewright_project::load_document(
         &fixtures().join(format!("case-{case}-oracle.kinewright")),
     )
@@ -89,9 +104,6 @@ pub(super) fn verify(
     let original = kinewright_project::load_document(&fixtures().join("talking-head.kinewright"))
         .map_err(error)?
         .0;
-    let history: kinewright_core::HistorySnapshot =
-        serde_json::from_value(history.clone()).map_err(error)?;
-    let (history_reopened, task_undo_redo) = histories(actual, &history, data)?;
     let clip = |document: &Document, id: u64| {
         document
             .tracks
@@ -130,9 +142,12 @@ pub(super) fn verify(
             a.pointer(&path).unwrap_or(&Value::Null)
         )
     });
+    let document = actual == &oracle;
+    drop(original_state);
+    let (history_reopened, task_undo_redo) = histories(&core, history.identity())?;
     Ok(Correctness {
+        document,
         document_difference,
-        document: actual == &oracle,
         history_reopened,
         task_undo_redo,
         unrelated_clips,
@@ -144,34 +159,193 @@ pub(super) fn verify(
         pcm_samples,
     })
 }
-#[cfg(target_os = "linux")]
-fn histories(
-    actual: &Document,
-    history: &kinewright_core::HistorySnapshot,
-    _data: &Value,
-) -> io::Result<(bool, bool)> {
-    let reopened = Core::spawn(std::sync::Arc::clone(&history.baseline)).map_err(error)?;
-    reopened.restore_history(history.clone()).map_err(error)?;
-    let history_reopened =
-        reopened.export_history().map_err(error)? == *history && *history.document == *actual;
-    for _ in &history.cursor.undo {
-        reopened
-            .request(kinewright_core::Command::Undo)
+#[cfg(any(target_os = "linux", test))]
+fn histories(core: &Core, expected: SnapshotIdentity) -> io::Result<(bool, bool)> {
+    let history_reopened = core.snapshot_identity().map_err(error)? == expected;
+    let before = replay_state(core)?;
+    for _ in 0..before.undo_steps {
+        core.request(kinewright_core::Command::Undo)
             .map_err(error)?;
     }
-    let undone = reopened.export_history().map_err(error)?;
-    let undo_ok = undone.document == history.baseline && undone.cursor.undo.is_empty();
-    for _ in &history.cursor.undo {
-        reopened
-            .request(kinewright_core::Command::Redo)
+    let undone = replay_state(core)?;
+    let undo_ok = undone.document == before.baseline
+        && undone.undo_steps == 0
+        && undone.redo_steps == before.undo_steps + before.redo_steps;
+    for _ in 0..before.undo_steps {
+        core.request(kinewright_core::Command::Redo)
             .map_err(error)?;
     }
-    let redone = reopened.export_history().map_err(error)?;
-    let task_undo_redo = !history.cursor.undo.is_empty()
+    let transitions = u64::try_from(before.undo_steps)
+        .map_err(error)?
+        .checked_mul(2)
+        .ok_or_else(|| error("replay position overflow"))?;
+    let task_undo_redo = before.undo_steps > 0
         && undo_ok
-        && redone.document == history.document
-        && redone.cursor == history.cursor;
+        && before.advanced(transitions) == Some(replay_state(core)?);
     Ok((history_reopened, task_undo_redo))
+}
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReplayState {
+    content: [u8; 32],
+    baseline: [u8; 32],
+    document: [u8; 32],
+    position: u64,
+    pub(crate) undo_steps: usize,
+    pub(crate) redo_steps: usize,
+}
+#[cfg(any(target_os = "linux", test))]
+impl ReplayState {
+    pub(crate) fn advanced(self, transitions: u64) -> Option<Self> {
+        Some(Self {
+            position: self.position.checked_add(transitions)?,
+            ..self
+        })
+    }
+}
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn replay_state(core: &Core) -> io::Result<ReplayState> {
+    let capture = core.export_history().map_err(error)?;
+    let kinewright_core::undo::Record {
+        baseline,
+        document,
+        undo,
+        redo,
+        position,
+        epoch,
+        policy,
+    } = capture.history();
+    Ok(ReplayState {
+        content: fingerprint(&(baseline, document, undo, redo, epoch, policy))?,
+        baseline: fingerprint(baseline)?,
+        document: fingerprint(document)?,
+        position: *position,
+        undo_steps: undo.len(),
+        redo_steps: redo.len(),
+    })
+}
+#[cfg(any(target_os = "linux", test))]
+fn fingerprint(value: &impl Serialize) -> io::Result<[u8; 32]> {
+    struct Writer(kinewright_hash::Sha256);
+    impl io::Write for Writer {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = Writer(kinewright_hash::Sha256::new());
+    serde_json::to_writer(&mut writer, value)?;
+    Ok(writer.0.finalize())
+}
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+    use kinewright_core::{
+        Command, Document, Operation, TimelineRevision, Track, TrackId, TrackKind,
+    };
+    use kinewright_project::{
+        bundle_records::{BatchId, BranchId},
+        operation_actor::CommandContext,
+        operation_history::{CreationOrigin, HistoryPool, PoolLimits, Role},
+    };
+
+    fn populated(pool: &HistoryPool) -> Core {
+        let core = Core::spawn(
+            pool,
+            Role::Task,
+            CreationOrigin {
+                branch: BranchId::fresh().unwrap(),
+                batch: BatchId::fresh().unwrap(),
+            },
+            Document {
+                tracks: vec![Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: false,
+                    clips: vec![],
+                }],
+                ..Document::default()
+            },
+        )
+        .unwrap();
+        for locked in [true, false] {
+            core.request_with_context(
+                Command::DoBatchCoalesced {
+                    operations: vec![Operation::SetTrackSyncLock {
+                        track: TrackId(1),
+                        locked,
+                    }],
+                    coalesce_key: "evaluation gesture".into(),
+                },
+                CommandContext {
+                    creation: CreationOrigin {
+                        branch: core.creation_branch().unwrap(),
+                        batch: BatchId::fresh().unwrap(),
+                    },
+                    inputs: vec![],
+                    approval: None,
+                    transition: None,
+                },
+            )
+            .unwrap();
+        }
+        core.request(Command::Do(Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: true,
+        }))
+        .unwrap();
+        core.request(Command::Undo).unwrap();
+        core
+    }
+
+    #[test]
+    fn native_evaluation_replays_coalesced_commands_and_preserves_a_live_redo_tail() {
+        let pool = HistoryPool::new(PoolLimits::default());
+        let source = populated(&pool);
+        let expected = source.snapshot_identity().unwrap();
+        let capture = source.export_history().unwrap();
+        assert_eq!(capture.history().undo[0].commands().len(), 2);
+        assert_eq!(capture.history().redo.len(), 1);
+        let transport = capture.into_transport().unwrap();
+        let scratch = Core::open(
+            transport.validate_shared(&pool, Role::Task).unwrap(),
+            BranchId::fresh().unwrap(),
+            TimelineRevision(0),
+        )
+        .unwrap();
+        assert_eq!(
+            histories(&scratch, expected).unwrap(),
+            (true, true),
+            "TE1_NATIVE_REPLAY_PRESERVES_REDO_AND_COMMAND_BOUNDARIES"
+        );
+        assert_eq!(
+            source.snapshot_identity().unwrap(),
+            expected,
+            "TE1_EVALUATION_NEVER_REPLAYS_THE_SOURCE_ACTOR"
+        );
+        assert_eq!(transport.identity(), expected);
+    }
+
+    #[test]
+    fn evaluation_reopen_requires_the_combined_owner_identity() {
+        let pool = HistoryPool::new(PoolLimits::default());
+        let first = populated(&pool);
+        let other = populated(&pool);
+        let expected = first.snapshot_identity().unwrap();
+        let actual = other.snapshot_identity().unwrap();
+        assert_eq!(
+            actual.core, expected.core,
+            "TE1_OWNER_IDENTITY_FIXTURE_SAME_CORE"
+        );
+        assert_ne!(actual.owner, expected.owner);
+        assert!(
+            !histories(&other, expected).unwrap().0,
+            "TE1_REOPEN_REQUIRES_THE_COMBINED_OWNER_IDENTITY"
+        );
+    }
 }
 #[cfg(target_os = "linux")]
 fn effective_merge_positions(calls: &[Call]) -> std::collections::BTreeSet<usize> {

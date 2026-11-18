@@ -1,5 +1,6 @@
 //! Durable production-import fixtures shared by the C0 and C2 witnesses.
 #![allow(clippy::missing_errors_doc)]
+use crate::operation_actor::Core;
 use crate::{
     bundle::{BundleError, BundleWriteAdmission, ProjectBundle},
     bundle_records::{ObjectRef, RecordKind},
@@ -7,14 +8,14 @@ use crate::{
     owned_inputs::{OwnedInputEntry, OwnedInputManifest, OwnedInputRef},
 };
 use kinewright_core::{
-    Command, Core, Document, Event, HistorySnapshot, LutAsset, LutAssetId, LutAssetKind,
-    LutAssetSource, Operation, TimeCode, Track, TrackId, TrackKind,
+    Command, Document, Event, LutAsset, LutAssetId, LutAssetKind, LutAssetSource, Operation,
+    TimeCode, Track, TrackId, TrackKind,
 };
 use std::path::{Path, PathBuf};
 
 pub struct C0FixtureSnapshot {
     pub path: PathBuf,
-    pub history: HistorySnapshot,
+    pub history: crate::operation_history::OwnerSnapshot,
     pub media: OwnedInputRef,
     pub table_ref: ObjectRef,
     pub lut_ref: ObjectRef,
@@ -101,8 +102,13 @@ fn build(
         "mkv",
     );
     let path = parent.join(format!("{label}.kinewright"));
-    let core = Core::spawn(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-    let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document())?;
+    let core =
+        Core::for_test(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+    let mut bundle = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )?;
     let mut lut =
         String::from("TITLE \"C0 landmark\"\nLUT_3D_SIZE 2\nDOMAIN_MIN 0 0 0\nDOMAIN_MAX 1 1 1\n");
     for b in 0..2 {
@@ -190,7 +196,7 @@ fn build(
     let history = session
         .core()
         .export_history()
-        .map_err(crate::bundle::history_error)?;
+        .map_err(crate::bundle::operation_error)?;
     let table_ref = media_entry.chunk_table_ref()?.clone();
     let media = OwnedInputRef {
         manifest_ref: inputs_ref,

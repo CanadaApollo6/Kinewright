@@ -1,13 +1,13 @@
 //! Read-only graph admission. Damaged roots/objects remain untouched for inspection.
 use crate::{
     bundle::{BundleError, BundleWriteAdmission, LoadedBundle, SupportInventory},
-    bundle_records::{BranchCheckpoint, BranchId, LineageRecord, ObjectRef, RecordKind},
+    bundle_records::{BranchCheckpoint, BranchId, ObjectRef, RecordKind},
     namespace::{PortablePath, ProjectNamespace},
     owned_inputs::OwnedInputManifest,
     storage_budget::{StorageLimits, StorageReservation, StorageUsage},
     store::{BundleRecord, ProjectStore, StoreManifest},
 };
-use kinewright_core::{Document, HistorySnapshot};
+use kinewright_core::Document;
 use serde::de::DeserializeOwned;
 use std::borrow::Borrow;
 use std::{
@@ -19,6 +19,7 @@ use std::{
 
 mod checkpoint;
 mod publication;
+pub(crate) use publication::{OwnerProof, ProjectionRef};
 mod restore;
 pub use checkpoint::{UndoHistoryUnavailable, VerifiedCheckpointRecovery};
 pub(crate) use publication::VerifiedIdentityMemo;
@@ -251,69 +252,59 @@ pub(crate) fn decode<T: DeserializeOwned>(
     fields: &mut BTreeSet<String>,
     limits: &StorageLimits,
 ) -> Result<StorageReservation<T>, BundleError> {
-    #[cfg(any(test, feature = "test-util"))]
-    if kind == RecordKind::History {
-        crate::io_observer::note_history_decode();
-    }
-    let scratch = StorageReservation::reserve(
+    decode_for_read(bytes, usage, kind, fields, limits, false)
+}
+fn decode_for_read<T: DeserializeOwned>(
+    bytes: &[u8],
+    usage: &Arc<Mutex<StorageUsage>>,
+    kind: RecordKind,
+    fields: &mut BTreeSet<String>,
+    limits: &StorageLimits,
+    retained: bool,
+) -> Result<StorageReservation<T>, BundleError> {
+    let scratch = StorageReservation::reserve_for_retained_read(
         usage,
         limits,
         0,
         limits.decoded_record_bytes,
-        0,
         false,
         u64::MAX,
+        retained,
     )?;
-    let wire_charge = crate::store::preflight_record(bytes, limits)?;
-    let charge = if kind == RecordKind::Lineage {
-        wire_charge
-            .checked_add(crate::lineage_journal::decode_live_bound(bytes)?)
-            .ok_or(BundleError::Capacity("lineage decode overflow"))?
+    if kind == RecordKind::OperationHistory {
+        let charge = crate::operation_history::stored::compact_decode_charge(bytes)?;
+        drop(scratch);
+        let (value, _shadow) = decoded_reservations_for_read(charge, usage, limits, retained)?;
+        let record =
+            serde_json::from_slice(bytes).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        return Ok(value.hold(record));
+    }
+    let wire_charge = if kind == RecordKind::Document {
+        crate::store::preflight_document_value(bytes, limits)?
     } else {
-        wire_charge
+        crate::store::preflight_record(bytes, limits)?
     };
+    let charge = wire_charge;
     drop(scratch);
-    let (value, shadow) = decoded_reservations(charge, kind, usage, limits)?;
+    let (value, shadow) = decoded_reservations_for_read(charge, usage, limits, retained)?;
+    let _parser = if kind == RecordKind::Document {
+        Some(StorageReservation::reserve_for_retained_read(
+            usage,
+            limits,
+            0,
+            2 * bytes.len() as u64,
+            false,
+            u64::MAX,
+            retained,
+        )?)
+    } else {
+        None
+    };
     let raw: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|e| BundleError::Corrupt(e.to_string()))?;
     support_semantics(&raw)?;
     let observed = match kind {
         RecordKind::Document => kinewright_core::document_support_fields(&raw),
-        RecordKind::History => kinewright_core::history_journal_support_fields(
-            raw.get("journal")
-                .ok_or_else(|| BundleError::Corrupt("missing history journal".into()))?,
-        ),
-        RecordKind::SpecialistBase => {
-            if let Some(operations) = raw
-                .get("full_applied_delta")
-                .and_then(serde_json::Value::as_array)
-            {
-                for operation in operations {
-                    fields.extend(
-                        kinewright_core::operation_support_fields(operation)
-                            .map_err(BundleError::Unsupported)?,
-                    );
-                }
-            }
-            Ok(BTreeSet::new())
-        }
-        RecordKind::Lineage => {
-            if let Some(ancestry) = raw
-                .get("split_ancestry")
-                .and_then(serde_json::Value::as_array)
-            {
-                for entry in ancestry {
-                    let clip = entry
-                        .get(2)
-                        .ok_or_else(|| BundleError::Corrupt("split ancestry tuple".into()))?;
-                    fields.extend(
-                        kinewright_core::clip_support_fields(clip)
-                            .map_err(BundleError::Unsupported)?,
-                    );
-                }
-            }
-            Ok(BTreeSet::new())
-        }
         _ => Ok(BTreeSet::new()),
     }
     .map_err(BundleError::Unsupported)?;
@@ -360,7 +351,6 @@ fn validate_switch_receipts(
 }
 fn check_encoded_record(reference: &ObjectRef, limits: &StorageLimits) -> Result<(), BundleError> {
     let cap = match reference.record_kind {
-        RecordKind::History => limits.branch_history_bytes,
         RecordKind::RootCheckpoint => limits.control_bytes,
         _ => limits.decoded_record_bytes,
     };
@@ -369,15 +359,39 @@ fn check_encoded_record(reference: &ObjectRef, limits: &StorageLimits) -> Result
     }
     Ok(())
 }
+fn decoded_reservations_for_read(
+    charge: u64,
+    usage: &Arc<Mutex<StorageUsage>>,
+    limits: &StorageLimits,
+    retained: bool,
+) -> Result<(StorageReservation, StorageReservation), BundleError> {
+    let shadow = StorageReservation::reserve_for_retained_read(
+        usage,
+        limits,
+        0,
+        charge,
+        false,
+        u64::MAX,
+        retained,
+    )?;
+    let value = StorageReservation::reserve_for_retained_read(
+        usage,
+        limits,
+        0,
+        charge,
+        false,
+        u64::MAX,
+        retained,
+    )?;
+    Ok((value, shadow))
+}
 fn decoded_reservations(
     charge: u64,
     _kind: RecordKind,
     usage: &Arc<Mutex<StorageUsage>>,
     limits: &StorageLimits,
 ) -> Result<(StorageReservation, StorageReservation), BundleError> {
-    let shadow = StorageReservation::reserve(usage, limits, 0, charge, 0, false, u64::MAX)?;
-    let value = StorageReservation::reserve(usage, limits, 0, charge, 0, false, u64::MAX)?;
-    Ok((value, shadow))
+    decoded_reservations_for_read(charge, usage, limits, false)
 }
 pub(crate) fn read_bytes(
     namespace: &ProjectNamespace,
@@ -385,10 +399,27 @@ pub(crate) fn read_bytes(
     usage: &Arc<Mutex<StorageUsage>>,
     limits: &StorageLimits,
 ) -> Result<(Vec<u8>, StorageReservation), BundleError> {
+    read_bytes_for_read(namespace, reference, usage, limits, false)
+}
+fn read_bytes_for_read(
+    namespace: &ProjectNamespace,
+    reference: &ObjectRef,
+    usage: &Arc<Mutex<StorageUsage>>,
+    limits: &StorageLimits,
+    retained: bool,
+) -> Result<(Vec<u8>, StorageReservation), BundleError> {
     check_encoded_record(reference, limits)?;
-    let charge =
-        StorageReservation::reserve(usage, limits, 0, reference.byte_length, 0, false, u64::MAX)?;
-    let mut file = ProjectStore::verify_in_namespace(namespace, reference, usage, limits)?;
+    let charge = StorageReservation::reserve_for_retained_read(
+        usage,
+        limits,
+        0,
+        reference.byte_length,
+        false,
+        u64::MAX,
+        retained,
+    )?;
+    let mut file =
+        ProjectStore::verify_in_namespace_for_read(namespace, reference, usage, limits, retained)?;
     let bytes = bounded_bytes(&mut file, reference.byte_length)?;
     if bytes.len() as u64 != reference.byte_length {
         return Err(BundleError::Corrupt("record changed while decoding".into()));
@@ -408,6 +439,29 @@ pub(crate) fn read_record<T: BundleRecord>(
     let (bytes, _encoded) = read_bytes(namespace, reference, usage, limits)?;
     let record: StorageReservation<T> =
         decode(&bytes, usage, reference.record_kind, fields, limits)?;
+    record.validate(limits)?;
+    Ok(record)
+}
+/// Read an already retained immutable cut while a later root publication is
+/// uncertain. Every byte and typed value retains its normal bound and charge.
+pub(crate) fn read_retained_record<T: BundleRecord>(
+    namespace: &ProjectNamespace,
+    reference: &ObjectRef,
+    usage: &Arc<Mutex<StorageUsage>>,
+    limits: &StorageLimits,
+) -> Result<StorageReservation<T>, BundleError> {
+    if reference.record_kind != T::KIND {
+        return Err(BundleError::Corrupt("record reference kind".into()));
+    }
+    let (bytes, _encoded) = read_bytes_for_read(namespace, reference, usage, limits, true)?;
+    let record: StorageReservation<T> = decode_for_read(
+        &bytes,
+        usage,
+        reference.record_kind,
+        &mut BTreeSet::new(),
+        limits,
+        true,
+    )?;
     record.validate(limits)?;
     Ok(record)
 }
@@ -709,9 +763,19 @@ fn inspect_checkpoints<T>(
         StorageReservation<BranchCheckpoint>,
         bool,
     ) -> Result<T, BundleError>,
+    last: Option<&BranchId>,
 ) -> Result<BTreeMap<BranchId, T>, BundleError> {
     let mut branches = BTreeMap::new();
-    for (id, reference) in index {
+    let delayed = last
+        .and_then(|id| index.get(id).map(|reference| (id, reference)))
+        .map(|(id, reference)| {
+            checkpoints
+                .remove(&reference.sha256)
+                .map(|checkpoint| (id, checkpoint))
+                .ok_or_else(|| BundleError::Corrupt("missing manual checkpoint".into()))
+        })
+        .transpose()?;
+    for (id, reference) in index.iter().filter(|(id, _)| Some(*id) != last) {
         let checkpoint = checkpoints
             .remove(&reference.sha256)
             .ok_or_else(|| BundleError::Corrupt("missing branch checkpoint".into()))?;
@@ -724,21 +788,31 @@ fn inspect_checkpoints<T>(
         let id = checkpoint.branch_id.clone();
         drop(inspect(&id, checkpoint, false)?);
     }
+    if let Some((id, checkpoint)) = delayed {
+        if checkpoint.branch_id != *id {
+            return Err(BundleError::Corrupt("manual branch binding".into()));
+        }
+        branches.insert(id.clone(), inspect(id, checkpoint, true)?);
+    }
     Ok(branches)
 }
-pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
-    read_with_limits(path, StorageLimits::default())
+pub(crate) fn read(
+    path: &Path,
+    pool: &crate::operation_history::HistoryPool,
+) -> Result<LoadedBundle, BundleError> {
+    read_with_limits(path, StorageLimits::default(), pool)
 }
 pub(crate) fn read_with_limits(
     path: &Path,
     limits: StorageLimits,
+    pool: &crate::operation_history::HistoryPool,
 ) -> Result<LoadedBundle, BundleError> {
     limits.validate()?;
     let namespace = ProjectNamespace::inspect(path)?;
     let bytes = namespace
         .read_root()?
         .ok_or_else(|| BundleError::Corrupt("missing root".into()))?;
-    read_graph(namespace, bytes, limits)
+    read_graph(namespace, bytes, limits, pool)
 }
 /// The publisher runs the identical empty-reader schedule under its pinned namespace.
 /// These operation-local reservations are never installed in the writer's physical ledger.
@@ -747,10 +821,11 @@ pub(crate) fn validate_publication_reopen_fit(
     bytes: &[u8],
     limits: &StorageLimits,
     memo: &mut VerifiedIdentityMemo,
+    pool: &crate::operation_history::HistoryPool,
 ) -> Result<(), BundleError> {
     #[cfg(any(test, feature = "test-util"))]
     let started = std::time::Instant::now();
-    let result = publication::validate(namespace, bytes, limits, memo);
+    let result = publication::validate(namespace, bytes, limits, memo, pool);
     #[cfg(any(test, feature = "test-util"))]
     crate::io_observer::note_publication_fit(started.elapsed());
     result
@@ -763,6 +838,7 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
     namespace_owner: N,
     bytes: Vec<u8>,
     profile: StorageLimits,
+    pool: &crate::operation_history::HistoryPool,
 ) -> Result<LoadedBundle<N>, BundleError> {
     profile.validate()?;
     let namespace = namespace_owner.borrow();
@@ -863,7 +939,7 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
 
     let mut memo = VerifiedIdentityMemo::default();
     let mut indexes = BTreeMap::new();
-    let mut input_manifests = BTreeMap::new();
+    let mut input_manifests = BTreeSet::new();
     let mut chunk_tables = BTreeMap::new();
     for reference in &manifest.objects {
         macro_rules! admit {
@@ -929,8 +1005,8 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
             RecordKind::Document => {
                 let _value = admit!(Document);
             }
-            RecordKind::History => {
-                let _value = admit!(crate::history_record::HistoryRecord);
+            RecordKind::OperationHistory => {
+                let _value = admit!(crate::operation_history::StoredOwnerRecord);
             }
             RecordKind::BranchCheckpoint => {
                 checkpoints.insert(reference.sha256.clone(), admit!(BranchCheckpoint));
@@ -941,20 +1017,12 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
                     admit!(BTreeMap<BranchId, ObjectRef>),
                 );
             }
-            RecordKind::Lineage => {
-                let _value = admit!(LineageRecord);
-            }
             RecordKind::SpecialistBase => {
                 let _value = admit!(crate::bundle_records::SpecialistBaseRecord);
             }
-            RecordKind::HistoryFloor => {
-                let _value = admit!(crate::bundle_records::HistoryFloorCheckpoint);
-            }
-            RecordKind::RecoveryClose => {
-                let _value = admit!(crate::bundle_records::RecoveryCloseCheckpoint);
-            }
             RecordKind::InputManifest => {
-                input_manifests.insert(reference.sha256.clone(), admit!(OwnedInputManifest));
+                let _manifest = admit!(OwnedInputManifest);
+                input_manifests.insert(reference.sha256.clone());
             }
             RecordKind::InputChunkTable => {
                 let value = admit!(crate::owned_inputs::InputChunkTable);
@@ -963,7 +1031,6 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
                     limits,
                     0,
                     reference.byte_length,
-                    0,
                     false,
                     u64::MAX,
                 )?;
@@ -1009,7 +1076,12 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
         }
         verified.insert(reference.sha256.clone());
     }
-    for inputs in input_manifests.values() {
+    for reference in objects
+        .values()
+        .filter(|r| r.record_kind == RecordKind::InputManifest)
+    {
+        let inputs =
+            read_record::<OwnedInputManifest>(namespace, reference, usage, &mut fields, limits)?;
         for entry in &inputs.entries {
             if entry.object.record_kind == RecordKind::OwnedMedia {
                 let reference = entry.chunk_table_ref()?;
@@ -1029,126 +1101,93 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
     let index = indexes
         .get(&root.branch_index_ref.sha256)
         .ok_or_else(|| BundleError::Corrupt("missing branch index".into()))?;
-    // Verify every archived checkpoint, releasing its decode before moving to the next.
-    // Only current branch histories remain resident, with shared hashes charged once.
-    let mut histories: BTreeMap<String, Arc<StorageReservation<HistorySnapshot>>> = BTreeMap::new();
-    let mut lineages: BTreeMap<String, Arc<StorageReservation<LineageRecord>>> = BTreeMap::new();
+    // Validate one owner at a time. Retain the manual token last, so two
+    // live project tabs and this read never require a fourth Ordinary lease.
     let inspect_checkpoint = |id: &BranchId,
                               checkpoint: StorageReservation<BranchCheckpoint>,
                               active: bool|
      -> Result<crate::bundle::LoadedBranch, BundleError> {
-        let history = if active && let Some(value) = histories.get(&checkpoint.history_ref.sha256) {
-            Arc::clone(value)
-        } else {
-            Arc::new(crate::history_record::resolve_namespace_history(
-                namespace,
-                &checkpoint.history_ref,
-                usage,
-                &mut fields,
-                limits,
-                active && id == &root.manual_branch_id,
-            )?)
-        };
-        crate::history_record::HistoryRecord::verify_checkpoint(&checkpoint, &history)?;
-        let lineage = if active && let Some(value) = lineages.get(&checkpoint.lineage_ref.sha256) {
-            Arc::clone(value)
-        } else {
-            Arc::new(read_record::<LineageRecord>(
-                namespace,
-                &checkpoint.lineage_ref,
-                usage,
-                &mut fields,
-                limits,
-            )?)
-        };
-        let document = read_record::<Document>(
-            namespace,
-            &checkpoint.document_ref,
-            usage,
-            &mut fields,
-            limits,
-        )?;
-        let baseline = read_record::<Document>(
-            namespace,
-            &checkpoint.baseline_ref,
-            usage,
-            &mut fields,
-            limits,
-        )?;
-        if checkpoint.branch_id != *id
-            || checkpoint.document_hash != checkpoint.document_ref.sha256
-            || *document != *history.document
-            || *baseline != *history.baseline
-            || checkpoint.batch_ids.len() != history.batches.len()
-            || checkpoint.history_input_manifest_refs.len() != history.batches.len() + 1
-            || checkpoint.applied_operations_digest
-                != kinewright_media::sha256_bytes(
-                    &serde_json::to_vec(&history.applied_operations())
-                        .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-                )
-        {
-            return Err(BundleError::Corrupt(
-                "branch history/checkpoint mismatch".into(),
-            ));
+        let scope = checkpoint
+            .stream
+            .as_ref()
+            .map(|stream| &stream.seed().project);
+        let inherited = scope.is_some_and(|project| root.origin_project_ids.contains(project));
+        // A plain copy retains task checkpoints verbatim, but removes their run
+        // authority. Only a person can select these branches, which starts a new
+        // destination epoch. Manual and registered agent checkpoints must still
+        // carry this project's stream scope.
+        let plain_inherited =
+            id != &root.manual_branch_id && !root.candidate_recovery.contains_key(id) && inherited;
+        if (active && !plain_inherited) || !inherited {
+            checkpoint.validate_scope(&root.project_id)?;
         }
-        let mut retained_inputs = OwnedInputManifest {
-            project_id: Some(root.project_id.clone()),
-            session_id: None,
-            owner_epoch: 0,
-            entries: vec![],
-        };
-        for reference in std::iter::once(&checkpoint.input_manifest_ref)
-            .chain(&checkpoint.history_input_manifest_refs)
+        let input = read_record::<OwnedInputManifest>(
+            namespace,
+            &checkpoint.input_manifest_ref,
+            usage,
+            &mut BTreeSet::new(),
+            limits,
+        )?;
+        let valid_owner = |input: &OwnedInputManifest| match (&input.project_id, &input.session_id)
         {
-            let input = input_manifests.get(&reference.sha256).ok_or_else(|| {
-                BundleError::Corrupt("active branch input manifest missing".into())
-            })?;
-            if (input.project_id.as_ref() != Some(&root.project_id)
-                && ((active && id == &root.manual_branch_id && root.manual_switch_generation == 0)
-                    || !input
-                        .project_id
-                        .as_ref()
-                        .is_some_and(|p| root.origin_project_ids.contains(p))))
-                || input.session_id.is_some()
-            {
-                return Err(BundleError::Corrupt("active branch input owner".into()));
+            (Some(project), None) => {
+                project == &root.project_id || root.origin_project_ids.contains(project)
             }
-            retained_inputs.entries.extend(input.entries.clone());
+            (None, Some(session)) => root.origin_session_ids.contains(session),
+            _ => false,
+        };
+        if !valid_owner(&input) {
+            return Err(BundleError::Identity("branch input owner".into()));
         }
-        crate::bundle_commit::validate_document_inputs(
-            &history.document,
-            &input_manifests[&checkpoint.input_manifest_ref.sha256],
-        )?;
-        crate::bundle_commit::validate_inputs(&history, &retained_inputs)?;
-        // The resolver already executed the ordinary journal and checked every
-        // retained hash. Avoid retaining another replay actor during graph admission.
-        crate::history_size::verify_history_lineage(
-            &history,
-            &lineage,
-            checkpoint.history_role,
+        let dependencies = manifest
+            .dependencies
+            .get(&checkpoint.owner_ref.sha256)
+            .ok_or_else(|| BundleError::Corrupt("owner edges missing".into()))?;
+        for reference in dependencies
+            .iter()
+            .filter(|reference| reference.record_kind == RecordKind::InputManifest)
+        {
+            if !input_manifests.contains(&reference.sha256) {
+                return Err(BundleError::Corrupt("owner input manifest missing".into()));
+            }
+            let context = read_record::<OwnedInputManifest>(
+                namespace,
+                reference,
+                usage,
+                &mut BTreeSet::new(),
+                limits,
+            )?;
+            if !valid_owner(&context) {
+                return Err(BundleError::Identity("owner input context".into()));
+            }
+        }
+        let history = crate::operation_history::StoredOwnerRecord::read_namespace(
+            namespace,
+            &checkpoint,
+            pool,
+            usage,
             limits,
         )?;
-
-        memo.remember_resolved_history(
-            &checkpoint.history_ref,
-            history.decoded_charge(),
-            checkpoint.history_role,
+        crate::bundle_commit::validate_document_inputs(history.document(), &input)?;
+        memo.remember_owner(
+            checkpoint.owner_ref.clone(),
+            publication::OwnerProof {
+                identity: history.identity(),
+                position: history.position(),
+                sizing: history.creation_sizing(),
+                document: publication::ProjectionRef::new(&checkpoint.document_ref)?,
+            },
             limits,
         );
-        let retain = active
-            && (id == &root.manual_branch_id
-                || checkpoint.history_role == crate::history_record::HistoryRole::Ordinary);
-        if retain {
-            histories.insert(checkpoint.history_ref.sha256.clone(), Arc::clone(&history));
-            lineages.insert(checkpoint.lineage_ref.sha256.clone(), Arc::clone(&lineage));
-        }
-        Ok((
-            checkpoint,
-            retain.then_some(history),
-            retain.then_some(lineage),
-        ))
+        let keep = active && id == &root.manual_branch_id;
+        Ok((checkpoint, keep.then_some(history)))
     };
-    let branches = inspect_checkpoints(index, checkpoints, inspect_checkpoint)?;
+    let branches = inspect_checkpoints(
+        index,
+        checkpoints,
+        inspect_checkpoint,
+        Some(&root.manual_branch_id),
+    )?;
     let candidates: Vec<_> = branches
         .keys()
         .filter(|id| **id != root.manual_branch_id)
@@ -1171,11 +1210,11 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
         .ok_or_else(|| BundleError::Corrupt("manual branch omitted".into()))?;
     if admission.inspection_document()
         != Some(
-            &manual
+            manual
                 .1
                 .as_ref()
                 .ok_or_else(|| BundleError::Corrupt("missing manual history".into()))?
-                .document,
+                .document(),
         )
         || manual.0.input_manifest_ref != root.input_manifest_ref
     {
@@ -1228,6 +1267,7 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
         }
     }
     Ok(LoadedBundle {
+        history_pool: pool.clone(),
         memo,
         admission,
         namespace: namespace_owner,
@@ -1319,14 +1359,18 @@ pub struct QuarantinedBranch {
 /// Inspect damaged history independently of intact immutable document bytes.
 /// # Errors
 /// Refuses unreadable or unsupported envelopes and bounded inspection failures.
-pub fn assess(path: &Path) -> Result<RecoveryAssessment, BundleError> {
-    assess_with_limits(path, &StorageLimits::default())
+pub fn assess(
+    path: &Path,
+    pool: &crate::operation_history::HistoryPool,
+) -> Result<RecoveryAssessment, BundleError> {
+    assess_with_limits(path, &StorageLimits::default(), pool)
 }
 pub(crate) fn assess_with_limits(
     path: &Path,
     limits: &StorageLimits,
+    pool: &crate::operation_history::HistoryPool,
 ) -> Result<RecoveryAssessment, BundleError> {
-    let error = match read_with_limits(path, limits.clone()) {
+    let error = match read_with_limits(path, limits.clone(), pool) {
         Ok(loaded) => return Ok(RecoveryAssessment::Verified(Box::new(loaded))),
         Err(error) => error,
     };
@@ -1375,30 +1419,19 @@ pub(crate) fn assess_with_limits(
         {
             verified_document_bytes.push(checkpoint.document_ref.clone());
         }
-        let history = crate::history_record::resolve_namespace_history(
+        let history_error = crate::operation_history::StoredOwnerRecord::read_namespace(
             &namespace,
-            &checkpoint.history_ref,
+            &checkpoint,
+            pool,
             usage,
-            &mut BTreeSet::new(),
             limits,
-            false,
-        );
-        let history_error = match history {
-            Err(error) => Some(error.to_string()),
-            Ok(history) => {
-                let core = kinewright_core::Core::spawn(std::sync::Arc::clone(&history.baseline))
-                    .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-                crate::history_save::ProjectAttachment::new(&core)
-                    .map_err(crate::bundle::history_error)?
-                    .restore_history((*history).clone())
-                    .err()
-                    .map(|e| e.to_string())
-            }
-        };
+        )
+        .err()
+        .map(|error| error.to_string());
         if let Some(reason) = history_error {
             branches.push(QuarantinedBranch {
                 branch_id: id.clone(),
-                history_ref: checkpoint.history_ref.clone(),
+                history_ref: checkpoint.owner_ref.clone(),
                 reason,
             });
         }
@@ -1459,9 +1492,10 @@ pub(super) fn validate_studio_records(
             }
             if checkpoint.head_id != descriptor.key.head
                 || checkpoint.document_ref != descriptor.document_ref
-                || checkpoint.document_hash != descriptor.key.document_hash
+                || checkpoint.document_ref.sha256 != descriptor.key.document_hash
                 || checkpoint.input_manifest_ref != descriptor.input_manifest_ref
-                || checkpoint.lineage_ref != descriptor.lineage_ref
+                || checkpoint.owner_ref != descriptor.owner_ref
+                || checkpoint.identity != descriptor.identity
             {
                 return Err(BundleError::Corrupt("snapshot checkpoint binding".into()));
             }

@@ -1,8 +1,9 @@
 use super::Ja1EditingSession;
 use kinewright_core::{
-    AttachmentState, Command, Core, Document, Event, Operation, Track, TrackId, TrackKind,
+    AttachmentState, Command, Document, Event, Operation, Track, TrackId, TrackKind,
 };
 use kinewright_media::test_support::TempDirectory;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::LoadedBundle,
     bundle_records::{BranchId, ObjectRef},
@@ -22,18 +23,52 @@ fn edit(core: &Core, locked: bool) {
     ));
 }
 fn frozen_refuses_input(core: &Core) {
-    let event = core
-        .request(Command::Do(Operation::SetTrackSyncLock {
-            track: TrackId(1),
-            locked: true,
-        }))
-        .unwrap();
+    let result = core.request(Command::Do(Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: true,
+    }));
     assert!(
-        matches!(event, Event::MutationRefused { .. }),
-        "post-cut edit was accepted: {event:?}"
+        matches!(
+            result,
+            Err(kinewright_project::operation_actor::Refusal {
+                error: kinewright_project::operation_actor::Error::MutationRefused(
+                    kinewright_core::CoreMutationRefusal::Frozen
+                ),
+                ..
+            })
+        ),
+        "FROZEN_SELECTION_REFUSES_POST_CUT_INPUT {result:?}"
     );
     assert_eq!(core.attachment_state().unwrap(), AttachmentState::Frozen);
 }
+// The expected selected contents outlive several publications. JSON is an
+// independent test oracle, not another resident history holder. Installation
+// changes the capture epoch; every command key and all owner fields stay checked.
+pub(super) fn contents(
+    snapshot: &kinewright_project::operation_history::OwnerSnapshot,
+) -> serde_json::Value {
+    let mut value = serde_json::to_value(snapshot).unwrap();
+    value["history"].as_object_mut().unwrap().remove("epoch");
+    for stack in ["undo", "redo"] {
+        for step in value["history"][stack].as_array_mut().unwrap() {
+            step.as_object_mut().unwrap().remove("charge");
+        }
+    }
+    value
+}
+#[track_caller]
+pub(super) fn state(core: &Core) -> serde_json::Value {
+    let snapshot = match core.export_history() {
+        Ok(snapshot) => snapshot,
+        Err(error) => panic!(
+            "STATE_CAPTURE {error}; pool={:?}",
+            core.history_pool()
+                .lease_counts(kinewright_project::operation_history::Role::Ordinary)
+        ),
+    };
+    contents(&snapshot)
+}
+
 fn fixture() -> (
     TempDirectory,
     Ja1EditingSession,
@@ -41,7 +76,7 @@ fn fixture() -> (
     BranchId,
 ) {
     let temp = TempDirectory::new_in(super::durable_test_root(), "s2-c5-local");
-    let core = Core::spawn(Document {
+    let core = Core::for_test(Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -70,15 +105,7 @@ fn fixture() -> (
             Event::DocumentChanged { .. }
         ));
     }
-    let initial_cost = kinewright_project::bundle_commit::history_cost_probe(
-        &core.export_history().unwrap(),
-        &StorageLimits::default(),
-    )
-    .unwrap();
-    let profile = StorageLimits {
-        branch_history_bytes: initial_cost * 3,
-        ..StorageLimits::default()
-    };
+    let profile = StorageLimits::default();
     let mut session = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
     assert!(matches!(
         session
@@ -114,7 +141,13 @@ pub(super) fn w13_checkpoint_recovery_preserves_dirty_b_before_activation() {
         .unwrap()
         .clone();
     let target_core = {
-        let loaded = LoadedBundle::read(&temp.path("a.kinewright")).unwrap();
+        let loaded = LoadedBundle::read(
+            &temp.path("a.kinewright"),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         let writer_root = loaded.root().unwrap();
         assert_eq!(writer_root.manual_branch_id, original_branch);
         let RecoverySelection::Checkpoint { root, .. } = &target else {
@@ -130,25 +163,7 @@ pub(super) fn w13_checkpoint_recovery_preserves_dirty_b_before_activation() {
         original.request(Command::Undo).unwrap(),
         Event::DocumentChanged { .. }
     ));
-    let history = original.export_history().unwrap();
-    let oracle = Core::spawn((*history.baseline).clone()).unwrap();
-    oracle.restore_history(history).unwrap();
-    std::fs::create_dir_all(temp.path("ordinary-oracle")).unwrap();
-    let mut ordinary = Ja1EditingSession::new(
-        &temp.path("ordinary-oracle"),
-        &oracle,
-        StorageLimits::default(),
-    )
-    .unwrap();
-    ordinary
-        .first_save(
-            &temp.path("ordinary.kinewright"),
-            session.store().unwrap().limits().clone(),
-        )
-        .unwrap();
-    let expected_l = oracle.export_history().unwrap();
-    drop(ordinary);
-    drop(oracle);
+    let expected_l = state(&original);
     let raw = std::fs::read(temp.path(&format!(
         "a.kinewright-assets/studio/objects/{}",
         target_core.sha256
@@ -170,12 +185,18 @@ pub(super) fn w13_checkpoint_recovery_preserves_dirty_b_before_activation() {
             &archived_index[&archived.manual_branch_id],
         )
         .unwrap();
-    let expected_target = (*session
-        .store()
+    let expected_target = archived_checkpoint
+        .open(
+            session.store().unwrap(),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
         .unwrap()
-        .resolve_history(&archived_checkpoint.history_ref)
-        .unwrap())
-    .clone();
+        .into_reader()
+        .unwrap()
+        .into_capture()
+        .unwrap();
     drop(archived_checkpoint);
     drop(archived_index);
     session.prepare_recovery(target.clone()).unwrap();
@@ -196,10 +217,17 @@ pub(super) fn w13_checkpoint_recovery_preserves_dirty_b_before_activation() {
         original.attachment_state().unwrap(),
         AttachmentState::Sealed
     );
-    assert_eq!(original.export_history().unwrap(), expected_l);
+    assert!(
+        matches!(
+            original.export_history(),
+            Err(kinewright_project::operation_actor::Error::Retired)
+        ),
+        "SELECTED_SOURCE_RELEASES_ITS_RESIDENT_HISTORY"
+    );
     let selected = session.core().clone();
-    let expected_r = selected.export_history().unwrap();
-    assert_eq!(expected_r, expected_target);
+    let expected_r = state(&selected);
+    assert_eq!(expected_r, contents(&expected_target));
+    drop(expected_target);
     assert!(!session.dirty().unwrap());
     let publications = trace
         .events
@@ -209,7 +237,13 @@ pub(super) fn w13_checkpoint_recovery_preserves_dirty_b_before_activation() {
     assert_eq!(publications, 2, "{trace:?}");
     assert!(session.store().unwrap().verify(&target_core).is_ok());
     let branch_lineage = |session: &Ja1EditingSession, id: &BranchId| {
-        let loaded = LoadedBundle::read(session.association().unwrap().path()).unwrap();
+        let loaded = LoadedBundle::read(
+            session.association().unwrap().path(),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         let index = session
             .store()
             .unwrap()
@@ -222,32 +256,69 @@ pub(super) fn w13_checkpoint_recovery_preserves_dirty_b_before_activation() {
             .unwrap()
             .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(&index[id])
             .unwrap();
-        let lineage = (*session
-            .store()
+        let capture = cp
+            .open(
+                session.store().unwrap(),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
             .unwrap()
-            .read_record::<kinewright_project::bundle_records::LineageRecord>(&cp.lineage_ref)
-            .unwrap())
-        .clone();
-        (cp.batch_ids.clone(), lineage)
+            .into_reader()
+            .unwrap()
+            .into_capture()
+            .unwrap();
+        let keys = capture
+            .history()
+            .undo
+            .iter()
+            .chain(capture.history().redo.iter().rev())
+            .flat_map(|step| {
+                step.commands()
+                    .iter()
+                    .map(|command| (command.id, command.payload_digest))
+            })
+            .collect::<Vec<_>>();
+        let depth = capture.history().undo.len();
+        let lineage = capture
+            .validate()
+            .unwrap()
+            .into_reader()
+            .unwrap()
+            .into_boundary(depth)
+            .unwrap()
+            .lineage()
+            .clone();
+        (keys, lineage)
     };
     let (source_ids, source_lineage) = branch_lineage(&session, &original_branch);
     assert!(!source_ids.is_empty());
     assert!(!source_lineage.split_ancestry.is_empty());
     let target_ids = branch_lineage(
         &session,
-        &LoadedBundle::read(&temp.path("a.kinewright"))
-            .unwrap()
-            .root()
-            .unwrap()
-            .manual_branch_id,
-    )
-    .0;
-    let right = LoadedBundle::read(&temp.path("a.kinewright"))
+        &LoadedBundle::read(
+            &temp.path("a.kinewright"),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
         .unwrap()
         .root()
         .unwrap()
-        .manual_branch_id
-        .clone();
+        .manual_branch_id,
+    )
+    .0;
+    let right = LoadedBundle::read(
+        &temp.path("a.kinewright"),
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .root()
+    .unwrap()
+    .manual_branch_id
+    .clone();
     for n in 0..3 {
         for i in 0..4 {
             edit(&selected, (n + i) % 2 == 0);
@@ -262,40 +333,18 @@ pub(super) fn w13_checkpoint_recovery_preserves_dirty_b_before_activation() {
                 );
             }
         }
-        // A newly selected floor can precede the source's split. Compare
-        // with that saved document's occurrence map, not the final children.
-        let selected_history = selected.export_history().unwrap();
-        let baseline_lineage = std::iter::once((&*expected_l.baseline, &source_lineage.baseline))
-            .chain(std::iter::once((
-                &*expected_l.document,
-                &source_lineage.current,
-            )))
-            .chain(
-                expected_l
-                    .cursor
-                    .undo
-                    .iter()
-                    .zip(&source_lineage.undo)
-                    .map(|(entry, boundary)| (&*entry.document, boundary)),
-            )
-            .chain(
-                expected_l
-                    .cursor
-                    .redo
-                    .iter()
-                    .zip(&source_lineage.redo)
-                    .map(|(entry, boundary)| (&*entry.document, boundary)),
-            )
-            .find_map(|(document, boundary)| {
-                (document == &*selected_history.baseline).then_some(boundary)
-            })
-            .expect("this fixture only changes sync-lock flags after the saved split");
-        assert_eq!(&current.baseline, baseline_lineage);
-        assert_eq!(current.current, source_lineage.current);
+        assert_eq!(
+            current.occurrences, source_lineage.occurrences,
+            "INSTALL_AND_LOCK_EDITS_PRESERVE_OCCURRENCE_IDENTITIES"
+        );
         assert_eq!(current.split_ancestry, source_lineage.split_ancestry);
     }
-    assert!(selected.export_history().unwrap().floor_offset > expected_r.floor_offset);
-    let later_r = selected.export_history().unwrap();
+    assert_eq!(
+        serde_json::to_value(selected.export_history().unwrap().fold_frontier()).unwrap(),
+        expected_r["fold_frontier"],
+        "SAVE_DOES_NOT_CREATE_A_FOLD"
+    );
+    let later_r = state(&selected);
     let (_, expected_right_lineage) = branch_lineage(&session, &right);
     session
         .prepare_recovery(RecoverySelection::WorkingBranch(original_branch.clone()))
@@ -304,7 +353,7 @@ pub(super) fn w13_checkpoint_recovery_preserves_dirty_b_before_activation() {
         session.select_local(),
         ProjectSelectionResult::Activated(_)
     ));
-    assert_eq!(session.core().export_history().unwrap(), expected_l);
+    assert_eq!(state(session.core()), expected_l);
     for i in 0..5 {
         edit(session.core(), i % 2 == 0);
     }
@@ -315,18 +364,29 @@ pub(super) fn w13_checkpoint_recovery_preserves_dirty_b_before_activation() {
     for shared in later_ids.iter().filter(|id| target_ids.contains(id)) {
         assert!(source_ids.contains(shared));
     }
-    assert_eq!(later_lineage.current, source_lineage.current);
+    assert_eq!(later_lineage.occurrences, source_lineage.occurrences);
     assert_eq!(later_lineage.split_ancestry, source_lineage.split_ancestry);
-    let later_l = session.core().export_history().unwrap();
+    let later_l = state(session.core());
     drop(session);
     drop(original);
     drop(selected);
-    let loaded = LoadedBundle::read(&temp.path("a.kinewright")).unwrap();
-    let fresh = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&fresh).unwrap();
-    assert_eq!(fresh.export_history().unwrap(), later_l);
+    let mut loaded = LoadedBundle::read(
+        &temp.path("a.kinewright"),
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let fresh = loaded.open_manual().unwrap();
+    assert_eq!(state(&fresh), later_l);
     drop(loaded);
-    let mut fresh_owner = Ja1EditingSession::open(&temp.path("a.kinewright")).unwrap();
+    let mut fresh_owner = Ja1EditingSession::open(
+        &temp.path("a.kinewright"),
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     fresh_owner
         .prepare_recovery(RecoverySelection::WorkingBranch(right))
         .unwrap();
@@ -334,7 +394,7 @@ pub(super) fn w13_checkpoint_recovery_preserves_dirty_b_before_activation() {
         fresh_owner.select_local(),
         ProjectSelectionResult::Activated(_)
     ));
-    assert_eq!(fresh_owner.core().export_history().unwrap(), later_r);
+    assert_eq!(state(fresh_owner.core()), later_r);
     assert_ne!(expected_r, later_r);
 }
 #[test]
@@ -344,10 +404,10 @@ pub(super) fn w13_preliminary_save_faults_keep_exact_cut_and_do_not_select() {
         let target = session.list_recovery_points().unwrap()[0].clone();
         edit(session.core(), false);
         let core = session.core().clone();
-        let history = core.export_history().unwrap();
+        let history = state(&core);
         session.prepare_recovery(target).unwrap();
         let result = io_observer::fail_once(fault, || session.select_local());
-        assert_eq!(core.export_history().unwrap(), history);
+        assert_eq!(state(&core), history);
         if fault == "root_before_publish" {
             assert!(
                 matches!(result, ProjectSelectionResult::Refused(_)),
@@ -363,8 +423,13 @@ pub(super) fn w13_preliminary_save_faults_keep_exact_cut_and_do_not_select() {
             );
             assert_eq!(core.attachment_state().unwrap(), AttachmentState::Frozen);
             assert!(matches!(
-                core.request(Command::Undo).unwrap(),
-                Event::MutationRefused { .. }
+                core.request(Command::Undo),
+                Err(kinewright_project::operation_actor::Refusal {
+                    error: kinewright_project::operation_actor::Error::MutationRefused(
+                        kinewright_core::CoreMutationRefusal::Frozen
+                    ),
+                    ..
+                })
             ));
             let result = session.select_local();
             if fault == "root_rename_io" {
@@ -395,14 +460,14 @@ pub(super) fn w13_one_level_retention_and_explicit_retirement() {
     let specialist_core = guard.core().clone();
     edit(&specialist_core, false);
     let root = session.root_sha256().unwrap();
-    let history = specialist_core.export_history().unwrap();
+    let history = state(&specialist_core);
     assert!(
         session
             .retire_working_branch(guard.branch_id(), &root, true)
             .is_err()
     );
     assert_eq!(session.root_sha256().unwrap(), root);
-    assert_eq!(specialist_core.export_history().unwrap(), history);
+    assert_eq!(state(&specialist_core), history);
     assert!(session.retire_working_branch(&branch, &root, true).is_err());
     assert!(session.close_durable_branch(&guard).is_err());
     session.persist_durable_branch(&mut guard).unwrap();
@@ -507,7 +572,8 @@ pub(super) fn w13_frozen_cut_rescue_at_both_unknown_publications_and_late_a_isol
             publication == 1,
             "only a definitely successful preliminary Save acknowledges O"
         );
-        let frozen = core.export_history().unwrap();
+        let frozen_identity = core.snapshot_identity().unwrap();
+        let frozen = state(&core);
         frozen_refuses_input(&core);
         let old_root = std::fs::read(&a).unwrap();
         let parent = temp.root().to_path_buf();
@@ -560,23 +626,18 @@ pub(super) fn w13_frozen_cut_rescue_at_both_unknown_publications_and_late_a_isol
         );
         assert!(failed.is_err() || failed.as_ref().is_ok_and(|o| !o.activated));
         frozen_refuses_input(&core);
-        assert!(matches!(
-            core.request(Command::Do(Operation::SetTrackSyncLock {
-                track: TrackId(1),
-                locked: true
-            }))
-            .unwrap(),
-            Event::MutationRefused { .. }
-        ));
-        assert!(matches!(
-            core.request(Command::Undo).unwrap(),
-            Event::MutationRefused { .. }
-        ));
-        assert!(matches!(
-            core.request(Command::Redo).unwrap(),
-            Event::MutationRefused { .. }
-        ));
-        assert_eq!(core.export_history().unwrap(), frozen);
+        for command in [Command::Undo, Command::Redo] {
+            assert!(matches!(
+                core.request(command),
+                Err(kinewright_project::operation_actor::Refusal {
+                    error: kinewright_project::operation_actor::Error::MutationRefused(
+                        kinewright_core::CoreMutationRefusal::Frozen
+                    ),
+                    ..
+                })
+            ));
+        }
+        assert_eq!(core.snapshot_identity().unwrap(), frozen_identity);
         let unknown =
             attempt(&mut session, "unknown.kinewright", Some("root_parent_sync")).unwrap();
         assert!(!unknown.activated);
@@ -585,36 +646,55 @@ pub(super) fn w13_frozen_cut_rescue_at_both_unknown_publications_and_late_a_isol
         assert!(outcome.activated, "{outcome:?}");
         assert!(outcome.disclosure.contains("Abandon") || publication == 1);
         let active = session.core().clone();
-        assert_eq!(active.export_history().unwrap(), frozen);
+        assert_eq!(state(&active), frozen);
         assert_ne!(active.actor_identity(), core.actor_identity());
         edit(&active, true);
-        let newer = active.export_history().unwrap();
+        let newer = state(&active);
         let association = session.association().unwrap().path().to_path_buf();
         let dirty = session.dirty().unwrap();
         std::fs::rename(&hidden, &parent).unwrap();
         assert_eq!(std::fs::read(&a).unwrap(), old_root);
         session.reconcile_retained_destination(&a).unwrap();
         assert_eq!(core.attachment_state().unwrap(), AttachmentState::Sealed);
-        assert_eq!(active.export_history().unwrap(), newer);
+        assert_eq!(state(&active), newer);
         assert_eq!(session.core().actor_identity(), active.actor_identity());
         assert_eq!(active.attachment_state().unwrap(), AttachmentState::Live);
         assert_eq!(session.association().unwrap().path(), association);
         assert_eq!(session.dirty().unwrap(), dirty);
         session.save_active().unwrap();
-        let saved = active.export_history().unwrap();
+        let saved = state(&active);
         drop(session);
         drop(core);
         drop(active);
-        let loaded = LoadedBundle::read(&b_parent.join("success.kinewright")).unwrap();
-        let fresh = Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&fresh).unwrap();
-        assert_eq!(fresh.export_history().unwrap(), saved);
+        let mut loaded = LoadedBundle::read(
+            &b_parent.join("success.kinewright"),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
+        let fresh = loaded.open_manual().unwrap();
+        assert_eq!(state(&fresh), saved);
         drop(loaded);
         if publication == 2 && !landed {
-            let mut collector = LoadedBundle::read(&a).unwrap().into_writer().unwrap();
+            let mut collector = LoadedBundle::read(
+                &a,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap()
+            .into_writer()
+            .unwrap();
             collector.collect_after_ack().unwrap();
             drop(collector);
-            let reopened = LoadedBundle::read(&a).unwrap();
+            let reopened = LoadedBundle::read(
+                &a,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap();
             drop(reopened);
             let objects = temp.path("a.kinewright-assets/studio/objects");
             assert!(
@@ -641,13 +721,13 @@ pub(super) fn w13_existing_target_retry_requires_current_membership_and_head() {
             .unwrap();
         session.change_prepared_target_probe(head).unwrap();
         let root = session.root_sha256().unwrap();
-        let history = session.core().export_history().unwrap();
+        let history = state(session.core());
         assert!(matches!(
             session.select_local(),
             ProjectSelectionResult::Refused(_)
         ));
         assert_eq!(session.root_sha256().unwrap(), root);
-        assert_eq!(session.core().export_history().unwrap(), history);
+        assert_eq!(state(session.core()), history);
         assert_eq!(
             session.core().attachment_state().unwrap(),
             AttachmentState::Live
@@ -731,7 +811,13 @@ pub(super) fn w13_selection_refusal_and_absence_keep_p2_for_same_target_retry() 
         assert_eq!(session.root_sha256().unwrap(), root);
         drop(session);
         drop(original);
-        let loaded = LoadedBundle::read(&temp.path("a.kinewright")).unwrap();
+        let loaded = LoadedBundle::read(
+            &temp.path("a.kinewright"),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         assert_eq!(loaded.root().unwrap().manual_switch_generation, 1);
     }
 }
@@ -764,32 +850,12 @@ pub(super) fn w13_preliminary_save_uses_ordinary_floor_with_redo_or_gesture() {
             ));
         }
         let original = session.core().clone();
-        let before = original.export_history().unwrap();
-        let profile = session.store().unwrap().limits();
-        let expected = (1..=before.batches.len())
-            .find_map(|cut| {
-                let after = kinewright_core::HistoryTransition::floor(before.clone(), cut)
-                    .ok()?
-                    .after()
-                    .clone();
-                let cost =
-                    kinewright_project::bundle_commit::history_cost_probe(&after, profile).ok()?;
-                (after.encoded_bytes().ok()? <= profile.branch_history_bytes
-                    && cost <= profile.branch_history_bytes
-                    && kinewright_project::bundle_commit::ordinary_history_admission_cost_probe(
-                        &after, profile,
-                    )
-                    .ok()?
-                        <= profile.branch_history_bytes)
-                    .then_some(after)
-            })
-            .expect("ordinary legal earliest floor");
-        assert!(expected.floor_offset > before.floor_offset);
+        let before = state(&original);
         let disclosure = session.recovery_save_disclosure().unwrap();
-        assert!(disclosure.contains(&format!(
-            "{} oldest Undo",
-            before.cursor.undo.len() - expected.cursor.undo.len()
-        )));
+        assert!(
+            !disclosure.contains("oldest Undo"),
+            "PRELIMINARY_SAVE_NEVER_TRIMS_HISTORY"
+        );
         let target = session
             .list_recovery_points()
             .unwrap()
@@ -802,9 +868,11 @@ pub(super) fn w13_preliminary_save_uses_ordinary_floor_with_redo_or_gesture() {
             ProjectSelectionResult::Refused(_)
         ));
         assert_eq!(original.attachment_state().unwrap(), AttachmentState::Live);
-        assert_eq!(original.export_history().unwrap(), expected);
-        assert_eq!(expected.document, before.document);
-        assert_eq!(expected.cursor.redo, before.cursor.redo);
+        assert_eq!(
+            state(&original),
+            before,
+            "PRELIMINARY_SAVE_PRESERVES_EVERY_REACHABLE_STATE"
+        );
         assert!(!session.dirty().unwrap());
         assert!(matches!(
             session.select_local(),

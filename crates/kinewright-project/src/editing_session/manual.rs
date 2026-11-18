@@ -1,100 +1,144 @@
+//! The GUI's bounded stream and the writer's durable shadow share one protocol.
 use super::{BundleError, BundleSaveReport, Ja1EditingSession};
 use crate::{
-    manual_history::{AcceptedManualCommand, ManualLease, history_sha256},
-    receipts::ReceiptLookup,
+    operation_actor::{AcceptedCut, ManualPermit},
+    operation_inputs::ManualInputs,
+    operation_protocol::{Action, EncodedMessage, Lease, Receipt, Seed, StreamState},
 };
-use kinewright_core::AcceptedHistory;
-
+use std::sync::{Arc, atomic::AtomicBool};
+fn protocol(error: crate::operation_protocol::Conflict) -> BundleError {
+    crate::bundle::operation_error(crate::operation_actor::Error::Protocol(error))
+}
+pub struct ManualAuthority {
+    lease: Lease,
+    inputs: ManualInputs,
+}
+impl std::ops::Deref for ManualAuthority {
+    type Target = Lease;
+    fn deref(&self) -> &Lease {
+        &self.lease
+    }
+}
+impl ManualAuthority {
+    #[must_use]
+    pub fn lease(&self) -> &Lease {
+        &self.lease
+    }
+}
 impl Ja1EditingSession {
     pub fn active_manual_project(&self) -> Result<crate::bundle_records::ProjectId, BundleError> {
         Ok(self.active_bundle()?.project_id().clone())
     }
-
     pub fn acknowledge_manual(
         &self,
-        permit: &kinewright_core::ManualPermit,
-        prefix: Vec<AcceptedHistory>,
+        permit: &ManualPermit,
+        prefix: Vec<Receipt>,
     ) -> Result<(), BundleError> {
         self.attachment
             .acknowledge_manual(permit, prefix)
-            .map_err(crate::bundle::history_error)
+            .map_err(crate::bundle::operation_error)
     }
     pub fn bind_manual_producer(
         &self,
-        lease: ManualLease,
+        lease: Lease,
         inputs: crate::owned_inputs::OwnedInputManifest,
-    ) -> Result<kinewright_core::ManualPermit, BundleError> {
-        if history_sha256(
-            &self
-                .core
-                .export_history()
-                .map_err(crate::bundle::history_error)?,
-        )? != lease.history_sha256
-        {
-            return Err(BundleError::HistoryChanged);
-        }
+        live: Arc<AtomicBool>,
+    ) -> Result<ManualPermit, BundleError> {
+        let inputs = ManualInputs::from_wire(lease.inputs.clone(), inputs, &self.input_usage)?;
         self.attachment
-            .manual_permit(lease.into_encoder(inputs)?)
-            .map_err(crate::bundle::history_error)
+            .manual_permit(lease, inputs, live)
+            .map_err(crate::bundle::operation_error)
     }
     pub fn manual_input_context(
         &self,
     ) -> Result<crate::owned_inputs::OwnedInputManifest, BundleError> {
         let bundle = self.active_bundle()?;
-        let inputs = &bundle
-            .checkpoint(bundle.manual_branch_id())?
-            .input_manifest_ref;
-        Ok((*bundle.store.read_input_manifest(inputs)?).clone())
+        Ok((*bundle.store.read_input_manifest(
+            &bundle
+                .checkpoint(bundle.manual_branch_id())?
+                .input_manifest_ref,
+        )?)
+        .clone())
     }
     pub fn issue_manual_lease(
         &mut self,
         client: String,
         token: String,
-    ) -> Result<ManualLease, BundleError> {
+    ) -> Result<Lease, BundleError> {
         self.require_local_writer()?;
         let core = self.core.clone();
         let inputs = self.inputs.clone();
-        let history = core
-            .export_history()
-            .map_err(crate::bundle::history_error)?;
         let bundle = self
             .destination
             .as_mut()
             .ok_or(BundleError::HistoryChanged)?
             .bundle_mut()?;
-        bundle.with_person_publication(|bundle| {
+        let mut published_base = None;
+        let result = bundle.with_person_publication(|bundle| {
             let branch = bundle.manual_branch_id().clone();
-            let matches = if let Some(cached) = bundle.verified_cached_history(&branch)? {
-                ***cached == history
-            } else {
-                *bundle.branch_history(&branch)? == history
-            };
-            if !matches {
-                return Err(BundleError::HistoryChanged);
+            // The writer shadow has no other mutator. The full combined state
+            // is checked at the boundary where authority is issued.
+            let cut = bundle
+                .attach_core(&core)?
+                .capture()
+                .map_err(crate::bundle::operation_error)?;
+            if bundle.checkpoint(&branch)?.identity != cut.identity() {
+                // The GUI handover installed a new epoch without claiming a
+                // save. Publish its exact owner and empty chain atomically
+                // before granting the first stream authority.
+                let capture = core
+                    .capture_state()
+                    .map_err(crate::bundle::operation_error)?;
+                if capture.change != cut.change() {
+                    return Err(BundleError::HistoryChanged);
+                }
+                let stream = StreamState::installed(Seed {
+                    project: bundle.project_id().clone(),
+                    branch: branch.clone(),
+                    attachment_epoch: capture.snapshot.history().epoch,
+                    installed: cut.identity(),
+                })
+                .map_err(protocol)?;
+                published_base = Some(bundle.publish_manual_base(&core, capture, &inputs, stream)?);
             }
             let issuer = bundle.issue_issuer(&core, &inputs, 1)?;
-            let namespace_name = bundle.store.with_namespace(|n| {
-                n.identity()
-                    .resolved_root
-                    .file_name()
-                    .and_then(std::ffi::OsStr::to_str)
-                    .map(str::to_owned)
-                    .ok_or(BundleError::Unsupported("manual namespace name".into()))
+            let checkpoint = bundle.checkpoint(&branch)?;
+            let stream = if let Some(stream) = &checkpoint.stream {
+                stream.clone()
+            } else {
+                StreamState::installed(Seed {
+                    project: bundle.project_id().clone(),
+                    branch: branch.clone(),
+                    attachment_epoch: checkpoint.position.epoch,
+                    installed: checkpoint.identity,
+                })
+                .map_err(protocol)?
+            };
+            crate::bundle_commit::BundleCommit::publish_stream(bundle, &inputs, stream)?;
+            let (parent_identity, namespace_name) = bundle.store.with_namespace(|n| {
+                let identity = n.identity();
+                Ok((
+                    (identity.parent_device, identity.parent_inode),
+                    identity
+                        .resolved_root
+                        .file_name()
+                        .and_then(std::ffi::OsStr::to_str)
+                        .ok_or(BundleError::HistoryChanged)?
+                        .to_owned(),
+                ))
             })?;
             let checkpoint = bundle.checkpoint(&branch)?;
-            let parent_identity = bundle
-                .store
-                .with_namespace(|n| Ok((n.identity().parent_device, n.identity().parent_inode)))?;
-            Ok(ManualLease {
-                history_limits: crate::manual_history::OrdinaryHistoryLimits::from_limits(
-                    bundle.store.limits(),
-                )?,
+            Ok(Lease {
+                state: checkpoint
+                    .stream
+                    .clone()
+                    .ok_or(BundleError::HistoryChanged)?,
+                snapshot: checkpoint.identity,
+                next_key: checkpoint.position,
                 parent_identity: Some(parent_identity),
                 namespace_name: Some(namespace_name),
                 client,
                 token,
-                project: bundle.project_id().clone(),
-                branch: branch.clone(),
                 switch_generation: bundle
                     .root()
                     .ok_or(BundleError::HistoryChanged)?
@@ -102,23 +146,163 @@ impl Ja1EditingSession {
                 owner_epoch: bundle.store.owner_epoch(),
                 generation: 1,
                 issuer,
+                next_issuer_sequence: 1,
                 anchor_head: checkpoint.head_id.clone(),
-                predecessor: checkpoint.batch_ids.last().cloned(),
-                history_sha256: checkpoint.history_digest.clone(),
                 inputs: checkpoint.input_manifest_ref.clone(),
-                lineage: checkpoint.lineage_ref.clone(),
             })
-        })
+        });
+        if let Some(report) = published_base
+            && let Some(association) = &mut self.association
+        {
+            association.saved = Some(report.history_sha256);
+            association.saved_position = Some(report.position);
+        }
+        result
+    }
+    pub fn manual_authority(&self, lease: Lease) -> Result<ManualAuthority, BundleError> {
+        let inputs = ManualInputs::read(self.store()?, &lease.inputs)?;
+        Ok(ManualAuthority { lease, inputs })
     }
     pub fn commit_manual_history(
         &mut self,
-        lease: &ManualLease,
-        accepted: &AcceptedHistory,
-    ) -> Result<(ReceiptLookup, Option<BundleSaveReport>), BundleError> {
+        authority: &ManualAuthority,
+        accepted: &EncodedMessage,
+    ) -> Result<(Receipt, Option<BundleSaveReport>), BundleError> {
+        let mut outcome =
+            self.commit_manual_history_group(authority, std::slice::from_ref(accepted))?;
+        if let Some(refusal) = outcome.refusal {
+            return Err(refusal);
+        }
+        let receipt = outcome.receipts.pop().ok_or(BundleError::HistoryChanged)?;
+        Ok((receipt, outcome.report))
+    }
+
+    pub fn commit_manual_history_group(
+        &mut self,
+        authority: &ManualAuthority,
+        messages: &[EncodedMessage],
+    ) -> Result<ManualHistoryCommit, BundleError> {
         self.require_local_writer()?;
-        let envelope = AcceptedManualCommand::decode(accepted)?.envelope;
-        if envelope.manual.as_ref().map(|m| &m.binding) != Some(lease) {
-            return Err(BundleError::HistoryChanged);
+        if messages.len() > crate::operation_protocol::PENDING_COMMANDS
+            || messages
+                .iter()
+                .try_fold(0_u64, |bytes, message| {
+                    bytes.checked_add(message.byte_len())
+                })
+                .is_none_or(|bytes| bytes > crate::operation_protocol::PENDING_BYTES)
+        {
+            return Err(BundleError::Capacity("manual ingress"));
+        }
+        if messages.is_empty() {
+            return Ok(ManualHistoryCommit::default());
+        }
+        let publisher = self.manual_publisher()?;
+        let core = &self.core;
+        let bundle = self
+            .destination
+            .as_mut()
+            .ok_or(BundleError::HistoryChanged)?
+            .bundle_mut()?;
+        // A prior request may have replaced the root before the acknowledgement
+        // was lost. Resolve its exact candidate before consulting the stream.
+        if bundle.unsettled
+            && bundle.pending_publication.as_ref().is_some_and(|pending| {
+                pending.core.actor_identity() == core.actor_identity()
+                    && matches!(
+                        pending.owner,
+                        Some(crate::bundle::PublicationOwner::Update { .. })
+                    )
+            })
+        {
+            bundle.reconcile_command(core)?;
+        }
+        let outcome = bundle.with_person_publication(|bundle| {
+            publish_manual_group(bundle, core, authority, publisher, messages)
+        })?;
+        if !bundle.unsettled && !outcome.receipts.is_empty() {
+            let checkpoint = bundle.checkpoint(bundle.manual_branch_id())?;
+            if let Some(association) = &mut self.association {
+                association.saved = Some(checkpoint.identity.to_string());
+                association.saved_position = Some(checkpoint.position);
+            }
+        }
+        Ok(outcome)
+    }
+
+    pub fn command_receipt(
+        &self,
+        envelope: &crate::receipts::CommandEnvelope,
+    ) -> Result<crate::receipts::ReceiptLookup, BundleError> {
+        self.active_bundle()?.receipt_lookup(envelope)
+    }
+    pub fn manual_receipt(
+        &self,
+        accepted: &EncodedMessage,
+    ) -> Result<Option<Receipt>, BundleError> {
+        let message = accepted.decode().map_err(protocol)?;
+        self.validate_manual_publisher(message.publisher)?;
+        self.active_bundle()?
+            .checkpoint(self.active_bundle()?.manual_branch_id())?
+            .stream
+            .as_ref()
+            .ok_or(BundleError::HistoryChanged)?
+            .lookup(&message)
+            .map(Option::<&Receipt>::cloned)
+            .map_err(protocol)
+    }
+    pub fn validate_manual_message_publisher(
+        &self,
+        accepted: &EncodedMessage,
+    ) -> Result<(), BundleError> {
+        self.validate_manual_publisher(accepted.decode().map_err(protocol)?.publisher)
+    }
+    pub fn manual_publisher(&self) -> Result<crate::operation_protocol::Publisher, BundleError> {
+        self.store()?.with_namespace(|namespace| {
+            let identity = namespace.identity();
+            let name = identity
+                .resolved_root
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .ok_or(BundleError::HistoryChanged)?;
+            crate::operation_protocol::Publisher::native(
+                (identity.parent_device, identity.parent_inode),
+                name,
+            )
+            .map_err(protocol)
+        })
+    }
+    pub fn validate_manual_publisher(
+        &self,
+        publisher: crate::operation_protocol::Publisher,
+    ) -> Result<(), BundleError> {
+        let expected = self.manual_publisher()?;
+        if publisher != expected {
+            return Err(BundleError::Identity(
+                "accepted command belongs to a different native publisher namespace".into(),
+            ));
+        }
+        Ok(())
+    }
+    /// A fresh authenticated recovery owner may apply only this bounded original
+    /// chain, with its original ids and tips. No retired issuer is revived.
+    pub fn reconcile_manual_chain(
+        &mut self,
+        _client: &str,
+        pending: &[EncodedMessage],
+        expected: Option<crate::operation_history::SnapshotIdentity>,
+    ) -> Result<(), BundleError> {
+        self.require_local_writer()?;
+        if pending.len() > crate::operation_protocol::PENDING_COMMANDS
+            || pending
+                .iter()
+                .try_fold(0_u64, |n, p| n.checked_add(p.byte_len()))
+                .is_none_or(|n| n > crate::operation_protocol::PENDING_BYTES)
+            || (!pending.is_empty() && expected.is_none())
+        {
+            return Err(BundleError::Capacity("manual recovery chain"));
+        }
+        for message in pending {
+            self.validate_manual_message_publisher(message)?;
         }
         let core = self.core.clone();
         let bundle = self
@@ -127,358 +311,173 @@ impl Ja1EditingSession {
             .ok_or(BundleError::HistoryChanged)?
             .bundle_mut()?;
         let result = bundle.with_person_publication(|bundle| {
-            crate::bundle_commit::BundleCommit::admitted_history(
-                bundle,
-                &envelope,
-                &core,
-                &lease.inputs,
-            )
-        })?;
+            for accepted in pending {
+                let message = accepted.decode().map_err(protocol)?;
+                let checkpoint = bundle.checkpoint(bundle.manual_branch_id())?;
+                let stream = checkpoint
+                    .stream
+                    .as_ref()
+                    .ok_or(BundleError::HistoryChanged)?;
+                if stream.lookup(&message).map_err(protocol)?.is_some() {
+                    continue;
+                }
+                let current = &checkpoint.input_manifest_ref;
+                let inputs = match message.context.inputs.as_slice() {
+                    [] => current.clone(),
+                    [inputs] => {
+                        if inputs != current {
+                            crate::bundle_commit::validate_manifest_extension(
+                                &bundle.store,
+                                current,
+                                inputs,
+                            )?;
+                        }
+                        inputs.clone()
+                    }
+                    _ => return Err(BundleError::HistoryChanged),
+                };
+                let certificate = ManualInputs::read(&bundle.store, &inputs)?;
+                if let Action::Do { operations, .. } = &message.action {
+                    certificate.check(operations)?;
+                }
+                for part in &message.folded {
+                    certificate.check(&part.operations)?;
+                }
+                crate::bundle_commit::BundleCommit::admitted_history(
+                    bundle, message, &core, &inputs,
+                )?;
+            }
+            if expected.is_some_and(|identity| {
+                bundle
+                    .checkpoint(bundle.manual_branch_id())
+                    .is_ok_and(|checkpoint| checkpoint.identity != identity)
+            }) {
+                return Err(BundleError::HistoryChanged);
+            }
+            Ok(())
+        });
+        // A later suffix may refuse after an earlier message committed. Keep
+        // the input identity of that exact durable prefix in either outcome.
         self.inputs = bundle
             .checkpoint(bundle.manual_branch_id())?
             .input_manifest_ref
             .clone();
-        if let Some(report) = &result.1 {
-            self.association
-                .as_mut()
-                .ok_or(BundleError::HistoryChanged)?
-                .saved = Some(report.history_sha256.clone());
+        if !bundle.unsettled {
+            let checkpoint = bundle.checkpoint(bundle.manual_branch_id())?;
+            if let Some(association) = &mut self.association {
+                association.saved = Some(checkpoint.identity.to_string());
+                association.saved_position = Some(checkpoint.position);
+            }
         }
-        Ok(result)
+        result
     }
-}
-
-impl Ja1EditingSession {
-    /// Recovery lookup never revives the original lease or issuer.
-    pub fn manual_receipt(&self, accepted: &AcceptedHistory) -> Result<ReceiptLookup, BundleError> {
-        self.active_bundle()?
-            .receipt_lookup(&AcceptedManualCommand::decode(accepted)?.envelope)
-    }
-
-    /// The complete bounded frozen chain is the only automatic reauthorization entrypoint.
-    pub fn reconcile_manual_chain(
+    pub fn rotate_manual_epoch(
         &mut self,
-        client: &str,
-        pending: &[AcceptedHistory],
-        expected: Option<&kinewright_core::HistorySnapshot>,
-    ) -> Result<(), BundleError> {
-        if pending.len() > kinewright_core::MANUAL_COMMANDS
-            || serde_json::to_vec(pending)
-                .map_err(crate::bundle::encoding_error)?
-                .len()
-                > kinewright_core::MANUAL_BYTES + 128
-            || (expected.is_none() && !pending.is_empty())
-        {
-            return Err(BundleError::Capacity("manual recovery chain"));
-        }
+        source: crate::operation_history::SnapshotIdentity,
+    ) -> Result<crate::bundle_records::ObjectRef, BundleError> {
         self.require_local_writer()?;
-        let mut previous = None;
-        let mut absent = Vec::new();
-        for accepted in pending {
-            let original = AcceptedManualCommand::decode(accepted)?.envelope;
-            let metadata = original
-                .manual
-                .as_ref()
-                .ok_or(BundleError::HistoryChanged)?;
-            let parent = self
-                .active_bundle()?
-                .store
-                .with_namespace(|n| Ok((n.identity().parent_device, n.identity().parent_inode)))?;
-            if metadata.binding.parent_identity != Some(parent)
-                || metadata.binding.namespace_name.as_deref()
-                    != Some(self.manual_namespace_name()?.as_str())
-            {
-                return Err(BundleError::HistoryChanged);
-            }
-            if let Some((binding, sequence, batch, after)) = previous.as_ref()
-                && (&metadata.binding != binding
-                    || original.id.sequence != sequence + 1
-                    || metadata.predecessor.as_ref() != Some(batch)
-                    || &metadata.before_sha256 != after)
-            {
-                return Err(BundleError::HistoryChanged);
-            }
-            previous = Some((
-                metadata.binding.clone(),
-                original.id.sequence,
-                metadata.batch_id.clone(),
-                metadata.after_sha256.clone(),
-            ));
-            match self.manual_receipt(accepted)? {
-                ReceiptLookup::Committed(_) | ReceiptLookup::Retired(_) => {
-                    if !absent.is_empty() {
-                        return Err(BundleError::HistoryChanged);
-                    }
-                }
-                ReceiptLookup::Absent => absent.push(original),
-                _ => return Err(BundleError::Unsettled),
-            }
-        }
-        if let (Some(history), Some((_, _, _, after))) = (expected, previous.as_ref())
-            && history_sha256(history)? != *after
+        let checkpoint = self
+            .active_bundle()?
+            .checkpoint(self.active_bundle()?.manual_branch_id())?
+            .clone();
+        if let Some(install) = &checkpoint.install
+            && install.source == source
         {
+            self.validate_manual_publisher(install.publisher)?;
+            return self
+                .active_bundle()?
+                .checkpoint_reference(self.active_bundle()?.manual_branch_id());
+        }
+        if checkpoint.identity != source {
             return Err(BundleError::HistoryChanged);
         }
-        if !absent.is_empty() {
-            self.publish_absent_manual_suffix(
-                client,
-                &absent,
-                expected.ok_or(BundleError::HistoryChanged)?,
-            )?;
-        }
-        Ok(())
-    }
-
-    #[allow(
-        clippy::too_many_lines,
-        reason = "one bounded absent-suffix validation and existing-root publication"
-    )]
-    fn publish_absent_manual_suffix(
-        &mut self,
-        client: &str,
-        originals: &[crate::receipts::CommandEnvelope],
-        expected: &kinewright_core::HistorySnapshot,
-    ) -> Result<(), BundleError> {
-        use kinewright_core::{AttachmentState, Command, Event};
-        let bundle = self.active_bundle()?;
-        if bundle.unsettled || bundle.pending_command.is_some() {
-            return Err(BundleError::Unsettled);
-        }
-        let limits = bundle.store.limits().clone();
-        if originals.len() as u64 > limits.pending_commands
-            || (bundle.receipts.detailed.len() + bundle.receipts.retired.len() + originals.len())
-                as u64
-                > limits.receipts
-        {
-            return Err(BundleError::Capacity("manual recovery receipts"));
-        }
-        let inputs = originals
-            .first()
-            .and_then(|original| original.manual.as_ref())
+        let cut = self
+            .attachment
+            .freeze()
+            .map_err(crate::bundle::operation_error)?;
+        let update = self
+            .attachment
+            .prepare_reinstall(
+                &cut,
+                crate::operation_actor::CommandContext {
+                    creation: crate::operation_history::CreationOrigin {
+                        branch: checkpoint.branch_id.clone(),
+                        batch: crate::bundle_records::BatchId::fresh()?,
+                    },
+                    inputs: vec![],
+                    approval: None,
+                    transition: None,
+                },
+            )
+            .map_err(crate::bundle::operation_error)?;
+        let install = crate::operation_checkpoint::InstallRecord {
+            publisher: self.manual_publisher()?,
+            source,
+            source_position: checkpoint.position,
+            stream: checkpoint.stream.clone(),
+        };
+        let core = self.core.clone();
+        let bundle = self
+            .destination
+            .as_mut()
             .ok_or(BundleError::HistoryChanged)?
-            .binding
-            .inputs
-            .clone();
-        crate::bundle_commit::validate_manifest_extension(
-            &bundle.store,
-            &bundle
-                .checkpoint(bundle.manual_branch_id())?
-                .input_manifest_ref,
-            &inputs,
-        )?;
-        let manifest = bundle.store.read_input_manifest(&inputs)?;
-        crate::bundle_commit::validate_inputs(expected, &manifest)?;
-        for reference in bundle.store.closure(std::slice::from_ref(&inputs))? {
-            bundle.store.verify(&reference)?;
-        }
-        crate::store::BundleRecord::validate_admission(&*manifest, &bundle.store)?;
-        let _inputs_pin = bundle.store.pin(std::slice::from_ref(&inputs))?;
-        drop(manifest);
-        if self
-            .core
-            .attachment_state()
-            .map_err(crate::bundle::history_error)?
-            == AttachmentState::Frozen
-        {
-            let cut = self
-                .attachment
-                .capture()
-                .map_err(crate::bundle::history_error)?;
-            self.attachment
-                .resume(&cut)
-                .map_err(crate::bundle::history_error)?;
-        }
-        let mut lease = self.issue_manual_lease(
-            client.into(),
-            format!(
-                "{}{}",
-                crate::bundle_records::SessionId::fresh()?.as_str(),
-                crate::bundle_records::SessionId::fresh()?.as_str()
-            ),
-        )?;
-        lease.inputs = inputs;
-        let before = self
-            .core
-            .export_history()
-            .map_err(crate::bundle::history_error)?;
-        let original_issuer = self.active_bundle()?.issuers[&lease.issuer].clone();
-        let _overlap = self.active_bundle()?.store.reserve_history_shadow(
-            before
-                .encoded_bytes()
-                .map_err(crate::bundle::history_error)?,
-        )?;
-        let mut attempted = false;
-        let outcome = (|| {
-            let mut envelopes = Vec::with_capacity(originals.len());
-            let mut encoded = 0_u64;
-            for (index, original) in originals.iter().enumerate() {
-                let mut renewed = original.clone();
-                renewed.owner_epoch = lease.owner_epoch;
-                renewed.id = crate::receipts::CommandId {
-                    issuer: lease.issuer.clone(),
-                    sequence: u64::try_from(index + 1)
-                        .map_err(|_| BundleError::Capacity("manual recovery sequence"))?,
-                };
-                renewed.lease = Some(lease.token.clone());
-                renewed.expected_head = Some(lease.anchor_head.clone());
-                renewed.expected_revision = self
-                    .attachment
-                    .capture()
-                    .map_err(crate::bundle::history_error)?
-                    .revision();
-                let manual = renewed.manual.as_mut().ok_or(BundleError::HistoryChanged)?;
-                manual.binding = lease.clone();
-                manual.recovery_origin = Some(crate::receipts::OriginalCommand {
-                    id: original.id.clone(),
-                    digest: original.digest()?,
-                });
-                encoded = encoded
-                    .checked_add(renewed.encoded_bytes()?)
-                    .ok_or(BundleError::Capacity("manual recovery controls"))?;
-                envelopes.push(renewed);
-            }
-            let reservation = self.active_bundle()?.store.reserve(
-                0,
-                encoded
-                    .checked_mul(3)
-                    .ok_or(BundleError::Capacity("manual recovery overlap"))?,
-                0,
-                false,
-            )?;
-            let mut predecessor = lease.predecessor.clone();
-            for original in originals {
-                let metadata = original
-                    .manual
-                    .as_ref()
-                    .ok_or(BundleError::HistoryChanged)?;
-                if metadata.recovery_origin.is_some()
-                    || original.project_id != lease.project
-                    || original.target_branch != lease.branch
-                    || metadata.binding.switch_generation != lease.switch_generation
-                    || metadata.binding.inputs != lease.inputs
-                    || metadata.predecessor != predecessor
-                    || history_sha256(
-                        &self
-                            .core
-                            .export_history()
-                            .map_err(crate::bundle::history_error)?,
-                    )? != metadata.before_sha256
-                {
-                    return Err(BundleError::HistoryChanged);
-                }
-                if !matches!(
-                    self.core
-                        .request(Command::from(
-                            original
-                                .command
-                                .clone()
-                                .ok_or(BundleError::HistoryChanged)?
-                        ))
-                        .map_err(|_| BundleError::HistoryChanged)?,
-                    Event::DocumentChanged { .. }
-                ) {
-                    return Err(BundleError::HistoryChanged);
-                }
-                let after = self
-                    .core
-                    .export_history()
-                    .map_err(crate::bundle::history_error)?;
-                if history_sha256(&after)? != metadata.after_sha256
-                    || after.batches.last() != Some(&metadata.batch)
-                    || kinewright_media::sha256_bytes(
-                        &serde_json::to_vec(
-                            &kinewright_core::HistoryJournal::capture(&after)
-                                .map_err(crate::bundle::history_error)?
-                                .cursor,
-                        )
-                        .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-                    ) != metadata.cursor_sha256
-                {
-                    return Err(BundleError::HistoryChanged);
-                }
-                predecessor = Some(metadata.batch_id.clone());
-            }
-            let after = self
-                .core
-                .export_history()
-                .map_err(crate::bundle::history_error)?;
-            let selected = self
-                .destination
-                .as_ref()
-                .ok_or(BundleError::Unsettled)?
-                .bundle()?
-                .store()
-                .with_history_admission(
-                    crate::history_record::HistoryRole::Ordinary,
-                    &limits,
-                    || crate::bundle_commit::bound_history(&after, &limits),
-                )?;
-            let bundle = self
-                .destination
-                .as_mut()
-                .ok_or(BundleError::Unsettled)?
-                .bundle_mut()?;
-            bundle.pending_command = Some(
-                reservation.hold(envelopes.last().ok_or(BundleError::HistoryChanged)?.clone()),
-            );
-            bundle
-                .issuers
-                .get_mut(&lease.issuer)
-                .ok_or(BundleError::HistoryChanged)?
-                .next_sequence = u64::try_from(originals.len())
-                .map_err(|_| BundleError::Capacity("manual recovery sequence"))?
-                .checked_add(1)
-                .ok_or(BundleError::Capacity("manual recovery sequence"))?;
-            attempted = true;
-            let report = crate::bundle_commit::BundleCommit::publish_recovery_batch(
+            .bundle_mut()?;
+        let report = bundle.with_person_publication(|bundle| {
+            crate::bundle_commit::BundleCommit::publish_update(
                 bundle,
-                &after,
-                &selected,
-                &lease.inputs,
-                &envelopes,
-            )?;
-            bundle.pending_command = None;
-            Ok(report)
-        })();
-        match outcome {
-            Ok(report) => {
-                self.inputs.clone_from(&lease.inputs);
-                if let Some(association) = &mut self.association {
-                    association.saved = Some(report.history_sha256);
-                }
-                Ok(())
-            }
-            Err(error) => {
-                let bundle = self
-                    .destination
-                    .as_mut()
-                    .ok_or(BundleError::Unsettled)?
-                    .bundle_mut()?;
-                if !attempted
-                    || !matches!(
-                        bundle.publication_state,
-                        crate::bundle::PublicationState::Unknown
-                            | crate::bundle::PublicationState::Committed
-                    )
-                {
-                    bundle.pending_command = None;
-                    bundle.issuers.insert(lease.issuer, original_issuer);
-                    self.attachment
-                        .restore_history(before)
-                        .map_err(crate::bundle::history_error)?;
-                } else {
-                    bundle.unsettled = true;
-                }
-                Err(error)
-            }
+                &core,
+                cut,
+                update,
+                &checkpoint.input_manifest_ref,
+                &checkpoint.branch_id,
+                None,
+                false,
+                Some(install),
+            )
+        })?;
+        let reference = bundle.checkpoint_reference(&checkpoint.branch_id)?;
+        if let Some(association) = &mut self.association {
+            association.saved = Some(report.history_sha256);
+            association.saved_position = Some(report.position);
         }
+        Ok(reference)
     }
-
+    pub fn installed_manual_receipts(
+        &self,
+        source: crate::operation_history::SnapshotIdentity,
+    ) -> Result<Option<Vec<Receipt>>, BundleError> {
+        let bundle = self.active_bundle()?;
+        let Some(install) = bundle
+            .checkpoint(bundle.manual_branch_id())?
+            .install
+            .as_ref()
+            .filter(|install| install.source == source)
+        else {
+            return Ok(None);
+        };
+        self.validate_manual_publisher(install.publisher)?;
+        Ok(Some(
+            install
+                .stream
+                .as_ref()
+                .map_or_else(Vec::new, |stream| stream.receipts().cloned().collect()),
+        ))
+    }
     pub fn published_manual_history(
         &self,
-    ) -> Result<kinewright_core::HistorySnapshot, BundleError> {
+    ) -> Result<crate::operation_actor::PortableHistory, BundleError> {
         let bundle = self.active_bundle()?;
-        Ok((*bundle.branch_history(bundle.manual_branch_id())?).clone())
+        let checkpoint = bundle.checkpoint(bundle.manual_branch_id())?;
+        Ok(crate::operation_actor::PortableHistory {
+            snapshot: Arc::new(
+                bundle
+                    .branch_history(bundle.manual_branch_id())?
+                    .into_capture()?
+                    .into_transport()?,
+            ),
+            branch: checkpoint.branch_id.clone(),
+            revision: checkpoint.revision,
+        })
     }
     pub fn manual_namespace_name(&self) -> Result<String, BundleError> {
         self.active_bundle()?.store.with_namespace(|n| {
@@ -487,7 +486,7 @@ impl Ja1EditingSession {
                 .file_name()
                 .and_then(std::ffi::OsStr::to_str)
                 .map(str::to_owned)
-                .ok_or(BundleError::Unsupported("manual namespace name".into()))
+                .ok_or(BundleError::HistoryChanged)
         })
     }
     #[cfg(any(test, feature = "test-util"))]
@@ -495,18 +494,13 @@ impl Ja1EditingSession {
         &mut self,
         limits: crate::storage_budget::StorageLimits,
     ) -> Result<(), BundleError> {
-        self.destination
-            .as_mut()
-            .ok_or(BundleError::Unsettled)?
-            .bundle_mut()?
-            .restrict_limits_probe(limits)
+        self.active_bundle_mut()?.restrict_limits_probe(limits)
     }
     pub fn manual_parent_identity(&self) -> Result<(u64, u64), BundleError> {
         self.active_bundle()?
             .store
             .with_namespace(|n| Ok((n.identity().parent_device, n.identity().parent_inode)))
     }
-    /// The manual branch's current checkpoint reference, without reading it.
     pub fn manual_checkpoint_ref(&self) -> Result<crate::bundle_records::ObjectRef, BundleError> {
         let bundle = self.active_bundle()?;
         bundle.checkpoint_reference(bundle.manual_branch_id())
@@ -521,237 +515,63 @@ impl Ja1EditingSession {
         BundleError,
     > {
         let bundle = self.active_bundle()?;
-        let id = bundle.manual_branch_id();
         Ok((
-            bundle.checkpoint_reference(id)?,
-            bundle.checkpoint(id)?.clone(),
+            bundle.checkpoint_reference(bundle.manual_branch_id())?,
+            bundle.checkpoint(bundle.manual_branch_id())?.clone(),
         ))
     }
-
-    /// Durable issuance precedes returning an immutable transition envelope.
-    pub fn prepare_manual_transition(
-        &mut self,
-        discard: Option<usize>,
-    ) -> Result<crate::receipts::CommandEnvelope, BundleError> {
-        self.require_local_writer()?;
-        let core = self.core.clone();
-        let inputs = self.inputs.clone();
-        let bundle = self
-            .destination
-            .as_mut()
-            .ok_or(BundleError::Unsettled)?
-            .bundle_mut()?;
-        let cut = self
-            .attachment
-            .capture()
-            .map_err(crate::bundle::history_error)?;
-        let frozen = (core
-            .attachment_state()
-            .map_err(crate::bundle::history_error)?
-            == kinewright_core::AttachmentState::Frozen)
-            .then_some(&cut);
-        let issuer = bundle.issue_issuer_at_cut(&core, &inputs, 1, frozen)?;
-        let checkpoint = bundle.checkpoint(bundle.manual_branch_id())?;
-        let cut = checkpoint.command_cut.clone();
-        let request = match discard {
-            Some(discard_batches) => crate::receipts::HistoryRequest::Floor {
-                discard_batches,
-                preceding_checkpoint_generation: checkpoint.checkpoint_generation,
-                preceding_floor_generation: checkpoint.floor_generation,
-                command_cut: cut.ok_or(BundleError::HistoryChanged)?,
-            },
-            None => crate::receipts::HistoryRequest::RecoveryClose {
-                preceding_checkpoint_generation: checkpoint.checkpoint_generation,
-                reconciled_cut: cut,
-                suffix_digest: checkpoint.history_ref.sha256.clone(),
-            },
-        };
-        let action = match request {
-            crate::receipts::HistoryRequest::Floor { .. } => "floor",
-            crate::receipts::HistoryRequest::RecoveryClose { .. } => "recovery_close",
-        };
-        Ok(crate::receipts::CommandEnvelope {
-            switch: None,
-            manual: None,
-            version: 1,
-            action: action.into(),
-            id: crate::receipts::CommandId {
-                issuer,
-                sequence: 1,
-            },
-            project_id: bundle.project_id().clone(),
-            target_branch: bundle.manual_branch_id().clone(),
-            owner_epoch: bundle.store.owner_epoch(),
-            lease: None,
-            expected_head: bundle.manual_head().cloned(),
-            expected_revision: self
-                .attachment
-                .capture()
-                .map_err(crate::bundle::history_error)?
-                .revision(),
-            command: None,
-            comment_text: None,
-            comment_strokes: None,
-            evidence: vec![],
-            transition: Some(request),
-        })
-    }
-
-    /// Reuses S1 transition validation/publication; the caller installs on each frozen actor.
-    pub fn publish_manual_transition(
-        &mut self,
-        envelope: &crate::receipts::CommandEnvelope,
-    ) -> Result<ReceiptLookup, BundleError> {
-        self.require_local_writer()?;
-        if envelope.transition.is_none() {
-            return Err(BundleError::HistoryChanged);
-        }
-        let core = self.core.clone();
-        let inputs = self.inputs.clone();
-        let bundle = self
-            .destination
-            .as_mut()
-            .ok_or(BundleError::Unsettled)?
-            .bundle_mut()?;
-        crate::bundle_commit::BundleCommit::command_inner(
-            bundle,
-            envelope,
-            &core,
-            &inputs,
-            &[],
-            false,
-        )
-    }
-
-    pub fn freeze_manual_barrier(&self) -> Result<kinewright_core::AcceptedCut, BundleError> {
+    pub fn freeze_manual_barrier(&self) -> Result<AcceptedCut, BundleError> {
         self.attachment
             .freeze()
-            .map_err(crate::bundle::history_error)
+            .map_err(crate::bundle::operation_error)
     }
-
-    pub fn install_manual_barrier(
-        &mut self,
-        cut: &kinewright_core::AcceptedCut,
-        history: kinewright_core::HistorySnapshot,
-        pending: Vec<AcceptedHistory>,
-    ) -> Result<kinewright_core::AcceptedCut, BundleError> {
-        let digest = history_sha256(&history)?;
-        let cut = self
-            .attachment
-            .install_frozen_transition(cut, history, pending)
-            .map_err(crate::bundle::history_error)?;
-        if self.host_attached {
-            self.host_cut = Some(cut.clone());
-        }
-        if let Some(association) = &mut self.association {
-            association.saved = Some(digest);
-        }
-        Ok(cut)
-    }
-
-    pub fn resume_manual_barrier(
-        &mut self,
-        cut: &kinewright_core::AcceptedCut,
-    ) -> Result<(), BundleError> {
+    pub fn resume_manual_barrier(&mut self, cut: &AcceptedCut) -> Result<(), BundleError> {
         self.attachment
             .resume(cut)
-            .map_err(crate::bundle::history_error)?;
+            .map_err(crate::bundle::operation_error)?;
         self.host_cut = None;
         Ok(())
-    }
-}
-
-impl Ja1EditingSession {
-    pub fn manual_transition_receipt(
-        &self,
-        envelope: &crate::receipts::CommandEnvelope,
-    ) -> Result<ReceiptLookup, BundleError> {
-        self.active_bundle()?.receipt_lookup(envelope)
     }
     pub fn verify_manual_predecessor(
         &self,
         reference: &crate::bundle_records::ObjectRef,
-        history: &kinewright_core::HistorySnapshot,
+        identity: crate::operation_history::SnapshotIdentity,
     ) -> Result<(), BundleError> {
-        let bundle = self.active_bundle()?;
-        let checkpoint = bundle
+        let checkpoint = self
+            .active_bundle()?
             .store
             .read_record::<crate::bundle_records::BranchCheckpoint>(reference)?;
-        if checkpoint.branch_id != *bundle.manual_branch_id()
-            || *bundle.store.resolve_history(&checkpoint.history_ref)? != *history
+        if checkpoint.branch_id != *self.active_bundle()?.manual_branch_id()
+            || checkpoint.identity != identity
         {
             return Err(BundleError::HistoryChanged);
         }
         Ok(())
     }
-}
-
-/// Same-process GUI actor control. It cannot execute edits or install arbitrary snapshots.
-pub struct ManualRecoveryEndpoint {
-    attachment: crate::ProjectAttachment,
-    core: kinewright_core::Core,
-    cut: kinewright_core::AcceptedCut,
-    pending: Vec<AcceptedHistory>,
-}
-impl ManualRecoveryEndpoint {
-    pub fn install(
-        &mut self,
-        history: kinewright_core::HistorySnapshot,
-    ) -> Result<(), BundleError> {
-        self.cut = self
-            .attachment
-            .install_frozen_transition(&self.cut, history, self.pending.clone())
-            .map_err(crate::bundle::history_error)?;
-        self.pending.clear();
-        Ok(())
-    }
-    pub fn snapshot(&self) -> Result<kinewright_core::HistorySnapshot, BundleError> {
-        self.core
-            .export_history()
-            .map_err(crate::bundle::history_error)
-    }
-    pub fn finish(
-        self,
-        lease: ManualLease,
-        inputs: crate::owned_inputs::OwnedInputManifest,
-        live: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<kinewright_core::ManualPermit, BundleError> {
-        if history_sha256(self.cut.history())? != lease.history_sha256 {
-            return Err(BundleError::HistoryChanged);
-        }
-        crate::bundle_commit::validate_inputs(self.cut.history(), &inputs)?;
-        self.attachment
-            .resume_manual(&self.cut, lease.into_encoder(inputs)?, live)
-            .map_err(crate::bundle::history_error)
-    }
-}
-impl Ja1EditingSession {
-    pub fn recapture_host_recovery_cut(
-        &mut self,
-    ) -> Result<kinewright_core::AcceptedCut, BundleError> {
+    pub fn recapture_host_recovery_cut(&mut self) -> Result<AcceptedCut, BundleError> {
         if !self.host_attached || self.host_retention_lost {
             return Err(BundleError::HistoryChanged);
         }
         let cut = self
             .attachment
             .freeze()
-            .map_err(crate::bundle::history_error)?;
-        self.host_cut = Some(cut.clone());
+            .map_err(crate::bundle::operation_error)?;
+        self.host_cut = Some(cut);
         Ok(cut)
     }
     pub fn manual_recovery_endpoint(
         &self,
-        cut: &kinewright_core::AcceptedCut,
-        pending: Vec<AcceptedHistory>,
+        cut: &AcceptedCut,
+        pending: Vec<EncodedMessage>,
     ) -> Result<ManualRecoveryEndpoint, BundleError> {
         if !self.host_attached
             || self.host_retention_lost
             || self.host_cut.as_ref() != Some(cut)
             || self
-                .attachment
-                .capture()
-                .map_err(crate::bundle::history_error)?
-                != *cut
+                .core
+                .change_id()
+                .map_err(crate::bundle::operation_error)?
+                != cut.change()
             || !self.rescue.attempts.is_empty()
             || !self.retained_destinations.is_empty()
         {
@@ -759,10 +579,11 @@ impl Ja1EditingSession {
         }
         Ok(ManualRecoveryEndpoint {
             attachment: crate::ProjectAttachment::new(&self.core)
-                .map_err(crate::bundle::history_error)?,
+                .map_err(crate::bundle::operation_error)?,
             core: self.core.clone(),
-            cut: cut.clone(),
+            cut: *cut,
             pending,
+            input_usage: std::sync::Arc::clone(&self.input_usage),
         })
     }
     pub fn finish_host_manual_recovery(
@@ -772,54 +593,28 @@ impl Ja1EditingSession {
         if !self.host_attached
             || self.host_retention_lost
             || self.host_cut.is_none()
-            || history_sha256(
-                &self
-                    .core
-                    .export_history()
-                    .map_err(crate::bundle::history_error)?,
-            )? != publisher_digest
+            || self
+                .attachment
+                .capture()
+                .map_err(crate::bundle::operation_error)?
+                .identity()
+                .to_string()
+                != publisher_digest
         {
             return Err(BundleError::HistoryChanged);
         }
         self.host_cut = None;
         self.host_published_digest = Some(publisher_digest.into());
-        if let Some(association) = &mut self.association {
-            association.saved = Some(publisher_digest.into());
+        if let Some(a) = &mut self.association {
+            a.saved_position = Some(
+                self.core
+                    .change_id()
+                    .map_err(crate::bundle::operation_error)?
+                    .position,
+            );
+            a.saved = Some(publisher_digest.into());
         }
         Ok(())
-    }
-}
-
-impl Ja1EditingSession {
-    /// Resolve the exact receipt checkpoint, allowing only later metadata publications
-    /// that preserve every payload reference, command cut and floor generation.
-    pub fn manual_barrier_result(
-        &self,
-        envelope: &crate::receipts::CommandEnvelope,
-    ) -> Result<crate::bundle_records::BranchCheckpoint, BundleError> {
-        use crate::receipts::ReceiptResult;
-        let bundle = self.active_bundle()?;
-        let lookup = bundle.receipt_lookup(envelope)?;
-        let (ReceiptLookup::Committed(receipt) | ReceiptLookup::Retired(receipt)) = lookup else {
-            return Err(BundleError::Unsettled);
-        };
-        let ReceiptResult::Edit { checkpoint_ref, .. } = receipt.result else {
-            return Err(BundleError::HistoryChanged);
-        };
-        let recorded = bundle
-            .store
-            .read_record::<crate::bundle_records::BranchCheckpoint>(&checkpoint_ref)?;
-        let mut current = bundle.checkpoint(bundle.manual_branch_id())?.clone();
-        if current.checkpoint_generation < recorded.checkpoint_generation {
-            return Err(BundleError::HistoryChanged);
-        }
-        current.head_id.clone_from(&recorded.head_id);
-        current.predecessor.clone_from(&recorded.predecessor);
-        current.checkpoint_generation = recorded.checkpoint_generation;
-        if current != *recorded {
-            return Err(BundleError::HistoryChanged);
-        }
-        Ok((*recorded).clone())
     }
     pub fn manual_switch_generation(&self) -> Result<u64, BundleError> {
         Ok(self
@@ -829,173 +624,1042 @@ impl Ja1EditingSession {
             .manual_switch_generation)
     }
 }
+/// A published or previously saved receipt for each accepted message, followed
+/// by at most one refusal. The request's remaining messages were untouched.
+#[derive(Default)]
+pub struct ManualHistoryCommit {
+    pub receipts: Vec<Receipt>,
+    pub refusal: Option<BundleError>,
+    pub report: Option<BundleSaveReport>,
+}
+
+struct ManualGroup<'a> {
+    authority: &'a ManualAuthority,
+    checkpoint: &'a crate::bundle_records::BranchCheckpoint,
+    publisher: crate::operation_protocol::Publisher,
+    lease_matches: bool,
+    writable: bool,
+    next_issuer_sequence: Option<u64>,
+    stream: StreamState,
+    stage: Option<(AcceptedCut, crate::operation_actor::ManualPreview)>,
+    partial_packet: bool,
+}
+
+impl<'a> ManualGroup<'a> {
+    fn new(
+        bundle: &crate::bundle::ProjectBundle,
+        checkpoint: &'a crate::bundle_records::BranchCheckpoint,
+        authority: &'a ManualAuthority,
+        publisher: crate::operation_protocol::Publisher,
+    ) -> Result<Self, BundleError> {
+        let lease = authority.lease();
+        let stream = checkpoint
+            .stream
+            .clone()
+            .ok_or(BundleError::HistoryChanged)?;
+        let switch_generation = bundle
+            .root()
+            .ok_or(BundleError::HistoryChanged)?
+            .manual_switch_generation;
+        Ok(Self {
+            authority,
+            checkpoint,
+            publisher,
+            lease_matches: lease.state.seed() == stream.seed()
+                && lease.owner_epoch == bundle.store.owner_epoch()
+                && lease.switch_generation == switch_generation
+                && lease.inputs == checkpoint.input_manifest_ref,
+            writable: !bundle.unsettled && bundle.pending_publication.is_none(),
+            next_issuer_sequence: bundle
+                .issuers
+                .get(&lease.issuer)
+                .map(|issuer| issuer.next_sequence),
+            stream,
+            stage: None,
+            partial_packet: false,
+        })
+    }
+    fn discard(&mut self, owner: &crate::ProjectAttachment) -> Result<(), BundleError> {
+        if let Some((cut, preview)) = self.stage.take() {
+            drop(preview);
+            owner.resume(&cut).map_err(crate::bundle::operation_error)?;
+        }
+        Ok(())
+    }
+    fn admit(
+        &mut self,
+        owner: &crate::ProjectAttachment,
+        accepted: &EncodedMessage,
+    ) -> Result<Receipt, BundleError> {
+        let message = accepted.decode().map_err(protocol)?;
+        if message.publisher != self.publisher {
+            return Err(BundleError::Identity(
+                "accepted command belongs to a different native publisher namespace".into(),
+            ));
+        }
+        // Check saved receipts before checking current issuer authority. Keep
+        // the original window available as new commands advance the preview.
+        let base_stream = self
+            .checkpoint
+            .stream
+            .as_ref()
+            .ok_or(BundleError::HistoryChanged)?;
+        if message.sequence <= base_stream.sequence() {
+            return base_stream
+                .lookup(&message)
+                .map_err(protocol)?
+                .cloned()
+                .ok_or(BundleError::HistoryChanged);
+        }
+        if let Some(receipt) = self.stream.lookup(&message).map_err(protocol)? {
+            return Ok(receipt.clone());
+        }
+        if !self.writable {
+            return Err(BundleError::Unsettled);
+        }
+        let lease = self.authority.lease();
+        if !self.lease_matches
+            || message.id.issuer != lease.issuer
+            || Some(message.id.sequence) != self.next_issuer_sequence
+            || message.context.creation.branch != self.checkpoint.branch_id
+            || message.context.approval.is_some()
+            || message.context.transition.is_some()
+            || message
+                .context
+                .inputs
+                .iter()
+                .any(|reference| reference != &lease.inputs)
+        {
+            return Err(BundleError::HistoryChanged);
+        }
+        if let Action::Do { operations, .. } = &message.action {
+            self.authority.inputs.check(operations)?;
+        }
+        for part in &message.folded {
+            self.authority.inputs.check(&part.operations)?;
+        }
+        let next = message
+            .id
+            .sequence
+            .checked_add(1)
+            .ok_or(BundleError::Capacity("issuer sequence"))?;
+        let position = self
+            .stage
+            .as_ref()
+            .map_or(self.checkpoint.position, |(_, preview)| preview.position());
+        let receipt = StreamState::new_receipt(&message, position).map_err(protocol)?;
+        if self.stage.is_none() {
+            let cut = owner
+                .freeze_published(
+                    self.checkpoint.identity,
+                    self.checkpoint.position,
+                    self.checkpoint.revision,
+                )
+                .map_err(crate::bundle::operation_error)?;
+            match owner.preview_manual(cut) {
+                Ok(preview) => self.stage = Some((cut, preview)),
+                Err(error) => {
+                    owner.resume(&cut).map_err(crate::bundle::operation_error)?;
+                    return Err(crate::bundle::operation_error(error));
+                }
+            }
+        }
+        let (_, preview) = self
+            .stage
+            .as_mut()
+            .expect("manual publication has a working copy");
+        if let Err(error) = preview.apply_message(message) {
+            self.partial_packet = preview.position() != position;
+            return Err(crate::bundle::operation_error(error));
+        }
+        self.stream.record_receipt(receipt.clone());
+        self.next_issuer_sequence = Some(next);
+        Ok(receipt)
+    }
+}
+
+fn publish_manual_group(
+    bundle: &mut crate::bundle::ProjectBundle,
+    core: &crate::operation_actor::Core,
+    authority: &ManualAuthority,
+    publisher: crate::operation_protocol::Publisher,
+    messages: &[EncodedMessage],
+) -> Result<ManualHistoryCommit, BundleError> {
+    let lease = authority.lease();
+    let branch = bundle.manual_branch_id().clone();
+    let checkpoint = bundle.checkpoint(&branch)?;
+    let mut group = ManualGroup::new(bundle, checkpoint, authority, publisher)?;
+    let owner = bundle.attach_core(core)?;
+    let mut outcome = ManualHistoryCommit {
+        receipts: Vec::with_capacity(messages.len()),
+        ..ManualHistoryCommit::default()
+    };
+    for accepted in messages {
+        match group.admit(&owner, accepted) {
+            Ok(receipt) => outcome.receipts.push(receipt),
+            Err(error) => {
+                outcome.refusal = Some(error);
+                break;
+            }
+        }
+    }
+    if group.partial_packet {
+        // A malformed folded packet can refuse after a sub-batch applied.
+        // Drop the private copy and replay the accepted packets once.
+        group.discard(&owner)?;
+        group = ManualGroup::new(bundle, checkpoint, authority, publisher)?;
+        for accepted in &messages[..outcome.receipts.len()] {
+            if let Err(error) = group.admit(&owner, accepted) {
+                group.discard(&owner)?;
+                return Err(error);
+            }
+        }
+    }
+    if let Some((cut, preview)) = group.stage {
+        match preview.finish() {
+            Ok(Some(update)) => {
+                outcome.report = Some(crate::bundle_commit::BundleCommit::publish_update(
+                    bundle,
+                    core,
+                    cut,
+                    update,
+                    &lease.inputs,
+                    &branch,
+                    Some(group.stream),
+                    true,
+                    None,
+                )?);
+            }
+            Ok(None) => owner.resume(&cut).map_err(crate::bundle::operation_error)?,
+            Err(error) => {
+                owner.resume(&cut).map_err(crate::bundle::operation_error)?;
+                return Err(crate::bundle::operation_error(error));
+            }
+        }
+    }
+    Ok(outcome)
+}
+
+pub struct ManualRecoveryEndpoint {
+    attachment: crate::ProjectAttachment,
+    core: crate::operation_actor::Core,
+    cut: AcceptedCut,
+    pending: Vec<EncodedMessage>,
+    input_usage: std::sync::Arc<std::sync::Mutex<crate::storage_budget::StorageUsage>>,
+}
+impl ManualRecoveryEndpoint {
+    pub fn install(
+        &mut self,
+        transport: crate::operation_actor::PortableHistory,
+        receipts: Vec<Receipt>,
+    ) -> Result<(), BundleError> {
+        let crate::operation_actor::PortableHistory {
+            snapshot,
+            branch,
+            revision,
+        } = transport;
+        let role = snapshot.role();
+        let snapshot = snapshot.receive(self.core.history_pool(), role)?;
+        self.attachment
+            .acknowledge_frozen(&self.cut, receipts)
+            .map_err(crate::bundle::operation_error)?;
+        // The actor retains any unacknowledged suffix. This duplicate request
+        // buffer has finished its job and must not keep the old arena's entire
+        // reservation through replacement. Install still requires a drained actor.
+        self.pending.clear();
+        // Every pending command must have a durable receipt before replacement.
+        self.attachment
+            .install_peer_snapshot(&self.cut, snapshot, branch, revision)
+            .map_err(crate::bundle::operation_error)?;
+        self.cut = self
+            .attachment
+            .freeze()
+            .map_err(crate::bundle::operation_error)?;
+        Ok(())
+    }
+    pub fn snapshot(&self) -> Result<crate::operation_actor::PortableHistory, BundleError> {
+        self.core
+            .portable_history()
+            .map_err(crate::bundle::operation_error)
+    }
+    pub fn finish(
+        self,
+        lease: Lease,
+        inputs: crate::owned_inputs::OwnedInputManifest,
+        live: Arc<AtomicBool>,
+    ) -> Result<ManualPermit, BundleError> {
+        if self.cut.identity() != lease.snapshot || !self.pending.is_empty() {
+            return Err(BundleError::HistoryChanged);
+        }
+        let inputs = ManualInputs::from_wire(lease.inputs.clone(), inputs, &self.input_usage)?;
+        self.attachment
+            .resume_manual(&self.cut, lease, inputs, live)
+            .map_err(crate::bundle::operation_error)
+    }
+}
 
 #[cfg(all(test, target_os = "linux"))]
 mod c0_fix1_tests {
     use super::*;
-    use crate::{
-        bundle::BundleWriteAdmission,
-        bundle_records::{ObjectRef, ProjectId, RecordKind},
-        store::BundleRecord,
-    };
-    use kinewright_core::{AssetId, Command, Core, Document, Operation};
+    use crate::{bundle::BundleWriteAdmission, operation_actor::Core};
+    use kinewright_core::{Command, Document, Operation, Track, TrackId, TrackKind};
     use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
 
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn s3_fix1_recovery_checks_inputs_before_replacement_authority() {
-        for fault in [
-            "owner",
-            "predecessor",
-            "fingerprint",
-            "interpretation",
-            "table",
-            "bytes",
-            "stream",
-        ] {
-            let temp =
-                TempDirectory::new_in(&workspace_target_dir(), "c0-fix1-recovery-validation");
-            let path = temp.path("validation.kinewright");
-            let core = Core::spawn(Document::default()).unwrap();
-            let mut owner = Ja1EditingSession::activate(
-                &path,
-                BundleWriteAdmission::new_document(),
-                &core,
-                None,
-            )
-            .unwrap();
-            let source = temp.path("source.wav");
-            std::fs::write(
-                &source,
-                kinewright_media::test_support::wav_f32(&vec![0.25; 4800], 48_000, 1),
-            )
-            .unwrap();
-            owner.import_owned_media(&source).unwrap();
-            std::fs::write(
-                &source,
-                kinewright_media::test_support::wav_f32(&vec![0.5; 4800], 48_000, 1),
-            )
-            .unwrap();
-            let prepared = owner.prepare_owned_media(&source, AssetId(2)).unwrap();
-            let lease = owner
-                .issue_manual_lease_for_inputs("r".repeat(64), "t".repeat(64), &prepared)
+    fn owner() -> (TempDirectory, Ja1EditingSession) {
+        let temp = TempDirectory::new_in(&workspace_target_dir(), "owner-manual-protocol");
+        let owner = owner_at(&temp.path("project.kinewright"));
+        (temp, owner)
+    }
+
+    fn owner_at(path: &std::path::Path) -> Ja1EditingSession {
+        let core = Core::for_test(Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Document::default()
+        })
+        .unwrap();
+        let mut owner =
+            Ja1EditingSession::activate(path, BundleWriteAdmission::new_document(), &core, None)
                 .unwrap();
-            let gui = Core::spawn(Document::default()).unwrap();
-            gui.restore_history(core.export_history().unwrap()).unwrap();
-            let replica = Ja1EditingSession::new(
-                temp.root(),
-                &gui,
-                crate::storage_budget::StorageLimits::default(),
+        owner.save_active().unwrap();
+        owner
+    }
+    fn replica(
+        temp: &TempDirectory,
+        owner: &Ja1EditingSession,
+        lease: Lease,
+    ) -> (Ja1EditingSession, ManualPermit) {
+        // Two processes have distinct explicit pools. This test exercises the
+        // same portable receiver and full validation as the GUI bootstrap.
+        let pool = crate::operation_history::HistoryPool::new(
+            crate::operation_history::PoolLimits::default(),
+        );
+        let wire = owner.core().portable_history().unwrap();
+        let branch = wire.branch.clone();
+        let revision = wire.revision;
+        let core = Core::open(wire.validate(&pool).unwrap(), branch, revision).unwrap();
+        let replica = Ja1EditingSession::new(
+            temp.root(),
+            &core,
+            crate::storage_budget::StorageLimits::default(),
+        )
+        .unwrap();
+        let permit = replica
+            .bind_manual_producer(
+                lease,
+                owner.manual_input_context().unwrap(),
+                Arc::new(AtomicBool::new(true)),
             )
             .unwrap();
-            let permit = replica
-                .bind_manual_producer(lease, prepared.manifest.clone())
-                .unwrap();
+        (replica, permit)
+    }
+
+    fn group_messages(permit: &ManualPermit) -> Vec<EncodedMessage> {
+        for locked in [false, true, false] {
             permit
-                .request(Command::Do(Operation::AddAsset {
-                    asset: prepared.asset.clone(),
+                .request(Command::DoBatchCoalesced {
+                    operations: vec![Operation::SetTrackSyncLock {
+                        track: TrackId(1),
+                        locked,
+                    }],
+                    coalesce_key: "group".into(),
+                })
+                .unwrap();
+            // These publication and process-stop witnesses send distinct packets.
+            let _ = permit.pending().unwrap();
+        }
+        permit.pending().unwrap()
+    }
+
+    #[test]
+    fn hx_h4_a_refused_folded_packet_publishes_only_prior_packets() {
+        let (temp, mut writer) = owner();
+        let lease = writer
+            .issue_manual_lease("group".into(), "group".into())
+            .unwrap();
+        let authority = writer.manual_authority(lease.clone()).unwrap();
+        let (gui, permit) = replica(&temp, &writer, lease);
+        let change = |track, locked| Operation::SetTrackSyncLock { track, locked };
+        permit
+            .request(Command::Do(change(TrackId(1), false)))
+            .unwrap();
+        let prefix = gui.core().snapshot_identity().unwrap();
+        let first = permit.pending().unwrap();
+        for locked in [true, false] {
+            permit
+                .request(Command::DoBatchCoalesced {
+                    operations: vec![change(TrackId(1), locked)],
+                    coalesce_key: "group".into(),
+                })
+                .unwrap();
+        }
+        permit.close_gesture().unwrap();
+        let messages = permit.pending().unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0], first[0]);
+        let mut refused = messages[1].decode().unwrap();
+        assert_eq!(refused.folded.len(), 1);
+        refused.folded[0].operations[0] = change(TrackId(999), false);
+        refused.tip = refused.chained().unwrap();
+        let refused =
+            serde_json::from_value(serde_json::json!(serde_json::to_string(&refused).unwrap()))
+                .unwrap();
+        let outcome = writer
+            .commit_manual_history_group(
+                &authority,
+                &[messages[0].clone(), refused, messages[2].clone()],
+            )
+            .unwrap();
+        assert_eq!(outcome.receipts.len(), 1);
+        assert!(outcome.refusal.is_some());
+        assert_eq!(writer.core().snapshot_identity().unwrap(), prefix);
+        let pool = crate::operation_history::HistoryPool::new(
+            crate::operation_history::PoolLimits::default(),
+        );
+        let mut loaded =
+            crate::bundle::LoadedBundle::read(&temp.path("project.kinewright"), &pool).unwrap();
+        assert_eq!(
+            loaded.open_manual().unwrap().snapshot_identity().unwrap(),
+            prefix
+        );
+        let retried = writer
+            .commit_manual_history_group(&authority, &messages)
+            .unwrap();
+        assert_eq!(retried.receipts.len(), 3);
+        assert!(retried.refusal.is_none());
+        assert_eq!(
+            writer.core().snapshot_identity().unwrap(),
+            gui.core().snapshot_identity().unwrap()
+        );
+    }
+
+    #[test]
+    fn hx_h4_publication_failure_returns_no_receipts_and_retries() {
+        use crate::io_observer::{fail_once, observe};
+        for failure in ["capacity", "root_rename_io", "root_parent_sync"] {
+            let (temp, mut writer) = owner();
+            let lease = writer
+                .issue_manual_lease("group".into(), "group".into())
+                .unwrap();
+            let authority = writer.manual_authority(lease.clone()).unwrap();
+            let (gui, permit) = replica(&temp, &writer, lease);
+            let messages = group_messages(&permit);
+            let before = writer.core().change_id().unwrap();
+            let path = temp.path("project.kinewright");
+            let root = std::fs::read(&path).unwrap();
+            let result = if failure == "capacity" {
+                let store = writer.store().unwrap();
+                let limits = store.limits();
+                let usage = store.usage().unwrap();
+                let mut available = limits.metadata_bytes
+                    - usage.metadata_bytes
+                    - (usage.decoded_bytes - usage.decoder_bytes);
+                let mut held = Vec::new();
+                while available > 0 {
+                    let bytes = available.min(limits.decoded_record_bytes);
+                    held.push(store.reserve_probe(bytes).unwrap());
+                    available -= bytes;
+                }
+                let result = writer.commit_manual_history_group(&authority, &messages);
+                drop(held);
+                assert!(
+                    matches!(
+                        result,
+                        Err(BundleError::Capacity("metadata and decoded bytes"))
+                    ),
+                    "{:?}",
+                    result.as_ref().err()
+                );
+                result
+            } else {
+                let result = fail_once(failure, || {
+                    writer.commit_manual_history_group(&authority, &messages)
+                });
+                assert!(matches!(result, Err(BundleError::DurabilityUnknown)));
+                assert!(
+                    !writer
+                        .active_bundle()
+                        .unwrap()
+                        .pending_publication
+                        .as_ref()
+                        .unwrap()
+                        .seals
+                        .is_empty()
+                );
+                result
+            };
+            assert!(
+                result.is_err(),
+                "FAILED_GROUP_ACKNOWLEDGES_NOTHING {failure}"
+            );
+            assert_eq!(writer.core().change_id().unwrap(), before, "{failure}");
+            let committed = failure == "root_parent_sync";
+            assert_eq!(
+                std::fs::read(&path).unwrap() != root,
+                committed,
+                "{failure}"
+            );
+
+            let (retried, trace) =
+                observe(|| writer.commit_manual_history_group(&authority, &messages));
+            let retried = retried.unwrap();
+            assert!(retried.refusal.is_none(), "{:?}", retried.refusal);
+            assert_eq!(retried.receipts.len(), messages.len());
+            assert_eq!(
+                trace
+                    .events
+                    .iter()
+                    .filter(|event| event.operation == "root_rename")
+                    .count(),
+                usize::from(!committed),
+                "RETRY_PUBLISHES_ONLY_AN_ABSENT_GROUP {failure}"
+            );
+            assert_eq!(
+                writer.core().export_history().unwrap(),
+                gui.core().export_history().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn hx_h4_process_stop_around_root_replace() {
+        use crate::operation_history::{HistoryPool, PoolLimits};
+        const CHILD: &str = "KINEWRIGHT_HX_H4_CRASH_FIXTURE";
+        const STOP: i32 = 86;
+        if let Some(root) = std::env::var_os(CHILD) {
+            let root = std::path::PathBuf::from(root);
+            let path = root.join("project.kinewright");
+            let mut writer = owner_at(&path);
+            let lease = writer
+                .issue_manual_lease("group".into(), "group".into())
+                .unwrap();
+            let authority = writer.manual_authority(lease.clone()).unwrap();
+            let gui_temp = TempDirectory::new_in(&root, "gui");
+            let (gui, permit) = replica(&gui_temp, &writer, lease.clone());
+            let messages = group_messages(&permit);
+            let expected = gui.core().snapshot_identity().unwrap();
+            let plan = serde_json::to_vec(&(lease, &messages, expected)).unwrap();
+            std::fs::write(root.join("request.json"), plan).unwrap();
+            let barrier = if root.join("after").exists() {
+                "root_rename"
+            } else {
+                "root_rename_attempt"
+            };
+            crate::io_observer::at_barrier(
+                barrier,
+                || std::process::exit(STOP),
+                || {
+                    let _ = writer.commit_manual_history_group(&authority, &messages);
+                },
+            );
+            panic!("GROUP_CRASH_HOOK_MUST_FIRE {barrier}");
+        }
+
+        for after in [false, true] {
+            let temp = TempDirectory::new_in(&workspace_target_dir(), "manual-group-crash");
+            if after {
+                std::fs::write(temp.path("after"), []).unwrap();
+            }
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "editing_session::manual::c0_fix1_tests::hx_h4_process_stop_around_root_replace"])
+                .env(CHILD, temp.root())
+                .output()
+                .unwrap();
+            assert_eq!(child.status.code(), Some(STOP), "{child:?}");
+            let (lease, messages, expected): (
+                Lease,
+                Vec<EncodedMessage>,
+                crate::operation_history::SnapshotIdentity,
+            ) = serde_json::from_slice(&std::fs::read(temp.path("request.json")).unwrap()).unwrap();
+            let path = temp.path("project.kinewright");
+            let pool = HistoryPool::new(PoolLimits::default());
+            let mut reopened = Ja1EditingSession::open(&path, &pool).unwrap();
+            let (_, checkpoint) = reopened.manual_checkpoint().unwrap();
+            let stream = checkpoint.stream.as_ref().unwrap();
+            let last = messages.last().unwrap().decode().unwrap();
+            assert_eq!(
+                stream.sequence(),
+                if after {
+                    last.sequence
+                } else {
+                    lease.state.sequence()
+                }
+            );
+            assert_eq!(
+                stream.tip(),
+                if after { last.tip } else { lease.state.tip() }
+            );
+            assert_eq!(
+                stream.receipts().count(),
+                if after { messages.len() } else { 0 }
+            );
+            assert_eq!(
+                reopened.core().snapshot_identity().unwrap(),
+                if after { expected } else { lease.snapshot }
+            );
+
+            if !after {
+                // Restarted owners replay absent messages through the original
+                // namespace and chain proof before rotating GUI authority.
+                reopened
+                    .reconcile_manual_chain("group", &messages, Some(expected))
+                    .unwrap();
+            }
+            let authority = reopened.manual_authority(lease).unwrap();
+            let root = std::fs::read(&path).unwrap();
+            let reply = reopened
+                .commit_manual_history_group(&authority, &messages)
+                .unwrap();
+            assert!(reply.refusal.is_none(), "{:?}", reply.refusal);
+            assert!(reply.report.is_none(), "COLD_RECEIPTS_DO_NOT_REPUBLISH");
+            assert_eq!(reply.receipts.len(), messages.len());
+            assert_eq!(std::fs::read(&path).unwrap(), root);
+            assert_eq!(reopened.core().snapshot_identity().unwrap(), expected);
+        }
+    }
+    #[test]
+    fn handover_pool_refusal_preserves_the_live_source_and_retries_after_release() {
+        let (_temp, mut gui) = owner();
+        let first = gui.core().export_history().unwrap();
+        let second = gui.core().export_history().unwrap();
+        let before = gui.core().change_id().unwrap();
+        let identity = gui.core().snapshot_identity().unwrap();
+        let leases = gui
+            .core()
+            .history_pool()
+            .lease_counts(crate::operation_history::Role::Ordinary)
+            .unwrap()
+            .0;
+        assert!(
+            matches!(
+                gui.prepare_host_attachment(),
+                Err(BundleError::Operation(
+                    crate::operation_actor::Error::History(
+                        crate::operation_history::Error::PoolFull(
+                            crate::operation_history::Role::Ordinary
+                        )
+                    )
+                ))
+            ),
+            "HANDOVER_FULL_POOL_IS_A_TYPED_RETRYABLE_REFUSAL"
+        );
+        assert_eq!(
+            gui.core().attachment_state().unwrap(),
+            kinewright_core::AttachmentState::Live,
+            "HOST_HANDOVER_POOL_REFUSAL_PRESERVES_THE_LIVE_SOURCE"
+        );
+        assert_eq!(gui.core().change_id().unwrap(), before);
+        assert_eq!(gui.core().snapshot_identity().unwrap(), identity);
+        assert_eq!(
+            gui.core()
+                .history_pool()
+                .lease_counts(crate::operation_history::Role::Ordinary)
+                .unwrap()
+                .0,
+            leases,
+            "HOST_HANDOVER_REFUSAL_NEVER_CHANGES_ITS_SOURCE_RESERVATION"
+        );
+        drop(second);
+        let prepared = gui
+            .prepare_host_attachment()
+            .expect("HOST_HANDOVER_RETRIES_AFTER_A_CAPTURE_IS_RELEASED");
+        assert_ne!(prepared.history.identity(), identity);
+        drop(first);
+    }
+    #[test]
+    fn first_save_reconciliation_preserves_a_later_local_suffix() {
+        let temp = TempDirectory::new_in(&workspace_target_dir(), "first-save-later-suffix");
+        let core = Core::for_test(Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Document::default()
+        })
+        .unwrap();
+        let mut session = Ja1EditingSession::new(
+            temp.root(),
+            &core,
+            crate::storage_budget::StorageLimits::default(),
+        )
+        .unwrap();
+        let path = temp.path("project.kinewright");
+        assert!(matches!(
+            crate::io_observer::fail_once("root_parent_sync", || session
+                .first_save(&path, crate::storage_budget::StorageLimits::default()))
+            .unwrap(),
+            crate::bundle_copy::CopyStatus::DurabilityUnknown
+        ));
+        // An unavailable first-save acknowledgement leaves the local producer
+        // live. Its later accepted commands must survive reconciliation.
+        core.request(Command::Do(Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: false,
+        }))
+        .unwrap();
+        let before = core.export_history().unwrap();
+        session.reconcile_active().unwrap();
+        let after = core.export_history().unwrap();
+        assert_eq!(
+            &*after.history().document,
+            &*before.history().document,
+            "FIRST_SAVE_RECONCILIATION_PRESERVES_THE_LATER_DOCUMENT"
+        );
+        assert_eq!(
+            serde_json::to_value(&after.history().undo).unwrap(),
+            serde_json::to_value(&before.history().undo).unwrap(),
+            "FIRST_SAVE_RECONCILIATION_PRESERVES_EVERY_LATER_COMMAND"
+        );
+        assert!(
+            session.dirty().unwrap(),
+            "SAVED_PREFIX_NEVER_ACKNOWLEDGES_THE_LATER_SUFFIX"
+        );
+        drop(before);
+        drop(after);
+        session.save_active().unwrap();
+        assert!(!session.dirty().unwrap());
+        let expected = core.snapshot_identity().unwrap();
+        let mut cold = crate::bundle::LoadedBundle::read(
+            &path,
+            &crate::operation_history::HistoryPool::new(
+                crate::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            cold.open_manual().unwrap().snapshot_identity().unwrap(),
+            expected,
+            "FIRST_SAVE_SUFFIX_SURVIVES_ITS_NEXT_SAVE_AND_COLD_OPEN"
+        );
+    }
+    #[test]
+    fn refused_peer_install_preserves_the_live_destination() {
+        let (_left, mut destination) = owner();
+        let (_right, mut sibling) = owner();
+        for (session, locked) in [(&destination, false), (&sibling, true)] {
+            session
+                .core()
+                .request(Command::Do(Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked,
                 }))
                 .unwrap();
-            let mut original = AcceptedManualCommand::decode(&permit.pending().unwrap()[0])
+        }
+        let before = destination.core().change_id().unwrap();
+        let identity = destination.core().snapshot_identity().unwrap();
+        let incoming = sibling.prepare_host_attachment().unwrap();
+        assert!(
+            matches!(
+                destination.install_host_snapshot(incoming.history),
+                Err(BundleError::Operation(
+                    crate::operation_actor::Error::History(
+                        crate::operation_history::Error::CommandConflict
+                    )
+                ))
+            ),
+            "PEER_INSTALL_RETAINED_KEY_CONFLICT_IS_TYPED"
+        );
+        assert_eq!(
+            destination.core().change_id().unwrap(),
+            before,
+            "PEER_INSTALL_REFUSAL_PRESERVES_THE_ACCEPTED_CUT"
+        );
+        assert_eq!(
+            destination.core().snapshot_identity().unwrap(),
+            identity,
+            "PEER_INSTALL_REFUSAL_PRESERVES_THE_COMBINED_IDENTITY"
+        );
+        assert_eq!(
+            destination.core().attachment_state().unwrap(),
+            kinewright_core::AttachmentState::Live,
+            "PEER_INSTALL_REFUSAL_PRESERVES_THE_LIVE_DESTINATION"
+        );
+    }
+    #[test]
+    fn manual_lease_publishes_the_validated_handover_snapshot_before_authority() {
+        let (temp, mut gui) = owner();
+        gui.core()
+            .request(Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: false,
+            }))
+            .unwrap();
+        let transfer = gui.prepare_host_attachment().unwrap();
+        let expected = transfer.history.identity();
+        let expected_revision = transfer.history.revision;
+        let expected_branch = transfer.history.branch.clone();
+        let path = temp.path("project.kinewright");
+        let pool = crate::operation_history::HistoryPool::new(
+            crate::operation_history::PoolLimits::default(),
+        );
+        let mut writer = Ja1EditingSession::open(&path, &pool).unwrap();
+        writer.install_host_snapshot(transfer.history).unwrap();
+        assert_eq!(
+            writer.core().change_id().unwrap().revision,
+            expected_revision,
+            "HANDOVER_PEERS_SHARE_THE_GUI_REVISION"
+        );
+        assert_eq!(
+            writer.core().creation_branch().unwrap(),
+            expected_branch,
+            "HANDOVER_PEERS_SHARE_THE_GUI_BRANCH"
+        );
+        let lease = writer
+            .issue_manual_lease("h".repeat(64), "t".repeat(64))
+            .expect("HANDOVER_LEASE_PUBLISHES_THE_INSTALLED_GUI_BASE_BEFORE_AUTHORITY");
+        assert_eq!(lease.snapshot, expected);
+        assert_eq!(lease.state.seed().installed, expected);
+        assert_eq!(
+            writer.manual_checkpoint().unwrap().1.identity,
+            expected,
+            "HANDOVER_AUTHORITY_NAMES_A_DURABLE_COMBINED_SNAPSHOT"
+        );
+        let mut cold = crate::bundle::LoadedBundle::read(
+            &path,
+            &crate::operation_history::HistoryPool::new(
+                crate::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            cold.open_manual().unwrap().snapshot_identity().unwrap(),
+            expected,
+            "HANDOVER_LEASE_COLD_OPEN_EQUALS_THE_GUI_BASE"
+        );
+    }
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one receipt lifecycle includes the lost acknowledgement, restart and fresh installation"
+    )]
+    fn production_manual_receipts_survive_restart_and_a_fresh_install_epoch() {
+        let (temp, mut writer) = owner();
+        let lease = writer
+            .issue_manual_lease("g".repeat(64), "t".repeat(64))
+            .unwrap();
+        let authority = writer.manual_authority(lease.clone()).unwrap();
+        let (gui, permit) = replica(&temp, &writer, lease.clone());
+        for command in [
+            Command::DoBatchCoalesced {
+                operations: vec![Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked: false,
+                }],
+                coalesce_key: "gesture".into(),
+            },
+            Command::DoBatchCoalesced {
+                operations: vec![Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked: true,
+                }],
+                coalesce_key: "gesture".into(),
+            },
+            Command::Undo,
+            Command::Redo,
+        ] {
+            permit.request(command).unwrap();
+        }
+        permit.close_gesture().unwrap();
+        let pending = permit.pending().unwrap();
+        let mut receipts = Vec::new();
+        for message in &pending {
+            let (receipt, report) = writer.commit_manual_history(&authority, message).unwrap();
+            let report = report.expect("ACK_FOLLOWS_DURABLE_ROOT_PUBLICATION");
+            assert_eq!(
+                kinewright_media::sha256_bytes(&std::fs::read(&report.path).unwrap()),
+                report.root_sha256,
+                "ACK_FOLLOWS_DURABLE_ROOT_PUBLICATION"
+            );
+            let position = writer.core().change_id().unwrap();
+            let (repeated, duplicate) = writer.commit_manual_history(&authority, message).unwrap();
+            assert_eq!(repeated, receipt, "RETRY_RETURNS_THE_ORIGINAL_RECEIPT");
+            assert!(duplicate.is_none());
+            assert_eq!(
+                writer.core().change_id().unwrap(),
+                position,
+                "RECEIPT_RETRY_NEVER_REAPPLIES_COMMAND"
+            );
+            receipts.push(receipt);
+        }
+        let identity = gui.core().snapshot_identity().unwrap();
+        assert_eq!(
+            writer.core().snapshot_identity().unwrap(),
+            identity,
+            "GUI_AND_PUBLISHED_SHADOW_HAVE_IDENTICAL_OWNER_STATE"
+        );
+        let path = temp.path("project.kinewright");
+        let pool = writer.core().history_pool().clone();
+        drop(authority);
+        drop(writer);
+        let mut reopened = Ja1EditingSession::open(&path, &pool).unwrap();
+        let retry_authority = reopened.manual_authority(lease).unwrap();
+        for (message, receipt) in pending.iter().zip(&receipts) {
+            assert_eq!(
+                reopened.manual_receipt(message).unwrap().as_ref(),
+                Some(receipt),
+                "RESTART_RECOGNISES_EVERY_ORIGINAL_RECEIPT"
+            );
+            let before = reopened.core().change_id().unwrap();
+            let (retried, report) = reopened
+                .commit_manual_history(&retry_authority, message)
+                .unwrap();
+            assert_eq!(&retried, receipt, "RESTART_RETURNS_ORIGINAL_RECEIPT");
+            assert!(report.is_none(), "RESTART_RETRY_PUBLISHES_NOTHING");
+            assert_eq!(
+                reopened.core().change_id().unwrap(),
+                before,
+                "RESTART_RECEIPT_RETRY_NEVER_REAPPLIES_COMMAND"
+            );
+        }
+        drop(retry_authority);
+        assert_eq!(
+            reopened.core().snapshot_identity().unwrap(),
+            identity,
+            "WHAT_WAS_ACKNOWLEDGED_REOPENS_IDENTICALLY"
+        );
+        let installation = reopened.rotate_manual_epoch(identity);
+        assert!(
+            installation.is_ok(),
+            "INSTALL_RETIRES_PREVIOUS_EPOCH_CHAIN: {:?}",
+            installation.as_ref().err()
+        );
+        installation.unwrap();
+        assert!(
+            reopened.manual_checkpoint().unwrap().1.stream.is_none(),
+            "INSTALL_RETIRES_PREVIOUS_EPOCH_CHAIN"
+        );
+        let after = reopened.core().snapshot_identity().unwrap();
+        assert_ne!(after, identity, "RECOVERY_INSTALL_STARTS_A_NEW_EPOCH");
+        let saved_position = reopened.core().change_id().unwrap().position;
+        reopened.rotate_manual_epoch(identity).unwrap();
+        assert_eq!(
+            reopened.core().change_id().unwrap().position,
+            saved_position,
+            "LOST_INSTALL_REPLY_DOES_NOT_INSTALL_AGAIN"
+        );
+        assert_eq!(
+            reopened
+                .installed_manual_receipts(identity)
                 .unwrap()
-                .envelope;
-            let mut expected = gui.export_history().unwrap();
-            let mut manifest = prepared.manifest.clone();
+                .unwrap(),
+            receipts,
+            "INSTALL_RETAINS_ITS_ORIGINAL_RECEIPT_WINDOW"
+        );
+        let attachment = crate::ProjectAttachment::new(gui.core()).unwrap();
+        let cut = attachment.freeze().unwrap();
+        attachment
+            .acknowledge_frozen(&cut, receipts.clone())
+            .unwrap();
+        let wire = reopened.published_manual_history().unwrap();
+        let snapshot = wire.validate(gui.core().history_pool()).unwrap();
+        let epoch = snapshot.position().epoch;
+        attachment
+            .install_snapshot(&cut, snapshot, Some(epoch))
+            .unwrap();
+        assert_eq!(
+            gui.core().snapshot_identity().unwrap(),
+            after,
+            "RECOVERY_PEERS_ADOPT_THE_SAME_COMBINED_IDENTITY"
+        );
+        drop(reopened);
+        let reopened = Ja1EditingSession::open(&path, &pool).unwrap();
+        assert_eq!(
+            reopened
+                .installed_manual_receipts(identity)
+                .unwrap()
+                .unwrap(),
+            receipts,
+            "RESTART_RECOGNISES_THE_COMMITTED_INSTALL"
+        );
+        assert!(
+            reopened.manual_receipt(&pending[0]).is_err(),
+            "OLD_EPOCH_CHAIN_CANNOT_BE_CONTINUED"
+        );
+    }
+    #[test]
+    fn s3_fix1_recovery_checks_inputs_before_replacement_authority() {
+        for fault in ["branch", "predecessor", "payload", "context"] {
+            let (_temp, mut writer) = owner();
+            let lease = writer
+                .issue_manual_lease("g".repeat(64), "t".repeat(64))
+                .unwrap();
+            let authority = writer.manual_authority(lease.clone()).unwrap();
+            let context = crate::operation_actor::CommandContext {
+                creation: crate::operation_history::CreationOrigin {
+                    branch: lease.state.seed().branch.clone(),
+                    batch: crate::bundle_records::BatchId::fresh().unwrap(),
+                },
+                inputs: vec![],
+                approval: None,
+                transition: None,
+            };
+            let mut message = lease
+                .state
+                .message(
+                    crate::receipts::CommandId {
+                        issuer: lease.issuer.clone(),
+                        sequence: lease.next_issuer_sequence,
+                    },
+                    lease.next_key,
+                    Action::Do {
+                        operations: vec![Operation::SetTrackSyncLock {
+                            track: TrackId(1),
+                            locked: false,
+                        }],
+                        gesture: None,
+                    },
+                    context,
+                )
+                .unwrap();
             match fault {
-                "owner" => manifest.project_id = Some(ProjectId::fresh().unwrap()),
-                "predecessor" => manifest
-                    .entries
-                    .retain(|entry| entry.matches_media_asset(&prepared.asset)),
-                "fingerprint" => {
-                    std::sync::Arc::make_mut(&mut expected.document).media_pool[1]
-                        .source_fingerprint
-                        .content_sha256 = Some("0".repeat(64));
+                "branch" => {
+                    message.context.creation.branch =
+                        crate::bundle_records::BranchId::fresh().unwrap();
                 }
-                "interpretation" => {
-                    std::sync::Arc::make_mut(&mut expected.document).media_pool[1]
-                        .color_description
-                        .provenance = kinewright_core::ColorProvenance::UserOverride;
+                "predecessor" => message.predecessor = [99; 32],
+                "payload" => {
+                    message.action = Action::Do {
+                        operations: vec![Operation::SetTrackSyncLock {
+                            track: TrackId(1),
+                            locked: true,
+                        }],
+                        gesture: None,
+                    }
                 }
-                "table" => {
-                    let other = manifest
-                        .entries
-                        .iter()
-                        .find(|entry| !entry.matches_media_asset(&prepared.asset))
-                        .unwrap()
-                        .chunk_table_ref()
-                        .unwrap()
-                        .clone();
-                    manifest
-                        .entries
-                        .iter_mut()
-                        .find(|entry| entry.matches_media_asset(&prepared.asset))
-                        .unwrap()
-                        .dependencies = vec![other];
-                }
-                "stream" => {
-                    let mut entry = manifest
-                        .entries
-                        .iter()
-                        .find(|entry| entry.matches_media_asset(&prepared.asset))
-                        .unwrap()
-                        .clone();
-                    let mut interpretation = entry.media_interpretation().unwrap();
-                    interpretation.audio.as_mut().unwrap().time_base = (1, 42);
-                    let profile = interpretation.canonical().unwrap();
-                    entry.entry_id = format!(
-                        "media:2:{}:{}:{}",
-                        entry.object.sha256,
-                        entry.object.byte_length,
-                        kinewright_media::sha256_bytes(profile.as_bytes())
-                    );
-                    entry.profile = Some(profile);
-                    manifest.entries.push(entry);
-                    manifest.entries.sort_by(|a, b| a.entry_id.cmp(&b.entry_id));
-                }
-                "bytes" => {
-                    use std::io::{Seek, SeekFrom, Write};
-                    let entry = manifest
-                        .entries
-                        .iter()
-                        .find(|entry| entry.matches_media_asset(&prepared.asset))
-                        .unwrap();
-                    let assets = path.with_extension("kinewright-assets");
-                    let mut writer = std::fs::OpenOptions::new()
-                        .write(true)
-                        .open(assets.join("studio/objects").join(&entry.object.sha256))
-                        .unwrap();
-                    writer.seek(SeekFrom::Start(1000)).unwrap();
-                    writer.write_all(&[99]).unwrap();
-                }
+                "context" => message
+                    .context
+                    .inputs
+                    .push(crate::bundle_records::ObjectRef {
+                        sha256: "0".repeat(64),
+                        byte_length: 1,
+                        record_kind: crate::bundle_records::RecordKind::InputManifest,
+                    }),
                 _ => unreachable!(),
             }
-            let bundle = owner.destination.as_mut().unwrap().bundle_mut().unwrap();
-            let bytes = serde_json::to_vec(&manifest).unwrap();
-            let reference = ObjectRef {
-                sha256: kinewright_media::sha256_bytes(&bytes),
-                byte_length: bytes.len() as u64,
-                record_kind: RecordKind::InputManifest,
-            };
-            let _pin = bundle
-                .store
-                .admit_recovered(&mut bytes.as_slice(), &reference, &manifest.dependencies())
-                .unwrap();
-            original.manual.as_mut().unwrap().binding.inputs = reference;
-            let issuers = bundle.issuers.len();
-            let root = owner.root_sha256().unwrap();
-            let result =
-                owner.publish_absent_manual_suffix(&"r".repeat(64), &[original], &expected);
-            assert!(result.is_err(), "C0_FIX1_RECOVERY_INPUT_REFUSED {fault}");
+            let accepted: EncodedMessage =
+                serde_json::from_value(serde_json::json!(serde_json::to_string(&message).unwrap()))
+                    .unwrap();
+            let root = writer.root_sha256().unwrap();
+            let before = writer.core().change_id().unwrap();
+            assert!(
+                writer.commit_manual_history(&authority, &accepted).is_err(),
+                "C0_FIX1_RECOVERY_INPUT_REFUSED {fault}"
+            );
             assert_eq!(
-                owner.active_bundle().unwrap().issuers.len(),
-                issuers,
+                writer.root_sha256().unwrap(),
+                root,
                 "C0_FIX1_NO_REPLACEMENT_AUTHORITY {fault}"
             );
-            assert_eq!(owner.root_sha256().unwrap(), root, "{fault}");
             assert_eq!(
-                core.export_history().unwrap().document.media_pool.len(),
-                1,
-                "{fault}"
+                writer.core().change_id().unwrap(),
+                before,
+                "MALFORMED_INGRESS_CHANGES_NO_OWNER_STATE {fault}"
             );
         }
     }

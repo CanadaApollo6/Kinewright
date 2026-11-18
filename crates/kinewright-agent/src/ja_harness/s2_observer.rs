@@ -1,7 +1,8 @@
 //! C1 observations of ordinary production save outcomes, identical in both harness modes.
 #[cfg(target_os = "linux")]
 use kinewright_core::TimelineRevision;
-use kinewright_core::{Command, Core, Document, Event, Operation, Track, TrackId, TrackKind};
+use kinewright_core::{Command, Document, Event, Operation, Track, TrackId, TrackKind};
+use kinewright_project::operation_actor::Core;
 #[cfg(target_os = "linux")]
 use kinewright_project::{
     bundle::{BundleError, BundleWriteAdmission, LoadedBundle, ProjectBundle, PublicationState},
@@ -38,7 +39,8 @@ fn observe_rescue_owners(root: &Path, revised: bool, slots: bool) -> Result<Valu
     } else {
         "source.kinewright"
     });
-    let core = Core::spawn(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+    let core =
+        Core::for_test(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
     if !revised {
         let mut source = SessionStore::create(root, StorageLimits::default())?;
         let inputs = source
@@ -52,7 +54,9 @@ fn observe_rescue_owners(root: &Path, revised: bool, slots: bool) -> Result<Valu
             .clone();
         let copy = source.first_save(&path, &core, &inputs)?;
         let control = matches!(copy.status(), CopyStatus::Committed(_))
-            && LoadedBundle::read(&path)?.admission().inspection_document()
+            && LoadedBundle::read(&path, core.history_pool())?
+                .admission()
+                .inspection_document()
                 == Some(&Document::default());
         return Ok(
             json!({"control_reopened":control,"surface":"pending_baseline_witness","rescue_publication":false}),
@@ -93,7 +97,7 @@ fn observe_rescue_owners(root: &Path, revised: bool, slots: bool) -> Result<Valu
     if slots {
         let mut ledger = RescueSlots::default();
         for attempt in 1..=3 {
-            let tag = kinewright_core::HistorySaveTag {
+            let tag = kinewright_project::PublicationTag {
                 destination: path.clone(),
                 parent_device: 1,
                 parent_inode: 1,
@@ -101,7 +105,7 @@ fn observe_rescue_owners(root: &Path, revised: bool, slots: bool) -> Result<Valu
                 previous_root_sha256: None,
             };
             let reservation = ledger.begin(tag)?;
-            let unknown = (attempt == 3).then(|| kinewright_core::HistorySaveTag {
+            let unknown = (attempt == 3).then(|| kinewright_project::PublicationTag {
                 destination: root.join("modeled-unknown.kinewright"),
                 parent_device: 1,
                 parent_inode: 1,
@@ -126,7 +130,7 @@ fn observe_rescue_owners(root: &Path, revised: bool, slots: bool) -> Result<Valu
     let retained = usage.physical_bytes >= reference.byte_length && usage.reserved_copy_bytes > 0;
     let held = kinewright_project::namespace::ProjectNamespace::acquire(&path).is_err();
     Ok(
-        json!({"control_reopened":LoadedBundle::read(&path)?.admission().inspection_document() == Some(&Document::default()), "lifecycle_holds":exact && retained && held, "ordinary_save_at_four_slots":session.rescue_slots() == 4 && !session.dirty()?, "rescue_publication":false, "slot_model":slots}),
+        json!({"control_reopened":LoadedBundle::read(&path, core.history_pool())?.admission().inspection_document() == Some(&Document::default()), "lifecycle_holds":exact && retained && held, "ordinary_save_at_four_slots":session.rescue_slots() == 4 && !session.dirty()?, "rescue_publication":false, "slot_model":slots}),
     )
 }
 
@@ -148,18 +152,33 @@ fn observe(root: &Path) -> Result<Value, BundleError> {
             .collect(),
         ..Document::default()
     };
-    let initial = Core::spawn(document.clone()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-    let mut owner = ProjectBundle::activate(&path, BundleWriteAdmission::new_document())?;
+    let initial =
+        Core::for_test(document.clone()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+    let mut owner = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        initial.history_pool(),
+    )?;
     let inputs = owner.empty_inputs()?.reference.clone();
     owner.save(&initial, &inputs)?;
     drop(owner);
     let limits = StorageLimits {
-        branch_history_bytes: 1 << 20,
         ..StorageLimits::default()
     };
-    let mut owner = LoadedBundle::read_with_limits_probe(&path, limits)?.into_writer()?;
-    let core = Core::spawn_at(document, TimelineRevision(u64::MAX - 40))
-        .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+    let mut owner = LoadedBundle::read_with_limits_probe(&path, limits, initial.history_pool())?
+        .into_writer()?;
+    let core = Core::spawn_at_revision(
+        initial.history_pool(),
+        kinewright_project::operation_history::Role::Ordinary,
+        kinewright_project::operation_history::CreationOrigin {
+            branch: kinewright_project::bundle_records::BranchId::fresh()?,
+            batch: kinewright_project::bundle_records::BatchId::fresh()?,
+        },
+        document,
+        TimelineRevision(u64::MAX - 40),
+    )
+    .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+    drop(initial);
     for i in 0_u64..40 {
         if !matches!(
             core.request(Command::Do(Operation::SetTrackSyncLock {
@@ -176,22 +195,20 @@ fn observe(root: &Path) -> Result<Value, BundleError> {
     }
     let outcome = BundleCommit::run(&mut owner, &core, &inputs);
     let phase = owner.publication_state();
-    let control = LoadedBundle::read(&path)?;
+    let control = LoadedBundle::read(&path, core.history_pool())?;
     let control_reopened = control.admission().inspection_document()
         == Some(
             &*core
                 .export_history()
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?
+                .history()
                 .document,
         );
-    let phase_preserved = phase == PublicationState::Committed
-        && matches!(
-            outcome,
-            CommitOutcome::CommittedWithError(BundleError::HistoryCommitInvariant)
-        );
+    let phase_preserved =
+        phase == PublicationState::Committed && matches!(outcome, CommitOutcome::Committed(_));
     let cleanup = root.join("cleanup.kinewright");
     let cleanup_core =
-        Core::spawn(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        Core::for_test(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
     let mut session = SessionStore::create(root, StorageLimits::default())?;
     let inputs = session.admit_inputs(&OwnedInputManifest {
         project_id: None,
@@ -218,7 +235,7 @@ fn observe(root: &Path) -> Result<Value, BundleError> {
 /// The baseline observes retained-handle editability; it never pretends to call a seal.
 pub(super) fn core_seal(revised: bool) -> Result<Value, String> {
     struct ObserverProof;
-    let core = Core::spawn(Document::default()).map_err(|e| e.to_string())?;
+    let core = Core::for_test(Document::default()).map_err(|e| e.to_string())?;
     let retained = core.clone();
     let operation = |id| Operation::AddTrack {
         track: Track {
@@ -235,25 +252,21 @@ pub(super) fn core_seal(revised: bool) -> Result<Value, String> {
         Event::DocumentChanged { .. }
     );
     if revised {
-        let attachment = core
-            .history_save_owner(&ObserverProof)
-            .map_err(|e| e.to_string())?;
+        let attachment = core.attach(&ObserverProof).map_err(|e| e.to_string())?;
         let cut = attachment
             .freeze(&ObserverProof)
             .map_err(|e| e.to_string())?;
         attachment
-            .seal(&ObserverProof, &cut)
+            .seal(&ObserverProof, cut)
             .map_err(|e| e.to_string())?;
     }
     let before = core.export_history().map_err(|e| e.to_string())?;
-    let result = retained
-        .request(Command::Do(operation(2)))
-        .map_err(|e| e.to_string())?;
+    let result = retained.request(Command::Do(operation(2)));
     let unchanged = core.export_history().map_err(|e| e.to_string())? == before;
     Ok(
         json!({"backend":"production-core", "control_edit_accepted":control,
-        "sealed_refuses_mutation":matches!(result, Event::MutationRefused { reason: kinewright_core::CoreMutationRefusal::Sealed, .. }) && unchanged,
-        "continued_edit_accepted":matches!(result, Event::DocumentChanged { .. }),
+        "sealed_refuses_mutation":matches!(result, Err(kinewright_project::operation_actor::Refusal { error: kinewright_project::operation_actor::Error::MutationRefused(kinewright_core::CoreMutationRefusal::Sealed), .. })) && unchanged,
+        "continued_edit_accepted":matches!(result, Ok(Event::DocumentChanged { .. })),
         "surface":if revised { "sealed actor" } else { "retained clone without seal" }}),
     )
 }
@@ -266,33 +279,51 @@ pub(super) fn rescue_recovery(root: &Path, revised: bool) -> Result<Value, Strin
     let run = || -> Result<Value, BundleError> {
         let path = root.join("recovery.kinewright");
         let core =
-            Core::spawn(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document())?;
+            Core::for_test(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let mut bundle = ProjectBundle::activate(
+            &path,
+            BundleWriteAdmission::new_document(),
+            core.history_pool(),
+        )?;
         let inputs = bundle.empty_inputs()?.reference.clone();
         bundle.save(&core, &inputs)?;
-        let control =
-            LoadedBundle::read(&path)?.root()?.manual_branch_id == *bundle.manual_branch_id();
+        let control = LoadedBundle::read(&path, core.history_pool())?
+            .root()?
+            .manual_branch_id
+            == *bundle.manual_branch_id();
         if !revised {
             return Ok(
                 json!({"control_reopened":control,"surface":"pending_baseline_witness","rescue_publication":false}),
             );
         }
         let left = bundle.manual_branch_id().clone();
-        let other = bundle.fork_branch(
-            &left,
-            kinewright_project::history_record::HistoryRole::Ordinary,
-        )?;
-        let target_ref = bundle.checkpoint_reference(&other)?;
+        let other =
+            bundle.fork_branch(&left, kinewright_project::operation_history::Role::Ordinary)?;
+        let target_identity = bundle.checkpoint(&other)?.identity;
         let target_head = bundle.checkpoint(&other)?.head_id.clone();
+        let mut expected = serde_json::to_value(bundle.branch_history(&other)?.into_capture()?)
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         let mut selected = bundle
             .prepare_project_selection(&core, RecoverySelection::WorkingBranch(other.clone()))?;
         let activated = matches!(
             bundle.publish_project_selection(&mut selected, &core),
             ProjectSelectionResult::Activated(_)
         );
-        let loaded = LoadedBundle::read(&path)?;
+        let loaded = LoadedBundle::read(&path, core.history_pool())?;
+        let installed = bundle.checkpoint(&other)?;
+        let actual = serde_json::to_value(bundle.branch_history(&other)?.into_capture()?)
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        assert!(
+            actual["history"]["epoch"].as_u64() > expected["history"]["epoch"].as_u64(),
+            "PROJECT_SELECTION_STARTS_A_NEW_EPOCH"
+        );
+        expected["history"]["epoch"] = actual["history"]["epoch"].clone();
+        assert_eq!(
+            actual, expected,
+            "PROJECT_SELECTION_PRESERVES_THE_COMPLETE_OWNER"
+        );
         Ok(
-            json!({"control_reopened":control,"selection_mapping":activated && loaded.root()?.manual_branch_id == other && loaded.root()?.manual_switch_generation == 1 && bundle.checkpoint_reference(&other)? == target_ref && bundle.checkpoint(&other)?.head_id == target_head,"rescue_publication":false}),
+            json!({"control_reopened":control,"selection_mapping":activated && loaded.root()?.manual_branch_id == other && loaded.root()?.manual_switch_generation == 1 && installed.identity != target_identity && installed.head_id != target_head,"rescue_publication":false}),
         )
     };
     run().map_err(|e| e.to_string())
@@ -305,13 +336,18 @@ pub(super) fn rescue_publication(root: &Path, revised: bool) -> Result<Value, St
     };
     let run = || -> Result<Value, BundleError> {
         let core =
-            Core::spawn(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            Core::for_test(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
         let control_path = root.join("control.kinewright");
-        let mut control =
-            ProjectBundle::activate(&control_path, BundleWriteAdmission::new_document())?;
+        let mut control = ProjectBundle::activate(
+            &control_path,
+            BundleWriteAdmission::new_document(),
+            core.history_pool(),
+        )?;
         let input = control.empty_inputs()?.reference.clone();
         control.save(&core, &input)?;
-        let reopened = LoadedBundle::read(&control_path)?.root().is_ok();
+        let reopened = LoadedBundle::read(&control_path, core.history_pool())?
+            .root()
+            .is_ok();
         drop(control);
         if !revised {
             return Ok(json!({"control_reopened":reopened,"surface":"pending_baseline_witness"}));
@@ -345,10 +381,13 @@ pub(super) fn rescue_publication(root: &Path, revised: bool) -> Result<Value, St
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         drop(session);
         drop(core);
-        let loaded = LoadedBundle::read(&destination)?;
-        let fresh =
-            Core::spawn(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        loaded.restore_manual(&fresh)?;
+        let mut loaded = LoadedBundle::read(
+            &destination,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )?;
+        let fresh = loaded.open_manual()?;
         Ok(
             json!({"control_reopened":reopened,"rescue_publication":outcome.activated && separate && sealed && fresh.export_history().map_err(|e|BundleError::Corrupt(e.to_string()))?==expected}),
         )

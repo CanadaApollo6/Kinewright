@@ -1,41 +1,58 @@
 //! Astra's real-Core missed-wake-up and duplicate-Undo probes, retained in the App.
 use super::ManualEdits;
 use kinewright_core::*;
+use kinewright_project::operation_actor::Core;
 use std::time::{Duration, Instant};
 pub(crate) struct Proof;
-struct Encoder;
-impl ManualHistoryEncoder for Encoder {
-    fn check_history(&mut self, _: &HistorySnapshot) -> Result<(), HistoryError> {
-        Ok(())
-    }
-    fn finish_history_check(&mut self, _: bool) {}
-    fn encode(
-        &self,
-        sequence: u64,
-        _: TimelineRevision,
-        _: Option<&str>,
-        _: ManualHistoryCandidate<'_>,
-    ) -> Result<AcceptedHistory, HistoryError> {
-        let mut item = AcceptedHistory {
-            sequence,
-            batch_id: sequence.to_string(),
-            digest: String::new(),
-            envelope: vec![],
-        };
-        let size = serde_json::to_vec(&item).unwrap().len();
-        item.digest = "x".repeat(MANUAL_BYTES - size);
-        Ok(item)
-    }
-}
-pub(crate) fn fixture() -> (Core, CoreAttachment<Proof>, ManualPermit, ManualEdits) {
+use kinewright_project::{
+    bundle_records::{HeadId, ProjectId},
+    operation_actor::{Attachment, Error, ManualPermit, Refusal},
+    operation_inputs::ManualInputs,
+    operation_protocol::{Lease, PENDING_COMMANDS, Receipt, Seed, StreamState},
+    receipts::IssuerId,
+};
+use std::sync::{Arc, atomic::AtomicBool};
+pub(crate) fn fixture() -> (Core, Attachment<Proof>, ManualPermit, ManualEdits) {
     fixture_with_document(Document::default())
 }
 pub(crate) fn fixture_with_document(
     document: Document,
-) -> (Core, CoreAttachment<Proof>, ManualPermit, ManualEdits) {
-    let core = Core::spawn(document).unwrap();
-    let owner = core.history_save_owner(&Proof).unwrap();
-    let permit = owner.manual_permit(&Proof, Box::new(Encoder)).unwrap();
+) -> (Core, Attachment<Proof>, ManualPermit, ManualEdits) {
+    let core = Core::for_test(document).unwrap();
+    let owner = core.attach(&Proof).unwrap();
+    let wire = core.portable_history().unwrap();
+    let identity = wire.identity();
+    let inputs = ManualInputs::fixture();
+    let lease = Lease {
+        state: StreamState::installed(Seed {
+            project: ProjectId::fresh().unwrap(),
+            branch: wire.branch.clone(),
+            attachment_epoch: 1,
+            installed: identity,
+        })
+        .unwrap(),
+        snapshot: identity,
+        next_key: core.change_id().unwrap().position,
+        issuer: serde_json::from_value::<IssuerId>(serde_json::json!("01".repeat(16))).unwrap(),
+        next_issuer_sequence: 1,
+        generation: 1,
+        client: "gui".into(),
+        token: "test-authority".into(),
+        switch_generation: 1,
+        owner_epoch: 1,
+        anchor_head: HeadId::fresh().unwrap(),
+        inputs: inputs.reference().clone(),
+        parent_identity: None,
+        namespace_name: None,
+    };
+    drop(wire);
+    let permit = owner
+        .manual_permit(&Proof, None, lease, inputs, Arc::new(AtomicBool::new(true)))
+        .unwrap();
+    // Leave one slot. The fixture's first real edit fills the actual protocol window.
+    for _ in 1..PENDING_COMMANDS {
+        permit.close_gesture().unwrap();
+    }
     (core, owner, permit, ManualEdits::default())
 }
 pub(crate) fn add(id: u64) -> Command {
@@ -56,9 +73,28 @@ pub(crate) fn collect(edits: &mut ManualEdits) {
         std::thread::yield_now();
     }
 }
-pub(crate) fn ack(owner: &CoreAttachment<Proof>, permit: &ManualPermit, edits: &mut ManualEdits) {
+pub(crate) fn ack(owner: &Attachment<Proof>, permit: &ManualPermit, edits: &mut ManualEdits) {
     owner
-        .acknowledge_manual(&Proof, permit, permit.pending().unwrap())
+        .acknowledge_manual(
+            &Proof,
+            permit,
+            permit
+                .pending()
+                .unwrap()
+                .into_iter()
+                .map(|encoded| {
+                    let message = encoded.decode().unwrap();
+                    Receipt {
+                        additional_batches: message.folded.len() as u64,
+                        id: message.id.clone(),
+                        sequence: message.sequence,
+                        accepted: message.accepted,
+                        tip: message.tip,
+                        command: message.digest().unwrap(),
+                    }
+                })
+                .collect(),
+        )
         .unwrap();
     edits.acknowledged();
 }
@@ -75,10 +111,10 @@ fn refusal_collected_after_curing_ack_retries_without_another_ack() {
     edits.submit(add(2), &permit).unwrap();
     assert!(matches!(
         events.recv_timeout(Duration::from_secs(10)).unwrap(),
-        Event::MutationRefused {
-            reason: CoreMutationRefusal::ManualBackpressure,
+        Err(Refusal {
+            error: Error::Protocol(kinewright_project::operation_protocol::Conflict::Backpressure),
             ..
-        }
+        })
     ));
     ack(&owner, &permit, &mut edits);
     collect(&mut edits);
@@ -87,7 +123,15 @@ fn refusal_collected_after_curing_ack_retries_without_another_ack() {
     collect(&mut edits);
     edits.start_next(&permit);
     assert!(!edits.pending());
-    assert_eq!(core.export_history().unwrap().document.tracks.len(), 2);
+    assert_eq!(
+        core.export_history()
+            .unwrap()
+            .history()
+            .document
+            .tracks
+            .len(),
+        2
+    );
 }
 #[test]
 fn accepted_command_never_replayed_by_extra_acks_or_polls() {
@@ -104,8 +148,12 @@ fn accepted_command_never_replayed_by_extra_acks_or_polls() {
         collect(&mut edits);
     }
     let h = core.export_history().unwrap();
-    assert_eq!(h.document.tracks.len(), 1, "UNDO_MUST_EXECUTE_EXACTLY_ONCE");
-    assert_eq!(h.document.tracks[0].id, TrackId(1));
+    assert_eq!(
+        h.history().document.tracks.len(),
+        1,
+        "UNDO_MUST_EXECUTE_EXACTLY_ONCE"
+    );
+    assert_eq!(h.history().document.tracks[0].id, TrackId(1));
     assert!(!edits.pending());
     assert_eq!(edits.message(), None);
 }
@@ -146,7 +194,15 @@ fn full_notice_clears_as_soon_as_the_queue_has_room() {
         None,
         "MANUAL_DRAINED_QUEUE_HAS_NO_FULL_NOTICE"
     );
-    assert_eq!(core.export_history().unwrap().document.tracks.len(), 17);
+    assert_eq!(
+        core.export_history()
+            .unwrap()
+            .history()
+            .document
+            .tracks
+            .len(),
+        17
+    );
 }
 
 #[test]
@@ -194,7 +250,7 @@ fn abandoned_acceptance_invalidates_a_stale_numeric_return() {
     collect(&mut edits);
     edits.start_next(&permit);
     assert!(
-        core.export_history().unwrap().document.tracks[0].sync_lock,
+        core.export_history().unwrap().history().document.tracks[0].sync_lock,
         "ABANDONED_ACCEPTANCE_INVALIDATES_STALE_RETURN"
     );
     assert!(!edits.pending());
@@ -205,9 +261,12 @@ fn unconfirmed_abandoned_worker_preserves_the_unapplied_count() {
     for panicked in [false, true] {
         let mut edits = ManualEdits::default();
         edits.note_unapplied(3);
-        let worker = std::thread::spawn(move || -> Result<Event, CoreDisconnected> {
+        let worker = std::thread::spawn(move || -> Result<Event, Refusal> {
             assert!(!panicked, "injected abandoned worker panic");
-            Err(CoreDisconnected)
+            Err(Refusal {
+                error: Error::Disconnected,
+                token: None,
+            })
         });
         edits.in_flight = Some(super::InFlight {
             command: super::PendingValue {

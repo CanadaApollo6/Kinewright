@@ -213,7 +213,7 @@ pub struct PendingTaskHistoryProfile {
 }
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) fn measure_pending_task_history(
-    history: &kinewright_core::HistorySnapshot,
+    history: &crate::operation_history::OwnerSnapshot,
     base: &crate::bundle_records::SpecialistBaseRecord,
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<PendingTaskHistoryProfile, BundleError> {
@@ -224,21 +224,31 @@ pub(crate) fn measure_pending_task_history(
         let bytes = serde_json::to_vec(value).map_err(|e| BundleError::Corrupt(e.to_string()))?;
         Ok((bytes.len(), crate::store::preflight_record(&bytes, limits)?))
     }
-    let (history_encoded, history_decoded) = size(
-        &crate::history_record::HistoryRecord::capture(history, base.history_role)?,
-        limits,
+    let reference = |document: &kinewright_core::Document| -> Result<ObjectRef, BundleError> {
+        let bytes = serde_json::to_vec(document).map_err(crate::bundle::encoding_error)?;
+        Ok(ObjectRef {
+            sha256: kinewright_media::sha256_bytes(&bytes),
+            byte_length: bytes.len() as u64,
+            record_kind: crate::bundle_records::RecordKind::Document,
+        })
+    };
+    let stored = history.stored_record(
+        reference(&history.history().baseline)?,
+        reference(&history.history().document)?,
+        &[],
     )?;
+    let (history_encoded, history_decoded) = size(&stored, limits)?;
     let (specialist_base_encoded, specialist_base_decoded) = size(base, limits)?;
-    let (full_delta_encoded, full_delta_decoded) = size(&base.full_applied_delta, limits)?;
+    let (full_delta_encoded, full_delta_decoded) = (0, 0);
     Ok(PendingTaskHistoryProfile {
         history_encoded,
         history_decoded,
-        history_batches: history.batches.len(),
+        history_batches: history.history().undo.len() + history.history().redo.len(),
         specialist_base_encoded,
         specialist_base_decoded,
         full_delta_encoded,
         full_delta_decoded,
-        full_delta_operations: base.full_applied_delta.len(),
+        full_delta_operations: 0,
     })
 }
 
@@ -267,10 +277,10 @@ pub struct RetainedRunProfile {
     pub peak_physical_bytes: u64,
     pub peak_reserved_bytes: u64,
     pub peak_decoded_bytes: u64,
-    pub peak_live_history_bytes: u64,
+
     pub metadata_bytes: u64,
     pub owned_bytes: u64,
-    pub live_history_bytes: u64,
+
     pub graph_depth: u64,
     pub receipts: usize,
     pub issuers: usize,
@@ -314,7 +324,7 @@ impl crate::editing_session::Ja1EditingSession {
                 let bytes = crate::bundle_recovery::bounded_bytes(file, reference.byte_length)?;
                 let decoded = crate::store::preflight_record(&bytes, store.limits())?;
                 max_record_decoded = max_record_decoded.max(decoded);
-                if reference.record_kind == crate::bundle_records::RecordKind::History {
+                if reference.record_kind == crate::bundle_records::RecordKind::OperationHistory {
                     max_history_encoded = max_history_encoded.max(reference.byte_length);
                     max_history_decoded = max_history_decoded.max(decoded);
                 }
@@ -414,10 +424,10 @@ impl crate::editing_session::Ja1EditingSession {
             peak_physical_bytes: usage.peak_physical_bytes,
             peak_reserved_bytes: usage.peak_reserved_bytes,
             peak_decoded_bytes: usage.peak_decoded_bytes,
-            peak_live_history_bytes: usage.peak_live_history_bytes,
+
             metadata_bytes: usage.metadata_bytes,
             owned_bytes: usage.owned_bytes,
-            live_history_bytes: usage.live_history_bytes,
+
             graph_depth: store.maximum_committed_depth()?,
             receipts: bundle.receipts.detailed.len() + bundle.receipts.retired.len(),
             issuers: bundle.issuers.len(),

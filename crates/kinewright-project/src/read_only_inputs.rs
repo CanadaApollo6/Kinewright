@@ -64,7 +64,6 @@ impl ReadOnlyInputs {
                 &metadata_limits,
                 0,
                 bytes,
-                0,
                 false,
                 u64::MAX,
                 true,

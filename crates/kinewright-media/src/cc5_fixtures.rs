@@ -5708,7 +5708,7 @@ const CC5_MEDIA_TESTS: [&str; 22] = [
 const CC5_EXTERNAL_OWNERS: [(u64, &str); 4] = [
     (10, "kinewright-agent"),
     (11, "kinewright-agent"),
-    (14, "kinewright-core"),
+    (14, "kinewright-project"),
     (15, "kinewright-agent"),
 ];
 
@@ -5767,8 +5767,8 @@ const CC5_TEST_SOURCES: [(&str, &str); 9] = [
         include_str!("compositor.rs"),
     ),
     (
-        "crates/kinewright-core/tests/cc5_core.rs",
-        include_str!("../../kinewright-core/tests/cc5_core.rs"),
+        "crates/kinewright-project/tests/kernel_contracts/cc5_core.rs",
+        include_str!("../../kinewright-project/tests/kernel_contracts/cc5_core.rs"),
     ),
     (
         "crates/kinewright-core/tests/cc5_core_proof.rs",
@@ -6478,6 +6478,7 @@ fn cc5_manifest_declares_every_required_fixture_and_constant() {
                 [
                     "kinewright-media",
                     "kinewright-core",
+                    "kinewright-project",
                     "kinewright-app",
                     "kinewright-agent"
                 ]

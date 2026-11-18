@@ -173,7 +173,7 @@
     "raster_aspect": "16/9",
     "pixel_centre": "((x + 0.5)/64, (y + 0.5)/36)",
     "field_raster": "r = 0.05 + 0.9x/63, g = 0.05 + 0.9y/35, b = 0.05 + 0.45(x/63 + y/35); no channel is ever 0",
-    "parity_raster": "the CC3 §10.2 192 samples as a 16 × 12 grid of 4 × 3-pixel blocks",
+    "parity_raster": "the CC3 \u00a710.2 192 samples as a 16 \u00d7 12 grid of 4 \u00d7 3-pixel blocks",
     "parity_block_width": 4,
     "parity_block_height": 3,
     "centred_window_pixels": 576,
@@ -229,7 +229,7 @@
   "tracking": {
     "owner": "kinewright-agent",
     "media_scope": "the generated clip, the analytic box, and the containment of the keyframed window",
-    "source": "640x360 25 fps, 100 frames: solid 0x303030 background, 80x80 white overlay, x = 320 + 120 sin(2πt/8) − 40, y = 180 + 60 sin(2πt/8) − 40, bt709/tv tagged",
+    "source": "640x360 25 fps, 100 frames: solid 0x303030 background, 80x80 white overlay, x = 320 + 120 sin(2\u03c0t/8) \u2212 40, y = 180 + 60 sin(2\u03c0t/8) \u2212 40, bt709/tv tagged",
     "sample_frames": [
       0,
       4,
@@ -320,7 +320,7 @@
       "owners": [
         {
           "owner": "kinewright-media",
-          "scope": "the whole item, the §9.1 rasters the gate is measured on, and the §9.0.2 sweep of every matte control at its minimum, maximum, and an interior value",
+          "scope": "the whole item, the \u00a79.1 rasters the gate is measured on, and the \u00a79.0.2 sweep of every matte control at its minimum, maximum, and an interior value",
           "tests": [
             "cc5_rasters_cover_their_controls_and_land_on_pixel_centres",
             "cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu",
@@ -338,7 +338,7 @@
       "owners": [
         {
           "owner": "kinewright-media",
-          "scope": "the whole item, including the 45° aspect gate, the ellipse margins, the §9.0.2 hand-derived window-control extremes with their GPU rasters, and §2.3's defensive hw/hh <= 0 clause",
+          "scope": "the whole item, including the 45\u00b0 aspect gate, the ellipse margins, the \u00a79.0.2 hand-derived window-control extremes with their GPU rasters, and \u00a72.3's defensive hw/hh <= 0 clause",
           "tests": [
             "cc5_window_geometry_anchors_are_hand_derived_on_cpu_and_gpu",
             "cc5_every_matte_control_bound_matches_a_hand_derived_expected_value",
@@ -388,7 +388,7 @@
       "owners": [
         {
           "owner": "kinewright-media",
-          "scope": "the whole item, including the degenerate-band QA report and the §9.0.2 hand-derived qualifier-control extremes",
+          "scope": "the whole item, including the degenerate-band QA report and the \u00a79.0.2 hand-derived qualifier-control extremes",
           "tests": [
             "cc5_qualifier_anchors_match_the_hand_derived_values",
             "cc5_every_matte_control_bound_matches_a_hand_derived_expected_value"
@@ -583,8 +583,8 @@
       "name": "serialization and history",
       "owners": [
         {
-          "owner": "kinewright-core",
-          "scope": "the whole item, in crates/kinewright-core/tests/cc5_core.rs",
+          "owner": "kinewright-project",
+          "scope": "Core operation and native actor contracts, in crates/kinewright-project/tests/kernel_contracts/cc5_core.rs",
           "tests": [
             "every_matte_capable_kind_carries_the_forty_seven_generated_parameters",
             "technical_lut_carries_no_matte_parameter",
@@ -595,7 +595,7 @@
             "a_two_window_matte_survives_save_reopen_replay_and_undo"
           ],
           "sources": [
-            "crates/kinewright-core/tests/cc5_core.rs"
+            "crates/kinewright-project/tests/kernel_contracts/cc5_core.rs"
           ]
         }
       ]
@@ -662,7 +662,7 @@
     }
   ],
   "manifest_self_test": {
-    "rule": "CC5 §9.0.4: every declared tolerance and constant is asserted equal to the code the fixtures gate with",
+    "rule": "CC5 \u00a79.0.4: every declared tolerance and constant is asserted equal to the code the fixtures gate with",
     "test": "cc5_manifest_declares_every_required_fixture_and_constant",
     "inventory_test": "cc5_declared_test_names_exist_in_their_source_files",
     "sources_rule": "every test name declared under required_fixtures[].owners[].tests is asserted to exist as a #[test] function in one of that owner's sources[], via include_str! at compile time"

@@ -17,14 +17,21 @@ pub(crate) struct ReplyDropProxy {
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
-fn packet(stream: &mut TcpStream) -> Vec<u8> {
+fn packet(stream: &mut TcpStream, exchange: &str) -> Vec<u8> {
     stream
         .set_read_timeout(Some(Duration::from_secs(15)))
         .unwrap();
     let mut bytes = Vec::new();
     let mut byte = [0];
     while !bytes.ends_with(b"\r\n\r\n") {
-        assert_eq!(stream.read(&mut byte).unwrap(), 1, "HTTP header");
+        assert_eq!(
+            stream.read(&mut byte).unwrap_or_else(|error| panic!(
+                "proxy {exchange} header after {} bytes: {error}",
+                bytes.len()
+            )),
+            1,
+            "HTTP header for {exchange}"
+        );
         bytes.push(byte[0]);
     }
     let header = String::from_utf8(bytes.clone()).unwrap();
@@ -86,7 +93,7 @@ impl ReplyDropProxy {
                 let (commands, losing, observed) =
                     (commands.clone(), Arc::clone(&losing), Arc::clone(&observed));
                 std::thread::spawn(move || {
-                    let request = packet(&mut downstream);
+                    let request = packet(&mut downstream, "request");
                     let header_end = request
                         .windows(4)
                         .position(|bytes| bytes == b"\r\n\r\n")
@@ -118,7 +125,7 @@ impl ReplyDropProxy {
                         observed.store(true, Ordering::Release);
                         std::thread::sleep(hold);
                         target.write_all(&request[half..]).unwrap();
-                        let response = packet(&mut target);
+                        let response = packet(&mut target, named.unwrap_or("unparsed response"));
                         let _ = downstream.write_all(&response);
                         return;
                     }
@@ -128,7 +135,7 @@ impl ReplyDropProxy {
                     }
                     let mut target = TcpStream::connect(upstream).unwrap();
                     target.write_all(&request).unwrap();
-                    let response = packet(&mut target);
+                    let response = packet(&mut target, named.unwrap_or("unparsed response"));
                     if !dropping {
                         let _ = downstream.write_all(&response);
                     }
@@ -170,9 +177,7 @@ impl HostAttachment {
     pub(in crate::ja1_attachment) fn manual_stream_inflight_for_test(&self) -> bool {
         self.manual_inflight.is_some()
     }
-    pub(in crate::ja1_attachment) fn take_child_for_test(&mut self) -> std::process::Child {
-        self.child.take().expect("owned fixture host")
-    }
+
     pub(in crate::ja1_attachment) fn manual_identity_for_test(&self) -> String {
         self.manual_client.clone()
     }
@@ -272,8 +277,11 @@ impl crate::ja1_attachment::Ja1Attachment {
         let host = self.host.as_ref().expect("launched host");
         let snapshot = HostSnapshot::capture(self.owner.core()).unwrap();
         let asset_id = kinewright_core::AssetId(
-            snapshot
-                .history
+            self.owner
+                .core()
+                .export_history()
+                .unwrap()
+                .history()
                 .document
                 .media_pool
                 .iter()

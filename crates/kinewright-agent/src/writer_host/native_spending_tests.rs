@@ -266,7 +266,7 @@ fn s4b_c3_all_budgets_survive_restart_and_downtime() {
     let expected = spending_record(&f, &run);
     let Fixture { host, temp, .. } = f;
     drop(host);
-    let owner = Ja1EditingSession::open(&temp.path("project.kinewright")).unwrap();
+    let owner = Ja1EditingSession::open(&temp.path("project.kinewright"), &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
     let state = owner.orchestration_projection(&run).unwrap().unwrap();
     let reference = state.usage.last().unwrap();
     let record = owner

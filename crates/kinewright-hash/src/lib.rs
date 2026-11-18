@@ -82,6 +82,8 @@ const ROUND_CONSTANTS: [u32; 64] = [
     0xc671_78f2,
 ];
 
+// Prefix evidence finalizes an independent hash state while the original stream continues.
+#[derive(Clone)]
 pub struct Sha256 {
     state: [u32; 8],
     buffer: [u8; 64],

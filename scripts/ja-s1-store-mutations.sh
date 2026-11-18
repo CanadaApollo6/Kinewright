@@ -6,16 +6,16 @@ evidence="${1:?absolute evidence directory}"
 mkdir -p "$evidence"
 source scripts/setup-ffmpeg.sh
 export CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 TMPDIR="$PWD/target/ja-s1-tmp"
-for mutation in hash closure copy live history decoded branch tamper decoded-lease dedup; do
+for mutation in hash closure copy live decoded tamper decoded-lease dedup; do
     file=crates/kinewright-project/src/store.rs
     case "$mutation" in
         hash|closure|decoded-lease) test=object_admission_checks_exact_bytes_and_dependency_closure ;;
         copy|dedup) test=reservation_counts_unique_blobs_and_simultaneous_copies ;;
         live) test=failed_seal_and_last_reader_retire_charges_once ;;
-        history|decoded|branch) test=storage_ingress_refuses_decoded_and_transient_overflow ;;
+        decoded) test=storage_ingress_refuses_decoded_and_transient_overflow ;;
         tamper) test=owned_input_tamper_invalidates_verified_identity ;;
     esac
-    if [[ "$mutation" == copy || "$mutation" == history || "$mutation" == decoded ]]; then file=crates/kinewright-project/src/storage_budget.rs; fi
+    if [[ "$mutation" == copy || "$mutation" == decoded ]]; then file=crates/kinewright-project/src/storage_budget.rs; fi
     cp "$file" "$evidence/$mutation.before.rs"
     if [[ "$mutation" == decoded-lease ]]; then cp crates/kinewright-project/src/storage_budget.rs "$evidence/decoded-lease-budget.before.rs"; fi
     trap 'cp "$evidence/$mutation.before.rs" "$file"; if [[ "$mutation" == decoded-lease && -f "$evidence/decoded-lease-budget.before.rs" ]]; then cp "$evidence/decoded-lease-budget.before.rs" crates/kinewright-project/src/storage_budget.rs; fi' EXIT
@@ -29,9 +29,7 @@ elif m=='closure':a='        self.closure(&dependencies)?;';b=''
 elif m=='copy':
  a='        state.reserved_copy_bytes = reserved_copies;';b='        state.reserved_copy_bytes = 0;'
  s=s.replace(a,b,1);p.write_text(s);sys.exit(0)
-elif m=='history':a='            || history_total > limits.live_history_bytes';b=''
 elif m=='decoded':a='            || decoded > limits.decoded_record_bytes';b=''
-elif m=='branch':a='if bytes > self.limits().branch_history_bytes {';b='if false && bytes > self.limits().branch_history_bytes {'
 elif m=='dedup':a='        if existing {';b='        if false && existing {'
 elif m=='live':
  s+='''
@@ -67,9 +65,8 @@ impl<T> StorageReservation<T> {
     pub(crate) fn uncharge_for_mutation(mut held: Self) -> Self {
         if let Ok(mut state) = held.usage.lock() {
             state.decoded_bytes -= held.decoded;
-            state.live_history_bytes -= held.history;
         }
-        held.decoded = 0; held.history = 0;
+        held.decoded = 0;
         held
     }
 }

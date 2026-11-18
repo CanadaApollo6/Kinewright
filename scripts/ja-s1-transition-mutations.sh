@@ -10,7 +10,6 @@ out=Path(sys.argv[1]);assert out.is_absolute();out.mkdir(parents=True,exist_ok=T
 cases=[]
 def add(name,path,anchor,replacement,witness,target='branches'):
  cases.append((name,Path(path),anchor,replacement,witness,target))
-core='crates/kinewright-core/src/'
 project='crates/kinewright-project/src/'
 agent='crates/kinewright-agent/src/durable_branch.rs'
 add('fresh-revision',agent,'''        let revision = self.bind(bundle, live)?;
@@ -21,14 +20,7 @@ add('full-applied-delta',agent,'        self.base.full_applied_delta = frozen.ap
         self.base.full_applied_delta=(*operations).clone();''','reopened_exact_base_merges_once_with_fresh_runtime_revision')
 add('lookup-before-bind',agent,'        let previous = bundle.receipt_lookup(envelope)?;','''        self.bind(bundle,live)?;
         let previous = bundle.receipt_lookup(envelope)?;''','merge_lost_reply_preserves_one_undo_entry')
-add('undone-ancestry',project+'bundle_commit.rs','    split_ancestry = ancestry(&current, &split_ancestry);','','restored_lineage_tracks_siblings_reuse_and_undone_splits')
-add('actor-exact-cut',core+'actor.rs','.is_some_and(|before| state.history() != *before)','.is_some_and(|before| false && state.history() != *before)','ordered_floor_install_preserves_open_gesture_and_redo','core')
-add('restore-redo',core+'actor.rs','                    state = candidate;','                    candidate.redo.clear();\n                    state = candidate;','ordered_floor_install_preserves_open_gesture_and_redo','core')
-add('suffix-equivalence',core+'history_transition.rs','        if before != *reconciled {','        if false && before != *reconciled {','recovery_close_follows_suffix_equivalence','core')
-add('floor-cut',project+'bundle_branch.rs','                || checkpoint.command_cut.as_ref() != Some(command_cut)\n','','merge_lost_reply_preserves_one_undo_entry')
-add('floor-generation',project+'bundle_branch.rs','                || checkpoint.floor_generation != *preceding_floor_generation\n','','merge_lost_reply_preserves_one_undo_entry')
-add('shared-history',project+'bundle_recovery.rs','''            .get(&checkpoint.history_ref.sha256)
-            .cloned()''','''            .remove(&checkpoint.history_ref.sha256)''','restored_lineage_tracks_siblings_reuse_and_undone_splits')
+
 for name,path,anchor,replacement,witness,target in cases:
  if (out/f'{name}-restored.log.gz').exists():continue
  original=path.read_bytes();source=original.decode();assert source.count(anchor)==1,(name,source.count(anchor))

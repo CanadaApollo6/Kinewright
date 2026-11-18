@@ -65,7 +65,7 @@ fn s4b_c3_fix3_copies_keep_plain_task_history_and_original_run() {
         }
         core.request(Command::Undo).unwrap();
         let expected = core.export_history().unwrap();
-        assert!(!expected.cursor.redo.is_empty());
+        assert!(!expected.history().redo.is_empty());
         let producer = f.producer(&run);
         let saved = f
             .host
@@ -77,7 +77,7 @@ fn s4b_c3_fix3_copies_keep_plain_task_history_and_original_run() {
             .checkpoint_task_history(&producer, &run, &execution.task)
             .unwrap();
         let (source_root, source_state) = {
-            let loaded = LoadedBundle::read(&f.temp.path(original)).unwrap();
+            let loaded = LoadedBundle::read(&f.temp.path(original), &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
             (loaded.root().unwrap().clone(), f.projection(&run))
         };
         let name = if rescue {
@@ -86,7 +86,7 @@ fn s4b_c3_fix3_copies_keep_plain_task_history_and_original_run() {
             "copied.kinewright"
         };
         let reply = if rescue {
-            let accepted = {
+            let _accepted = {
                 let host = f.host.owner.upgrade().unwrap();
                 let mut owner = host.lock().unwrap();
                 owner
@@ -107,7 +107,7 @@ fn s4b_c3_fix3_copies_keep_plain_task_history_and_original_run() {
             let preview = f
                 .editor
                 .request(HostCommand::PreviewRescue {
-                    snapshot: HostSnapshot::from_history(accepted).unwrap(),
+                    snapshot: host_snapshot_for_test(&f.host),
                 })
                 .unwrap();
             assert!(
@@ -155,13 +155,11 @@ fn s4b_c3_fix3_copies_keep_plain_task_history_and_original_run() {
                     &copied.checkpoint,
                 )
                 .unwrap();
-            let history = session
+            let history = checkpoint.open(session
                 .store()
-                .unwrap()
-                .resolve_history(&checkpoint.history_ref)
-                .unwrap();
-            assert_eq!(*history, expected);
-            let loaded = LoadedBundle::read(&f.temp.path(name)).unwrap();
+                .unwrap(), &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap().into_reader().unwrap().into_capture().unwrap();
+            assert_eq!(history, expected);
+            let loaded = LoadedBundle::read(&f.temp.path(name), &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
             assert!(
                 loaded.root().unwrap().run_index_ref.is_none(),
                 "C3_COPY_PLAIN_TASK_BOUNDARY rescue={rescue}"
@@ -217,7 +215,7 @@ fn s4b_c3_fix3_copies_keep_plain_task_history_and_original_run() {
                 matches!(session.select_local(), ProjectSelectionResult::Activated(_)),
                 "C3_PLAIN_BRANCH_SELECTION"
             );
-            assert_eq!(session.core().export_history().unwrap(), expected);
+            assert_recovered_task_owner(session.core(), serde_json::to_value(&expected).unwrap(), "C3_PLAIN_TASK_SELECTION_PRESERVES_ITS_COMPLETE_OWNER");
             session.core().request(Command::Redo).unwrap();
             session.save_active().unwrap();
             assert!(
@@ -252,7 +250,7 @@ fn s4b_c3_fix3_copies_keep_plain_task_history_and_original_run() {
         let (_, _, _, restored) = history_task_endpoint(&f, &run);
         assert_eq!(restored.export_history().unwrap(), expected);
         restored.request(Command::Redo).unwrap();
-        assert!(restored.export_history().unwrap().cursor.redo.is_empty());
+        assert!(restored.export_history().unwrap().history().redo.is_empty());
         drop(restored);
         drop(host);
         claim.finish().unwrap();

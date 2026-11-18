@@ -3,7 +3,8 @@
 
 Nextest archives avoid compilation on test runners. Run libtest batches directly
 because mcp_server has crashed with per-test filtering and the app has order-sensitive
-fixtures. Media and agent library tests get separate processes, at most four per runner.
+fixtures. Media and agent library tests, plus slow Project tests, get separate
+processes, at most four per runner.
 All result logs retain the existing slow_tests.py ignored-reason proof.
 """
 from __future__ import annotations
@@ -106,7 +107,8 @@ def plan(listing, tier, count):
     estimates, measured_batches = weights(tier)
     units = []
     for suite_index, suite in enumerate(suites):
-        split = suite["label"] in ("kinewright_media", "kinewright_agent")
+        split = (suite["label"] in ("kinewright_media", "kinewright_agent") or
+                 (tier == "slow" and suite["label"] == "kinewright_project"))
         controls = [p for p in suite["tests"] if tier == "fast" and suite["label"] == "kinewright_agent" and p.startswith(CONTROL_PREFIX)]
         display_names = [p for p in suite["tests"] if tier == "fast" and suite["label"] == "kinewright_media" and p.startswith("display::tests::") and not p.startswith(DISPLAY_PARITY_PREFIX)]
         rest = [p for p in suite["tests"] if p not in controls and p not in display_names]
@@ -172,7 +174,10 @@ def plan(listing, tier, count):
         if suites[unit["suite"]]["label"] == "kinewright_app":
             slot = 0
         else:
-            slot = min(available, key=lambda i: (predicted_seconds([*shards[i], unit]),
+            # The App batch completes before isolated processes start. Slow
+            # Project cases may use its otherwise lightly loaded runner.
+            eligible = [0, *available] if tier == "slow" and suites[unit["suite"]]["label"] == "kinewright_project" else available
+            slot = min(eligible, key=lambda i: (predicted_seconds([*shards[i], unit]),
                                                  sum(u["estimate"] for u in shards[i]), i))
         shards[slot].append(unit)
     loads = [round(predicted_seconds(shard), 3) for shard in shards]

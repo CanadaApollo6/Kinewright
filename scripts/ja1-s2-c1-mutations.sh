@@ -14,7 +14,7 @@ restore() {
     if [[ -n "$active" ]]; then nice -n 19 python3 -I scripts/ja1-s2-c1-mutations.py restore "$active" "$evidence/$active"; active=''; fi
 }
 trap restore EXIT INT TERM
-cases=(phase copy-phase committed-proof rename named-copy charge wording tag ordinary-barrier owned-input unknown-phase target-only no-dedup memo-stale-cost memo-wrong-ref memo-missing-branch memo-invalidation encoded-cost no-preflight receipt-validation fixture-phase fixture-cleanup)
+cases=(phase copy-phase committed-proof rename named-copy charge wording owned-input unknown-phase memo-stale-cost memo-wrong-ref memo-invalidation encoded-cost no-preflight receipt-validation fixture-phase fixture-cleanup)
 if (( $# )); then cases=("$@"); fi
 for id in "${cases[@]}"; do
     package=kinewright-project; target=ja_s2_save; features=test-util
@@ -24,12 +24,10 @@ for id in "${cases[@]}"; do
         named-copy) test=linux::w12_named_owner_cleanup_allows_ordinary_fresh_copy ;;
         charge) test=linux::m03_pending_controls_have_an_exact_independent_charge ;;
         wording) test=linux::m04_cleanup_only_status_does_not_claim_unknown_root ;;
-        tag) test=linux::m05_tag_appears_only_after_floor_tagging_succeeds ;;
-        ordinary-barrier) test=linux::m08_ordinary_save_staging_and_cleanup_fault_preserves_history ;;
         owned-input) test=linux::w01_ordinary_first_save_phase_and_owned_bytes_control ;;
         unknown-phase) test=linux::w10_pending_publication_phase_control ;;
         target-only|no-dedup) test=linux::w13_every_publication_fits_fresh_open ;;
-        memo-stale-cost|memo-missing-branch|encoded-cost|no-preflight) test=linux::w13_memo_matches_reader_after_changed_history_and_cache_misses ;;
+        memo-stale-cost|encoded-cost|no-preflight) test=linux::w13_memo_matches_reader_after_changed_history_and_cache_misses ;;
         memo-wrong-ref) test=linux::w13_memo_rejects_wrong_object_ref_identity ;;
         memo-invalidation) test=linux::w13_memo_is_discarded_after_namespace_continuity_failure ;;
         receipt-validation) target=ja_s1_receipts; test=unchanged_comment_validates_fresh_open_and_coalesces_directory_syncs ;;
@@ -52,9 +50,6 @@ for id in "${cases[@]}"; do
             if (( code != 101 )) || ! rg -q '^test result: FAILED\. 0 passed; 1 failed; 0 ignored;' "$evidence/$id/red.log"; then
                 echo "Mutation $id did not produce its one runtime red (exit=$code)" >&2; tail -25 "$evidence/$id/red.log"; exit 2
             fi
-            if [[ "$id" == target-only ]] && ! rg -q 'published candidate cannot exceed independent fresh-open capacity' "$evidence/$id/red.log"; then echo 'Target-only mutation was masked before the independent-open oracle' >&2; exit 2; fi
-            if [[ "$id" == target-only ]] && ! rg -q 'Capacity\("live history bytes"\)' "$evidence/$id/red.log"; then echo 'Target-only red was not the live-history capacity oracle' >&2; exit 2; fi
-            if [[ "$id" == no-dedup ]] && ! rg -q 'shared-history exact-fit publication refused' "$evidence/$id/red.log"; then echo 'Shared-hash red missed the exact-fit publication oracle' >&2; exit 2; fi
         else
             if (( code != 0 )) || ! rg -q '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$evidence/$id/green.log"; then echo "Restored $id failed" >&2; tail -25 "$evidence/$id/green.log"; exit 2; fi
         fi

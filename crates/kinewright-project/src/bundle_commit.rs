@@ -1,22 +1,18 @@
 //! Synchronous B0–B5 publication through the one store/namespace owner.
 #![allow(clippy::missing_errors_doc)]
+use crate::operation_actor::Core;
 use crate::{
     bundle::{
         BundleError, BundleSaveReport, BundleWriteAdmission, ProjectBundle, StudioRoot,
         SupportInventory,
     },
-    bundle_records::{
-        BatchId, BranchCheckpoint, HeadId, LineageRecord, ObjectRef, OccurrenceId, RecordKind,
-    },
+    bundle_records::{BatchId, BranchCheckpoint, HeadId, ObjectRef, RecordKind},
     owned_inputs::OwnedInputManifest,
     receipts::{CommandEnvelope, CommandReceipt, ReceiptLookup, ReceiptResult},
     store::SealedObject,
 };
-use kinewright_core::{ClipId, Core, HistorySnapshot, JournalCommand};
-use std::{
-    borrow::Cow,
-    collections::{BTreeMap, BTreeSet},
-};
+
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommitBarrier {
@@ -49,10 +45,105 @@ impl BranchPublication {
 }
 pub struct BundleCommit;
 #[derive(Clone, Copy)]
-pub(crate) struct BranchSeed<'a> {
-    pub lineage: &'a LineageRecord,
-    pub role: crate::history_record::HistoryRole,
+pub(crate) enum PublicationView<'a> {
+    Capture(&'a crate::operation_actor::CapturedHistory),
+    Continuity(
+        &'a crate::operation_actor::CapturedHistory,
+        crate::operation_history::SnapshotIdentity,
+    ),
+    Snapshot(
+        &'a crate::operation_history::OwnerSnapshot,
+        kinewright_core::TimelineRevision,
+    ),
+    Prepared(&'a crate::operation_actor::PreparedUpdate),
+    Reinstall(
+        &'a crate::operation_actor::PreparedUpdate,
+        &'a crate::operation_checkpoint::InstallRecord,
+    ),
+    Selection(&'a crate::bundle_switch::PreparedProjectSelection),
+    Frozen(
+        &'a crate::ProjectAttachment,
+        &'a crate::operation_actor::AcceptedCut,
+        &'a BTreeSet<ObjectRef>,
+    ),
 }
+impl PublicationView<'_> {
+    fn revision(self) -> kinewright_core::TimelineRevision {
+        match self {
+            Self::Capture(capture) | Self::Continuity(capture, _) => capture.change.revision,
+            Self::Snapshot(_, revision) => revision,
+            Self::Prepared(update) | Self::Reinstall(update, _) => update.revision(),
+            Self::Selection(selection) => selection.restore.cut.change().revision,
+            Self::Frozen(_, cut, _) => cut.change().revision,
+        }
+    }
+    fn seal(
+        self,
+        bundle: &mut ProjectBundle,
+        inputs: &ObjectRef,
+        prior: Option<&BranchCheckpoint>,
+    ) -> Result<crate::operation_history::SealedOwner, BundleError> {
+        let mut sources = std::collections::BTreeSet::from([inputs.clone()]);
+        if let Some(prior) = prior {
+            sources.insert(prior.owner_ref.clone());
+        }
+        if let Self::Capture(capture) | Self::Continuity(capture, _) = self {
+            sources.extend(
+                capture
+                    .snapshot
+                    .origins()
+                    .iter()
+                    .flat_map(|origin| origin.inputs.iter().cloned()),
+            );
+        }
+        if let Self::Snapshot(snapshot, _) = self {
+            sources.extend(
+                snapshot
+                    .origins()
+                    .iter()
+                    .flat_map(|origin| origin.inputs.iter().cloned()),
+            );
+        }
+        if let Self::Prepared(update) | Self::Reinstall(update, _) = self {
+            sources.extend(update.input_contexts().cloned());
+        }
+        if let Self::Selection(selection) = self {
+            sources.insert(selection.restore.checkpoint.owner_ref.clone());
+        }
+        if let Self::Frozen(_, _, references) = self {
+            sources.extend(references.iter().cloned());
+        }
+        let bindings = crate::operation_publication::bindings(&bundle.store, &sources, inputs)?;
+        match self {
+            Self::Frozen(attachment, cut, _) => attachment
+                .seal_selection(cut, &bundle.store, bindings)
+                .map_err(crate::bundle::operation_error),
+
+            Self::Capture(capture) | Self::Continuity(capture, _) => capture
+                .snapshot
+                .persist_checkpoint(&mut bundle.store, |resource| {
+                    Ok(bindings.get(resource).cloned())
+                })
+                .map_err(BundleError::from),
+            Self::Snapshot(snapshot, _) => snapshot
+                .persist_checkpoint(&mut bundle.store, |resource| {
+                    Ok(bindings.get(resource).cloned())
+                })
+                .map_err(BundleError::from),
+            Self::Prepared(update) | Self::Reinstall(update, _) => update
+                .persist_checkpoint(&mut bundle.store, |resource| {
+                    Ok(bindings.get(resource).cloned())
+                })
+                .map_err(crate::bundle::operation_error),
+            Self::Selection(selection) => selection
+                .restore
+                .attachment
+                .seal_selection(&selection.restore.cut, &bundle.store, bindings)
+                .map_err(crate::bundle::operation_error),
+        }
+    }
+}
+
 impl BundleCommit {
     /// Stage through Core, then publish the result and issuer sequence with the same root.
     #[allow(clippy::too_many_lines)]
@@ -90,43 +181,33 @@ impl BundleCommit {
         install: bool,
         target: &crate::bundle_records::BranchId,
     ) -> Result<ReceiptLookup, BundleError> {
-        use kinewright_core::{Command, Event, Query, QueryResult};
-        if envelope.action == "metadata" {
-            return Err(BundleError::Unsupported(
-                "metadata requires typed owner ingress".into(),
-            ));
-        }
-        if install {
-            crate::bundle::reconcile_core_save(core)?;
-        } else if core
-            .attachment_state()
-            .map_err(crate::bundle::history_error)?
-            != kinewright_core::AttachmentState::Frozen
-            || core
-                .pending_history_save()
-                .map_err(crate::bundle::history_error)?
-                .is_some()
-            || (envelope.transition.is_none()
-                && !(target != &bundle.manual_branch_id && envelope.action == "edit"))
-        {
-            return Err(BundleError::HistoryBarrierInvariant);
-        }
+        // Durable results precede fresh authority, including after a restart.
         let lookup = bundle.receipt_lookup(envelope)?;
         if lookup != ReceiptLookup::Absent {
+            if matches!(
+                lookup,
+                ReceiptLookup::Committed(_) | ReceiptLookup::Retired(_)
+            ) {
+                bundle.settle_matching_receipt(envelope)?;
+            }
             return Ok(lookup);
+        }
+        if envelope.action == "metadata" {
+            return Err(BundleError::Unsupported(
+                "typed owner ingress required".into(),
+            ));
+        }
+        if bundle.unsettled
+            || bundle.pending_command.is_some()
+            || bundle.pending_publication.is_some()
+        {
+            return Err(BundleError::Unsettled);
         }
         let retained_candidate = !install
             && target != &bundle.manual_branch_id
             && envelope.action == "edit"
-            && envelope.transition.is_none()
             && bundle.retained_candidate_merge(envelope)?;
-        let checkpoint = bundle
-            .branches
-            .get(target)
-            .ok_or_else(|| BundleError::Unsupported("unknown branch".into()))?;
-        if bundle.unsettled || bundle.pending_command.is_some() {
-            return Err(BundleError::Unsettled);
-        }
+        let checkpoint = bundle.checkpoint(target)?.clone();
         if envelope.project_id != bundle.project_id
             || envelope.target_branch != *target
             || (envelope.owner_epoch != bundle.store.owner_epoch() && !retained_candidate)
@@ -137,34 +218,25 @@ impl BundleCommit {
                 "stale command authority/head".into(),
             ));
         }
-        let Event::QueryResult(QueryResult::Snapshot { revision, .. }) = core
-            .request(Command::Query(Query::Snapshot))
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?
-        else {
-            return Err(BundleError::Corrupt("Core snapshot response".into()));
-        };
-        if revision != envelope.expected_revision && !retained_candidate {
-            return Err(BundleError::Unsupported("stale runtime binding".into()));
+        let change = core.change_id().map_err(crate::bundle::operation_error)?;
+        if change.revision != envelope.expected_revision && !retained_candidate {
+            return Err(BundleError::HistoryChanged);
         }
         let issuer = bundle
             .issuers
             .get(&envelope.id.issuer)
             .cloned()
-            .ok_or_else(|| BundleError::Unsupported("unknown issuer".into()))?;
+            .ok_or(BundleError::HistoryChanged)?;
         if issuer.retired || issuer.next_sequence != envelope.id.sequence {
-            return Err(BundleError::Unsupported(
-                "issuer sequence/retirement".into(),
-            ));
+            return Err(BundleError::HistoryChanged);
         }
-        let next_sequence = envelope
-            .id
-            .sequence
+        let next_sequence = issuer
+            .next_sequence
             .checked_add(1)
-            .ok_or(BundleError::Capacity("issuer sequence overflow"))?;
+            .ok_or(BundleError::Capacity("issuer sequence"))?;
         if bundle.store.admission_limits().pending_commands == 0
-            || (bundle.receipts.detailed.len() as u64)
-                .checked_add(bundle.receipts.retired.len() as u64)
-                .is_none_or(|n| n >= bundle.store.admission_limits().receipts)
+            || (bundle.receipts.detailed.len() + bundle.receipts.retired.len()) as u64
+                >= bundle.store.admission_limits().receipts
         {
             return Err(bundle
                 .store
@@ -174,296 +246,320 @@ impl BundleCommit {
         if encoded > bundle.store.limits().command_bytes {
             return Err(BundleError::Capacity("command bytes"));
         }
-        let reservation = bundle.store.reserve(0, encoded, 0, false)?;
-        let mut before = core
-            .export_history()
-            .map_err(crate::bundle::history_error)?;
-        let original = before.clone();
+        let reservation = bundle.store.reserve(0, encoded, false)?;
+        if envelope
+            .context
+            .as_ref()
+            .is_some_and(|context| context.creation.branch != *target)
         {
-            let acknowledged = if let Some(cached) = bundle.cached_history(target) {
-                std::sync::Arc::clone(cached)
-            } else {
-                std::sync::Arc::new(bundle.store.resolve_history(&checkpoint.history_ref)?)
-            };
-            if before.floor_offset < acknowledged.floor_offset {
-                let cut = usize::try_from(acknowledged.floor_offset - before.floor_offset)
-                    .map_err(|_| BundleError::Capacity("history floor offset"))?;
-                before = kinewright_core::HistoryTransition::floor(before, cut)
-                    .map_err(|_| {
-                        BundleError::Unsupported(
-                            "Core floor differs from acknowledged checkpoint".into(),
-                        )
-                    })?
-                    .into_after();
-            }
-            if **acknowledged != before {
-                return Err(BundleError::Unsupported(
-                    "Core is not the acknowledged checkpoint".into(),
-                ));
-            }
+            return Err(BundleError::HistoryChanged);
         }
-        let _shadow = bundle.store.reserve_history_shadow(
-            before
-                .encoded_bytes()
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-        )?;
-        let _transition_overlap = if envelope.transition.is_some() {
-            Some((
-                bundle.store.reserve_history_shadow(
-                    before
-                        .encoded_bytes()
-                        .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-                )?,
-                bundle.store.reserve_history_shadow(
-                    before
-                        .encoded_bytes()
-                        .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-                )?,
-            ))
+        let owner = bundle.attach_core(core)?;
+        let was_live = core
+            .attachment_state()
+            .map_err(crate::bundle::operation_error)?
+            == kinewright_core::AttachmentState::Live;
+        if install && !was_live {
+            return Err(BundleError::HistoryBarrierInvariant);
+        }
+        let cut = if envelope.action == "comment" && envelope.command.is_none() {
+            // Comments publish metadata over the saved checkpoint. Freeze the
+            // current actor without pretending its unsaved suffix is that cut.
+            owner.freeze()
         } else {
-            None
+            owner.freeze_published(
+                checkpoint.identity,
+                checkpoint.position,
+                checkpoint.revision,
+            )
+        }
+        .map_err(crate::bundle::operation_error)?;
+        let cut = if core
+            .creation_branch()
+            .map_err(crate::bundle::operation_error)?
+            == *target
+        {
+            cut
+        } else {
+            owner
+                .retarget_selection(&cut, target.clone())
+                .map_err(crate::bundle::operation_error)?
         };
-        let after = if envelope.command.is_none() && envelope.transition.is_none() {
-            before
-        } else {
-            let candidate = Core::spawn(std::sync::Arc::clone(&before.baseline))
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            let attachment = bundle.attach_core(&candidate)?;
-            // A transition needs `before` again; otherwise the restore takes it.
-            let (restored, transition_before) = if envelope.transition.is_some() {
-                (before.clone(), Some(before))
+        if let Some(command) = &envelope.command {
+            let action = crate::operation_protocol::Action::from_normalised(
+                kinewright_core::Command::from(command.clone()),
+            )
+            .map_err(|error| {
+                crate::bundle::operation_error(crate::operation_actor::Error::Protocol(error))
+            })?;
+            let context = if let Some(context) = &envelope.context {
+                if context.creation.branch != *target {
+                    return Err(BundleError::HistoryChanged);
+                }
+                context.clone()
             } else {
-                (before, None)
+                crate::operation_actor::CommandContext {
+                    creation: crate::operation_history::CreationOrigin {
+                        branch: target.clone(),
+                        batch: BatchId::command(&envelope.id)?,
+                    },
+                    inputs: if matches!(action, crate::operation_protocol::Action::Do { .. }) {
+                        vec![inputs.clone()]
+                    } else {
+                        vec![]
+                    },
+                    approval: None,
+                    transition: None,
+                }
             };
-            attachment
-                .restore_history(restored)
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            if let Some((transition, before)) = envelope.transition.as_ref().zip(transition_before)
+            let update = if target != &bundle.manual_branch_id
+                && checkpoint.role == crate::operation_history::Role::Candidate
             {
-                let checkpoint = bundle.branches.get(target).ok_or_else(|| {
-                    BundleError::Corrupt("transition without acknowledged checkpoint".into())
-                })?;
-                let install = crate::bundle_branch::transition(transition, checkpoint, before)?;
-                attachment
-                    .install_history_transition(install)
-                    .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            } else if let Some(command) = &envelope.command {
-                let command = if let JournalCommand::DoBatch(operations) = command {
-                    let Event::QueryResult(QueryResult::Snapshot { revision, .. }) = candidate
-                        .request(Command::Query(Query::Snapshot))
-                        .map_err(|e| BundleError::Corrupt(e.to_string()))?
-                    else {
-                        return Err(BundleError::Corrupt("candidate revision".into()));
-                    };
-                    Command::DoBatchIfRevision {
-                        expected: revision,
-                        operations: operations.clone(),
-                    }
-                } else {
-                    Command::from(command.clone())
-                };
-                if !matches!(
-                    candidate
-                        .request(command)
-                        .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-                    Event::DocumentChanged { .. }
-                ) {
-                    return Err(BundleError::Unsupported("Core rejected the command".into()));
+                match action {
+                    crate::operation_protocol::Action::Do {
+                        operations,
+                        gesture: None,
+                    } => owner.prepare_merge(&cut, operations, context),
+                    action => owner.prepare(&cut, action, context),
                 }
-            }
-            let after = candidate
-                .export_history()
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            drop(candidate);
-            after
-        };
-        if envelope.action == "comment" {
-            match crate::receipts::stage_comment(bundle, envelope, blobs) {
-                Ok(result) => bundle.pending_result = Some(result),
+            } else if install {
+                owner.prepare_install(&cut, action, context)
+            } else {
+                owner.prepare(&cut, action, context)
+            };
+            let update = match update {
+                Ok(update) => update,
                 Err(error) => {
-                    return Err(error);
+                    if was_live {
+                        owner.resume(&cut).map_err(crate::bundle::operation_error)?;
+                    }
+                    return Err(crate::bundle::operation_error(error));
                 }
+            };
+            bundle.pending_command = Some(reservation.hold(envelope.clone()));
+            bundle
+                .issuers
+                .get_mut(&envelope.id.issuer)
+                .ok_or(BundleError::HistoryChanged)?
+                .next_sequence = next_sequence;
+            let result = Self::publish_update(
+                bundle, core, cut, update, inputs, target, None, was_live, None,
+            );
+            if let Err(error) = result {
+                if !bundle.unsettled {
+                    bundle.issuers.insert(envelope.id.issuer.clone(), issuer);
+                    bundle.pending_command = None;
+                }
+                return Err(error);
             }
-        }
-        bundle.pending_command = Some(reservation.hold(envelope.clone()));
-        bundle
-            .issuers
-            .get_mut(&envelope.id.issuer)
-            .ok_or_else(|| BundleError::Corrupt("admitted issuer disappeared".into()))?
-            .next_sequence = next_sequence;
-        let publication = if install {
-            Self::publish_branch(bundle, &after, inputs, target, None)
         } else {
-            let branch = target.clone();
-            Self::publish_branch_selected(bundle, &after, inputs, &branch, None, Some(&after))
-        };
-        if let Err(error) = publication {
-            if !matches!(
-                error,
-                BundleError::DurabilityUnknown | BundleError::Unsettled
-            ) {
-                bundle.issuers.insert(envelope.id.issuer.clone(), issuer);
+            if envelope.action != "comment" {
+                if was_live {
+                    owner.resume(&cut).map_err(crate::bundle::operation_error)?;
+                }
+                return Err(BundleError::HistoryChanged);
             }
-            bundle.unsettled = true;
-            return Err(error);
+            let result = crate::receipts::stage_comment(bundle, envelope, blobs);
+            if let Err(error) = result {
+                if was_live {
+                    owner.resume(&cut).map_err(crate::bundle::operation_error)?;
+                }
+                return Err(error);
+            }
+            bundle.pending_result = Some(result?);
+            bundle.pending_command = Some(reservation.hold(envelope.clone()));
+            bundle
+                .issuers
+                .get_mut(&envelope.id.issuer)
+                .ok_or(BundleError::HistoryChanged)?
+                .next_sequence = next_sequence;
+            let result = Self::publish_maintenance(bundle);
+            if was_live {
+                owner.resume(&cut).map_err(crate::bundle::operation_error)?;
+            }
+            result?;
         }
         bundle.pending_command = None;
         bundle.pending_result = None;
-        if install {
-            let published = if let Some(cached) = bundle.cached_history(target) {
-                std::sync::Arc::clone(cached)
-            } else {
-                std::sync::Arc::new(bundle.branch_history(target)?)
-            };
-            if **published != original
-                && bundle
-                    .attach_core(core)?
-                    .install_checkpoint(original, (**published).clone())
-                    .is_err()
-            {
-                bundle.unsettled = true;
-                return Err(BundleError::Unsettled);
-            }
-        }
         bundle.receipt_lookup(envelope)
     }
-    /// Publish an already accepted manual message. The supplied Core is the host's
-    /// sole validation shadow; the GUI is never executed or installed here.
-    #[allow(clippy::too_many_lines)]
+    /// The host validates the lease and input certificate before this ingress.
+    /// Stream receipts remain the authoritative duplicate check after restart.
     pub fn admitted_history(
         bundle: &mut ProjectBundle,
-        envelope: &CommandEnvelope,
+        message: crate::operation_protocol::Message,
         shadow: &Core,
         inputs: &ObjectRef,
-    ) -> Result<(ReceiptLookup, Option<BundleSaveReport>), BundleError> {
-        use kinewright_core::{Command, Event};
-        let lookup = bundle.receipt_lookup(envelope)?;
-        if lookup != ReceiptLookup::Absent {
-            return Ok((lookup, None));
-        }
-        let manual = envelope
-            .manual
+    ) -> Result<(crate::operation_protocol::Receipt, Option<BundleSaveReport>), BundleError> {
+        let branch = bundle.manual_branch_id.clone();
+        let checkpoint = bundle.checkpoint(&branch)?.clone();
+        let stream = checkpoint
+            .stream
             .as_ref()
-            .ok_or(BundleError::HistoryBarrierInvariant)?;
-        if manual.recovery_origin.is_some() {
-            return Err(BundleError::HistoryChanged);
+            .ok_or(BundleError::HistoryChanged)?;
+        if let Some(receipt) = stream.lookup(&message).map_err(|e| {
+            crate::bundle::operation_error(crate::operation_actor::Error::Protocol(e))
+        })? {
+            return Ok((receipt.clone(), None));
         }
-        let binding = &manual.binding;
-        if bundle.unsettled || bundle.pending_command.is_some() {
+        if bundle.unsettled || bundle.pending_publication.is_some() {
             return Err(BundleError::Unsettled);
         }
-        let checkpoint = bundle.checkpoint(bundle.manual_branch_id())?;
-        if envelope.action != "manual"
-            || envelope.project_id != bundle.project_id
-            || envelope.target_branch != bundle.manual_branch_id
-            || envelope.owner_epoch != bundle.store.owner_epoch()
-            || envelope.lease.as_deref() != Some(binding.token.as_str())
-            || envelope.expected_head.as_ref() != Some(&binding.anchor_head)
-            || envelope.id.issuer != binding.issuer
-            || bundle
-                .root()
-                .is_none_or(|r| r.manual_switch_generation != binding.switch_generation)
-            || inputs != &binding.inputs
-            || checkpoint.batch_ids.last() != manual.predecessor.as_ref()
-            || checkpoint.history_digest != manual.before_sha256
-        {
-            return Err(BundleError::Unsupported(
-                "manual chain authority/predecessor".into(),
-            ));
-        }
-        validate_manifest_extension(&bundle.store, &checkpoint.input_manifest_ref, inputs)?;
-        let issuer = bundle
+        if bundle
             .issuers
-            .get(&envelope.id.issuer)
-            .cloned()
-            .ok_or(BundleError::HistoryChanged)?;
-        if issuer.retired || issuer.next_sequence != envelope.id.sequence {
-            return Err(BundleError::HistoryChanged);
-        }
-        if bundle.store.admission_limits().pending_commands == 0
-            || (bundle.receipts.detailed.len() + bundle.receipts.retired.len()) as u64
-                >= bundle.store.admission_limits().receipts
+            .get(&message.id.issuer)
+            .is_none_or(|issuer| issuer.next_sequence != message.id.sequence)
         {
-            return Err(bundle
-                .store
-                .run_error(BundleError::Capacity("manual receipt entries")));
-        }
-        let bytes = envelope.encoded_bytes()?;
-        if bytes > bundle.store.limits().command_bytes {
-            return Err(BundleError::Capacity("manual command bytes"));
-        }
-        let reservation = bundle.store.reserve(0, bytes, 0, false)?;
-        let before = shadow
-            .export_history()
-            .map_err(crate::bundle::history_error)?;
-        if crate::manual_history::history_sha256(&before)? != manual.before_sha256 {
             return Err(BundleError::HistoryChanged);
         }
-        let _overlap = bundle.store.reserve_history_shadow(
-            before
-                .encoded_bytes()
-                .map_err(crate::bundle::history_error)?,
+        if message.context.creation.branch != branch
+            || message.context.approval.is_some()
+            || message.context.transition.is_some()
+            || message
+                .context
+                .inputs
+                .iter()
+                .any(|reference| reference != inputs)
+        {
+            return Err(BundleError::HistoryChanged);
+        }
+        let (stream, receipt) = stream
+            .advanced(&message, checkpoint.position)
+            .map_err(|e| {
+                crate::bundle::operation_error(crate::operation_actor::Error::Protocol(e))
+            })?;
+        let owner = bundle.attach_core(shadow)?;
+        let cut = owner
+            .freeze_published(
+                checkpoint.identity,
+                checkpoint.position,
+                checkpoint.revision,
+            )
+            .map_err(crate::bundle::operation_error)?;
+        let update = match owner.preview_manual(cut).and_then(|mut preview| {
+            preview.apply_message(message)?;
+            preview
+                .finish()?
+                .ok_or(crate::operation_actor::Error::CaptureChanged)
+        }) {
+            Ok(update) => update,
+            Err(error) => {
+                owner.resume(&cut).map_err(crate::bundle::operation_error)?;
+                return Err(crate::bundle::operation_error(error));
+            }
+        };
+        let report = Self::publish_update(
+            bundle,
+            shadow,
+            cut,
+            update,
+            inputs,
+            &branch,
+            Some(stream),
+            true,
+            None,
         )?;
-        let event = shadow
-            .request(Command::from(
-                envelope
-                    .command
-                    .clone()
-                    .ok_or(BundleError::HistoryChanged)?,
-            ))
-            .map_err(|e| BundleError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)))?;
-        let after = shadow
-            .export_history()
-            .map_err(crate::bundle::history_error)?;
-        if !matches!(event, Event::DocumentChanged { .. })
-            || crate::manual_history::history_sha256(&after)? != manual.after_sha256
-            || after.batches.last() != Some(&manual.batch)
-            || kinewright_media::sha256_bytes(
-                &serde_json::to_vec(
-                    &kinewright_core::HistoryJournal::capture(&after)
-                        .map_err(crate::bundle::history_error)?
-                        .cursor,
-                )
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-            ) != manual.cursor_sha256
-        {
-            bundle
-                .attach_core(shadow)?
-                .restore_history(before)
-                .map_err(crate::bundle::history_error)?;
-            return Err(BundleError::HistoryChanged);
-        }
-        bundle.pending_command = Some(reservation.hold(envelope.clone()));
-        bundle
-            .issuers
-            .get_mut(&envelope.id.issuer)
-            .ok_or(BundleError::HistoryChanged)?
-            .next_sequence = issuer
-            .next_sequence
-            .checked_add(1)
-            .ok_or(BundleError::Capacity("manual sequence"))?;
-        // Selecting the exact accepted history forbids a unilateral manual floor in C9.
-        let branch = bundle.manual_branch_id.clone();
-        let publication =
-            Self::publish_branch_selected(bundle, &after, inputs, &branch, None, Some(&after));
-        match publication {
+        // This answer is constructed only after root publication and shadow commit.
+        Ok((receipt, Some(report)))
+    }
+    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the publication consumes the original bounded install evidence with its attempt"
+    )]
+    pub(crate) fn publish_update(
+        bundle: &mut ProjectBundle,
+        core: &Core,
+        cut: crate::operation_actor::AcceptedCut,
+        update: crate::operation_actor::PreparedUpdate,
+        inputs: &ObjectRef,
+        branch: &crate::bundle_records::BranchId,
+        stream: Option<crate::operation_protocol::StreamState>,
+        resume: bool,
+        install: Option<crate::operation_checkpoint::InstallRecord>,
+    ) -> Result<BundleSaveReport, BundleError> {
+        let identity = match update.identity() {
+            Ok(identity) => identity,
+            Err(error) => {
+                if resume {
+                    bundle
+                        .attach_core(core)?
+                        .resume(&cut)
+                        .map_err(crate::bundle::operation_error)?;
+                }
+                return Err(crate::bundle::operation_error(error));
+            }
+        };
+        bundle.publication_state = crate::bundle::PublicationState::NeverAttempted;
+        bundle.pending_publication = Some(crate::bundle::PendingPublication {
+            candidate_base: None,
+            core: core.clone(),
+            change: cut.change(),
+            identity,
+            owner: None,
+            root_sha256: None,
+            seals: Vec::new(),
+        });
+        let view = install
+            .as_ref()
+            .map_or(PublicationView::Prepared(&update), |install| {
+                PublicationView::Reinstall(&update, install)
+            });
+        let result = Self::publish_branch_impl(
+            bundle,
+            Some(view),
+            inputs,
+            branch,
+            None,
+            false,
+            &[],
+            stream,
+            None,
+            None,
+        )
+        .and_then(BranchPublication::published);
+        match result {
             Ok(report) => {
-                bundle.pending_command = None;
-                let lookup = bundle.receipt_lookup(envelope)?;
-                Ok((lookup, Some(report)))
+                bundle
+                    .pending_publication
+                    .as_mut()
+                    .ok_or(BundleError::HistoryBarrierInvariant)?
+                    .owner = Some(crate::bundle::PublicationOwner::Update {
+                    cut,
+                    update,
+                    resume,
+                });
+                if let Err(error) = bundle.settle_pending_publication(true) {
+                    bundle.unsettled = true;
+                    return Err(error);
+                }
+                Ok(report)
             }
             Err(error) => {
-                if bundle.publication_state != crate::bundle::PublicationState::Unknown
-                    && bundle.publication_state != crate::bundle::PublicationState::Committed
-                {
-                    bundle.pending_command = None;
-                    bundle.issuers.insert(envelope.id.issuer.clone(), issuer);
+                if matches!(
+                    bundle.publication_state,
+                    crate::bundle::PublicationState::Unknown
+                        | crate::bundle::PublicationState::Committed
+                ) {
                     bundle
-                        .attach_core(shadow)?
-                        .restore_history(before)
-                        .map_err(crate::bundle::history_error)?;
-                } else {
+                        .pending_publication
+                        .as_mut()
+                        .ok_or(BundleError::HistoryBarrierInvariant)?
+                        .owner = Some(crate::bundle::PublicationOwner::Update {
+                        cut,
+                        update,
+                        resume,
+                    });
                     bundle.unsettled = true;
+                } else {
+                    drop(update);
+                    bundle.pending_publication = None;
+                    if resume {
+                        bundle
+                            .attach_core(core)?
+                            .resume(&cut)
+                            .map_err(crate::bundle::operation_error)?;
+                    }
                 }
                 Err(error)
             }
@@ -492,73 +588,106 @@ impl BundleCommit {
             Err(error) => CommitOutcome::DefinitelyUnpublished(error),
         }
     }
-    #[allow(clippy::too_many_lines)]
-    pub(crate) fn publish(
+    pub(crate) fn publish_capture(
         bundle: &mut ProjectBundle,
-        history: &HistorySnapshot,
+        capture: &crate::operation_actor::CapturedHistory,
         inputs: &ObjectRef,
+        branch: &crate::bundle_records::BranchId,
     ) -> Result<BundleSaveReport, BundleError> {
-        let branch_id = bundle.manual_branch_id.clone();
-        Self::publish_branch(bundle, history, inputs, &branch_id, None)
+        Self::publish_capture_kind(bundle, capture, inputs, branch, None)
     }
-    #[allow(clippy::too_many_lines)]
+    pub(crate) fn publish_continuity_capture(
+        bundle: &mut ProjectBundle,
+        capture: &crate::operation_actor::CapturedHistory,
+        inputs: &ObjectRef,
+        branch: &crate::bundle_records::BranchId,
+        source: crate::operation_history::SnapshotIdentity,
+    ) -> Result<BundleSaveReport, BundleError> {
+        let prior = bundle.checkpoint(branch)?;
+        if prior.identity != source
+            || prior.input_manifest_ref != *inputs
+            || capture.change.position.epoch <= prior.position.epoch
+        {
+            return Err(BundleError::HistoryChanged);
+        }
+        Self::publish_capture_kind(bundle, capture, inputs, branch, Some(source))
+    }
+    fn publish_capture_kind(
+        bundle: &mut ProjectBundle,
+        capture: &crate::operation_actor::CapturedHistory,
+        inputs: &ObjectRef,
+        branch: &crate::bundle_records::BranchId,
+        continuity: Option<crate::operation_history::SnapshotIdentity>,
+    ) -> Result<BundleSaveReport, BundleError> {
+        let stream = match bundle.branches.get(branch) {
+            Some(checkpoint) if checkpoint.stream.is_some() => {
+                let identity = capture.snapshot.identity()?;
+                if checkpoint.position.epoch != capture.change.position.epoch {
+                    Some(
+                        crate::operation_protocol::StreamState::installed(
+                            crate::operation_protocol::Seed {
+                                project: bundle.project_id.clone(),
+                                branch: branch.clone(),
+                                attachment_epoch: capture.change.position.epoch,
+                                installed: identity,
+                            },
+                        )
+                        .map_err(|error| BundleError::Corrupt(error.to_string()))?,
+                    )
+                } else if checkpoint.identity == identity {
+                    checkpoint.stream.clone()
+                } else {
+                    return Err(BundleError::HistoryChanged);
+                }
+            }
+            _ => None,
+        };
+        Self::publish_branch_impl(
+            bundle,
+            Some(
+                continuity.map_or(PublicationView::Capture(capture), |source| {
+                    PublicationView::Continuity(capture, source)
+                }),
+            ),
+            inputs,
+            branch,
+            None,
+            false,
+            &[],
+            stream,
+            None,
+            None,
+        )?
+        .published()
+    }
+    pub(crate) fn publish_capture_with_stream(
+        bundle: &mut ProjectBundle,
+        capture: &crate::operation_actor::CapturedHistory,
+        inputs: &ObjectRef,
+        branch: &crate::bundle_records::BranchId,
+        stream: Option<crate::operation_protocol::StreamState>,
+    ) -> Result<BundleSaveReport, BundleError> {
+        Self::publish_branch_impl(
+            bundle,
+            Some(PublicationView::Capture(capture)),
+            inputs,
+            branch,
+            None,
+            false,
+            &[],
+            stream,
+            None,
+            None,
+        )?
+        .published()
+    }
     pub(crate) fn publish_branch(
         bundle: &mut ProjectBundle,
-        history: &HistorySnapshot,
+        capture: &crate::operation_actor::CapturedHistory,
         inputs: &ObjectRef,
-        branch_id: &crate::bundle_records::BranchId,
-        seed: Option<BranchSeed<'_>>,
+        branch: &crate::bundle_records::BranchId,
     ) -> Result<BundleSaveReport, BundleError> {
-        Self::publish_branch_selected(bundle, history, inputs, branch_id, seed, None)
-    }
-    #[allow(clippy::too_many_lines)]
-    pub(crate) fn publish_branch_selected(
-        bundle: &mut ProjectBundle,
-        history: &HistorySnapshot,
-        inputs: &ObjectRef,
-        branch_id: &crate::bundle_records::BranchId,
-        seed: Option<BranchSeed<'_>>,
-        selected: Option<&HistorySnapshot>,
-    ) -> Result<BundleSaveReport, BundleError> {
-        Self::publish_branch_impl(
-            bundle,
-            history,
-            inputs,
-            branch_id,
-            seed,
-            selected,
-            None,
-            false,
-            None,
-            &[],
-            None,
-            None,
-        )
-        .and_then(BranchPublication::published)
-    }
-    pub(crate) fn publish_recovery_batch(
-        bundle: &mut ProjectBundle,
-        history: &HistorySnapshot,
-        selected: &HistorySnapshot,
-        inputs: &ObjectRef,
-        envelopes: &[CommandEnvelope],
-    ) -> Result<BundleSaveReport, BundleError> {
-        let branch = bundle.manual_branch_id.clone();
-        Self::publish_branch_impl(
-            bundle,
-            history,
-            inputs,
-            &branch,
-            None,
-            Some(selected),
-            None,
-            false,
-            None,
-            envelopes,
-            None,
-            None,
-        )
-        .and_then(BranchPublication::published)
+        Self::publish_capture(bundle, capture, inputs, branch)
     }
     pub(crate) fn publish_selection(
         bundle: &mut ProjectBundle,
@@ -568,72 +697,120 @@ impl BundleCommit {
         crate::test_hook("switch_before_publish");
         let result = Self::publish_branch_impl(
             bundle,
-            &selection.restore.history,
+            Some(PublicationView::Selection(selection)),
             &selection.restore.checkpoint.input_manifest_ref,
             &selection.target_branch,
-            Some(BranchSeed {
-                lineage: &selection.restore.lineage,
-                role: selection.restore.checkpoint.history_role,
-            }),
-            Some(&selection.restore.history),
             Some(selection),
             false,
-            None,
             &[],
             None,
             None,
-        )
-        .and_then(BranchPublication::published);
+            None,
+        )?
+        .published();
         #[cfg(any(test, feature = "test-util"))]
         if result.is_ok() {
             crate::test_hook("switch_after_publish");
         }
         result
     }
+    pub(crate) fn publish_snapshot(
+        bundle: &mut ProjectBundle,
+        snapshot: &crate::operation_history::OwnerSnapshot,
+        revision: kinewright_core::TimelineRevision,
+        inputs: &ObjectRef,
+    ) -> Result<BundleSaveReport, BundleError> {
+        let branch = bundle.manual_branch_id.clone();
+        Self::publish_branch_impl(
+            bundle,
+            Some(PublicationView::Snapshot(snapshot, revision)),
+            inputs,
+            &branch,
+            None,
+            false,
+            &[],
+            None,
+            None,
+            None,
+        )?
+        .published()
+    }
+    pub(crate) fn publish_frozen_branch(
+        bundle: &mut ProjectBundle,
+        attachment: &crate::ProjectAttachment,
+        cut: &crate::operation_actor::AcceptedCut,
+        sources: &BTreeSet<ObjectRef>,
+        inputs: &ObjectRef,
+        branch: &crate::bundle_records::BranchId,
+    ) -> Result<BundleSaveReport, BundleError> {
+        Self::publish_branch_impl(
+            bundle,
+            Some(PublicationView::Frozen(attachment, cut, sources)),
+            inputs,
+            branch,
+            None,
+            false,
+            &[],
+            None,
+            None,
+            None,
+        )?
+        .published()
+    }
+    pub(crate) fn publish_stream(
+        bundle: &mut ProjectBundle,
+        inputs: &ObjectRef,
+        stream: crate::operation_protocol::StreamState,
+    ) -> Result<BundleSaveReport, BundleError> {
+        let branch = bundle.manual_branch_id.clone();
+        Self::publish_branch_impl(
+            bundle,
+            None,
+            inputs,
+            &branch,
+            None,
+            true,
+            &[],
+            Some(stream),
+            None,
+            None,
+        )?
+        .published()
+    }
     pub(crate) fn publish_maintenance(
         bundle: &mut ProjectBundle,
     ) -> Result<BundleSaveReport, BundleError> {
         let branch = bundle.manual_branch_id.clone();
-        let history = if let Some(cached) = bundle.verified_cached_history(&branch)? {
-            std::sync::Arc::clone(cached)
-        } else {
-            std::sync::Arc::new(bundle.branch_history(&branch)?)
-        };
         let inputs = bundle.checkpoint(&branch)?.input_manifest_ref.clone();
         Self::publish_branch_impl(
             bundle,
-            &history,
+            None,
             &inputs,
             &branch,
             None,
-            Some(&history),
-            None,
             true,
-            None,
             &[],
             None,
             None,
-        )
-        .and_then(BranchPublication::published)
+            None,
+        )?
+        .published()
     }
     pub(crate) fn prepare_maintenance(
         bundle: &mut ProjectBundle,
         fence: &crate::store::PublicationFence,
     ) -> Result<PreparedMaintenancePublication, BundleError> {
         let branch = bundle.manual_branch_id.clone();
-        let history = bundle.branch_history(&branch)?;
         let inputs = bundle.checkpoint(&branch)?.input_manifest_ref.clone();
         match Self::publish_branch_impl(
             bundle,
-            &history,
+            None,
             &inputs,
             &branch,
             None,
-            Some(&history),
-            None,
             true,
-            None,
             &[],
+            None,
             None,
             Some(fence),
         )? {
@@ -641,52 +818,26 @@ impl BundleCommit {
             _ => Err(BundleError::HistoryBarrierInvariant),
         }
     }
-    pub(crate) fn publish_rescue(
-        bundle: &mut ProjectBundle,
-        history: &HistorySnapshot,
-        inputs: &ObjectRef,
-        source: &ProjectBundle,
-        contexts: &[ObjectRef],
-    ) -> Result<BundleSaveReport, BundleError> {
-        let id = bundle.manual_branch_id.clone();
-        Self::publish_branch_impl(
-            bundle,
-            history,
-            inputs,
-            &id,
-            None,
-            Some(history),
-            None,
-            false,
-            Some((source, contexts)),
-            &[],
-            None,
-            None,
-        )
-        .and_then(BranchPublication::published)
-    }
     pub(crate) fn stage_task_checkpoint(
         bundle: &mut ProjectBundle,
-        history: &HistorySnapshot,
+        capture: &crate::operation_actor::CapturedHistory,
         inputs: &ObjectRef,
         branch: &crate::bundle_records::BranchId,
         base: &ObjectRef,
     ) -> Result<(), BundleError> {
-        let result = Self::publish_branch_impl(
+        let BranchPublication::Staged(staged) = Self::publish_branch_impl(
             bundle,
-            history,
+            Some(PublicationView::Capture(capture)),
             inputs,
             branch,
             None,
-            Some(history),
-            None,
             false,
-            None,
             &[],
+            None,
             Some(base),
             None,
-        )?;
-        let BranchPublication::Staged(staged) = result else {
+        )?
+        else {
             return Err(BundleError::HistoryBarrierInvariant);
         };
         bundle.task_checkpoints.insert(branch.clone(), *staged);
@@ -697,63 +848,22 @@ impl BundleCommit {
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     fn publish_branch_impl(
         bundle: &mut ProjectBundle,
-        history: &HistorySnapshot,
+        view: Option<PublicationView<'_>>,
         inputs: &ObjectRef,
         branch_id: &crate::bundle_records::BranchId,
-        seed: Option<BranchSeed<'_>>,
-        selected: Option<&HistorySnapshot>,
         selection: Option<&crate::bundle_switch::PreparedProjectSelection>,
         metadata_only: bool,
-        rescue_source: Option<(&ProjectBundle, &[ObjectRef])>,
         manual_batch: &[CommandEnvelope],
+        stream: Option<crate::operation_protocol::StreamState>,
         stage_base: Option<&ObjectRef>,
         preparation: Option<&crate::store::PublicationFence>,
     ) -> Result<BranchPublication, BundleError> {
-        bundle.store.replay_gate().with(|| {
-            Self::publish_branch_serial(
-                bundle,
-                history,
-                inputs,
-                branch_id,
-                seed,
-                selected,
-                selection,
-                metadata_only,
-                rescue_source,
-                manual_batch,
-                stage_base,
-                preparation,
-            )
-        })?
-    }
-    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-    fn publish_branch_serial(
-        bundle: &mut ProjectBundle,
-        history: &HistorySnapshot,
-        inputs: &ObjectRef,
-        branch_id: &crate::bundle_records::BranchId,
-        seed: Option<BranchSeed<'_>>,
-        selected: Option<&HistorySnapshot>,
-        selection: Option<&crate::bundle_switch::PreparedProjectSelection>,
-        metadata_only: bool,
-        rescue_source: Option<(&ProjectBundle, &[ObjectRef])>,
-        manual_batch: &[CommandEnvelope],
-        stage_base: Option<&ObjectRef>,
-        preparation: Option<&crate::store::PublicationFence>,
-    ) -> Result<BranchPublication, BundleError> {
+        #[cfg(any(test, feature = "test-util"))]
+        if matches!(view, Some(PublicationView::Capture(_))) {
+            crate::test_hook("history_selected");
+        }
         let copy_branch = bundle.prepare_plain_copy(branch_id)?;
         let branch_id = copy_branch.as_ref().unwrap_or(branch_id);
-        let history_role = if let Some(seed) = seed {
-            seed.role
-        } else {
-            bundle.history_role(branch_id, stage_base)?
-        };
-        let seed = seed.map(|seed| seed.lineage);
-        let _role_memory = (history_role != crate::history_record::HistoryRole::Ordinary)
-            .then(|| crate::run_admission::reading(&bundle.store));
-        let existing_selection = metadata_only
-            || selection
-                .is_some_and(crate::bundle_switch::PreparedProjectSelection::reuses_checkpoint);
         let manual_branch_id = selection.map_or_else(
             || bundle.manual_branch_id.clone(),
             |s| s.target_branch.clone(),
@@ -761,7 +871,7 @@ impl BundleCommit {
         let old_switch = bundle
             .root
             .as_ref()
-            .map_or(0, |r| r.manual_switch_generation);
+            .map_or(0, |root| root.manual_switch_generation);
         let switch_generation = if selection.is_some() {
             old_switch
                 .checked_add(1)
@@ -774,7 +884,7 @@ impl BundleCommit {
         if bundle.unsettled {
             return Err(BundleError::Unsettled);
         }
-        if stage_base.is_none() && !existing_selection {
+        if stage_base.is_none() && !metadata_only {
             bundle.refuse_unpaired_task_checkpoint(branch_id)?;
         }
         bundle.store.with_namespace(|n| n.verify())?;
@@ -796,7 +906,6 @@ impl BundleCommit {
                 .with_namespace(|n| Ok(n.object_batch_active()))?
             && let Err(error) = bundle.collect_after_ack()
         {
-            // Namespace uncertainty still fences publication; ordinary unlink failures retry.
             bundle.store.with_namespace(|n| n.verify())?;
             if matches!(
                 error,
@@ -806,320 +915,12 @@ impl BundleCommit {
             }
             crate::namespace::note("gc_retry_pending", &bundle.store.resolved_root()?);
         }
-        let prior = selection
-            .map(|s| s.restore.checkpoint.clone())
-            .or_else(|| {
-                rescue_source.and_then(|(source, _)| source.branches.get(branch_id).cloned())
-            })
-            .or_else(|| bundle.branches.get(branch_id).cloned());
-        let old_history = if let Some(prior) = &prior {
-            Some(if let Some(selection) = selection {
-                std::sync::Arc::clone(&selection.restore.history)
-            } else if let Some((source, _)) = rescue_source {
-                std::sync::Arc::new(
-                    source
-                        .store
-                        .resolve_copy_history(&prior.history_ref, true)?,
-                )
-            } else if let Some(cached) = bundle.cached_history(branch_id) {
-                std::sync::Arc::clone(cached)
-            } else {
-                std::sync::Arc::new(bundle.store.resolve_history(&prior.history_ref)?)
-            })
-        } else {
-            None
-        };
-        let explicit_floor = bundle.pending_command.as_ref().is_some_and(|e| {
-            matches!(
-                e.transition,
-                Some(crate::receipts::HistoryRequest::Floor { .. })
-            )
-        });
-        let aligned: Cow<'_, HistorySnapshot> = if let Some(old) = &old_history
-            && history.floor_offset < old.floor_offset
-        {
-            Cow::Owned(
-                kinewright_core::HistoryTransition::floor_after(
-                    history,
-                    usize::try_from(old.floor_offset - history.floor_offset)
-                        .map_err(|_| BundleError::Capacity("history floor offset"))?,
-                )
-                .map_err(|_| BundleError::Corrupt("history before durable floor".into()))?,
-            )
-        } else {
-            Cow::Borrowed(history)
-        };
-        if !explicit_floor
-            && old_history.as_ref().is_some_and(|old| {
-                aligned.floor_offset == old.floor_offset
-                    && (aligned.baseline != old.baseline
-                        || aligned.batches.len() < old.batches.len()
-                        || aligned.batches[..old.batches.len()] != old.batches)
-            })
-        {
-            return Err(BundleError::Corrupt(
-                "history is not a continuation of the admitted head".into(),
-            ));
-        }
-        if !explicit_floor
-            && let Some(old) = &old_history
-            && aligned.floor_offset > old.floor_offset
-        {
-            let cut = usize::try_from(aligned.floor_offset - old.floor_offset)
-                .map_err(|_| BundleError::Capacity("history floor offset"))?;
-            let expected = kinewright_core::HistoryTransition::floor_after(old, cut)
-                .map_err(|_| BundleError::Corrupt("unproved history floor".into()))?;
-            if aligned.baseline != expected.baseline
-                || aligned.batches.len() < expected.batches.len()
-                || aligned.batches[..expected.batches.len()] != expected.batches
-            {
-                return Err(BundleError::Corrupt(
-                    "history floor differs from admitted cut".into(),
-                ));
-            }
-        }
-        let role_matches = prior
-            .as_ref()
-            .is_none_or(|prior| prior.history_role == history_role);
-        let bounded: Cow<'_, HistorySnapshot> = if let Some(selected) = selected {
-            if selected.floor_offset < aligned.floor_offset {
-                return Err(BundleError::HistoryBarrierInvariant);
-            }
-            Cow::Borrowed(selected)
-        } else if history_role != crate::history_record::HistoryRole::Ordinary {
-            // Native admission has its own persisted/live bounds. An admitted
-            // task must not be floored to the ordinary history limit at Finish.
-            Cow::Borrowed(&*aligned)
-        } else if role_matches && old_history.as_ref().is_some_and(|old| ***old == *aligned) {
-            Cow::Borrowed(&*aligned)
-        } else {
-            bundle
-                .store
-                .with_history_admission(history_role, bundle.store.limits(), || {
-                    bound_history_borrowed(&aligned, bundle.store.limits())
-                })?
-        };
-        // `check_bytes` keeps the checked encoding with the support fields its decode
-        // observed, so sealing that same encoding needs no second decode for the inventory.
-        let (checked, check_bytes) = if role_matches
-            && old_history.as_ref().is_some_and(|old| ***old == *bounded)
-        {
-            (std::sync::Arc::clone(old_history.as_ref().unwrap()), None)
-        } else {
-            let serialized = serde_json::to_vec(&bounded).map_err(crate::bundle::encoding_error)?;
-            let (checked, check_bytes) = bundle
-                .store
-                .check_history_bytes(&serialized, history_role)?;
-            if *checked != *bounded {
-                return Err(BundleError::Corrupt(
-                    "history transport differs from capture".into(),
-                ));
-            }
-            // The checked replay proves this exact capture. Keep its immutable document
-            // allocations shared with the live actor and floor capture.
-            let checked = checked.map(|_| (*bounded).clone());
-            // Compact decode already replayed every accepted command and checked
-            // every boundary. A second private actor would duplicate that proof.
-            (std::sync::Arc::new(checked), Some(check_bytes))
-        };
-        // Adopting native work as the manual branch transfers this retained
-        // capture to the ordinary pool before publication. The immutable document
-        // images remain shared with the source capture.
-        let checked = if branch_id == &manual_branch_id
-            && history_role != crate::history_record::HistoryRole::Ordinary
-        {
-            let live = checked.decoded_charge();
-            std::sync::Arc::new(
-                bundle
-                    .store
-                    .reserve_copy_read(0, live, live, false, true)?
-                    .hold((**checked).clone()),
-            )
-        } else {
-            checked
-        };
-        let manifest = bundle.store.read_input_manifest(inputs)?;
-        let historical_input_owner = switch_generation != 0
-            && manifest
-                .project_id
-                .as_ref()
-                .is_some_and(|id| bundle.origin_project_ids.contains(id));
-        if (manifest.project_id.as_ref() != Some(&bundle.project_id) && !historical_input_owner)
-            || manifest.session_id.is_some()
-        {
-            return Err(BundleError::Identity("current input manifest owner".into()));
-        }
-        validate_document_inputs(&checked.document, &manifest)?;
-        let mut retained_manifest = (*manifest).clone();
-        if let Some(prior) = &prior {
-            for reference in &prior.history_input_manifest_refs {
-                let old = if let Some((source, _)) = rescue_source {
-                    source
-                        .store
-                        .read_copy_record::<OwnedInputManifest>(reference, true)?
-                } else {
-                    bundle.store.read_input_manifest(reference)?
-                };
-                retained_manifest.entries.extend(old.entries.clone());
-            }
-        }
-        let floor_discard = old_history
-            .as_ref()
-            .map(|old| {
-                usize::try_from(
-                    checked
-                        .floor_offset
-                        .checked_sub(old.floor_offset)
-                        .ok_or_else(|| {
-                            BundleError::Corrupt("history floor moved backward".into())
-                        })?,
-                )
-                .map_err(|_| BundleError::Capacity("history floor offset"))
-            })
-            .transpose()?
-            .filter(|n| *n > 0);
-        let mut contexts = rescue_source.map_or_else(
-            || {
-                prior
-                    .as_ref()
-                    .map_or_else(Vec::new, |p| p.history_input_manifest_refs.clone())
-            },
-            |(_, contexts)| contexts.to_vec(),
-        );
-        if contexts.is_empty() {
-            contexts.push(inputs.clone());
-        }
-        while contexts.len() < checked.batches.len() + floor_discard.unwrap_or(0) + 1 {
-            contexts.push(inputs.clone());
-        }
-        let floor_inputs = if let Some(discard) = floor_discard {
-            contexts = contexts
-                .get(discard..)
-                .ok_or_else(|| BundleError::Corrupt("floor input-context cut".into()))?
-                .to_vec();
-            // The boundary document can precede the input context of a multi-edit save.
-            // Give the retained checkpoint its own exact owned graph before validating it.
-            retain_history_inputs(&checked, &mut retained_manifest);
-            validate_inputs(&checked, &retained_manifest)?;
-            crate::store::BundleRecord::validate(&retained_manifest, bundle.store.limits())?;
-            Some(retained_manifest)
-        } else {
-            validate_inputs(&checked, &retained_manifest)?;
-            None
-        };
-        let mut batch_ids = prior
-            .as_ref()
-            .map_or_else(Vec::new, |p| p.batch_ids.clone());
-        let total_batches = checked.batches.len() + floor_discard.unwrap_or(0);
-        while batch_ids.len() < total_batches {
-            let accepted = if manual_batch.is_empty() {
-                bundle
-                    .pending_command
-                    .as_ref()
-                    .and_then(|e| e.manual.as_ref())
-            } else {
-                manual_batch
-                    .iter()
-                    .filter_map(|e| e.manual.as_ref())
-                    .find(|m| usize::try_from(m.batch.order).ok() == Some(batch_ids.len()))
-            };
-            batch_ids.push(if let Some(manual) = accepted {
-                if manual_batch.is_empty() && batch_ids.len() + 1 != total_batches {
-                    return Err(BundleError::HistoryChanged);
-                }
-                manual.batch_id.clone()
-            } else if !manual_batch.is_empty() {
-                return Err(BundleError::HistoryChanged);
-            } else {
-                BatchId::fresh()?
-            });
-        }
-        let all_batch_ids = batch_ids.clone();
-        if let Some(discard) = floor_discard {
-            batch_ids = batch_ids
-                .get(discard..)
-                .ok_or_else(|| BundleError::Corrupt("floor batch cut".into()))?
-                .to_vec();
-        }
-        let old_lineage = prior
-            .as_ref()
-            .map(|p| {
-                if let Some((source, _)) = rescue_source {
-                    source
-                        .store
-                        .read_copy_record::<LineageRecord>(&p.lineage_ref, true)
-                } else {
-                    bundle.store.read_record::<LineageRecord>(&p.lineage_ref)
-                }
-            })
-            .transpose()?;
-        let floor_seed = if let Some(discard) = floor_discard {
-            let old = if aligned.floor_offset < checked.floor_offset {
-                &*aligned
-            } else {
-                &***old_history
-                    .as_ref()
-                    .ok_or_else(|| BundleError::Corrupt("floor without previous history".into()))?
-            };
-            let prefix = crate::bundle_branch::replay_prefix(old, discard)?;
-            let prefix_lineage = lineage(
-                branch_id,
-                &prefix,
-                &all_batch_ids[..discard],
-                old_lineage.as_deref(),
-                old_lineage.as_deref(),
-            )?;
-            Some(LineageRecord {
-                branch_origin: branch_id.clone(),
-                baseline: prefix_lineage.current.clone(),
-                current: prefix_lineage.current,
-                undo: vec![],
-                redo: vec![],
-                split_ancestry: prefix_lineage.split_ancestry,
-            })
-        } else {
-            None
-        };
-        let lineage = lineage(
-            branch_id,
-            &checked,
-            &batch_ids,
-            floor_seed.as_ref().or(seed).or(old_lineage.as_deref()),
-            old_lineage.as_deref().or(seed),
-        )?;
-        if history_role != crate::history_record::HistoryRole::Ordinary {
-            let live = crate::history_size::history_live_bytes(&checked)?
-                .checked_add(crate::lineage_journal::live_bytes(&lineage)?)
-                .ok_or(BundleError::Capacity("role history memory overflow"))?;
-            if live > history_role.live_limit(bundle.store.limits()) {
-                return Err(BundleError::RunAdmission(
-                    crate::task_history_admission::LIMIT_REASON,
-                ));
-            }
-        }
+        let prior = bundle.branches.get(branch_id).cloned();
         let generation = bundle
             .generation
             .checked_add(1)
             .ok_or(BundleError::Capacity("root generation"))?;
-        let role_unchanged = prior
-            .as_ref()
-            .is_none_or(|checkpoint| checkpoint.history_role == history_role);
-        let unchanged = role_unchanged
-            && old_history.as_ref().is_some_and(|h| ***h == **checked)
-            && prior
-                .as_ref()
-                .is_some_and(|p| p.input_manifest_ref == *inputs);
-        let head_id = if unchanged
-            && (selection.is_none() || existing_selection)
-            && bundle
-                .pending_command
-                .as_ref()
-                .is_none_or(|e| e.transition.is_none())
-        {
-            prior.as_ref().unwrap().head_id.clone()
-        } else {
-            HeadId::fresh()?
-        };
+        bundle.store.bind_history_pool(&bundle.history_pool)?;
         barrier(bundle, CommitBarrier::B0)?;
         bundle.store.begin_publication()?;
         let mut seals: Vec<SealedObject> = vec![];
@@ -1131,79 +932,86 @@ impl BundleCommit {
                 reference
             }};
         }
-        // The just-sealed history's support fields, from the commit check's decode of the
-        // same bytes, for the support inventory below.
-        let mut sealed_support = None;
-        let (document_ref, baseline_ref, history_ref, lineage_ref) = if unchanged {
-            let prior = prior.as_ref().unwrap();
-            (
-                prior.document_ref.clone(),
-                prior.baseline_ref.clone(),
-                prior.history_ref.clone(),
-                prior.lineage_ref.clone(),
-            )
-        } else {
-            let document_ref = seal!(&*checked.document);
-            let baseline_ref = seal!(&*checked.baseline);
-            let (history, support) =
-                bundle
-                    .store
-                    .admit_checked_history(&checked, check_bytes, history_role)?;
-            sealed_support = support;
-            let history_ref = history.reference.clone();
-            seals.push(history);
-            (document_ref, baseline_ref, history_ref, seal!(&lineage))
-        };
-        if let Some(floor_inputs) = floor_inputs {
-            contexts[0] = seal!(&floor_inputs);
-        }
-        let reuse_checkpoint = existing_selection || (stage_base.is_some() && unchanged);
-        let checkpoint = if reuse_checkpoint {
-            prior.clone().ok_or_else(|| {
-                BundleError::Corrupt("missing existing selection checkpoint".into())
-            })?
-        } else {
-            BranchCheckpoint {
-                branch_id: branch_id.clone(),
-                head_id: head_id.clone(),
-                document_hash: document_ref.sha256.clone(),
-                document_ref,
-                baseline_ref,
-                history_ref,
-                history_digest: crate::manual_history::history_sha256(&checked)?,
-                history_role,
-                lineage_ref,
-                input_manifest_ref: inputs.clone(),
-                history_input_manifest_refs: contexts,
-                batch_ids,
-                applied_operations_digest: kinewright_media::sha256_bytes(
-                    &serde_json::to_vec(&checked.applied_operations())
-                        .map_err(crate::bundle::encoding_error)?,
-                ),
-                checkpoint_generation: generation,
-                floor_generation: if floor_discard.is_some() {
-                    prior
-                        .as_ref()
-                        .map_or(0, |p| p.floor_generation)
-                        .checked_add(1)
-                        .ok_or(BundleError::Capacity("floor generation"))?
-                } else {
-                    prior.as_ref().map_or(0, |p| p.floor_generation)
-                },
-                command_cut: bundle
-                    .pending_command
-                    .as_ref()
-                    .map(|e| e.id.clone())
-                    .or_else(|| prior.as_ref().and_then(|p| p.command_cut.clone())),
-                predecessor: prior.as_ref().map(|p| p.head_id.clone()),
-                take_map_revision_ref: None,
+        let (checkpoint, checkpoint_ref) = if metadata_only {
+            let mut checkpoint = prior
+                .clone()
+                .ok_or_else(|| BundleError::Corrupt("metadata checkpoint missing".into()))?;
+            if stream
+                .as_ref()
+                .is_some_and(|next| checkpoint.stream.as_ref() != Some(next))
+                || checkpoint.input_manifest_ref != *inputs
+            {
+                // Binding or renewing an empty stream accepts no edit. Keep the
+                // person's submitted-note head while publishing the new stream.
+                if checkpoint.input_manifest_ref != *inputs
+                    || stream.as_ref().is_some_and(|next| next.sequence() != 0)
+                {
+                    checkpoint.head_id = HeadId::fresh()?;
+                    checkpoint.predecessor = prior.as_ref().map(|c| c.head_id.clone());
+                }
+                checkpoint.generation = generation;
+                checkpoint.input_manifest_ref = inputs.clone();
+                if let Some(stream) = stream {
+                    checkpoint.command_cut = stream.receipts().last().map(|r| r.id.clone());
+                    checkpoint.stream = Some(stream);
+                }
+                let reference = seal!(&checkpoint);
+                (checkpoint, reference)
+            } else {
+                (checkpoint, bundle.checkpoint_reference(branch_id)?)
             }
-        };
-        let checkpoint_ref = if reuse_checkpoint {
-            bundle.checkpoint_reference(branch_id)?
         } else {
-            seal!(&checkpoint)
+            let view = view.ok_or(BundleError::HistoryBarrierInvariant)?;
+            let owner = view.seal(bundle, inputs, prior.as_ref())?;
+            let continuity = match view {
+                PublicationView::Continuity(_, source) => {
+                    prior.as_ref().is_some_and(|p| p.identity == source)
+                }
+                _ => false,
+            };
+            let head = if continuity
+                || prior.as_ref().is_some_and(|p| {
+                    p.identity == owner.identity
+                        && p.input_manifest_ref == *inputs
+                        && p.stream == stream
+                }) {
+                prior.as_ref().unwrap().head_id.clone()
+            } else {
+                HeadId::fresh()?
+            };
+            let mut checkpoint = crate::operation_checkpoint::Checkpoint::from_sealed(
+                crate::operation_checkpoint::Header {
+                    branch: branch_id.clone(),
+                    head,
+                    revision: view.revision(),
+                    inputs: inputs.clone(),
+                    generation,
+                    predecessor: prior.as_ref().map(|p| p.head_id.clone()),
+                    command_cut: stream
+                        .as_ref()
+                        .and_then(|state| state.receipts().last())
+                        .map(|receipt| receipt.id.clone())
+                        .or_else(|| manual_batch.last().map(|e| e.id.clone()))
+                        .or_else(|| bundle.pending_command.as_ref().map(|e| e.id.clone()))
+                        .or_else(|| prior.as_ref().and_then(|p| p.command_cut.clone())),
+                    take_map: None,
+                    stream,
+                },
+                &owner,
+            )?;
+            checkpoint.install = if let PublicationView::Reinstall(_, install) = view {
+                Some(install.clone())
+            } else {
+                prior
+                    .as_ref()
+                    .filter(|p| p.position.epoch == checkpoint.position.epoch)
+                    .and_then(|p| p.install.clone())
+            };
+            let reference = seal!(&checkpoint);
+            seals.push(owner.into_object());
+            (checkpoint, reference)
         };
+        let head_id = checkpoint.head_id.clone();
         if let Some(base_ref) = stage_base {
             bundle
                 .store
@@ -1217,7 +1025,6 @@ impl BundleCommit {
                     reference: checkpoint_ref,
                     checkpoint,
                     base_ref: base_ref.clone(),
-                    history: std::sync::Arc::clone(&checked),
                     _pin: pin,
                     _seals: seals,
                 },
@@ -1227,20 +1034,24 @@ impl BundleCommit {
             .root
             .as_ref()
             .map_or_else(BTreeMap::new, |root| root.candidate_recovery.clone());
-        if !existing_selection
-            && let Some(mut base) = bundle.advanced_candidate_base(branch_id, &checked)?
+        if let Some((candidate, base)) = bundle
+            .pending_publication
+            .as_ref()
+            .and_then(|pending| pending.candidate_base.as_ref())
+            .filter(|(candidate, _)| candidate == branch_id)
         {
-            // A person can adopt retained task work as the manual branch. Its
-            // future full delta belongs to ordinary history along with the cursor.
-            base.history_role = history_role;
-            let base_ref = seal!(&base);
             candidate_recovery.insert(
-                branch_id.clone(),
+                candidate.clone(),
                 crate::candidate_recovery::CandidateRecovery {
                     checkpoint: checkpoint_ref.clone(),
-                    base_ref,
+                    base_ref: base.clone(),
                 },
             );
+        }
+        // The base is immutable, but its binding follows every committed cut of
+        // this registered branch, including a merge prepared under a lost reply.
+        if let Some(binding) = candidate_recovery.get_mut(branch_id) {
+            binding.checkpoint = checkpoint_ref.clone();
         }
         let mut branches = bundle.branches.clone();
         branches.insert(branch_id.clone(), checkpoint);
@@ -1254,65 +1065,9 @@ impl BundleCommit {
         } else {
             BTreeMap::new()
         };
-        let preceding_checkpoint_ref = branch_index.get(branch_id).cloned();
         branch_index.retain(|id, _| branches.contains_key(id));
         branch_index.insert(branch_id.clone(), checkpoint_ref.clone());
-        let mut evidence = bundle.evidence.clone();
-        if let Some(envelope) = bundle.pending_command.as_ref()
-            && let Some(transition) = &envelope.transition
-        {
-            evidence.retain(|r| {
-                !matches!(
-                    r.record_kind,
-                    RecordKind::HistoryFloor | RecordKind::RecoveryClose
-                )
-            });
-            let previous = prior
-                .as_ref()
-                .ok_or_else(|| BundleError::Corrupt("transition without checkpoint".into()))?;
-            let reference = match transition {
-                crate::receipts::HistoryRequest::Floor { .. } => {
-                    seal!(&crate::bundle_records::HistoryFloorCheckpoint {
-                        preceding_checkpoint_generation: previous.checkpoint_generation,
-                        preceding_floor_generation: previous.floor_generation,
-                        floor_generation: branches[branch_id].floor_generation,
-                        command_cut: Some(envelope.id.clone()),
-                        old_baseline_ref: previous.baseline_ref.clone(),
-                        new_baseline_ref: branches[branch_id].baseline_ref.clone(),
-                        checkpoint_ref: checkpoint_ref.clone(),
-                        equivalence_digest: branches[branch_id].history_ref.sha256.clone(),
-                    })
-                }
-                crate::receipts::HistoryRequest::RecoveryClose {
-                    suffix_digest,
-                    reconciled_cut,
-                    ..
-                } => seal!(&crate::bundle_records::RecoveryCloseCheckpoint {
-                    preceding_checkpoint_ref: preceding_checkpoint_ref
-                        .ok_or_else(|| BundleError::Corrupt("close predecessor".into()))?,
-                    reconciled_cut: reconciled_cut.clone(),
-                    suffix_digest: suffix_digest.clone(),
-                    closed_checkpoint_ref: checkpoint_ref.clone(),
-                }),
-            };
-            evidence.push(reference);
-        }
-        if floor_discard.is_some()
-            && !explicit_floor
-            && let Some(previous) = &prior
-        {
-            evidence.retain(|r| r.record_kind != RecordKind::HistoryFloor);
-            evidence.push(seal!(&crate::bundle_records::HistoryFloorCheckpoint {
-                preceding_checkpoint_generation: previous.checkpoint_generation,
-                preceding_floor_generation: previous.floor_generation,
-                floor_generation: branches[branch_id].floor_generation,
-                command_cut: branches[branch_id].command_cut.clone(),
-                old_baseline_ref: previous.baseline_ref.clone(),
-                new_baseline_ref: branches[branch_id].baseline_ref.clone(),
-                checkpoint_ref: checkpoint_ref.clone(),
-                equivalence_digest: branches[branch_id].history_ref.sha256.clone(),
-            }));
-        }
+        let evidence = bundle.evidence.clone();
         if let Some(pending) = &bundle.pending_metadata {
             for branch in &pending.task_checkpoints {
                 let staged = bundle
@@ -1361,6 +1116,28 @@ impl BundleCommit {
         recovery.staging = None;
         let mut receipts = bundle.receipts.clone();
         let mut issuers = bundle.issuers.clone();
+        if let Some(stream) = &branches[branch_id].stream {
+            let previous = prior
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.stream.as_ref())
+                .filter(|before| before.seed() == stream.seed())
+                .map_or(0, crate::operation_protocol::StreamState::sequence);
+            for receipt in stream
+                .receipts()
+                .filter(|receipt| receipt.sequence > previous)
+            {
+                let issuer = issuers
+                    .get_mut(&receipt.id.issuer)
+                    .ok_or(BundleError::HistoryChanged)?;
+                if issuer.next_sequence != receipt.id.sequence {
+                    return Err(BundleError::HistoryChanged);
+                }
+                issuer.next_sequence = issuer
+                    .next_sequence
+                    .checked_add(1)
+                    .ok_or(BundleError::Capacity("issuer sequence"))?;
+            }
+        }
         for envelope in manual_batch
             .iter()
             .chain(
@@ -1405,11 +1182,13 @@ impl BundleCommit {
                     .clone()
                     .unwrap_or_else(|| ReceiptResult::Edit {
                         checkpoint_ref: checkpoint_ref.clone(),
-                        batch_id: envelope
-                            .manual
-                            .as_ref()
-                            .map(|m| m.batch_id.clone())
-                            .or_else(|| branches[branch_id].batch_ids.last().cloned()),
+                        batch_id: match view {
+                            Some(
+                                PublicationView::Prepared(update)
+                                | PublicationView::Reinstall(update, _),
+                            ) => update.accepted_batch().cloned(),
+                            _ => None,
+                        },
                     })
             };
             if matches!(result, ReceiptResult::Comment { .. }) {
@@ -1419,10 +1198,7 @@ impl BundleCommit {
                     .ok_or(BundleError::Capacity("comment count"))?;
             }
             receipts.detailed.push(CommandReceipt {
-                recovery_origin: envelope
-                    .manual
-                    .as_ref()
-                    .and_then(|m| m.recovery_origin.clone()),
+                recovery_origin: None,
                 id: envelope.id.clone(),
                 digest: envelope.digest()?,
                 project_id: bundle.project_id.clone(),
@@ -1477,7 +1253,7 @@ impl BundleCommit {
         let mut retained = roots.clone();
         retained.extend(evidence.clone());
         retained.extend(recovery.references());
-        inventory.required_fields = bundle.store.support_fields(&retained, sealed_support)?;
+        inventory.required_fields = bundle.store.support_fields(&retained)?;
         let closure = bundle.store.closure(&retained)?;
         let roles = bundle.store.evidence_roles(&closure)?;
         let requires_switch =
@@ -1515,7 +1291,7 @@ impl BundleCommit {
                 crate::orchestration_records::BranchBinding {
                     branch: source.branch_id.clone(),
                     head: source.head_id.clone(),
-                    document_hash: source.document_hash.clone(),
+                    document_hash: source.document_ref.sha256.clone(),
                     checkpoint: bundle.checkpoint_reference(&source.branch_id)?,
                 },
             );
@@ -1568,7 +1344,6 @@ impl BundleCommit {
             issuers,
             inventory,
             recovery,
-            checked,
             seals,
             staged_inventory,
         };
@@ -1689,7 +1464,6 @@ struct PreparedBranchPublication {
     issuers: BTreeMap<crate::receipts::IssuerId, crate::receipts::IssuerState>,
     inventory: SupportInventory,
     recovery: crate::store::RecoveryInventory,
-    checked: std::sync::Arc<crate::storage_budget::StorageReservation<HistorySnapshot>>,
     seals: Vec<SealedObject>,
     staged_inventory: Option<crate::store::RecoveryInventory>,
 }
@@ -1739,7 +1513,6 @@ impl PreparedBranchPublication {
             &self.branch_id,
             &self.manual_branch_id,
             &self.branches,
-            &self.checked,
             self.root
                 .as_ref()
                 .ok_or(BundleError::HistoryBarrierInvariant)?,
@@ -1752,7 +1525,19 @@ impl PreparedBranchPublication {
         }
         barrier(bundle, CommitBarrier::B3)?;
         let (next_admission, _encoded_root) = self.encode_root(bundle)?;
-        let published = publish_root_from_admission(bundle, &next_admission, None)?;
+        let published = match publish_root_from_admission(bundle, &next_admission, None) {
+            Ok(published) => published,
+            Err(error) => {
+                if bundle.publication_state == crate::bundle::PublicationState::Unknown
+                    && let Some(pending) = &mut bundle.pending_publication
+                {
+                    // Either root may still be authoritative. Its incoming
+                    // graph stays pinned until the original attempt settles.
+                    pending.seals = self.seals;
+                }
+                return Err(error);
+            }
+        };
         self.adopt(bundle, next_admission, published, None)
     }
     fn adopt(
@@ -1774,7 +1559,6 @@ impl PreparedBranchPublication {
             issuers,
             inventory,
             recovery,
-            checked,
             seals,
             staged_inventory: _,
         } = self;
@@ -1793,31 +1577,7 @@ impl PreparedBranchPublication {
             if let Some(pending) = &bundle.pending_metadata {
                 for branch in &pending.task_checkpoints {
                     bundle.task_checkpoints.remove(branch);
-                    bundle.history_cache.remove(branch);
                 }
-            }
-            bundle.history_cache.retain(|branch, _| {
-                branch == &manual_branch_id
-                    || bundle.branches.get(branch).is_some_and(|checkpoint| {
-                        checkpoint.history_role == crate::history_record::HistoryRole::Ordinary
-                    })
-            });
-            if branch_id == &manual_branch_id
-                || bundle.branches[branch_id].history_role
-                    == crate::history_record::HistoryRole::Ordinary
-            {
-                bundle.history_cache.insert(
-                    branch_id.clone(),
-                    crate::bundle::CachedHistory {
-                        reference: bundle.branches[branch_id].history_ref.clone(),
-                        profile: bundle.branches[branch_id]
-                            .history_role
-                            .admission_profile(bundle.store.limits()),
-                        history: std::sync::Arc::clone(&checked),
-                    },
-                );
-            } else {
-                bundle.history_cache.remove(branch_id);
             }
             bundle.generation = generation;
             bundle.inventory = inventory;
@@ -1839,7 +1599,8 @@ impl PreparedBranchPublication {
         bundle.unsettled = false;
         drop(seals);
         Ok(BranchPublication::Published(BundleSaveReport {
-            history_sha256: bundle.checkpoint(branch_id)?.history_digest.clone(),
+            position: bundle.checkpoint(branch_id)?.position,
+            history_sha256: bundle.checkpoint(branch_id)?.identity.to_string(),
             collection: published.collection,
             path: published.saved_path,
             project_id: bundle.project_id.clone(),
@@ -1869,7 +1630,7 @@ fn publish_root_from_admission(
     let saved_path = bundle.store.resolved_root()?;
     let collection = bundle.store.collection_status()?;
     let identity = bundle.store.with_namespace(|n| Ok(n.identity().clone()))?;
-    let tag = kinewright_core::HistorySaveTag {
+    let tag = crate::history_save::PublicationTag {
         destination: identity.resolved_root,
         parent_device: identity.parent_device,
         parent_inode: identity.parent_inode,
@@ -1880,20 +1641,9 @@ fn publish_root_from_admission(
             Some(kinewright_media::sha256_bytes(bundle.admission.raw_bytes()))
         },
     };
-    #[cfg(any(test, feature = "test-util"))]
-    crate::io_observer::check_failure("floor_tag_prepare", &saved_path)?;
-    if let Some(pending) = &mut bundle.pending_save
-        && let Some(barrier) = &mut pending.barrier
-    {
-        barrier
-            .tag_publication(tag.clone())
-            .map_err(crate::bundle::history_error)?;
-    }
-    #[cfg(any(test, feature = "test-util"))]
-    crate::io_observer::check_failure("floor_tag_complete", &saved_path)?;
     // Publish the owner tag only after every fallible preparation step succeeds.
     bundle.publication_tag = Some(tag.clone());
-    if let Some(pending) = &mut bundle.pending_save {
+    if let Some(pending) = &mut bundle.pending_publication {
         pending.root_sha256 = Some(tag.root_sha256);
     }
     #[cfg(any(test, feature = "test-util"))]
@@ -1924,7 +1674,7 @@ fn publish_root_from_admission(
             };
         // Cleanup may still be uncertain, but it cannot have published this root.
         bundle.publication_tag = None;
-        if let Some(pending) = &mut bundle.pending_save {
+        if let Some(pending) = &mut bundle.pending_publication {
             pending.root_sha256 = None;
         }
         return Err(failure.error);
@@ -1947,10 +1697,9 @@ fn publish_root_from_admission(
 /// The production root encoding/admission used by immediate and prepared cuts.
 fn encode_publication_root(
     bundle: &ProjectBundle,
-    branch_id: &crate::bundle_records::BranchId,
+    _branch_id: &crate::bundle_records::BranchId,
     manual_branch_id: &crate::bundle_records::BranchId,
     branches: &BTreeMap<crate::bundle_records::BranchId, BranchCheckpoint>,
-    checked: &std::sync::Arc<crate::storage_budget::StorageReservation<HistorySnapshot>>,
     root: &StudioRoot,
 ) -> Result<
     (
@@ -1959,357 +1708,65 @@ fn encode_publication_root(
     ),
     BundleError,
 > {
-    let manual_history = if branch_id == manual_branch_id {
-        None
-    } else {
-        Some(
-            bundle
-                .store
-                .resolve_history(&branches[manual_branch_id].history_ref)?,
-        )
-    };
-    let manual_document = manual_history
-        .as_ref()
-        .map_or(&checked.document, |h| &h.document);
-    let (bytes, encoded_root) = serialize_root(&bundle.store, manual_document, root)?;
-    let next_admission = BundleWriteAdmission::from_bytes_with_limits(
+    let document = bundle
+        .store
+        .read_record::<kinewright_core::Document>(&branches[manual_branch_id].document_ref)?;
+    let (bytes, encoded_root) = serialize_root(&bundle.store, &document, root)?;
+    let next = BundleWriteAdmission::from_bytes_with_limits(
         Some(bundle.store.resolved_root()?),
         bytes,
         bundle.store.usage_arc(),
         bundle.store.limits(),
     )?;
-    next_admission.require_supported()?;
+    next.require_supported()?;
     bundle.store.closure(&root.references())?;
-    Ok((next_admission, encoded_root))
-}
-
-pub(crate) struct BoundedHistory {
-    pub history: HistorySnapshot,
-    pub floor: Option<kinewright_core::HistoryTransition>,
-}
-
-pub(crate) fn bound_history(
-    history: &HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<HistorySnapshot, BundleError> {
-    select_history(history, limits).map(|selected| selected.history)
-}
-
-pub(crate) fn select_history(
-    history: &HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<BoundedHistory, BundleError> {
-    observed_bound(history, limits, |bounded| {
-        bounded.unwrap_or_else(|| BoundedHistory {
-            history: history.clone(),
-            floor: None,
-        })
-    })
-}
-
-/// [`bound_history`], borrowing `history` when it already fits (the common
-/// path) instead of copying it.
-fn bound_history_borrowed<'a>(
-    history: &'a HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<Cow<'a, HistorySnapshot>, BundleError> {
-    observed_bound(history, limits, |bounded| match bounded {
-        Some(selected) => Cow::Owned(selected.history),
-        None => Cow::Borrowed(history),
-    })
-}
-
-/// Bound `history` and turn the result (`None`: it fits as it is) into the
-/// caller's value. The test-util profile times both, so a caller's copy of
-/// a fitting history is counted once, inside this one call.
-fn observed_bound<T>(
-    history: &HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-    finish: impl FnOnce(Option<BoundedHistory>) -> T,
-) -> Result<T, BundleError> {
-    #[cfg(any(test, feature = "test-util"))]
-    let started = std::time::Instant::now();
-    let result = bound_history_inner(history, limits).map(finish);
-    #[cfg(any(test, feature = "test-util"))]
-    crate::io_observer::note_history_bound(started.elapsed());
-    result
-}
-
-#[allow(
-    clippy::too_many_lines,
-    reason = "the conservative prefilter and authoritative fit share one selection policy"
-)]
-fn bound_history_inner(
-    history: &HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<Option<BoundedHistory>, BundleError> {
-    let fits = |h: &HistorySnapshot| {
-        crate::history_size::verify_history_admission(
-            h,
-            crate::history_record::HistoryRole::Ordinary,
-            limits,
-        )
-        .is_ok()
-    };
-    if fits(history) {
-        return Ok(None);
-    }
-    // A retained command is unchanged by flooring. Complete batch costs are
-    // also stable when the suffix never undoes below the new baseline. Keep
-    // that exception: an excursion can rewrite effects and cursor counters.
-    let commands = suffix_costs(history.batches.iter().map(|batch| &batch.command), limits);
-    let batches = suffix_costs(
-        history.batches.iter().map(|batch| {
-            let mut batch = kinewright_core::JournalBatch::from(batch);
-            batch.order = 0;
-            batch.undo_entries = 0;
-            batch
-        }),
-        limits,
-    );
-    let undo_costs = suffix_costs(history.cursor.undo.iter(), limits);
-    let redo_cost = history
-        .cursor
-        .redo
-        .iter()
-        .map(|boundary| record_cost(boundary, limits).unwrap_or(u64::MAX))
-        .fold(0_u64, u64::saturating_add);
-    let current_cost = record_cost(&history.document, limits).unwrap_or(u64::MAX);
-    let mut minimum_undo = vec![usize::MAX; history.batches.len() + 1];
-    for index in (0..history.batches.len()).rev() {
-        minimum_undo[index] = minimum_undo[index + 1].min(history.batches[index].undo_entries);
-    }
-    let skeleton = kinewright_core::HistoryJournal {
-        floor_offset: 0,
-        baseline_sha256: "0".repeat(64),
-        document_sha256: "0".repeat(64),
-        batches: vec![],
-        cursor: kinewright_core::JournalCursor {
-            undo: vec![],
-            redo: vec![],
-        },
-    };
-    let overhead = record_cost(&skeleton, limits)?;
-    let hash = record_cost(&"0".repeat(64), limits)?;
-    kinewright_core::HistoryTransition::find_floor(
-        history.clone(),
-        |cut, dropped, baseline| {
-            let count = history.batches.len() - cut;
-            let Some(undo) = history.cursor.undo.len().checked_sub(dropped) else {
-                return false;
-            };
-            let Some(offset) = history.floor_offset.checked_add(cut as u64) else {
-                return false;
-            };
-            let redo = history.cursor.redo.len();
-            let excursion = dropped > 0 && minimum_undo[cut] < dropped;
-            // A successful floor preserves these exact cursor suffixes. Their
-            // document-bearing admission costs are therefore a safe prefilter,
-            // including when an excursion rewrites the retained batch effects.
-            let ordinary = undo_costs[dropped]
-                .saturating_add(redo_cost)
-                .saturating_add(current_cost)
-                .saturating_add(record_cost(baseline, limits).unwrap_or(u64::MAX))
-                .saturating_add(if excursion {
-                    commands[cut]
-                } else {
-                    batches[cut]
-                })
-                .saturating_add(8192);
-            let mut journal = overhead
-                .saturating_add(if excursion {
-                    commands[cut]
-                } else {
-                    batches[cut]
-                })
-                .saturating_add(hash.saturating_mul((undo + redo) as u64))
-                .saturating_add(
-                    2 * (count.saturating_sub(1) + undo.saturating_sub(1) + redo.saturating_sub(1))
-                        as u64,
-                )
-                .saturating_add(2 * u64::from(offset.checked_ilog10().unwrap_or(0)));
-            if !excursion {
-                let mut threshold = 10;
-                while threshold < count {
-                    journal = journal.saturating_add(2 * (count - threshold) as u64);
-                    threshold *= 10;
-                }
-            }
-            // Replay room is decided only by `fits`. A structural JSON
-            // estimate is not a lower bound for the typed replay reservation.
-            count <= kinewright_core::HISTORY_COMMANDS
-                && ordinary <= limits.branch_history_bytes
-                && journal <= limits.branch_history_bytes
-        },
-        fits,
-    )
-    .map(|transition| {
-        Some(BoundedHistory {
-            history: transition.after().clone(),
-            floor: Some(transition),
-        })
-    })
-    .map_err(|_| BundleError::Capacity("history baseline exceeds branch allowance"))
-}
-
-fn record_cost(
-    value: &impl serde::Serialize,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<u64, BundleError> {
-    let bytes = serde_json::to_vec(value).map_err(crate::bundle::encoding_error)?;
-    crate::store::preflight_record(&bytes, limits)
+    Ok((next, encoded_root))
 }
 
 // Ordinary Save keeps its document-bearing decoded admission budget. Count
 // one boundary at a time; the persisted/transport form stays compact and this
 // check never builds a second complete document-bearing JSON history.
-pub(crate) fn ordinary_history_admission_cost(
-    history: &HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<u64, BundleError> {
-    let header = (
-        history.floor_offset,
-        &history.baseline,
-        &history.document,
-        &history.batches,
-    );
-    history
-        .cursor
-        .undo
-        .iter()
-        .chain(&history.cursor.redo)
-        .try_fold(
-            record_cost(&header, limits)?.saturating_add(8192),
-            |sum, boundary| {
-                sum.checked_add(record_cost(boundary, limits)?)
-                    .and_then(|bytes| bytes.checked_add(64))
-                    .ok_or(BundleError::Capacity("ordinary history admission overflow"))
-            },
-        )
-}
 
-#[cfg(feature = "test-util")]
-/// The ordinary document-bearing admission cost, without a full encoded copy.
-/// # Errors
-/// Refuses arithmetic overflow or a component beyond the record limit.
-pub fn ordinary_history_admission_cost_probe(
-    history: &HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<u64, BundleError> {
-    ordinary_history_admission_cost(history, limits)
-}
-
-fn suffix_costs<T: serde::Serialize + PartialEq>(
-    values: impl DoubleEndedIterator<Item = T>,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Vec<u64> {
-    let mut costs = vec![0_u64];
-    let mut cache: Vec<(T, u64)> = vec![];
-    for value in values.rev() {
-        let cost = if let Some((_, cost)) = cache.iter().find(|(prior, _)| prior == &value) {
-            *cost
-        } else {
-            let cost = record_cost(&value, limits).unwrap_or(u64::MAX);
-            if cache.len() == 16 {
-                cache.remove(0);
-            }
-            cache.push((value, cost));
-            cost
-        };
-        costs.push(costs.last().unwrap().saturating_add(cost));
-    }
-    costs.reverse();
-    costs
-}
-
-fn barrier(bundle: &ProjectBundle, barrier: CommitBarrier) -> Result<(), BundleError> {
-    let path = bundle.store.resolved_root()?;
-    let label = match barrier {
-        CommitBarrier::B0 => "bundle_B0",
-        CommitBarrier::B1 => "bundle_B1",
-        CommitBarrier::B2 => "bundle_B2",
-        CommitBarrier::B3 => "bundle_B3",
-        CommitBarrier::B4 => "bundle_B4",
-        CommitBarrier::B5 => "bundle_B5",
-    };
-    crate::namespace::note(label, &path);
-    Ok(())
-}
-pub(crate) fn validate_inputs(
-    history: &HistorySnapshot,
-    manifest: &OwnedInputManifest,
-) -> Result<(), BundleError> {
-    // All retained source identities, including disabled and undone assets, require owned bytes.
-    let documents = std::iter::once(&history.baseline)
-        .chain(std::iter::once(&history.document))
-        .chain(
-            history
-                .cursor
-                .undo
-                .iter()
-                .chain(&history.cursor.redo)
-                .map(|e| &e.document),
-        );
-    for document in documents {
-        validate_document_inputs(document, manifest)?;
-    }
-    Ok(())
-}
-pub(crate) fn retain_history_inputs(history: &HistorySnapshot, manifest: &mut OwnedInputManifest) {
-    let documents: Vec<_> = std::iter::once(&history.baseline)
-        .chain(std::iter::once(&history.document))
-        .chain(
-            history
-                .cursor
-                .undo
-                .iter()
-                .chain(&history.cursor.redo)
-                .map(|e| &e.document),
-        )
-        .collect();
-    manifest.entries.retain(|entry| {
-        documents.iter().any(|document| {
-            document
-                .media_pool
-                .iter()
-                .any(|a| entry.matches_media_asset(a))
-                || document.lut_assets.iter().any(|a| {
-                    lut_entry_id_matches(&entry.entry_id, a)
-                        && entry.object.sha256 == a.sha256
-                        && entry.object.byte_length == a.byte_len
-                })
-                || (entry.entry_id == "font:Inter"
-                    && document
-                        .tracks
-                        .iter()
-                        .flat_map(|t| &t.clips)
-                        .any(|c| matches!(c.content, kinewright_core::ClipContent::Title(_))))
-        })
-    });
-    for entry in &mut manifest.entries {
-        if entry.object.record_kind == RecordKind::OwnedLut
-            && let Some(asset) = documents.iter().flat_map(|d| &d.lut_assets).find(|a| {
-                lut_entry_id_matches(&entry.entry_id, a)
-                    && entry.object.sha256 == a.sha256
-                    && entry.object.byte_length == a.byte_len
-            })
-        {
-            entry.entry_id = format!("lut:{}:{}:{}", asset.id.0, asset.sha256, asset.byte_len);
-        }
-    }
-    manifest.entries.sort_by(|a, b| a.entry_id.cmp(&b.entry_id));
-    manifest.entries.dedup();
-}
-fn lut_entry_id_matches(id: &str, asset: &kinewright_core::LutAsset) -> bool {
+pub(crate) fn lut_entry_id_matches(id: &str, asset: &kinewright_core::LutAsset) -> bool {
     id == format!("lut:{}", asset.id.0)
         || id == format!("lut:{}:{}", asset.id.0, asset.sha256)
         || id == format!("lut:{}:{}:{}", asset.id.0, asset.sha256, asset.byte_len)
+}
+pub(crate) fn retain_document_inputs(
+    document: &kinewright_core::Document,
+    manifest: &mut OwnedInputManifest,
+) {
+    manifest.entries.retain(|entry| {
+        document.media_pool.iter().any(|asset| {
+            asset.source_fingerprint.content_sha256.is_some()
+                && asset.source_fingerprint.byte_len.is_some()
+                && entry.matches_media_asset(asset)
+        }) || document.lut_assets.iter().any(|asset| {
+            lut_entry_id_matches(&entry.entry_id, asset)
+                && entry.object.sha256 == asset.sha256
+                && entry.object.byte_length == asset.byte_len
+        }) || (entry.entry_id == "font:Inter"
+            && document
+                .tracks
+                .iter()
+                .flat_map(|track| &track.clips)
+                .any(|clip| matches!(clip.content, kinewright_core::ClipContent::Title(_))))
+    });
+    manifest
+        .entries
+        .sort_by(|left, right| left.entry_id.cmp(&right.entry_id));
+    manifest.entries.dedup();
 }
 pub(crate) fn validate_document_inputs(
     document: &kinewright_core::Document,
     manifest: &OwnedInputManifest,
 ) -> Result<(), BundleError> {
     for asset in &document.media_pool {
+        if asset.source_fingerprint.content_sha256.is_none()
+            && asset.source_fingerprint.byte_len.is_none()
+        {
+            continue;
+        }
         if !manifest
             .entries
             .iter()
@@ -2354,162 +1811,6 @@ pub(crate) fn validate_document_inputs(
     Ok(())
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "one ordered history replay of occurrence maps"
-)]
-pub(crate) fn lineage(
-    branch: &crate::bundle_records::BranchId,
-    history: &HistorySnapshot,
-    batches: &[BatchId],
-    old: Option<&LineageRecord>,
-    origin_history: Option<&LineageRecord>,
-) -> Result<LineageRecord, BundleError> {
-    let seed = BatchId::fresh()?;
-    let baseline: BTreeMap<ClipId, OccurrenceId> = if let Some(old) = old {
-        old.baseline.clone()
-    } else {
-        history
-            .baseline
-            .tracks
-            .iter()
-            .flat_map(|t| &t.clips)
-            .enumerate()
-            .map(|(i, c)| {
-                (
-                    c.id,
-                    OccurrenceId {
-                        branch_origin: branch.clone(),
-                        creation_batch_id: seed.clone(),
-                        result_ordinal: i as u64,
-                    },
-                )
-            })
-            .collect()
-    };
-    let origins: BTreeMap<_, _> = old
-        .into_iter()
-        .chain(origin_history)
-        .flat_map(|old| {
-            old.baseline
-                .values()
-                .chain(old.current.values())
-                .chain(old.undo.iter().flat_map(|m| m.values()))
-                .chain(old.redo.iter().flat_map(|m| m.values()))
-                .chain(
-                    old.split_ancestry
-                        .iter()
-                        .flat_map(|(child, parent, _)| [child, parent]),
-                )
-        })
-        .map(|o| (o.creation_batch_id.clone(), o.branch_origin.clone()))
-        .collect();
-    let mut current = baseline.clone();
-    let mut undo = vec![];
-    let mut redo = vec![];
-    let mut split_ancestry =
-        old.map_or_else(Vec::new, |old| ancestry(&baseline, &old.split_ancestry));
-    for (batch, id) in history.batches.iter().zip(batches) {
-        let origin = origins.get(id).unwrap_or(branch);
-        match &batch.command {
-            JournalCommand::Undo => {
-                if let Some(previous) = undo.pop() {
-                    redo.push(current);
-                    current = previous;
-                }
-            }
-            JournalCommand::Redo => {
-                if let Some(next) = redo.pop() {
-                    undo.push(current);
-                    current = next;
-                }
-            }
-            _ => {
-                let before = current.clone();
-                let mut ordinal = 0_u64;
-                for effect in &batch.identity_effects {
-                    let parent = effect
-                        .split_parent
-                        .as_ref()
-                        .and_then(|c| current.get(&c.id))
-                        .cloned();
-                    for deleted in &effect.deleted {
-                        current.remove(deleted);
-                    }
-                    let children: BTreeSet<_> = effect.split_results.iter().map(|c| c.id).collect();
-                    for created in effect.created.iter().filter(|c| !children.contains(c)) {
-                        current.insert(
-                            *created,
-                            OccurrenceId {
-                                branch_origin: origin.clone(),
-                                creation_batch_id: id.clone(),
-                                result_ordinal: ordinal,
-                            },
-                        );
-                        ordinal += 1;
-                    }
-                    for child in &effect.split_results {
-                        let occurrence = OccurrenceId {
-                            branch_origin: origin.clone(),
-                            creation_batch_id: id.clone(),
-                            result_ordinal: ordinal,
-                        };
-                        ordinal += 1;
-                        split_ancestry.push((
-                            occurrence.clone(),
-                            parent.clone().ok_or_else(|| {
-                                BundleError::Corrupt("unknown split parent occurrence".into())
-                            })?,
-                            child.clone(),
-                        ));
-                        current.insert(child.id, occurrence);
-                    }
-                }
-                if batch.undo_entries == undo.len() + 1 {
-                    undo.push(before);
-                } else if batch.undo_entries != undo.len() {
-                    return Err(BundleError::Corrupt("lineage gesture boundary".into()));
-                }
-                redo.clear();
-            }
-        }
-        if undo.len() != batch.undo_entries || redo.len() != batch.redo_entries {
-            return Err(BundleError::Corrupt("lineage cursor counts".into()));
-        }
-    }
-    split_ancestry = ancestry(&current, &split_ancestry);
-    Ok(LineageRecord {
-        branch_origin: branch.clone(),
-        baseline,
-        current,
-        undo,
-        redo,
-        split_ancestry,
-    })
-}
-
-fn ancestry(
-    current: &BTreeMap<ClipId, OccurrenceId>,
-    all: &[(OccurrenceId, OccurrenceId, kinewright_core::Clip)],
-) -> Vec<(OccurrenceId, OccurrenceId, kinewright_core::Clip)> {
-    let mut retained: BTreeSet<_> = current.values().cloned().collect();
-    loop {
-        let before = retained.len();
-        for (child, parent, _) in all {
-            if retained.contains(child) {
-                retained.insert(parent.clone());
-            }
-        }
-        if before == retained.len() {
-            break;
-        }
-    }
-    all.iter()
-        .filter(|(child, _, _)| retained.contains(child))
-        .cloned()
-        .collect()
-}
-
 pub(crate) fn serialize_root(
     store: &crate::store::ProjectStore,
     document: &kinewright_core::Document,
@@ -2533,7 +1834,7 @@ pub(crate) fn serialize_root(
     };
     serde_json::to_writer_pretty(&mut counter, &file)
         .map_err(|_| BundleError::Capacity("root encoded bytes"))?;
-    let encoded = store.reserve(0, counter.bytes, 0, false)?;
+    let encoded = store.reserve(0, counter.bytes, false)?;
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(
@@ -2547,48 +1848,6 @@ pub(crate) fn serialize_root(
         return Err(BundleError::Corrupt("unstable root serialization".into()));
     }
     Ok((bytes, encoded))
-}
-
-#[cfg(feature = "test-util")]
-/// Exercise the production floor selection with explicit downward limits.
-/// # Errors
-/// Returns the same admission error as a save at these limits.
-pub fn bound_history_probe(
-    history: &HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<HistorySnapshot, BundleError> {
-    bound_history(history, limits)
-}
-
-#[cfg(feature = "test-util")]
-/// Minimum single-history allowance, including its measured replay peak.
-/// This is not retained residency; use `restored_history_live_bytes` for that.
-/// # Errors
-/// Refuses an invalid or excessive record.
-pub fn history_cost_probe(
-    history: &HistorySnapshot,
-    limits: &crate::storage_budget::StorageLimits,
-) -> Result<u64, BundleError> {
-    let record = crate::history_record::HistoryRecord::capture(
-        history,
-        crate::history_record::HistoryRole::Ordinary,
-    )?;
-    let retained = crate::history_size::native_history_live_bytes(history)?;
-    let charge = record_cost(&record, limits)?
-        .max(retained)
-        .max(ordinary_history_admission_cost(history, limits)?);
-    // This sizing witness intentionally measures cuts which admission rejects.
-    // An already excessive retained cut needs no further materialization.
-    if retained > kinewright_core::history_size::TRANSPORT_LIVE_BYTES {
-        return Ok(charge);
-    }
-    let peak = kinewright_core::history_size::measure_replay_peak(
-        &record.journal,
-        &history.baseline,
-        &history.document,
-    )
-    .map_err(crate::bundle::history_error)?;
-    Ok(charge.max(peak))
 }
 
 pub(crate) fn validate_manifest_extension(
@@ -2617,9 +1876,173 @@ pub(crate) fn validate_manifest_extension(
 #[cfg(all(test, target_os = "linux"))]
 mod fu1_tests {
     use super::*;
+    use kinewright_core::JournalCommand;
     use kinewright_core::{
         Command, Document, Event, Operation, Query, QueryResult, Track, TrackId, TrackKind,
     };
+
+    #[test]
+    fn root_admission_refuses_an_unopenable_owner_graph_before_staging() {
+        let temp = kinewright_media::test_support::TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "native-root-admission",
+        );
+        let path = temp.path("project.kinewright");
+        let core = Core::for_test(Document::default()).unwrap();
+        let mut bundle = ProjectBundle::activate(
+            &path,
+            BundleWriteAdmission::new_document(),
+            core.history_pool(),
+        )
+        .unwrap();
+        let inputs = bundle.empty_inputs().unwrap();
+        bundle.save(&core, &inputs.reference).unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        let identity = core.snapshot_identity().unwrap();
+        drop(bundle.store.prepare_root_write(&saved).unwrap());
+        let mut proposed: crate::ProjectFile = serde_json::from_slice(&saved).unwrap();
+        proposed.studio.as_mut().unwrap().branch_index_ref.sha256 = "f".repeat(64);
+        let bytes = serde_json::to_vec(&proposed).unwrap();
+        assert!(
+            bundle.store.prepare_root_write(&bytes).is_err(),
+            "ROOT_ADMISSION_REFUSES_UNOPENABLE_OWNER_GRAPH"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            saved,
+            "REFUSED_ROOT_LEAVES_THE_FILE_UNCHANGED"
+        );
+        assert_eq!(
+            core.snapshot_identity().unwrap(),
+            identity,
+            "REFUSED_ROOT_LEAVES_THE_CORE_UNCHANGED"
+        );
+        assert!(
+            crate::bundle::LoadedBundle::read(
+                &path,
+                &crate::operation_history::HistoryPool::new(
+                    crate::operation_history::PoolLimits::default()
+                ),
+            )
+            .is_ok(),
+            "REFUSED_ROOT_LEAVES_THE_SAVED_STATE_OPENABLE"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one native candidate transaction proves the absent outcome, source preservation and exact retry"
+    )]
+    fn absent_candidate_publication_preserves_work_and_retries_once() {
+        let temp = kinewright_media::test_support::TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "absent-native-candidate",
+        );
+        let core = Core::for_test(Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Document::default()
+        })
+        .unwrap();
+        let mut owner = crate::editing_session::Ja1EditingSession::new(
+            temp.root(),
+            &core,
+            crate::storage_budget::StorageLimits::default(),
+        )
+        .unwrap();
+        owner
+            .first_save(
+                &temp.path("project.kinewright"),
+                crate::storage_budget::StorageLimits::default(),
+            )
+            .unwrap();
+        let mut candidate = owner
+            .fork_durable_branch(
+                "candidate",
+                crate::editing_session::DurableBranchRole::RunCandidate,
+            )
+            .unwrap();
+        owner.persist_durable_branch(&mut candidate).unwrap();
+        let binding = owner.candidate_binding(candidate.branch_id()).unwrap();
+        let mut source = owner
+            .fork_registered_from_candidate(&binding, "Editor")
+            .unwrap();
+        source
+            .core()
+            .request(Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: false,
+            }))
+            .unwrap();
+        let frozen = owner.freeze_registered_candidate(&mut source).unwrap();
+        let source_identity = source.core().snapshot_identity().unwrap();
+        let issuer = owner
+            .issue_manual_lease("candidate".into(), "private".into())
+            .unwrap()
+            .issuer;
+        let envelope = owner
+            .candidate_merge_envelope(
+                &frozen,
+                crate::receipts::CommandId {
+                    issuer,
+                    sequence: 1,
+                },
+            )
+            .unwrap();
+        let original = candidate.core().snapshot_identity().unwrap();
+        let original_change = candidate.core().change_id().unwrap();
+        assert!(
+            matches!(
+                crate::io_observer::fail_once("root_rename_io", || owner
+                    .commit_candidate(&frozen, &envelope)),
+                Err(BundleError::DurabilityUnknown)
+            ),
+            "CANDIDATE_ROOT_OUTCOME_IS_UNKNOWN_BEFORE_RECONCILIATION"
+        );
+        owner.reconcile_active().unwrap();
+        assert_eq!(
+            candidate.core().snapshot_identity().unwrap(),
+            original,
+            "ABSENT_CANDIDATE_ROOT_NEVER_COMMITS_ITS_PREPARED_UPDATE"
+        );
+        assert_eq!(candidate.core().change_id().unwrap(), original_change);
+        assert_eq!(
+            source.core().snapshot_identity().unwrap(),
+            source_identity,
+            "ABSENT_PUBLICATION_PRESERVES_THE_SOURCE_WORK"
+        );
+        assert!(matches!(
+            owner.commit_candidate(&frozen, &envelope).unwrap(),
+            ReceiptLookup::Committed(_)
+        ));
+        let committed = candidate.core().change_id().unwrap();
+        assert_eq!(
+            committed.position.position,
+            original_change.position.position + 1,
+            "ABSENT_CANDIDATE_RETRY_APPLIES_EXACTLY_ONCE"
+        );
+        assert_eq!(
+            candidate
+                .core()
+                .export_history()
+                .unwrap()
+                .history()
+                .undo
+                .len(),
+            1
+        );
+        owner.commit_candidate(&frozen, &envelope).unwrap();
+        assert_eq!(
+            candidate.core().change_id().unwrap(),
+            committed,
+            "COMMITTED_CANDIDATE_RETRY_NEVER_REAPPLIES"
+        );
+    }
 
     #[test]
     fn fu1_unknown_branch_refuses_after_receipt_lookup() {
@@ -2630,7 +2053,7 @@ mod fu1_tests {
             .unwrap();
         let root = workspace.join("target").join("fu1-unit");
         let temp = kinewright_media::test_support::TempDirectory::new_in(&root, "unknown-branch");
-        let core = Core::spawn(Document {
+        let core = Core::for_test(Document {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
@@ -2643,6 +2066,7 @@ mod fu1_tests {
         let mut bundle = ProjectBundle::activate(
             &temp.path("project.kinewright"),
             BundleWriteAdmission::new_document(),
+            core.history_pool(),
         )
         .unwrap();
         let inputs = bundle.empty_inputs().unwrap().reference.clone();
@@ -2671,12 +2095,11 @@ mod fu1_tests {
                 locked: false,
             })),
             switch: None,
-            manual: None,
+            context: None,
             lease: None,
             comment_text: None,
             comment_strokes: None,
             evidence: vec![],
-            transition: None,
         };
         assert!(
             matches!(BundleCommit::command_target(&mut bundle, &envelope, &core, &inputs, &[], true, &target), Err(BundleError::Unsupported(message)) if message == "unknown branch")
@@ -2701,4 +2124,18 @@ mod fu1_tests {
             receipt
         );
     }
+}
+
+fn barrier(bundle: &ProjectBundle, barrier: CommitBarrier) -> Result<(), BundleError> {
+    let path = bundle.store.resolved_root()?;
+    let label = match barrier {
+        CommitBarrier::B0 => "bundle_B0",
+        CommitBarrier::B1 => "bundle_B1",
+        CommitBarrier::B2 => "bundle_B2",
+        CommitBarrier::B3 => "bundle_B3",
+        CommitBarrier::B4 => "bundle_B4",
+        CommitBarrier::B5 => "bundle_B5",
+    };
+    crate::namespace::note(label, &path);
+    Ok(())
 }

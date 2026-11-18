@@ -67,7 +67,7 @@ fn typed_recheck_refusal(phase: RecheckPhase) {
         };
         let (s, v, provider) = recheck_service(fail_at, failure);
         let before = s.snapshot().unwrap();
-        let history = s.core.export_history_identified().unwrap();
+        let history = history_identity(&s);
         thread::scope(|scope| {
             let worker = scope.spawn(|| invoke(&s, "cut_dialogue", args(vec![words(&v, 1)])));
             let until = Instant::now() + Duration::from_secs(60);

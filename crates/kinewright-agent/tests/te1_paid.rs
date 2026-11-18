@@ -9,9 +9,13 @@ fn te1_one_granted_run() {
     );
     #[cfg(feature = "te1-eval")]
     {
-        let result = kinewright_agent::te1_eval::run_one_granted(std::path::Path::new(env!(
-            "CARGO_BIN_EXE_kinewright-job-guardian"
-        )))
+        let pool = kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        );
+        let result = kinewright_agent::te1_eval::run_one_granted(
+            &pool,
+            std::path::Path::new(env!("CARGO_BIN_EXE_kinewright-job-guardian")),
+        )
         .expect("granted evaluation refused or interrupted; never retry this grant");
         println!("{}", serde_json::to_string(&result).unwrap());
     }

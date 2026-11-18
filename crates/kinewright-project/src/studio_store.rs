@@ -68,7 +68,7 @@ record!(
             }
             kind(&d.checkpoint_ref, RecordKind::BranchCheckpoint)?;
             kind(&d.document_ref, RecordKind::Document)?;
-            kind(&d.lineage_ref, RecordKind::Lineage)?;
+            kind(&d.owner_ref, RecordKind::OperationHistory)?;
             kind(&d.input_manifest_ref, RecordKind::InputManifest)?;
             if d.revision_refs.len() as u64 > l.comments {
                 return Err(BundleError::Capacity("snapshot revision refs"));
@@ -524,7 +524,7 @@ impl MetadataEnvelope {
         let bytes = serde_json::to_vec(update).map_err(|e| BundleError::Corrupt(e.to_string()))?;
         Ok(CommandEnvelope {
             switch: None,
-            manual: None,
+            context: None,
             version: 1,
             action: "metadata".into(),
             id: self.id.clone(),
@@ -542,7 +542,6 @@ impl MetadataEnvelope {
                 byte_length: bytes.len() as u64,
                 record_kind: RecordKind::OwnedEvidence,
             }],
-            transition: None,
         })
     }
 }
@@ -552,7 +551,7 @@ impl ProjectBundle {
         reference: Option<&ObjectRef>,
     ) -> Result<StorageReservation<T>, BundleError> {
         reference.map_or_else(
-            || Ok(self.store.reserve(0, 256, 0, false)?.hold(T::default())),
+            || Ok(self.store.reserve(0, 256, false)?.hold(T::default())),
             |r| self.store.read_record(r),
         )
     }
@@ -619,9 +618,10 @@ impl ProjectBundle {
             .store
             .read_record::<BranchCheckpoint>(&d.checkpoint_ref)?;
         if c.head_id != d.key.head
-            || c.document_hash != d.key.document_hash
+            || c.document_ref.sha256 != d.key.document_hash
             || c.document_ref != d.document_ref
-            || c.lineage_ref != d.lineage_ref
+            || c.owner_ref != d.owner_ref
+            || c.identity != d.identity
             || c.input_manifest_ref != d.input_manifest_ref
         {
             return Err(BundleError::Corrupt("snapshot checkpoint binding".into()));
@@ -831,7 +831,7 @@ impl ProjectBundle {
         struct Header<'a> {
             bundle: &'a mut ProjectBundle,
             state: crate::bundle::PublicationState,
-            tag: Option<kinewright_core::HistorySaveTag>,
+            tag: Option<crate::history_save::PublicationTag>,
         }
         impl Drop for Header<'_> {
             fn drop(&mut self) {
@@ -1054,7 +1054,7 @@ impl ProjectBundle {
         {
             return Err(BundleError::Capacity("metadata receipts/pending"));
         }
-        let reservation = self.store.reserve(0, command.encoded_bytes()?, 0, false)?;
+        let reservation = self.store.reserve(0, command.encoded_bytes()?, false)?;
         let (validated, result) = match admitted {
             Some(admitted) => admitted,
             None => self.validate_metadata(envelope, update)?,
@@ -1167,14 +1167,15 @@ impl ProjectBundle {
                     project: self.project_id.clone(),
                     version: p.version.clone(),
                     head: checkpoint.head_id.clone(),
-                    document_hash: checkpoint.document_hash.clone(),
+                    document_hash: checkpoint.document_ref.sha256.clone(),
                     input_manifest_ref: checkpoint.input_manifest_ref.clone(),
                 };
                 let descriptor = SnapshotDescriptor {
                     key: key.clone(),
                     checkpoint_ref: p.checkpoint_ref.clone(),
                     document_ref: checkpoint.document_ref.clone(),
-                    lineage_ref: checkpoint.lineage_ref.clone(),
+                    owner_ref: checkpoint.owner_ref.clone(),
+                    identity: checkpoint.identity,
                     input_manifest_ref: checkpoint.input_manifest_ref.clone(),
                     revision_refs: p.revision_refs.clone(),
                     parent_version: p.parent_version.clone(),
@@ -1979,10 +1980,10 @@ fn charge_value<T: serde::Serialize>(
     value: &T,
 ) -> Result<StorageReservation, BundleError> {
     bounded(value, store.limits().decoded_record_bytes)?;
-    let _scratch = store.reserve(0, store.limits().decoded_record_bytes, 0, false)?;
+    let _scratch = store.reserve(0, store.limits().decoded_record_bytes, false)?;
     let bytes = serde_json::to_vec(value).map_err(|e| BundleError::Corrupt(e.to_string()))?;
     let decoded = crate::store::preflight_record(&bytes, store.limits())?;
-    store.reserve(0, decoded, 0, false)
+    store.reserve(0, decoded, false)
 }
 
 impl crate::editing_session::Ja1EditingSession {
@@ -2012,7 +2013,7 @@ impl FrozenContext {
         let bytes = crate::voice_ingress::AUDIO_BYTES + crate::voice_ingress::LOG_BYTES;
         store
             .person_publication_store()
-            .reserve(bytes, 3 * bytes, 0, true)
+            .reserve(bytes, 3 * bytes, true)
     }
 
     /// Recheck certified descriptors without rereading the footage.
@@ -2227,9 +2228,10 @@ impl crate::store::ProjectStore {
         self.check_read_authority()?;
         let c = self.read_record::<BranchCheckpoint>(&descriptor.checkpoint_ref)?;
         if c.head_id != descriptor.key.head
-            || c.document_hash != descriptor.key.document_hash
+            || c.document_ref.sha256 != descriptor.key.document_hash
             || c.document_ref != descriptor.document_ref
-            || c.lineage_ref != descriptor.lineage_ref
+            || c.owner_ref != descriptor.owner_ref
+            || c.identity != descriptor.identity
             || c.input_manifest_ref != descriptor.input_manifest_ref
             || descriptor.key.document_hash != descriptor.document_ref.sha256
             || descriptor.key.input_manifest_ref != descriptor.input_manifest_ref

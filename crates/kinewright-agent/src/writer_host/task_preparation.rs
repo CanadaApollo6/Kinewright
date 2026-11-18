@@ -74,7 +74,7 @@ impl HostCommandOwner {
                 return Err(refused());
             }
             let (ReceiptLookup::Committed(receipt) | ReceiptLookup::Retired(receipt)) =
-                self.owner()?.manual_transition_receipt(envelope)?
+                self.owner()?.command_receipt(envelope)?
             else {
                 continue;
             };
@@ -92,7 +92,7 @@ impl HostCommandOwner {
                     branch: checkpoint.branch_id.clone(),
                     head: checkpoint.head_id.clone(),
                     checkpoint: checkpoint_ref.clone(),
-                    document_hash: checkpoint.document_hash.clone(),
+                    document_hash: checkpoint.document_ref.sha256.clone(),
                 },
             ));
         }

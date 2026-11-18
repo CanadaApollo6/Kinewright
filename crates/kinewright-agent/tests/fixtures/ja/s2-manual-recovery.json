@@ -102,9 +102,9 @@
       "participant": "main",
       "action": "assert_observed",
       "args": {
-        "id": "floor",
+        "id": "stacks-preserved",
         "observation": 1,
-        "pointer": "/recovery/floor",
+        "pointer": "/recovery/stacks_preserved",
         "oracle": "true",
         "evidence_class": "revised_property",
         "positive_control": "query-ran",

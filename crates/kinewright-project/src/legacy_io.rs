@@ -1,11 +1,13 @@
 //! Directory handles used by legacy writers. Paths passed to IO stay below
 //! the admitted directory even if a caller's alias changes during a write.
 use std::{
-    fs::File,
+    fs::{self, File},
     io,
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+use crate::namespace::FileIdentity;
 
 #[derive(Debug, Clone)]
 pub struct PinnedDirectory {
@@ -110,5 +112,184 @@ pub fn lock_journal(file: &File) -> io::Result<()> {
     #[cfg(not(unix))]
     {
         file.metadata().map(|_| ())
+    }
+}
+
+/// Identity of the recorder's journal. On Unix the duplicate keeps its inode
+/// alive after the recorder unlocks, so a replacement cannot recycle the ID.
+pub struct JournalIdentity {
+    identity: FileIdentity,
+    #[cfg(unix)]
+    _original: File,
+}
+
+/// A journal under its lock. Unlock before closing the descriptor: a child
+/// forked on another thread can hold a copy of its open file description
+/// until exec. Closing one descriptor alone would leave the journal locked.
+pub struct LockedJournal(File);
+
+impl LockedJournal {
+    /// Take the journal's non-blocking lock.
+    ///
+    /// # Errors
+    /// Returns the native lock or metadata error.
+    pub fn lock(file: File) -> io::Result<Self> {
+        lock_journal(&file)?;
+        Ok(Self(file))
+    }
+
+    /// Open and lock a regular journal for removal, without following a Unix link
+    /// or blocking on a special file substituted before open.
+    ///
+    /// # Errors
+    /// Returns open, file type, or lock errors. A missing file returns `NotFound`.
+    pub fn open_for_removal(path: &Path) -> io::Result<Self> {
+        fn require_regular(metadata: &fs::Metadata) -> io::Result<()> {
+            if metadata.is_file() {
+                Ok(())
+            } else {
+                Err(io::Error::other("journal is not a regular file"))
+            }
+        }
+
+        require_regular(&fs::symlink_metadata(path)?)?;
+        let mut options = File::options();
+        options.read(true).write(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::custom_flags(
+            &mut options,
+            libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        );
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            const FILE_SHARE_READ: u32 = 1;
+            const FILE_SHARE_DELETE: u32 = 4;
+
+            // Hold the file against writers from the digest check through unlink.
+            options.share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE);
+        }
+        let file = options.open(path)?;
+        require_regular(&file.metadata()?)?;
+        Self::lock(file)
+    }
+
+    /// Capture the recorder's file identity before it releases the journal.
+    ///
+    /// # Errors
+    /// Returns an identity or descriptor duplication error.
+    pub fn identity(&self) -> io::Result<JournalIdentity> {
+        Ok(JournalIdentity {
+            identity: FileIdentity::of_file(&self.0)?,
+            #[cfg(unix)]
+            _original: self.0.try_clone()?,
+        })
+    }
+
+    /// Check that the opened journal is the recorder's original file.
+    ///
+    /// # Errors
+    /// Returns a native identity lookup error.
+    pub fn matches_identity(&self, original: &JournalIdentity) -> io::Result<bool> {
+        Ok(FileIdentity::of_file(&self.0)? == original.identity)
+    }
+
+    /// Unlink while holding the journal lock, after checking the path still
+    /// names this file. Returns `false` if the name now identifies another file.
+    ///
+    /// # Errors
+    /// Returns an identity lookup or unlink error.
+    pub fn unlink(self, path: &Path) -> io::Result<bool> {
+        let current = fs::symlink_metadata(path)?;
+        if !current.is_file() {
+            return Ok(false);
+        }
+        #[cfg(unix)]
+        let matches = FileIdentity::of_file(&self.0)? == FileIdentity::of_metadata(&current);
+        #[cfg(not(unix))]
+        let matches = crate::namespace::file_matches_path(&self.0, path)?;
+        if !matches {
+            return Ok(false);
+        }
+        #[cfg(any(test, feature = "test-util"))]
+        crate::test_hook("journal_before_unlink");
+        fs::remove_file(path)?;
+        Ok(true)
+    }
+}
+
+impl std::ops::Deref for LockedJournal {
+    type Target = File;
+
+    fn deref(&self) -> &File {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for LockedJournal {
+    fn deref_mut(&mut self) -> &mut File {
+        &mut self.0
+    }
+}
+
+impl Drop for LockedJournal {
+    fn drop(&mut self) {
+        // A live Windows recorder denies deletion through its share mode.
+        #[cfg(unix)]
+        let _ = self.0.unlock();
+    }
+}
+
+/// Whether another handle blocked locking or deleting a journal.
+#[must_use]
+pub fn journal_removal_contended(error: &io::Error) -> bool {
+    #[cfg(windows)]
+    if error.raw_os_error() == Some(32) {
+        // ERROR_SHARING_VIOLATION
+        return true;
+    }
+    error.kind() == io::ErrorKind::WouldBlock
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use std::{io::Write as _, os::windows::fs::OpenOptionsExt as _};
+
+    use kinewright_media::test_support::TempDirectory;
+
+    use super::*;
+
+    #[test]
+    fn journal_removal_and_recording_exclude_each_other_on_windows() {
+        let directory = TempDirectory::new("journal-removal-share-mode");
+        let path = directory.path("recorded.journal");
+        let original = b"recorded edits";
+        let mut recorder = File::options()
+            .create_new(true)
+            .write(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
+        recorder.write_all(original).unwrap();
+        recorder.sync_all().unwrap();
+
+        let Err(error) = LockedJournal::open_for_removal(&path) else {
+            panic!("a live recorder must refuse removal");
+        };
+        assert!(journal_removal_contended(&error), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), original);
+        drop(recorder);
+
+        let remover = LockedJournal::open_for_removal(&path).unwrap();
+        let Err(error) = File::options().append(true).open(&path) else {
+            panic!("the removal handle must refuse an append");
+        };
+        assert!(journal_removal_contended(&error), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(remover.unlink(&path).unwrap());
+        assert_eq!(
+            fs::symlink_metadata(&path).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
     }
 }

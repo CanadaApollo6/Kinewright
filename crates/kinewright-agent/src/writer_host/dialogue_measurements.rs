@@ -4,8 +4,9 @@ use crate::{
     dialogue_measurements::{CachedDialogueMeasurements, failed},
     dialogue_tools::{BoundDialogue, DialogueMeasurements, MediaIdentity, Refusal},
 };
-use kinewright_core::{Command, Core, Document, Event, Query, QueryResult};
+use kinewright_core::{Command, Document, Event, Query, QueryResult};
 use kinewright_media::owned_io::PlaybackInputs;
+use kinewright_project::operation_actor::Core;
 use std::sync::{Arc, OnceLock};
 
 fn document(core: &Core) -> Result<Arc<Document>, String> {

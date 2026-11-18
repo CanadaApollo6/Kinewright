@@ -1,0 +1,364 @@
+//! A bound source retains its admitted manifest under the store's existing
+//! decoded reservation. Payload checks use an in-place sorted index; they
+//! neither replay retained operations nor traverse the candidate document.
+#![allow(clippy::missing_errors_doc)]
+use crate::{
+    bundle::BundleError,
+    bundle_records::{ObjectRef, RecordKind},
+    operation_history::Error,
+    owned_inputs::{OwnedInputEntry, OwnedInputManifest},
+    storage_budget::StorageReservation,
+    store::{BundleRecord, ProjectStore},
+};
+use kinewright_core::{MediaSourceFingerprint, Operation};
+
+pub struct ManualInputs {
+    reference: ObjectRef,
+    manifest: StorageReservation<OwnedInputManifest>,
+    font: String,
+    _pin: Option<crate::store::StorePin>,
+}
+impl ManualInputs {
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "the retained store pin owns reachability until this input context drops"
+    )]
+    pub fn read(store: &ProjectStore, reference: &ObjectRef) -> Result<Self, BundleError> {
+        let pin = store.pin(std::slice::from_ref(reference))?;
+        let mut inputs = Self::from_reserved(reference.clone(), store.read_record(reference)?)?;
+        inputs._pin = Some(pin);
+        Ok(inputs)
+    }
+    /// The GUI receives this exact manifest from its authenticated writer.
+    /// Its decoded bytes remain charged even after the named writer handoff;
+    /// the writer's live authority owns the physical pin in that process.
+    pub(crate) fn from_wire(
+        reference: ObjectRef,
+        manifest: OwnedInputManifest,
+        usage: &std::sync::Arc<std::sync::Mutex<crate::storage_budget::StorageUsage>>,
+    ) -> Result<Self, BundleError> {
+        let mut bytes = std::mem::size_of::<OwnedInputManifest>() as u64;
+        let mut add = |n: usize| -> Result<(), BundleError> {
+            bytes = bytes
+                .checked_add(n as u64)
+                .ok_or(BundleError::Capacity("input manifest capacity"))?;
+            Ok(())
+        };
+        add(manifest
+            .entries
+            .capacity()
+            .checked_mul(std::mem::size_of::<OwnedInputEntry>())
+            .ok_or(BundleError::Capacity("input manifest capacity"))?)?;
+        if let Some(id) = &manifest.project_id {
+            add(id.allocated_capacity())?;
+        }
+        if let Some(id) = &manifest.session_id {
+            add(id.allocated_capacity())?;
+        }
+        for entry in &manifest.entries {
+            add(entry.entry_id.capacity())?;
+            add(entry.object.sha256.capacity())?;
+            add(entry
+                .dependencies
+                .capacity()
+                .checked_mul(std::mem::size_of::<ObjectRef>())
+                .ok_or(BundleError::Capacity("input manifest capacity"))?)?;
+            for reference in &entry.dependencies {
+                add(reference.sha256.capacity())?;
+            }
+            if let Some(text) = &entry.selected_stream {
+                add(text.capacity())?;
+            }
+            if let Some(text) = &entry.profile {
+                add(text.capacity())?;
+            }
+        }
+        let limits = crate::storage_budget::StorageLimits::default();
+        let charge = StorageReservation::reserve(usage, &limits, 0, bytes, false, u64::MAX)?;
+        Self::from_reserved(reference, charge.hold(manifest))
+    }
+    fn from_reserved(
+        reference: ObjectRef,
+        manifest: StorageReservation<OwnedInputManifest>,
+    ) -> Result<Self, BundleError> {
+        use std::fmt::Write as _;
+        struct HashWriter {
+            hash: kinewright_hash::Sha256,
+            bytes: u64,
+        }
+        impl std::io::Write for HashWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.bytes = self
+                    .bytes
+                    .checked_add(bytes.len() as u64)
+                    .ok_or_else(|| std::io::Error::other("input length"))?;
+                self.hash.update(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        reference.validate()?;
+        if reference.record_kind != RecordKind::InputManifest {
+            return Err(BundleError::Corrupt("manual input manifest kind".into()));
+        }
+        manifest.validate(&crate::storage_budget::StorageLimits::default())?;
+        // The reference is checked before sorting the retained value. This
+        // derived order is used only for membership, never written as a record.
+        let mut writer = HashWriter {
+            hash: kinewright_hash::Sha256::new(),
+            bytes: 0,
+        };
+        serde_json::to_writer(&mut writer, &*manifest)
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let mut digest = String::with_capacity(64);
+        for byte in writer.hash.finalize() {
+            let _ = write!(digest, "{byte:02x}");
+        }
+        if digest != reference.sha256 || writer.bytes != reference.byte_length {
+            return Err(BundleError::HistoryChanged);
+        }
+        let manifest = manifest.map(|mut manifest| {
+            manifest.entries.sort_unstable_by(|left, right| {
+                (
+                    &left.object.record_kind,
+                    left.object.sha256.as_str(),
+                    left.object.byte_length,
+                )
+                    .cmp(&(
+                        &right.object.record_kind,
+                        right.object.sha256.as_str(),
+                        right.object.byte_length,
+                    ))
+                    .then_with(|| left.entry_id.cmp(&right.entry_id))
+            });
+            manifest
+        });
+        Ok(Self {
+            reference,
+            manifest,
+            font: kinewright_media::sha256_bytes(kinewright_core::title_font_bytes()),
+            _pin: None,
+        })
+    }
+    #[must_use]
+    pub const fn reference(&self) -> &ObjectRef {
+        &self.reference
+    }
+    fn entries(&self, kind: RecordKind, hash: &str, length: u64) -> &[OwnedInputEntry] {
+        let key = (&kind, hash, length);
+        let compare = |entry: &OwnedInputEntry| {
+            (
+                &entry.object.record_kind,
+                entry.object.sha256.as_str(),
+                entry.object.byte_length,
+            )
+                .cmp(&key)
+        };
+        let first = self
+            .manifest
+            .entries
+            .partition_point(|entry| compare(entry).is_lt());
+        let last = self
+            .manifest
+            .entries
+            .partition_point(|entry| !compare(entry).is_gt());
+        &self.manifest.entries[first..last]
+    }
+    fn font(&self) -> bool {
+        self.entries(
+            RecordKind::OwnedFont,
+            &self.font,
+            kinewright_core::title_font_bytes().len() as u64,
+        )
+        .iter()
+        .any(|entry| entry.entry_id == "font:Inter")
+    }
+    /// Whether these operations import bytes directly, so the command context
+    /// must carry this manifest. Clips that an edit creates implicitly (split
+    /// halves) reuse bytes the history already owns and import nothing. This
+    /// only classifies; admission stays in [`Self::check`], after the kernel.
+    pub(crate) fn imports(operations: &[Operation]) -> bool {
+        // As before this split: a hashed source names stored bytes.
+        let owned = |fingerprint: &MediaSourceFingerprint| fingerprint.content_sha256.is_some();
+        operations.iter().any(|operation| match operation {
+            Operation::AddAsset { asset } => owned(&asset.source_fingerprint),
+            Operation::RelinkAsset { candidate, .. } => owned(&candidate.fingerprint),
+            Operation::AddLutAsset { .. } | Operation::AddTitle { .. } => true,
+            Operation::AddTrack { track } => track.clips.iter().any(|clip| {
+                crate::operation_history::Resources::clip_content(&clip.content).is_some()
+            }),
+            _ => false,
+        })
+    }
+    pub(crate) fn check(&self, operations: &[Operation]) -> Result<(), Error> {
+        for operation in operations {
+            let admitted = match operation {
+                Operation::AddAsset { asset } => match (
+                    &asset.source_fingerprint.content_sha256,
+                    asset.source_fingerprint.byte_len,
+                ) {
+                    (Some(hash), Some(length)) => self
+                        .entries(RecordKind::OwnedMedia, hash, length)
+                        .iter()
+                        .any(|entry| entry.matches_media_asset(asset)),
+                    // An unhashed source is an external locator, never a claim
+                    // to bytes owned by the store (decision 9).
+                    _ => true,
+                },
+                Operation::RelinkAsset {
+                    asset, candidate, ..
+                } => match (
+                    &candidate.fingerprint.content_sha256,
+                    candidate.fingerprint.byte_len,
+                ) {
+                    (Some(hash), Some(length)) => self
+                        .entries(RecordKind::OwnedMedia, hash, length)
+                        .iter()
+                        .any(|entry| {
+                            entry.entry_id.starts_with(&format!("media:{}:", asset.0))
+                                && entry.chunk_table_ref().is_ok()
+                                && entry.media_interpretation().is_ok_and(|interpretation| {
+                                    interpretation.kind == candidate.kind
+                                        && interpretation.fps == candidate.fps
+                                        && interpretation.duration == candidate.duration
+                                        && interpretation.resolution == candidate.resolution
+                                })
+                        }),
+                    _ => true,
+                },
+                Operation::AddLutAsset { asset } => self
+                    .entries(RecordKind::OwnedLut, &asset.sha256, asset.byte_len)
+                    .iter()
+                    .any(|entry| {
+                        crate::bundle_commit::lut_entry_id_matches(&entry.entry_id, asset)
+                    }),
+                Operation::AddTitle { .. } => self.font(),
+                Operation::AddTrack { track }
+                    if track.clips.iter().any(|clip| {
+                        crate::operation_history::Resources::clip_content(&clip.content).is_some()
+                    }) =>
+                {
+                    self.font()
+                }
+                _ => true,
+            };
+            if !admitted {
+                return Err(Error::InputRequired);
+            }
+        }
+        Ok(())
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    /// # Panics
+    /// Panics if the fixed empty test context cannot be admitted.
+    pub fn fixture() -> Self {
+        let manifest = OwnedInputManifest {
+            project_id: None,
+            session_id: None,
+            owner_epoch: 1,
+            entries: vec![],
+        };
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let reference = ObjectRef {
+            sha256: kinewright_media::sha256_bytes(&bytes),
+            byte_length: bytes.len() as u64,
+            record_kind: RecordKind::InputManifest,
+        };
+        let reservation = StorageReservation::reserve(
+            &std::sync::Arc::default(),
+            &crate::storage_budget::StorageLimits::default(),
+            0,
+            4096,
+            false,
+            u64::MAX,
+        )
+        .unwrap();
+        Self::from_reserved(reference, reservation.hold(manifest)).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn mixed_kinds_and_duplicate_content_keep_exact_membership() {
+        // The fixture owns its decode reservation; the production constructor
+        // consumes a store read with that same lifetime.
+        let mut manifest = OwnedInputManifest {
+            project_id: None,
+            session_id: None,
+            owner_epoch: 1,
+            entries: vec![],
+        };
+        for (index, (kind, hash)) in [
+            (RecordKind::OwnedFont, 'f'),
+            (RecordKind::OwnedLut, '0'),
+            (RecordKind::OwnedEvidence, '8'),
+            (RecordKind::OwnedFont, '1'),
+            (RecordKind::OwnedLut, '0'),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            manifest.entries.push(OwnedInputEntry {
+                entry_id: format!("input:{index}"),
+                object: ObjectRef {
+                    record_kind: kind,
+                    sha256: hash.to_string().repeat(64),
+                    byte_length: 7,
+                },
+                dependencies: vec![],
+                selected_stream: None,
+                time_base: None,
+                origin: None,
+                profile: None,
+            });
+        }
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let reference = ObjectRef {
+            sha256: kinewright_media::sha256_bytes(&bytes),
+            byte_length: bytes.len() as u64,
+            record_kind: RecordKind::InputManifest,
+        };
+        let usage = std::sync::Arc::default();
+        let reservation = StorageReservation::reserve(
+            &usage,
+            &crate::storage_budget::StorageLimits::default(),
+            0,
+            16384,
+            false,
+            u64::MAX,
+        )
+        .unwrap();
+        let certificate =
+            ManualInputs::from_reserved(reference, reservation.hold(manifest)).unwrap();
+        assert_eq!(
+            certificate
+                .entries(RecordKind::OwnedLut, &"0".repeat(64), 7)
+                .len(),
+            2,
+            "INPUT_MEMBERSHIP_INDEX_USES_THE_LOOKUP_ORDER"
+        );
+        assert_eq!(
+            certificate
+                .entries(RecordKind::OwnedFont, &"f".repeat(64), 7)
+                .len(),
+            1
+        );
+        assert!(
+            certificate
+                .entries(RecordKind::OwnedLut, &"0".repeat(64), 8)
+                .is_empty(),
+            "INPUT_MEMBERSHIP_REQUIRES_EXACT_LENGTH"
+        );
+        drop(certificate);
+        assert_eq!(
+            usage.lock().unwrap().decoded_bytes,
+            0,
+            "INPUT_CERTIFICATE_RELEASES_ITS_ACTUAL_DECODE_RESERVATION"
+        );
+    }
+}

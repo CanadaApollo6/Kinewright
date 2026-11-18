@@ -1,18 +1,16 @@
 //! Independently verified checkpoint rescue. Failed history grants no writer authority.
 #![allow(clippy::missing_errors_doc)]
-use super::{RecoveryAssessment, compare_edges, read_bytes, read_record, walk};
+use super::{RecoveryAssessment, compare_edges, read_record, walk};
 use crate::{
     bundle::{BundleError, BundleSaveReport, BundleWriteAdmission, ProjectBundle},
-    bundle_commit::{BranchSeed, BundleCommit},
-    bundle_records::{BranchCheckpoint, BranchId, LineageRecord, ObjectRef, RecordKind},
-    history_record::HistoryRole,
+    bundle_records::{BranchCheckpoint, BranchId, ObjectRef, RecordKind},
     namespace::{DestinationInspection, ProjectNamespace},
     owned_inputs::OwnedInputManifest,
     owned_media::InputChunkTable,
     storage_budget::{StorageLimits, StorageReservation},
     store::{BundleRecord, ProjectStore, StoreManifest},
 };
-use kinewright_core::{Document, HistoryCursor, HistorySnapshot};
+use kinewright_core::Document;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -31,7 +29,8 @@ pub struct VerifiedCheckpointRecovery {
     namespace: ProjectNamespace,
     admission: BundleWriteAdmission,
     document: StorageReservation<Arc<Document>>,
-    lineage: StorageReservation<LineageRecord>,
+    pool: crate::operation_history::HistoryPool,
+    epoch: u64,
     inputs: StorageReservation<OwnedInputManifest>,
     manifest: StorageReservation<StoreManifest>,
     disclosure: UndoHistoryUnavailable,
@@ -51,6 +50,61 @@ fn load<T: BundleRecord>(
     )
 }
 
+/// Whether a failed owner read proves the stored history unusable: a decode or
+/// identity failure of the bytes the store holds under that reference. Only
+/// that authorizes a rescue with empty history; every other failure is a
+/// refusal that leaves the record untouched and retryable. Exhaustive, so a
+/// new error variant does not compile until it is classified here.
+fn history_bytes_unusable(error: &crate::operation_history::Error) -> bool {
+    use crate::operation_history::Error as H;
+    use kinewright_core::undo::Error as C;
+    match error {
+        H::History(
+            C::Batch(_)
+            | C::InvalidDepth
+            | C::InvalidRecord
+            | C::InvalidMetadata
+            | C::InvalidDocument(_)
+            | C::DocumentMismatch
+            | C::InvalidUndo(_)
+            | C::InvalidRedo(_)
+            | C::UnsupportedCommand,
+        )
+        | H::InvalidLedger
+        | H::InvalidFrontier
+        | H::InvalidPolicy
+        | H::InvalidOrigin
+        | H::InvalidSeeds
+        | H::MissingResource
+        | H::InvalidResource
+        | H::InvalidRecord
+        | H::IdentityMismatch
+        // Decode errors, digest or length mismatches, and a content address
+        // the store does not hold.
+        | H::StoreCorrupt(_) => true,
+        H::History(
+            C::StepTooLarge
+            | C::HistoryFull
+            | C::Capacity
+            | C::DocumentCapacity
+            | C::CounterExhausted
+            | C::Encoding,
+        )
+        | H::Capacity(_)
+        | H::PoolFull(_)
+        | H::Reservation
+        | H::StoreCapacity(_)
+        | H::StoreUnsettled
+        | H::StoreRunLimit
+        // I/O (EACCES and the like), identity of the session, contention.
+        | H::Store(_)
+        | H::CommandConflict
+        | H::NoTargetStep
+        | H::StaleTransition
+        | H::InputRequired => false,
+    }
+}
+
 impl VerifiedCheckpointRecovery {
     #[must_use]
     pub fn document(&self) -> &Document {
@@ -63,20 +117,27 @@ impl VerifiedCheckpointRecovery {
 
     /// Ordinary/native open stays strict. This capability offers a checkpoint cut,
     /// never a resolved value under the failed history reference.
-    pub fn open(path: &Path) -> Result<Option<Self>, BundleError> {
-        Self::open_with_limits(path, &StorageLimits::default())
+    pub fn open(
+        path: &Path,
+        pool: &crate::operation_history::HistoryPool,
+    ) -> Result<Option<Self>, BundleError> {
+        Self::open_with_limits(path, &StorageLimits::default(), pool)
     }
     #[allow(
         clippy::too_many_lines,
         reason = "one independently verified source cut before granting a rescue capability"
     )]
-    fn open_with_limits(path: &Path, limits: &StorageLimits) -> Result<Option<Self>, BundleError> {
+    fn open_with_limits(
+        path: &Path,
+        limits: &StorageLimits,
+        pool: &crate::operation_history::HistoryPool,
+    ) -> Result<Option<Self>, BundleError> {
         let RecoveryAssessment::Quarantined {
             admission,
             branches,
             verified_document_bytes,
             ..
-        } = super::assess_with_limits(path, limits)?
+        } = super::assess_with_limits(path, limits, pool)?
         else {
             return Ok(None);
         };
@@ -104,76 +165,41 @@ impl VerifiedCheckpointRecovery {
             &admission,
         )?;
         if checkpoint.branch_id != root.manual_branch_id
-            || checkpoint.history_ref != failed.history_ref
+            || checkpoint.owner_ref != failed.history_ref
             || !verified_document_bytes.contains(&checkpoint.document_ref)
         {
             return Err(BundleError::Corrupt("recovery checkpoint identity".into()));
         }
-        // Capacity and authority failures do not authorize discarding Undo.
-        let reason = match crate::history_record::resolve_namespace_history(
+        // Only unusable stored bytes authorize discarding Undo. Capacity,
+        // permission and other store failures leave the record retryable.
+        let reason = match crate::operation_history::StoredOwnerRecord::read_namespace(
             &namespace,
-            &checkpoint.history_ref,
+            &checkpoint,
+            pool,
             &admission.data.usage,
-            &mut BTreeSet::new(),
             limits,
-            false,
         ) {
-            Err(BundleError::Corrupt(reason)) => reason,
-            Err(error) => return Err(error),
+            Err(error) if history_bytes_unusable(&error) => error.to_string(),
+            Err(
+                crate::operation_history::Error::Capacity(_)
+                | crate::operation_history::Error::PoolFull(_),
+            ) => {
+                return Err(BundleError::Capacity("checkpoint recovery admission"));
+            }
+            Err(error) => return Err(error.into()),
             Ok(_) => return Err(BundleError::HistoryChanged),
         };
         let document = load::<Document>(&namespace, &checkpoint.document_ref, &admission)?;
-        if checkpoint.document_hash != checkpoint.document_ref.sha256
-            || admission.inspection_document() != Some(&*document)
-        {
+        if admission.inspection_document() != Some(&*document) {
             return Err(BundleError::Corrupt(
                 "recovery checkpoint document mismatch".into(),
             ));
         }
-        if checkpoint.lineage_ref.record_kind != RecordKind::Lineage {
-            return Err(BundleError::Corrupt("recovery lineage kind".into()));
-        }
-        let lineage = {
-            let limits = StorageLimits::default();
-            let (bytes, _encoded) = read_bytes(
-                &namespace,
-                &checkpoint.lineage_ref,
-                &admission.data.usage,
-                &limits,
-            )?;
-            let charge = crate::store::preflight_record(&bytes, &limits)?;
-            let _wire = StorageReservation::reserve(
-                &admission.data.usage,
-                &limits,
-                0,
-                charge,
-                0,
-                false,
-                u64::MAX,
-            )?;
-            crate::lineage_journal::restore_current(&bytes, |live| {
-                StorageReservation::reserve(
-                    &admission.data.usage,
-                    &limits,
-                    0,
-                    live,
-                    0,
-                    false,
-                    u64::MAX,
-                )
-            })?
-        };
-        if lineage.current.keys().copied().collect::<BTreeSet<_>>()
-            != document
-                .tracks
-                .iter()
-                .flat_map(|t| t.clips.iter().map(|c| c.id))
-                .collect()
-        {
-            return Err(BundleError::Corrupt(
-                "recovery current occurrences mismatch".into(),
-            ));
-        }
+        let epoch = checkpoint
+            .position
+            .epoch
+            .checked_add(1)
+            .ok_or(BundleError::Capacity("install epoch"))?;
         let inputs =
             load::<OwnedInputManifest>(&namespace, &checkpoint.input_manifest_ref, &admission)?;
         if inputs.session_id.is_some()
@@ -190,19 +216,8 @@ impl VerifiedCheckpointRecovery {
         // Only the checkpoint document is being recovered. Redo-only resources
         // remain with the original quarantined history, not the empty new history.
         let document = document.map(Arc::new);
-        let history = HistorySnapshot {
-            replay_proof: None,
-            floor_offset: 0,
-            baseline: Arc::clone(&document),
-            document: Arc::clone(&document),
-            batches: vec![],
-            cursor: HistoryCursor {
-                undo: vec![],
-                redo: vec![],
-            },
-        };
         let inputs = inputs.map(|mut inputs| {
-            crate::bundle_commit::retain_history_inputs(&history, &mut inputs);
+            crate::bundle_commit::retain_document_inputs(&document, &mut inputs);
             inputs
         });
         // Bound the SHA lookup and the walk's owned visited/found keys.
@@ -213,7 +228,6 @@ impl VerifiedCheckpointRecovery {
             (manifest.objects.len() as u64)
                 .checked_mul(512)
                 .ok_or(BundleError::Capacity("recovery graph inspection"))?,
-            0,
             false,
             u64::MAX,
         )?;
@@ -287,18 +301,21 @@ impl VerifiedCheckpointRecovery {
                     .validate_binding(&entry.object, &StorageLimits::default())?;
             }
         }
-        let history_ref = checkpoint.history_ref.clone();
+        let history_ref = checkpoint.owner_ref.clone();
         namespace.verify_admitted_root(admission.raw_bytes())?;
         Ok(Some(Self {
             namespace,
             admission,
             document,
-            lineage,
+            pool: pool.clone(),
+            epoch,
             inputs,
             manifest,
             disclosure: UndoHistoryUnavailable {
                 history_ref,
-                reason,
+                reason: format!(
+                    "{reason}. Rescue keeps the current document; previous Undo steps, approvals and comment links cannot be recovered."
+                ),
             },
         }))
     }
@@ -369,6 +386,7 @@ impl VerifiedCheckpointRecovery {
             &prepared.path,
             BundleWriteAdmission::new_document(),
             &prepared,
+            &self.pool,
         )?;
         target
             .store
@@ -388,32 +406,38 @@ impl VerifiedCheckpointRecovery {
                 entries: self.inputs.entries.clone(),
             })?
             .reference;
-        let history = HistorySnapshot {
-            replay_proof: None,
-            floor_offset: 0,
-            baseline: Arc::clone(&self.document),
-            document: Arc::clone(&self.document),
-            batches: vec![],
-            cursor: HistoryCursor {
-                undo: vec![],
-                redo: vec![],
-            },
+        let branch = target.manual_branch_id.clone();
+        let origin = crate::operation_history::CreationOrigin {
+            branch: branch.clone(),
+            batch: crate::bundle_records::BatchId::fresh()?,
         };
+        let owner = crate::operation_history::OwnerHistory::new(
+            &self.pool,
+            crate::operation_history::Role::Ordinary,
+            kinewright_core::undo::RetentionPolicy::Fold,
+            &origin,
+            || Ok(Arc::clone(&self.document)),
+        )?;
+        let selected = owner.capture()?.into_install_at(self.epoch)?;
+        drop(owner);
+        let snapshot = selected.validate()?;
+        let core = crate::operation_actor::Core::open(
+            snapshot,
+            branch,
+            kinewright_core::TimelineRevision(1),
+        )
+        .map_err(crate::bundle::operation_error)?;
+        let attachment = target.attach_core(&core)?;
+        let cut = attachment
+            .freeze()
+            .map_err(crate::bundle::operation_error)?;
         self.namespace
             .verify_admitted_root(self.admission.raw_bytes())?;
-        let branch = target.manual_branch_id.clone();
-        let result = target.with_person_publication(|target| {
-            BundleCommit::publish_branch(
-                target,
-                &history,
-                &inputs,
-                &branch,
-                Some(BranchSeed {
-                    lineage: &self.lineage,
-                    role: HistoryRole::Ordinary,
-                }),
-            )
-        });
+        let result =
+            target.with_person_publication(|target| target.save_frozen(&core, &inputs, &cut));
+        attachment
+            .retire(&cut)
+            .map_err(crate::bundle::operation_error)?;
         match result {
             Err(BundleError::DurabilityUnknown) => {
                 // The diagnostic keeps the admitted identity after its parent guard drops.

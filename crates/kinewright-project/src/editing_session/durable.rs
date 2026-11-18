@@ -1,7 +1,8 @@
 //! Registration belongs to the project owner; dropping a caller's guard does not close its actor.
 use super::{BundleError, Core, Ja1EditingSession, ObjectRef, StorageReservation};
 use crate::bundle_records::{BranchId, SpecialistBaseRecord};
-use kinewright_core::{Command, Document, Event, HistorySnapshot};
+use crate::operation_history::Role;
+use kinewright_core::{Command, Document, Event};
 use std::sync::Arc;
 
 /// Exact durable identity. Runtime revision counters never substitute for this binding.
@@ -21,10 +22,10 @@ pub enum DurableBranchRole {
     RunCandidate,
 }
 impl DurableBranchRole {
-    const fn history_role(self) -> crate::history_record::HistoryRole {
+    const fn history_role(self) -> Role {
         match self {
-            Self::Session => crate::history_record::HistoryRole::Ordinary,
-            Self::RunCandidate => crate::history_record::HistoryRole::Candidate,
+            Self::Session => Role::Task,
+            Self::RunCandidate => Role::Candidate,
         }
     }
 }
@@ -35,7 +36,6 @@ pub struct FrozenTaskResult {
     base: BranchBinding,
     source: BranchBinding,
     base_ref: ObjectRef,
-    delta: Vec<kinewright_core::Operation>,
     captured_history: crate::edit_audit::CapturedHistory,
 }
 
@@ -57,9 +57,26 @@ impl FrozenTaskResult {
     pub const fn base_ref(&self) -> &ObjectRef {
         &self.base_ref
     }
-    #[must_use]
-    pub fn delta(&self) -> &[kinewright_core::Operation] {
-        &self.delta
+
+    pub fn delta(
+        &self,
+        session: &Ja1EditingSession,
+    ) -> Result<crate::operation_history::OwnerOperations, BundleError> {
+        let bundle = session.active_bundle()?;
+        let checkpoint = bundle
+            .store
+            .read_record::<crate::bundle_records::BranchCheckpoint>(&self.source.checkpoint)?;
+        if checkpoint.branch_id != self.source.branch
+            || checkpoint.head_id != self.source.head
+            || checkpoint.document_ref.sha256 != self.source.document_hash
+            || checkpoint.role == Role::Ordinary
+        {
+            return Err(BundleError::HistoryChanged);
+        }
+        let reader = checkpoint
+            .open(&bundle.store, bundle.history_pool())?
+            .into_reader()?;
+        reader.into_operations().map_err(BundleError::from)
     }
     #[must_use]
     pub const fn captured_history(&self) -> crate::edit_audit::CapturedHistory {
@@ -69,7 +86,6 @@ impl FrozenTaskResult {
 
 pub(super) struct PendingCandidateCommit {
     pub(super) core: Core,
-    cut: kinewright_core::AcceptedCut,
     pub(super) envelope: crate::receipts::CommandEnvelope,
 }
 
@@ -79,10 +95,8 @@ pub struct DurableBranchSessionGuard {
     pub(super) base: Arc<StorageReservation<SpecialistBaseRecord>>,
     core: Core,
     pub(super) epoch: u64,
-    floor_source: Arc<StorageReservation<kinewright_core::HistoryTransport>>,
 }
 pub(super) struct RegisteredSession {
-    pub(super) digest_cache: std::cell::RefCell<super::HistoryDigestCache>,
     pub(super) guard: DurableBranchSessionGuard,
     pub(super) name: String,
     pin: crate::store::StorePin,
@@ -163,7 +177,7 @@ impl Ja1EditingSession {
         self.durable_sessions
             .try_reserve(1)
             .map_err(|_| BundleError::Capacity("durable session registrations"))?;
-        self.store()?.reserve(0, name.len() as u64 + 512, 0, false)
+        self.store()?.reserve(0, name.len() as u64 + 512, false)
     }
     pub fn candidate_binding(&self, branch: &BranchId) -> Result<BranchBinding, BundleError> {
         let bundle = self.active_bundle()?;
@@ -175,7 +189,7 @@ impl Ja1EditingSession {
             branch: branch.clone(),
             head: checkpoint.head_id.clone(),
             checkpoint: bundle.checkpoint_reference(branch)?,
-            document_hash: checkpoint.document_hash.clone(),
+            document_hash: checkpoint.document_ref.sha256.clone(),
         })
     }
     /// A prepared binding is published only with its matching H1 history record.
@@ -203,9 +217,10 @@ impl Ja1EditingSession {
             .ok_or(BundleError::HistoryChanged)?;
         let core = registered.guard.core.clone();
         if core
-            .export_history()
-            .map_err(crate::bundle::history_error)?
-            != *bundle.branch_history(&binding.branch)?
+            .change_id()
+            .map_err(crate::bundle::operation_error)?
+            .position
+            != bundle.checkpoint(&binding.branch)?.position
         {
             return Err(BundleError::HistoryChanged);
         }
@@ -252,40 +267,26 @@ impl Ja1EditingSession {
                 .read_record::<crate::bundle_records::BranchCheckpoint>(&base.checkpoint)?;
             let history = bundle.branch_history(branch)?;
             let retained = bundle.checkpoint(branch)?;
-            let lineage = bundle.branch_lineage(branch)?;
-            let origin = bundle
-                .store()
-                .read_record::<crate::bundle_records::LineageRecord>(&checkpoint.lineage_ref)?;
-            if !history.cursor.undo.is_empty()
-                || !history.cursor.redo.is_empty()
-                || retained.document_hash != base.document_hash
+            if !history.history().undo().is_empty()
+                || !history.history().redo().is_empty()
+                || retained.role != Role::Task
+                || retained.document_ref.sha256 != base.document_hash
+                || history.history().baseline() != history.history().document()
                 || retained.input_manifest_ref != checkpoint.input_manifest_ref
-                || lineage.branch_origin != *branch
-                || lineage.baseline != origin.current
-                || lineage.current != origin.current
-                || !lineage.undo.is_empty()
-                || !lineage.redo.is_empty()
-                || lineage.split_ancestry != origin.split_ancestry
             {
                 return Err(BundleError::HistoryChanged);
             }
             let specialist = SpecialistBaseRecord {
-                history_role: crate::history_record::HistoryRole::Task,
+                history_role: Role::Task,
                 target_branch: base.branch.clone(),
                 base_head: base.head.clone(),
                 base_document_hash: base.document_hash.clone(),
                 original_baseline_ref: checkpoint.document_ref.clone(),
                 frozen_checkpoint_ref: base.checkpoint.clone(),
-                full_applied_delta: vec![],
             };
             let reference = bundle.stage_specialist_base(&specialist)?;
             return self
-                .reopen_branch(
-                    branch.clone(),
-                    &reference,
-                    name,
-                    crate::history_record::HistoryRole::Task,
-                )
+                .reopen_branch(branch.clone(), &reference, name, Role::Task)
                 .map(Some);
         }
         Ok(None)
@@ -301,54 +302,78 @@ impl Ja1EditingSession {
         {
             return Ok(guard);
         }
-        self.candidate_core(base)?;
+        let parent = self.candidate_core(base)?;
         let charge = self.registration_capacity(name)?;
+        let branch = branch.unwrap_or(BranchId::fresh()?);
+        let (core, _) = parent
+            .fork(
+                Role::Task,
+                crate::operation_history::CreationOrigin {
+                    branch: branch.clone(),
+                    batch: crate::bundle_records::BatchId::fresh()?,
+                },
+                false,
+            )
+            .map_err(crate::bundle::operation_error)?;
+        self.register_fork(core, branch, base, Role::Task, name, charge)
+    }
+    fn register_fork(
+        &mut self,
+        core: Core,
+        branch: BranchId,
+        base: &BranchBinding,
+        role: Role,
+        name: &str,
+        charge: StorageReservation,
+    ) -> Result<DurableBranchSessionGuard, BundleError> {
         let bundle = self.active_bundle_mut()?;
-        let checkpoint = bundle.checkpoint(&base.branch)?.clone();
-        let history = bundle.branch_history(&base.branch)?;
-        let core = Core::spawn(std::sync::Arc::clone(&history.document))
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let frozen = core
-            .export_history()
-            .map_err(crate::bundle::history_error)?;
+        let checkpoint = bundle
+            .store
+            .read_record::<crate::bundle_records::BranchCheckpoint>(&base.checkpoint)?;
+        if checkpoint.branch_id != base.branch
+            || checkpoint.head_id != base.head
+            || checkpoint.document_ref.sha256 != base.document_hash
+            || bundle.branches.contains_key(&branch)
+        {
+            return Err(BundleError::HistoryChanged);
+        }
         let specialist = SpecialistBaseRecord {
-            history_role: crate::history_record::HistoryRole::Task,
+            history_role: role,
             target_branch: base.branch.clone(),
             base_head: base.head.clone(),
             base_document_hash: base.document_hash.clone(),
-            original_baseline_ref: checkpoint.document_ref,
+            original_baseline_ref: checkpoint.document_ref.clone(),
             frozen_checkpoint_ref: base.checkpoint.clone(),
-            full_applied_delta: vec![],
         };
+        // Reserve the immutable base's version slot before a task can accept
+        // work. Its growing tail never consumes another base slot.
+        bundle.stage_specialist_base(&specialist)?;
         let pin = bundle.store.pin(std::slice::from_ref(&base.checkpoint))?;
-        let encoded = serde_json::to_vec(&specialist).map_err(crate::bundle::encoding_error)?;
-        let specialist = Arc::new(
+        let bytes = serde_json::to_vec(&specialist).map_err(crate::bundle::encoding_error)?;
+        let base = Arc::new(
             bundle
                 .store
-                .reserve_retained_capture(&encoded)?
+                .reserve_retained_capture(&bytes)?
                 .hold(specialist),
         );
-        let anchor = kinewright_core::HistoryTransport::capture(&frozen)
-            .map_err(crate::bundle::history_error)?;
-        let floor_source = Arc::new(bundle.store.reserve_history_anchor(&anchor)?.hold(anchor));
-        let branch = match branch {
-            Some(branch) => bundle.fork_branch_as(
-                &base.branch,
-                branch,
-                crate::history_record::HistoryRole::Task,
-            )?,
-            None => bundle.fork_branch(&base.branch, crate::history_record::HistoryRole::Task)?,
-        };
+        let capture = core
+            .capture_state()
+            .map_err(crate::bundle::operation_error)?;
+        crate::bundle_commit::BundleCommit::publish_branch(
+            bundle,
+            &capture,
+            &checkpoint.input_manifest_ref,
+            &branch,
+        )?;
+        drop(capture);
         bundle.attach_core(&core)?;
         let guard = DurableBranchSessionGuard {
             branch,
-            base: specialist,
+            base,
             core,
             epoch: bundle.store.owner_epoch(),
-            floor_source,
         };
         self.durable_sessions.push(RegisteredSession {
-            digest_cache: std::cell::RefCell::new(None),
             guard: guard.clone(),
             name: name.into(),
             pin,
@@ -365,7 +390,7 @@ impl Ja1EditingSession {
             .store()?
             .read_record::<SpecialistBaseRecord>(base)?
             .history_role;
-        if role == crate::history_record::HistoryRole::Ordinary {
+        if role == Role::Ordinary {
             return Err(BundleError::HistoryChanged);
         }
         self.reopen_branch(branch, base, "native branch", role)
@@ -406,7 +431,6 @@ impl Ja1EditingSession {
                 self.candidate_binding(guard.branch_id())?
             },
             base_ref,
-            delta: base.full_applied_delta.clone(),
             captured_history: persisted.captured_history,
         })
     }
@@ -424,6 +448,7 @@ impl Ja1EditingSession {
             return Err(BundleError::HistoryChanged);
         };
         let bundle = self.active_bundle()?;
+        let context = self.candidate_merge_context(frozen, &id)?;
         Ok(crate::receipts::CommandEnvelope {
             version: 1,
             action: "edit".into(),
@@ -434,14 +459,42 @@ impl Ja1EditingSession {
             expected_head: Some(frozen.base.head.clone()),
             expected_revision: revision,
             command: Some(kinewright_core::JournalCommand::DoBatch(
-                frozen.delta.clone(),
+                frozen.delta(self)?.iter().cloned().collect(),
             )),
             switch: None,
-            manual: None,
+            context: Some(context),
             lease: None,
             comment_text: None,
             comment_strokes: None,
             evidence: vec![],
+        })
+    }
+    fn candidate_merge_context(
+        &self,
+        frozen: &FrozenTaskResult,
+        id: &crate::receipts::CommandId,
+    ) -> Result<crate::operation_actor::CommandContext, BundleError> {
+        let bundle = self.active_bundle()?;
+        let checkpoint = bundle
+            .store
+            .read_record::<crate::bundle_records::BranchCheckpoint>(&frozen.source.checkpoint)?;
+        let record = bundle
+            .store
+            .read_record::<crate::operation_history::StoredOwnerRecord>(&checkpoint.owner_ref)?;
+        let mut inputs: std::collections::BTreeSet<_> = record
+            .edges
+            .iter()
+            .filter(|r| r.record_kind == crate::bundle_records::RecordKind::InputManifest)
+            .cloned()
+            .collect();
+        inputs.insert(checkpoint.input_manifest_ref.clone());
+        Ok(crate::operation_actor::CommandContext {
+            creation: crate::operation_history::CreationOrigin {
+                branch: frozen.base.branch.clone(),
+                batch: crate::bundle_records::BatchId::command(id)?,
+            },
+            inputs: inputs.into_iter().collect(),
+            approval: None,
             transition: None,
         })
     }
@@ -461,48 +514,52 @@ impl Ja1EditingSession {
         core: &Core,
         frozen: &FrozenTaskResult,
         envelope: &crate::receipts::CommandEnvelope,
-    ) -> Result<HistorySnapshot, BundleError> {
-        // This preview owns no pending state and cannot latch a store refusal.
-        // The expected head/revision above remains bound until the owner stages it.
-        let target = &frozen.base.branch;
-        self.store()?.replay_gate().with(|| {
-            let before = core
-                .export_history()
-                .map_err(crate::bundle::history_error)?;
-            let preview = Core::spawn(std::sync::Arc::clone(&before.baseline))
-                .map_err(|error| BundleError::Corrupt(error.to_string()))?;
-            preview
-                .restore_history(before.clone())
-                .map_err(crate::bundle::history_error)?;
-            let event = preview
-                .request(Command::DoBatch(frozen.delta.clone()))
-                .map_err(|error| BundleError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, error)))?;
-            if !matches!(event, Event::DocumentChanged { .. }) {
+    ) -> Result<(), BundleError> {
+        let owner = self.active_bundle()?.attach_core(core)?;
+        let cut = owner.freeze().map_err(crate::bundle::operation_error)?;
+        let result = (|| {
+            if cut.change().revision != envelope.expected_revision {
                 return Err(BundleError::HistoryChanged);
             }
-            let proposed = preview
-                .export_history()
-                .map_err(crate::bundle::history_error)?;
-            let registered = &self
-                .durable_sessions
-                .iter()
-                .find(|session| &session.guard.branch == target)
-                .ok_or(BundleError::HistoryChanged)?
-                .guard;
-            self.task_history_admission(registered)?.check_role(&proposed, crate::history_record::HistoryRole::Candidate)
-                .map_err(|error| match error {
-                    BundleError::Capacity(_) | BundleError::RunAdmission(_) => BundleError::RunAdmission("Candidate history limit reached. Keep this result frozen and use publish_result to report the limit."),
-                    other => other,
+            let context = crate::operation_actor::CommandContext {
+                creation: crate::operation_history::CreationOrigin {
+                    branch: frozen.base.branch.clone(),
+                    batch: crate::bundle_records::BatchId::fresh()?,
+                },
+                inputs: vec![],
+                approval: None,
+                transition: None,
+            };
+            let update = owner
+                .prepare_merge(&cut, frozen.delta(self)?.iter().cloned().collect(), context)
+                .map_err(|error| {
+                    use crate::{operation_actor::Error, operation_history::Error as HistoryError};
+                    if matches!(
+                        error,
+                        Error::History(
+                            HistoryError::History(
+                                kinewright_core::undo::Error::StepTooLarge
+                                    | kinewright_core::undo::Error::HistoryFull
+                                    | kinewright_core::undo::Error::Capacity
+                                    | kinewright_core::undo::Error::DocumentCapacity
+                            ) | HistoryError::Capacity(_)
+                        )
+                    ) {
+                        BundleError::RunAdmission(
+                            "Candidate history limit reached. Keep this result frozen and use publish_result to report the limit.",
+                        )
+                    } else {
+                        // Temporary pool/workspace pressure stays typed and
+                        // retryable; only this fixed history budget is exhausted.
+                        crate::bundle::operation_error(error)
+                    }
                 })?;
-            let encoded = serde_json::to_vec(envelope)
-                .map_err(crate::bundle::encoding_error)?;
-            if encoded.len() as u64 > self.store()?.limits().command_bytes {
-                return Err(BundleError::RunAdmission(
-                    "Candidate history limit reached. Keep this result frozen and use publish_result to report the limit.",
-                ));
-            }
-            Ok(before)
-        })?
+            drop(update);
+            envelope.encoded_bytes()?;
+            Ok(())
+        })();
+        owner.resume(&cut).map_err(crate::bundle::operation_error)?;
+        result
     }
     pub fn commit_candidate(
         &mut self,
@@ -513,17 +570,19 @@ impl Ja1EditingSession {
             if pending.envelope != *envelope {
                 return Err(BundleError::Unsettled);
             }
-            if let Err(error) = self.reconcile_active() {
-                return match self.active_bundle()?.receipt_lookup(envelope)? {
-                    receipt @ (crate::receipts::ReceiptLookup::Committed(_)
-                    | crate::receipts::ReceiptLookup::Retired(_)) => Ok(receipt),
-                    _ => Err(error),
-                };
-            }
+            self.reconcile_active()?;
         }
         let bundle = self.active_bundle()?;
         let previous = bundle.receipt_lookup(envelope)?;
         if previous != crate::receipts::ReceiptLookup::Absent {
+            if matches!(
+                previous,
+                crate::receipts::ReceiptLookup::Committed(_)
+                    | crate::receipts::ReceiptLookup::Retired(_)
+            ) {
+                self.active_bundle_mut()?
+                    .settle_matching_receipt(envelope)?;
+            }
             return Ok(previous);
         }
         if bundle.unsettled || bundle.pending_command.is_some() {
@@ -545,34 +604,7 @@ impl Ja1EditingSession {
             .checkpoint(&target)?
             .input_manifest_ref
             .clone();
-        let verified_before = self.preview_candidate_merge(&core, frozen, envelope)?;
-        let attachment = self.active_bundle()?.attach_core(&core)?;
-        let cut = attachment.freeze().map_err(crate::bundle::history_error)?;
-        if cut.revision() != envelope.expected_revision || cut.history() != &verified_before {
-            attachment
-                .resume(&cut)
-                .map_err(crate::bundle::history_error)?;
-            return Err(BundleError::HistoryChanged);
-        }
-        let charge = match (|| {
-            self.store()?.reserve_history_capture(
-                cut.history(),
-                crate::history_record::HistoryRole::Candidate,
-            )
-        })() {
-            Ok(charge) => charge,
-            Err(error) => {
-                attachment
-                    .resume(&cut)
-                    .map_err(crate::bundle::history_error)?;
-                return Err(error);
-            }
-        };
-        self.pending_candidate = Some(charge.hold(PendingCandidateCommit {
-            core: core.clone(),
-            cut,
-            envelope: envelope.clone(),
-        }));
+        self.preview_candidate_merge(&core, frozen, envelope)?;
         let bundle = self.active_bundle_mut()?;
         let result = crate::bundle_commit::BundleCommit::command_target(
             bundle,
@@ -580,7 +612,7 @@ impl Ja1EditingSession {
             &core,
             &inputs,
             &[],
-            false,
+            true,
             &target,
         );
         if result.is_ok() {
@@ -592,33 +624,9 @@ impl Ja1EditingSession {
         result
     }
     pub(super) fn settle_pending_candidate(&mut self) -> Result<(), BundleError> {
-        let Some(pending) = &self.pending_candidate else {
-            return Ok(());
-        };
-        let core = pending.core.clone();
-        let cut = pending.cut.clone();
-        let envelope = pending.envelope.clone();
-        let bundle = self.active_bundle_mut()?;
-        let attachment = bundle.attach_core(&core)?;
-        let cut = match bundle.receipt_lookup(&envelope)? {
-            crate::receipts::ReceiptLookup::Committed(_)
-            | crate::receipts::ReceiptLookup::Retired(_) => {
-                #[cfg(any(test, feature = "test-util"))]
-                crate::io_observer::check_failure(
-                    "candidate_settlement",
-                    &bundle.store.resolved_root()?,
-                )?;
-                let after = bundle.branch_history(&envelope.target_branch)?;
-                attachment
-                    .install_frozen_checkpoint(&cut, (*after).clone())
-                    .map_err(crate::bundle::history_error)?
-            }
-            crate::receipts::ReceiptLookup::Absent => cut,
-            _ => return Err(BundleError::Unsettled),
-        };
-        attachment
-            .resume(&cut)
-            .map_err(crate::bundle::history_error)?;
+        if self.active_bundle()?.unsettled {
+            return Err(BundleError::Unsettled);
+        }
         self.pending_candidate = None;
         Ok(())
     }
@@ -630,79 +638,37 @@ impl Ja1EditingSession {
         if self
             .core
             .attachment_state()
-            .map_err(crate::bundle::history_error)?
+            .map_err(crate::bundle::operation_error)?
             != kinewright_core::AttachmentState::Live
         {
             return Err(BundleError::Unsettled);
         }
         let charge = self.registration_capacity(name)?;
-        let live = self
-            .core
-            .export_history()
-            .map_err(crate::bundle::history_error)?;
         if self.dirty()? {
             return Err(BundleError::HistoryChanged);
         }
-        let core = Core::spawn(std::sync::Arc::clone(&live.document))
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let bundle = self.active_bundle_mut()?;
+        let bundle = self.active_bundle()?;
         let target = bundle.manual_branch_id().clone();
-        if live != *bundle.branch_history(&target)? {
-            return Err(BundleError::HistoryChanged);
-        }
-        let checkpoint = bundle.checkpoint(&target)?.clone();
-        let base = SpecialistBaseRecord {
-            history_role: role.history_role(),
-            target_branch: target.clone(),
-            base_head: checkpoint.head_id,
-            base_document_hash: checkpoint.document_hash,
-            original_baseline_ref: checkpoint.document_ref,
-            frozen_checkpoint_ref: bundle.checkpoint_reference(&target)?,
-            full_applied_delta: vec![],
+        let checkpoint = bundle.checkpoint(&target)?;
+        let base = BranchBinding {
+            branch: target.clone(),
+            head: checkpoint.head_id.clone(),
+            checkpoint: bundle.checkpoint_reference(&target)?,
+            document_hash: checkpoint.document_ref.sha256.clone(),
         };
-        let pin = bundle
-            .store
-            .pin(std::slice::from_ref(&base.frozen_checkpoint_ref))?;
-        let encoded = serde_json::to_vec(&base).map_err(crate::bundle::encoding_error)?;
-        let base = Arc::new(bundle.store.reserve_retained_capture(&encoded)?.hold(base));
-        let attachment = bundle.attach_core(&core)?;
-        let candidate_cut = attachment.freeze().map_err(crate::bundle::history_error)?;
-        if !candidate_cut.history().batches.is_empty() {
-            attachment
-                .resume(&candidate_cut)
-                .map_err(crate::bundle::history_error)?;
-            return Err(BundleError::HistoryChanged);
-        }
-        let anchor = kinewright_core::HistoryTransport::capture(candidate_cut.history())
-            .map_err(crate::bundle::history_error)?;
-        let floor_source = Arc::new(bundle.store.reserve_history_anchor(&anchor)?.hold(anchor));
-        let branch = match bundle.fork_branch(&target, role.history_role()) {
-            Ok(branch) => branch,
-            Err(error) => {
-                attachment
-                    .seal(&candidate_cut)
-                    .map_err(crate::bundle::history_error)?;
-                return Err(error);
-            }
-        };
-        let guard = DurableBranchSessionGuard {
-            branch,
-            floor_source,
-            base,
-            core: core.clone(),
-            epoch: bundle.store.owner_epoch(),
-        };
-        self.durable_sessions.push(RegisteredSession {
-            digest_cache: std::cell::RefCell::new(None),
-            guard: guard.clone(),
-            name: name.into(),
-            pin,
-            _charge: charge,
-        });
-        attachment
-            .resume(&candidate_cut)
-            .map_err(crate::bundle::history_error)?;
-        Ok(guard)
+        let branch = BranchId::fresh()?;
+        let (core, _) = self
+            .core
+            .fork(
+                role.history_role(),
+                crate::operation_history::CreationOrigin {
+                    branch: branch.clone(),
+                    batch: crate::bundle_records::BatchId::fresh()?,
+                },
+                false,
+            )
+            .map_err(crate::bundle::operation_error)?;
+        self.register_fork(core, branch, &base, role.history_role(), name, charge)
     }
     pub fn reopen_durable_branch(
         &mut self,
@@ -718,7 +684,7 @@ impl Ja1EditingSession {
         branch: BranchId,
         base_ref: &ObjectRef,
         name: &str,
-        role: crate::history_record::HistoryRole,
+        role: Role,
     ) -> Result<DurableBranchSessionGuard, BundleError> {
         let session = self.prepare_reopened_branch(branch, base_ref, name, role)?;
         let guard = session.guard.clone();
@@ -741,12 +707,8 @@ impl Ja1EditingSession {
             .map_err(|_| BundleError::Capacity("durable session registrations"))?;
         let mut prepared = Vec::new();
         for (branch, base, role) in [
-            (task, task_base, crate::history_record::HistoryRole::Task),
-            (
-                candidate,
-                candidate_base,
-                crate::history_record::HistoryRole::Candidate,
-            ),
+            (task, task_base, Role::Task),
+            (candidate, candidate_base, Role::Candidate),
         ] {
             if !self
                 .durable_sessions
@@ -770,12 +732,12 @@ impl Ja1EditingSession {
         branch: BranchId,
         base_ref: &ObjectRef,
         name: &str,
-        role: crate::history_record::HistoryRole,
+        role: Role,
     ) -> Result<RegisteredSession, BundleError> {
         if self
             .core
             .attachment_state()
-            .map_err(crate::bundle::history_error)?
+            .map_err(crate::bundle::operation_error)?
             != kinewright_core::AttachmentState::Live
             || self.active_bundle()?.unsettled
         {
@@ -797,7 +759,7 @@ impl Ja1EditingSession {
         let base = bundle
             .store
             .read_record::<SpecialistBaseRecord>(&base_ref)?;
-        if base.history_role != role || bundle.checkpoint(&branch)?.history_role != role {
+        if base.history_role != role || bundle.checkpoint(&branch)?.role != role {
             return Err(BundleError::HistoryChanged);
         }
         let checkpoint = bundle
@@ -805,53 +767,38 @@ impl Ja1EditingSession {
             .read_record::<crate::bundle_records::BranchCheckpoint>(&base.frozen_checkpoint_ref)?;
         if checkpoint.branch_id != base.target_branch
             || checkpoint.head_id != base.base_head
-            || checkpoint.document_hash != base.base_document_hash
+            || checkpoint.document_ref.sha256 != base.base_document_hash
             || checkpoint.document_ref != base.original_baseline_ref
             || !bundle.branches.contains_key(&base.target_branch)
         {
             return Err(BundleError::HistoryChanged);
         }
-        let history = bundle.branch_history(&branch)?;
-        let lineage = bundle.branch_lineage(&branch)?;
-        crate::history_size::verify_history_lineage(
-            &history,
-            &lineage,
-            role,
-            bundle.store().limits(),
-        )?;
-        drop(lineage);
-        let core =
-            Core::spawn(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        bundle
-            .attach_core(&core)?
-            .restore_history((*history).clone())
-            .map_err(crate::bundle::history_error)?;
-        let attachment = bundle.attach_core(&core)?;
-        let candidate_cut = attachment.freeze().map_err(crate::bundle::history_error)?;
+        let current = bundle.checkpoint(&branch)?;
+        let record = bundle
+            .store
+            .read_record::<crate::operation_history::StoredOwnerRecord>(&current.owner_ref)?;
+        if record.baseline != base.original_baseline_ref {
+            return Err(BundleError::HistoryChanged);
+        }
+        drop(record);
+        let snapshot = current.open(&bundle.store, bundle.history_pool())?;
+        let core = Core::open(snapshot, branch.clone(), current.revision)
+            .map_err(crate::bundle::operation_error)?;
+        bundle.attach_core(&core)?;
         let pin = bundle
             .store
             .pin(&[base_ref.clone(), bundle.checkpoint_reference(&branch)?])?;
-        let anchor = kinewright_core::HistoryTransport::capture(candidate_cut.history())
-            .map_err(crate::bundle::history_error)?;
-        let floor_source = Arc::new(bundle.store.reserve_history_anchor(&anchor)?.hold(anchor));
-        let guard = DurableBranchSessionGuard {
-            branch,
-            floor_source,
-            base: Arc::new(base),
-            core: core.clone(),
-            epoch: bundle.store.owner_epoch(),
-        };
-        let session = RegisteredSession {
-            digest_cache: std::cell::RefCell::new(None),
-            guard,
+        Ok(RegisteredSession {
+            guard: DurableBranchSessionGuard {
+                branch,
+                base: Arc::new(base),
+                core,
+                epoch: bundle.store.owner_epoch(),
+            },
             name: name.into(),
             pin,
             _charge: charge,
-        };
-        attachment
-            .resume(&candidate_cut)
-            .map_err(crate::bundle::history_error)?;
-        Ok(session)
+        })
     }
     pub(super) fn registered(
         &self,
@@ -871,18 +818,15 @@ impl Ja1EditingSession {
         guard: &DurableBranchSessionGuard,
     ) -> Result<Arc<Document>, BundleError> {
         self.registered(guard)?;
-        Ok(Arc::new(
-            (*self
-                .registered_bundle(guard)?
-                .store()
-                .read_record::<Document>(&guard.base.original_baseline_ref)?)
-            .clone(),
-        ))
+        guard
+            .core
+            .baseline_document()
+            .map_err(|error| BundleError::Corrupt(error.to_string()))
     }
     pub fn durable_branch_history(
         &self,
         guard: &DurableBranchSessionGuard,
-    ) -> Result<StorageReservation<HistorySnapshot>, BundleError> {
+    ) -> Result<crate::operation_history::OwnerRead, BundleError> {
         self.registered(guard)?;
         let bundle = self.registered_bundle(guard)?;
         if bundle.unsettled {
@@ -920,11 +864,11 @@ impl Ja1EditingSession {
             .guard;
         let history = core
             .export_history()
-            .map_err(crate::bundle::history_error)?;
-        let base = self.specialist_checkpoint_base(guard, &history)?;
+            .map_err(crate::bundle::operation_error)?;
+        let base = guard.base();
         crate::orchestration_retention::measure_pending_task_history(
             &history,
-            &base,
+            base,
             self.store()?.limits(),
         )
     }
@@ -938,129 +882,68 @@ impl Ja1EditingSession {
         resume: bool,
         retain_checkpoint: bool,
     ) -> Result<PersistedTaskCheckpoint, BundleError> {
-        let _reading = crate::run_admission::reading(self.store()?);
         let index = self.registered(guard)?;
-        let canonical = self.durable_sessions[index].guard.clone();
-        if self
-            .core
-            .attachment_state()
-            .map_err(crate::bundle::history_error)?
-            != kinewright_core::AttachmentState::Live
-            || self.registered_bundle(&canonical)?.unsettled
-        {
-            return Err(BundleError::Unsettled);
+        if !retain_checkpoint {
+            self.registered_bundle(guard)?
+                .refuse_unpaired_task_checkpoint(guard.branch_id())?;
         }
+        let canonical = self.durable_sessions[index].guard.clone();
         let owner = self
             .registered_bundle(&canonical)?
             .attach_core(&canonical.core)?;
-        let cut = owner.freeze().map_err(crate::bundle::history_error)?;
+        let cut = owner.freeze().map_err(crate::bundle::operation_error)?;
         let captured_history = crate::edit_audit::CapturedHistory::from_cut(&cut);
         let result = (|| {
-            if retain_checkpoint
-                && let Some(staged) = self
-                    .registered_bundle(&canonical)?
-                    .task_checkpoints
-                    .get(&canonical.branch)
-                && **staged.history == *cut.history()
-            {
-                *guard = canonical.clone();
-                return Ok(staged.base_ref.clone());
+            let bundle = self.registered_bundle_mut(&canonical)?;
+            if bundle.unsettled {
+                return Err(BundleError::Unsettled);
             }
-            let base = self.specialist_checkpoint_base(&canonical, cut.history())?;
-            let base_bytes = serde_json::to_vec(&base).map_err(crate::bundle::encoding_error)?;
-            let same_base = base == *canonical.base();
-            let reference = ObjectRef {
-                sha256: kinewright_media::sha256_bytes(&base_bytes),
-                byte_length: base_bytes.len() as u64,
-                record_kind: crate::bundle_records::RecordKind::SpecialistBase,
-            };
-            if retain_checkpoint
-                && same_base
-                && cut.history()
-                    == &*self
-                        .registered_bundle(&canonical)?
-                        .branch_history(&canonical.branch)?
-                && self
-                    .registered_bundle(&canonical)?
-                    .store()
-                    .verify(&reference)
-                    .is_ok()
-                && self
-                    .registered_bundle(&canonical)?
-                    .root()
-                    .is_some_and(|root| {
+            let reference = bundle.stage_specialist_base(canonical.base())?;
+            let checkpoint = bundle.checkpoint(&canonical.branch)?;
+            let inputs = checkpoint.input_manifest_ref.clone();
+            let same = if let Some(staged) = bundle.task_checkpoints.get(&canonical.branch) {
+                staged.checkpoint.identity == cut.identity() && staged.base_ref == reference
+            } else {
+                checkpoint.identity == cut.identity()
+                    && bundle.root().is_some_and(|root| {
                         root.candidate_recovery
                             .get(&canonical.branch)
-                            .is_some_and(|binding| {
-                                binding.base_ref == reference
-                                    && self
-                                        .registered_bundle(&canonical)
-                                        .and_then(|bundle| {
-                                            bundle.checkpoint_reference(&canonical.branch)
-                                        })
-                                        .is_ok_and(|checkpoint| binding.checkpoint == checkpoint)
-                            })
+                            .is_some_and(|binding| binding.base_ref == reference)
                     })
-            {
-                *guard = canonical.clone();
-                return Ok(reference);
-            }
-            let source = self.registered_bundle(&canonical)?.store();
-            let base = Arc::new(source.reserve_retained_capture(&base_bytes)?.hold(base));
-            let anchor = kinewright_core::HistoryTransport::capture(cut.history())
-                .map_err(crate::bundle::history_error)?;
-            let floor_source = Arc::new(source.reserve_history_anchor(&anchor)?.hold(anchor));
-            *guard = DurableBranchSessionGuard {
-                base,
-                floor_source,
-                ..canonical.clone()
             };
-            self.durable_sessions[index].guard = guard.clone();
-            let bundle = self.registered_bundle_mut(guard)?;
-            let before = (bundle.evidence.len(), bundle.pending_evidence.len());
-            let reference = bundle.stage_specialist_base(guard.base())?;
-            let inputs = bundle.checkpoint(&guard.branch)?.input_manifest_ref.clone();
-            let publication = if retain_checkpoint {
-                crate::bundle_commit::BundleCommit::stage_task_checkpoint(
-                    bundle,
-                    cut.history(),
-                    &inputs,
-                    &guard.branch,
-                    &reference,
-                )
-            } else {
-                bundle
-                    .save_frozen_branch_with_base(
-                        &guard.core,
+            if !same {
+                if retain_checkpoint {
+                    crate::bundle_commit::BundleCommit::stage_task_checkpoint(
+                        bundle,
+                        &canonical
+                            .core
+                            .capture_state()
+                            .map_err(crate::bundle::operation_error)?,
+                        &inputs,
+                        &canonical.branch,
+                        &reference,
+                    )?;
+                } else {
+                    bundle.save_frozen_branch_with_base(
+                        &canonical.core,
                         &inputs,
                         &cut,
-                        &guard.branch,
+                        &canonical.branch,
                         Some(&reference),
-                    )
-                    .map(|_| ())
-            };
-            if let Err(error) = publication {
-                if !bundle.unsettled {
-                    bundle.evidence.truncate(before.0);
-                    bundle.pending_evidence.truncate(before.1);
+                    )?;
                 }
-                return Err(error);
             }
-            let pin = bundle.store.pin(&[
-                reference.clone(),
-                bundle.task_checkpoints.get(&guard.branch).map_or_else(
-                    || bundle.checkpoint_reference(&guard.branch),
-                    |staged| Ok(staged.reference.clone()),
-                )?,
-            ])?;
+            let checkpoint = bundle.task_checkpoints.get(&canonical.branch).map_or_else(
+                || bundle.checkpoint_reference(&canonical.branch),
+                |staged| Ok(staged.reference.clone()),
+            )?;
+            let pin = bundle.store.pin(&[reference.clone(), checkpoint])?;
             self.durable_sessions[index].pin = pin;
+            *guard = canonical.clone();
             Ok(reference)
         })();
-        let current = owner.capture().map_err(crate::bundle::history_error)?;
-        if resume || result.is_err() {
-            owner
-                .resume(&current)
-                .map_err(crate::bundle::history_error)?;
+        if (resume || result.is_err()) && !self.registered_bundle(&canonical)?.unsettled {
+            owner.resume(&cut).map_err(crate::bundle::operation_error)?;
         }
         result.map(|base_ref| PersistedTaskCheckpoint {
             base_ref,
@@ -1090,7 +973,7 @@ impl Ja1EditingSession {
         if self
             .core
             .attachment_state()
-            .map_err(crate::bundle::history_error)?
+            .map_err(crate::bundle::operation_error)?
             != kinewright_core::AttachmentState::Live
             || self.registered_bundle(guard)?.unsettled
         {
@@ -1098,9 +981,9 @@ impl Ja1EditingSession {
         }
         let bundle = self.registered_bundle_mut(guard)?;
         let owner = bundle.attach_core(&guard.core)?;
-        let cut = owner.freeze().map_err(crate::bundle::history_error)?;
-        if cut.history() != &*bundle.branch_history(&guard.branch)? {
-            owner.resume(&cut).map_err(crate::bundle::history_error)?;
+        let cut = owner.freeze().map_err(crate::bundle::operation_error)?;
+        if cut.identity() != bundle.checkpoint(&guard.branch)?.identity {
+            owner.resume(&cut).map_err(crate::bundle::operation_error)?;
             return Err(BundleError::Identity(
                 "persist this session before closing it".into(),
             ));
@@ -1110,60 +993,17 @@ impl Ja1EditingSession {
             && let Err(error) = bundle.save_frozen_branch(&guard.core, &inputs, &cut, &guard.branch)
         {
             if !bundle.unsettled {
-                owner.resume(&cut).map_err(crate::bundle::history_error)?;
+                owner.resume(&cut).map_err(crate::bundle::operation_error)?;
             }
             return Err(error);
         }
-        let settled = owner.capture().map_err(crate::bundle::history_error)?;
-        owner.seal(&settled).map_err(crate::bundle::history_error)?;
+        let settled = owner.capture().map_err(crate::bundle::operation_error)?;
+        owner
+            .retire(&settled)
+            .map_err(crate::bundle::operation_error)?;
         self.durable_sessions.remove(index);
         Ok(())
     }
-}
-
-pub fn specialist_floor_delta_from_baseline(
-    base: &SpecialistBaseRecord,
-    history: &kinewright_core::HistorySnapshot,
-    baseline: &Document,
-) -> Result<Vec<kinewright_core::Operation>, BundleError> {
-    let retained = history.applied_operations();
-    let split = base
-        .full_applied_delta
-        .len()
-        .checked_sub(retained.len())
-        .filter(|split| base.full_applied_delta[*split..] == retained)
-        .ok_or_else(|| {
-            BundleError::Corrupt("frozen specialist delta differs from checkpoint".into())
-        })?;
-    let check = Core::spawn(baseline.clone()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-    for (ops, expected) in [
-        (&base.full_applied_delta[..split], &history.baseline),
-        (&retained[..], &history.document),
-    ] {
-        if !ops.is_empty()
-            && !matches!(
-                check
-                    .request(Command::DoBatch(ops.to_vec()))
-                    .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-                Event::DocumentChanged { .. }
-            )
-        {
-            return Err(BundleError::Corrupt(
-                "specialist proposal replay refused".into(),
-            ));
-        }
-        if check
-            .export_history()
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?
-            .document
-            != *expected
-        {
-            return Err(BundleError::Corrupt(
-                "specialist proposal differs from checkpoint".into(),
-            ));
-        }
-    }
-    Ok(base.full_applied_delta[..split].to_vec())
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -1181,7 +1021,7 @@ mod fu2_tests {
             &kinewright_media::test_support::workspace_target_dir(),
             "ordinary-session-history",
         );
-        let core = Core::spawn(Document {
+        let core = Core::for_test(Document {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
@@ -1215,24 +1055,27 @@ mod fu2_tests {
                 .unwrap();
         }
         let expected = session.core().export_history().unwrap();
-        assert!(
-            crate::history_size::history_live_bytes(&expected).unwrap()
-                > crate::history_record::CANDIDATE_LIVE
+        assert_eq!(
+            expected.history().policy,
+            kinewright_core::undo::RetentionPolicy::NeverFold,
+            "SESSION_DELTA_NEVER_FOLDS"
+        );
+        assert_eq!(
+            expected.creation_sizing().kind,
+            crate::operation_history::CreationKind::Task
         );
         owner.persist_durable_branch(&mut session).unwrap();
         let bundle = owner.active_bundle().unwrap();
         let checkpoint = bundle.checkpoint(session.branch_id()).unwrap();
+        assert_eq!(checkpoint.role, Role::Task);
         assert_eq!(
-            checkpoint.history_role,
-            crate::history_record::HistoryRole::Ordinary
-        );
-        assert_eq!(
-            *bundle.branch_history(session.branch_id()).unwrap(),
-            expected
-        );
-        assert!(
-            bundle.store.usage().unwrap().live_history_bytes
-                > crate::history_record::CANDIDATE_LIVE
+            bundle
+                .branch_history(session.branch_id())
+                .unwrap()
+                .into_capture()
+                .unwrap(),
+            expected,
+            "SESSION_PERSIST_KEEPS_THE_COMPLETE_OWNER"
         );
     }
 
@@ -1257,7 +1100,7 @@ mod fu2_tests {
             }],
             ..Document::default()
         };
-        let core = Core::spawn(document).unwrap();
+        let core = Core::for_test(document).unwrap();
         let mut owner =
             Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
         owner
@@ -1284,26 +1127,23 @@ mod fu2_tests {
             ));
         }
         let expected = task.core().export_history().unwrap();
-        assert!(
-            crate::history_size::history_live_bytes(&expected).unwrap()
-                > crate::history_record::HistoryRole::Ordinary
-                    .live_limit(&StorageLimits::default())
-        );
-        owner
-            .task_history_admission(&task)
-            .unwrap()
-            .check(&expected)
-            .unwrap();
-        owner.persist_registered_task_checkpoint(&mut task).unwrap();
-        let staged = &owner.active_bundle().unwrap().task_checkpoints[task.branch_id()];
         assert_eq!(
-            **staged.history, expected,
+            expected.history().undo.len(),
+            70,
             "NATIVE_ADMISSION_MUST_NOT_FLOOR"
         );
         assert_eq!(
-            staged.checkpoint.history_role,
-            crate::history_record::HistoryRole::Task
+            expected.history().policy,
+            kinewright_core::undo::RetentionPolicy::NeverFold
         );
+        owner.persist_registered_task_checkpoint(&mut task).unwrap();
+        let staged = &owner.active_bundle().unwrap().task_checkpoints[task.branch_id()];
+        assert_eq!(
+            staged.checkpoint.identity,
+            expected.identity().unwrap(),
+            "NATIVE_STAGED_OWNER_IS_THE_EXACT_TASK"
+        );
+        assert_eq!(staged.checkpoint.role, Role::Task);
         assert_eq!(task.core().export_history().unwrap(), expected);
     }
 
@@ -1316,7 +1156,7 @@ mod fu2_tests {
         let root = kinewright_media::test_support::workspace_target_dir().join("fu2-unit");
         let temp =
             kinewright_media::test_support::TempDirectory::new_in(&root, "retired-candidate");
-        let core = Core::spawn(Document {
+        let core = Core::for_test(Document {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
@@ -1350,10 +1190,13 @@ mod fu2_tests {
             }))
             .unwrap();
         let frozen = owner.freeze_registered_candidate(&mut specialist).unwrap();
-        let issuer = owner
-            .issue_manual_lease("candidate".into(), "candidate-private".into())
+        let bundle = owner.active_bundle_mut().unwrap();
+        let inputs = bundle
+            .checkpoint(bundle.manual_branch_id())
             .unwrap()
-            .issuer;
+            .input_manifest_ref
+            .clone();
+        let issuer = bundle.issue_issuer(&core, &inputs, 1).unwrap();
         let envelope = owner
             .candidate_merge_envelope(
                 &frozen,
@@ -1370,8 +1213,13 @@ mod fu2_tests {
             color: kinewright_core::SolidColor::default(),
         }))
         .unwrap();
-        let manual = core.export_history().unwrap();
-        assert_eq!(manual.document.tracks[0].clips.len(), 1);
+        let manual = core.snapshot_identity().unwrap();
+        assert_eq!(
+            core.export_history().unwrap().history().document.tracks[0]
+                .clips
+                .len(),
+            1
+        );
         let result = crate::io_observer::fail_once("candidate_settlement", || {
             owner.commit_candidate(&frozen, &envelope)
         });
@@ -1382,15 +1230,18 @@ mod fu2_tests {
             candidate.core().attachment_state().unwrap(),
             AttachmentState::Frozen
         );
-        assert!(owner.pending_candidate.is_some());
-        assert_eq!(core.export_history().unwrap(), manual);
+        assert!(owner.active_bundle().unwrap().pending_publication.is_some());
+        assert_eq!(core.snapshot_identity().unwrap(), manual);
         let expected = owner
             .active_bundle()
             .unwrap()
             .branch_history(candidate.branch_id())
             .unwrap();
-        assert!(expected.document.tracks[0].clips.is_empty());
-        assert_ne!(*expected, manual);
+        assert!(expected.history().document().tracks[0].clips.is_empty());
+        assert_ne!(expected.identity().unwrap(), manual);
+        owner
+            .reconcile_active()
+            .expect("committed private update must settle before metadata can retire its receipt");
         let bundle = owner.active_bundle_mut().unwrap();
         let inputs = bundle
             .checkpoint(bundle.manual_branch_id())
@@ -1413,130 +1264,23 @@ mod fu2_tests {
             candidate.core().attachment_state().unwrap(),
             AttachmentState::Live
         );
-        assert!(owner.pending_candidate.is_none());
-        assert_eq!(candidate.core().export_history().unwrap(), *expected);
-        assert_eq!(core.export_history().unwrap(), manual);
+        assert!(owner.active_bundle().unwrap().pending_publication.is_none());
+        assert_eq!(
+            candidate.core().snapshot_identity().unwrap(),
+            expected.identity().unwrap()
+        );
+        assert_eq!(core.snapshot_identity().unwrap(), manual);
         owner.save_active().unwrap();
-        assert_eq!(core.export_history().unwrap(), manual);
-        assert_eq!(result.unwrap(), ReceiptLookup::Committed(retired.clone()));
-        assert_eq!(retry.unwrap(), ReceiptLookup::Committed(retired));
-    }
-}
-
-impl Ja1EditingSession {
-    fn specialist_checkpoint_base(
-        &self,
-        guard: &DurableBranchSessionGuard,
-        history: &HistorySnapshot,
-    ) -> Result<SpecialistBaseRecord, BundleError> {
-        let mut full_delta =
-            self.verified_floor_prefix(guard, history.floor_offset, &history.baseline)?;
-        full_delta.extend(history.applied_operations());
-        let mut base = guard.base().clone();
-        base.full_applied_delta = full_delta;
-        Ok(base)
-    }
-    // Keep the reconstructed anchor within the serial replay window and drop
-    // its boundary documents before checkpoint publication materializes another history.
-    fn verified_floor_prefix(
-        &self,
-        guard: &DurableBranchSessionGuard,
-        floor_offset: u64,
-        baseline: &Document,
-    ) -> Result<Vec<kinewright_core::Operation>, BundleError> {
-        let store = self.registered_bundle(guard)?.store();
-        store.replay_gate().with(|| {
-            let source = &guard.floor_source;
-            let role = guard.base.history_role;
-            let limit = if role == crate::history_record::HistoryRole::Ordinary {
-                let usage = store.usage()?;
-                let ordinary = store
-                    .limits()
-                    .live_history_bytes
-                    .saturating_sub(usage.live_history_bytes);
-                let decoded = usage.decoded_bytes.saturating_sub(usage.decoder_bytes);
-                let raw = store
-                    .limits()
-                    .metadata_bytes
-                    .saturating_sub(usage.metadata_bytes)
-                    .saturating_sub(decoded);
-                // A session anchor may exceed its selected ordinary cut. Its
-                // serial proof uses the remaining ordinary pool, with a real
-                // reservation before replay, rather than reserving the whole
-                // pool alongside the already retained saved cut.
-                kinewright_core::history_size::TRANSPORT_LIVE_BYTES
-                    .min(ordinary)
-                    .min(raw)
-                    .min(store.limits().decoded_record_bytes)
-            } else {
-                role.replay_limit(store.limits())
-            };
-            let reservation = if role == crate::history_record::HistoryRole::Ordinary {
-                store.reserve_copy_read(0, limit, limit, false, true)?
-            } else {
-                store.reserve_history_replay(limit, role)?
-            };
-            let (history, _) = source
-                .journal
-                .resolve_with_budget(Arc::clone(&source.baseline), &source.document, limit)
-                .map_err(crate::bundle::history_error)?;
-            let retained = crate::history_size::native_history_live_bytes(&history)?;
-            let materialized = reservation.finish_history_replay(retained)?.hold(history);
-            let discarded = usize::try_from(
-                floor_offset
-                    .checked_sub(source.journal.floor_offset)
-                    .ok_or(BundleError::HistoryChanged)?,
-            )
-            .map_err(|_| BundleError::Capacity("specialist floor offset"))?;
-            let original = if discarded == 0 {
-                (*materialized).clone()
-            } else {
-                kinewright_core::HistoryTransition::floor((*materialized).clone(), discarded)
-                    .map_err(crate::bundle::history_error)?
-                    .into_after()
-            };
-            if &*original.baseline != baseline {
-                return Err(BundleError::HistoryChanged);
-            }
-            specialist_floor_delta_from_baseline(
-                guard.base(),
-                &original,
-                &*self.durable_branch_baseline(guard)?,
-            )
-        })?
-    }
-    /// Capture the immutable floor prefix once, before endpoint ingress opens.
-    /// Task checkpoints never floor this branch's history.
-    pub fn task_history_admission(
-        &self,
-        guard: &DurableBranchSessionGuard,
-    ) -> Result<crate::task_history_admission::TaskHistoryAdmission, BundleError> {
-        let canonical = &self.durable_sessions[self.registered(guard)?].guard;
-        let retained_lineage = self
-            .registered_bundle(canonical)?
-            .branch_lineage(&canonical.branch)?;
-        let lineage_seed = crate::bundle_records::LineageRecord {
-            branch_origin: retained_lineage.branch_origin.clone(),
-            baseline: retained_lineage.baseline.clone(),
-            current: retained_lineage.baseline.clone(),
-            undo: vec![],
-            redo: vec![],
-            split_ancestry: retained_lineage.split_ancestry.clone(),
-        };
-        let prefix = self.verified_floor_prefix(
-            canonical,
-            canonical.floor_source.journal.floor_offset,
-            &canonical.floor_source.baseline,
-        )?;
-        Ok(crate::task_history_admission::TaskHistoryAdmission {
-            usage: self.registered_bundle(canonical)?.store().usage_arc(),
-            replay_gate: self.registered_bundle(canonical)?.store().replay_gate(),
-            base: canonical.base().clone(),
-            prefix,
-            floor_offset: canonical.floor_source.journal.floor_offset,
-            limits: self.registered_bundle(canonical)?.store().limits().clone(),
-            lineage_seed,
-            proof: std::sync::Mutex::new(None),
-        })
+        assert_eq!(core.snapshot_identity().unwrap(), manual);
+        assert!(result.is_err(), "ACK_WAITS_FOR_PRIVATE_SHADOW_SETTLEMENT");
+        assert!(
+            matches!(retry, Err(_) | Ok(ReceiptLookup::Pending)),
+            "ACK_RETRY_WAITS_FOR_PRIVATE_SHADOW_SETTLEMENT: {retry:?}"
+        );
+        assert_eq!(
+            owner.commit_candidate(&frozen, &envelope).unwrap(),
+            ReceiptLookup::Retired(retired),
+            "SETTLED_RETRY_RECOVERS_THE_ORIGINAL_RETIRED_RECEIPT"
+        );
     }
 }

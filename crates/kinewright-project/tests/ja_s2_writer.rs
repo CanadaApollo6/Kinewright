@@ -38,7 +38,7 @@ fn g04_studio_associations_preserve_the_persons_path() {
     let relative = temp.root().strip_prefix(&cwd).unwrap();
     let first = relative.join("first.kinewright");
     let second = relative.join("second.kinewright");
-    let core = kinewright_core::Core::spawn(Document::default()).unwrap();
+    let core = kinewright_project::operation_actor::Core::for_test(Document::default()).unwrap();
     let mut owner = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
     owner.first_save(&first, StorageLimits::default()).unwrap();
     assert_eq!(
@@ -53,7 +53,13 @@ fn g04_studio_associations_preserve_the_persons_path() {
         "Save As keeps the supplied spelling"
     );
     drop(owner);
-    let reopened = Ja1EditingSession::open(&second).unwrap();
+    let reopened = Ja1EditingSession::open(
+        &second,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     assert_eq!(
         reopened.association().unwrap().path(),
         second,
@@ -66,7 +72,7 @@ fn g04_studio_associations_preserve_the_persons_path() {
         serialize_project_document(&Document::default()).unwrap(),
     )
     .unwrap();
-    let core = kinewright_core::Core::spawn(Document::default()).unwrap();
+    let core = kinewright_project::operation_actor::Core::for_test(Document::default()).unwrap();
     let admission = BundleWriteAdmission::read(&legacy).unwrap();
     let activated = Ja1EditingSession::activate(&legacy, admission, &core, None).unwrap();
     assert_eq!(
@@ -331,9 +337,14 @@ fn g04_two_process_lock_save_alias_and_discovery() {
     {
         use kinewright_project::bundle::{LoadedBundle, ProjectBundle};
         let studio_path = temp.path("studio.kinewright");
-        let core = kinewright_core::Core::spawn(Document::default()).unwrap();
-        let mut studio =
-            ProjectBundle::activate(&studio_path, BundleWriteAdmission::new_document()).unwrap();
+        let core =
+            kinewright_project::operation_actor::Core::for_test(Document::default()).unwrap();
+        let mut studio = ProjectBundle::activate(
+            &studio_path,
+            BundleWriteAdmission::new_document(),
+            core.history_pool(),
+        )
+        .unwrap();
         let inputs = studio.empty_inputs().unwrap().reference.clone();
         studio.save(&core, &inputs).unwrap();
         let root = fs::read(&studio_path).unwrap();
@@ -343,9 +354,14 @@ fn g04_two_process_lock_save_alias_and_discovery() {
         ));
         assert_eq!(fs::read(&studio_path).unwrap(), root);
         drop(studio);
-        let loaded = LoadedBundle::read(&studio_path).unwrap();
-        let reopened = kinewright_core::Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&reopened).unwrap();
+        let mut loaded = LoadedBundle::read(
+            &studio_path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
+        let reopened = loaded.open_manual().unwrap();
         assert_eq!(
             reopened.export_history().unwrap(),
             core.export_history().unwrap()
@@ -569,8 +585,7 @@ fn g04_sidecar_refuses_lost_authority_and_preserves_pending_journal() {
     {
         let before = fs::read(path.with_extension("kinewright-incidents")).unwrap();
         fs::remove_file(&owner.handle.path).unwrap();
-        let successor =
-            kinewright_project::lockfile::acquire_gui_project_lock(&path, &recovery).unwrap();
+        let successor = kinewright_project::lockfile::acquire_gui_project_lock(&path).unwrap();
         let discovery = fs::read(&successor.handle.discovery).unwrap();
         assert!(
             session

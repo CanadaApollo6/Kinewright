@@ -7,6 +7,7 @@ use super::{EffectiveAuthEvidence, EffectiveLaunchContext, ProviderAuthContract}
 use kinewright_core::SessionConfig;
 use std::path::{Path, PathBuf};
 
+#[cfg(any(target_os = "linux", test, feature = "test-util"))]
 use super::super::task_tool_names::TASK_TOOL_NAMES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

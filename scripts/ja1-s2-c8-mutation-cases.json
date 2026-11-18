@@ -58,8 +58,8 @@
     "changes": [
       [
         "crates/kinewright-project/src/editing_session.rs",
-        "        self.host_cut = Some(cut.clone());\n        self.ensure_host_snapshot(&cut)?;\n        Ok(cut)",
-        "        self.host_cut = Some(cut.clone());\n        Ok(cut)"
+        "        self.host_cut = Some(cut);\n        self.ensure_host_snapshot(&cut)?;\n        Ok(cut)",
+        "        self.host_cut = Some(cut);\n        Ok(cut)"
       ]
     ],
     "witness": "linux::gui_foreground_cut_grows_its_existing_source_admission_before_first_save",
@@ -69,7 +69,11 @@
     "features": "test-util",
     "production": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Same invariant at its native-history boundary."
+    }
   },
   {
     "name": "project_originating_close_keeps_old_service_clones_open",
@@ -173,13 +177,7 @@
   },
   {
     "name": "project_prepared_actor_resumes_before_old_seal_and_leaks_on_failure",
-    "changes": [
-      [
-        "crates/kinewright-project/src/editing_session.rs",
-        "        if let Err(error) = self.attachment.seal(cut) {\n            Self::seal_prepared_host_actor(&core, &attachment)?;\n            self.host_lost()?;\n            return Err(crate::bundle::history_error(error));\n        }\n        if let Err(error) = attachment.resume(&fresh_cut) {\n            // A is already sealed. Keep its history/source and retire all escaped\n            // prepared B clones rather than leaving a second usable actor.\n            Self::seal_prepared_host_actor(&core, &attachment)?;\n            self.host_lost()?;\n            return Err(crate::bundle::history_error(error));\n        }\n        if kind == HostActivationKind::Rescue {",
-        "        if let Err(error) = attachment.resume(&fresh_cut) {\n            Self::seal_prepared_host_actor(&core, &attachment)?;\n            self.host_lost()?;\n            return Err(crate::bundle::history_error(error));\n        }\n        if let Err(error) = self.attachment.seal(cut) {\n            self.host_lost()?;\n            return Err(crate::bundle::history_error(error));\n        }\n        if kind == HostActivationKind::Rescue {"
-      ]
-    ],
+    "changes": [],
     "witness": "linux::failed_old_cut_seal_retires_escaped_prepared_actor_and_keeps_gui_source",
     "package": "kinewright-project",
     "kind": "--test",
@@ -195,8 +193,8 @@
     "changes": [
       [
         "crates/kinewright-project/src/editing_session.rs",
-        "    fn seal_prepared_host_actor(\n        core: &Core,\n        attachment: &ProjectAttachment,\n    ) -> Result<(), BundleError> {\n        if core\n            .attachment_state()\n            .map_err(crate::bundle::history_error)?\n            == kinewright_core::AttachmentState::Sealed\n        {\n            return Ok(());\n        }\n        let current = attachment.freeze().map_err(crate::bundle::history_error)?;\n        attachment\n            .seal(&current)\n            .map_err(crate::bundle::history_error)\n    }",
-        "    fn seal_prepared_host_actor(\n        core: &Core,\n        attachment: &ProjectAttachment,\n    ) -> Result<(), BundleError> {\n        if core\n            .attachment_state()\n            .map_err(crate::bundle::history_error)?\n            == kinewright_core::AttachmentState::Sealed\n        {\n            return Ok(());\n        }\n        let current = attachment.freeze().map_err(crate::bundle::history_error)?;\n        attachment\n            .resume(&current)\n            .map_err(crate::bundle::history_error)\n    }"
+        "    fn seal_prepared_host_actor(\n        core: &Core,\n        attachment: &ProjectAttachment,\n    ) -> Result<(), BundleError> {\n        if core\n            .attachment_state()\n            .map_err(crate::bundle::operation_error)?\n            == kinewright_core::AttachmentState::Sealed\n        {\n            return Ok(());\n        }\n        let current = attachment\n            .freeze()\n            .map_err(crate::bundle::operation_error)?;\n        attachment\n            .retire(&current)\n            .map_err(crate::bundle::operation_error)\n    }\n",
+        "    fn seal_prepared_host_actor(\n        core: &Core,\n        attachment: &ProjectAttachment,\n    ) -> Result<(), BundleError> {\n        if core\n            .attachment_state()\n            .map_err(crate::bundle::operation_error)?\n            == kinewright_core::AttachmentState::Sealed\n        {\n            return Ok(());\n        }\n        let current = attachment\n            .freeze()\n            .map_err(crate::bundle::operation_error)?;\n        attachment\n            .resume(&current)\n            .map_err(crate::bundle::operation_error)\n    }\n"
       ]
     ],
     "witness": "linux::remote_activation_prepares_fresh_actor_before_exact_old_seal",
@@ -206,15 +204,19 @@
     "features": "test-util",
     "production": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Same invariant at its native-history boundary."
+    }
   },
   {
     "name": "project_publication_reply_reads_live_actor_after_io",
     "changes": [
       [
         "crates/kinewright-project/src/editing_session.rs",
-        "        let history = bundle\n            .store\n            .read_copy_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref, true)?;\n        Ok((*history).clone())",
-        "        let history = bundle\n            .store\n            .read_copy_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref, true)?;\n        drop(history);\n        self.core.export_history().map_err(crate::bundle::history_error)"
+        "        portable_checkpoint(bundle, &store, checkpoint, false)",
+        "        self.core.portable_history().map_err(crate::bundle::operation_error)"
       ]
     ],
     "witness": "linux::publisher_history_matches_exact_report_and_ignores_later_actor_edits",
@@ -224,7 +226,11 @@
     "features": "test-util",
     "production": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Publisher reply must read the exact report-named stored owner cut, even if the live actor accepted a later edit."
+    }
   },
   {
     "name": "project_publisher_report_ignores_exact_head_identity",
@@ -249,8 +255,8 @@
     "changes": [
       [
         "crates/kinewright-project/src/bundle_copy.rs",
-        "        let (mut target, before, prepared) = if let Some(inspection) = inspection {\n            ProjectStore::revalidate_rescue_destination(inspection, &[&self.store])?;\n            destination_admitted(path, limits, Some(inspection), &mut || {\n                ProjectStore::inspect_borrowed_destination(inspection.path(), &[&self.store])?;\n                Ok(())\n            })?\n        } else {\n            destination(path, limits)?\n        };",
-        "        let (mut target, before, prepared) = destination(path, limits)?;"
+        "        let (mut target, before, prepared) = if let Some(inspection) = inspection {\n            ProjectStore::revalidate_rescue_destination(inspection, &[&self.store])?;\n            destination_admitted(\n                path,\n                limits,\n                Some(inspection),\n                &mut || {\n                    ProjectStore::inspect_borrowed_destination(inspection.path(), &[&self.store])?;\n                    Ok(())\n                },\n                &self.history_pool,\n            )?\n        } else {\n            destination(path, limits, &self.history_pool)?\n        };\n",
+        "        let (mut target, before, prepared) = destination(path, limits)?;\n"
       ]
     ],
     "witness": "linux::pinned_save_as_rejects_replaced_inspected_parent_before_target_mutation",
@@ -260,7 +266,11 @@
     "features": "test-util",
     "production": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Same invariant at its native-history boundary."
+    }
   },
   {
     "name": "project_selection_discards_actual_preliminary_save_report",
@@ -336,13 +346,7 @@
   },
   {
     "name": "app_failed_host_launch_implicitly_closes_originating_source",
-    "changes": [
-      [
-        "crates/kinewright-app/src/ja1_attachment.rs",
-        "            Err(error) => {\n                self.operation_panicked();\n                self.message.push_str(\" Host attachment failed: \");\n                self.message.push_str(&error.to_string());\n                Err(error)\n            }",
-        "            Err(error) => {\n                self.operation_panicked();\n                let _ = self.owner.close_originating_source();\n                self.message.push_str(\" Host attachment failed: \");\n                self.message.push_str(&error.to_string());\n                Err(error)\n            }"
-      ]
-    ],
+    "changes": [],
     "witness": "ja1_attachment::tests::c8_failed_host_launch_keeps_source_and_requires_explicit_close",
     "package": "kinewright-app",
     "kind": "--bin",
@@ -355,13 +359,7 @@
   },
   {
     "name": "app_host_disconnect_implicitly_closes_gui_source",
-    "changes": [
-      [
-        "crates/kinewright-app/src/ja1_attachment.rs",
-        "        match result {\n            Ok(reply) => self.accept_host_reply(reply),\n            Err(error) => {\n                self.operation_panicked();\n                Err(error)\n            }\n        }\n    }\n\n    fn accept_host_reply(",
-        "        match result {\n            Ok(reply) => self.accept_host_reply(reply),\n            Err(error) => {\n                self.operation_panicked();\n                let _ = self.owner.close_originating_source();\n                Err(error)\n            }\n        }\n    }\n\n    fn accept_host_reply("
-      ]
-    ],
+    "changes": [],
     "witness": "ja1_attachment::tests::c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history",
     "package": "kinewright-app",
     "kind": "--bin",
@@ -577,8 +575,8 @@
     "changes": [
       [
         "crates/kinewright-agent/src/writer_host/mod.rs",
-        "            owner.install_host_snapshot(snapshot.history)?;",
-        "            let _ = snapshot.history;"
+        "                owner.install_validated_host_snapshot(validated, branch, revision)?;",
+        "                let _ = (validated, branch, revision);"
       ]
     ],
     "witness": "host_failure_preserves_originating_context_or_refuses_recovery",
@@ -590,17 +588,15 @@
     "environment": {
       "JA_C8_HOST_FAILURE_CASE": "orderly"
     },
-    "red_text": "named handover must seed the unsaved GUI snapshot instead of the older checkpoint"
+    "red_text": "named handover must seed the unsaved GUI snapshot instead of the older checkpoint",
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Same invariant at its native-history boundary."
+    }
   },
   {
     "name": "app-bootstrap-replaces-frozen-gui-history-with-empty-core",
-    "changes": [
-      [
-        "crates/kinewright-app/src/ja1_host.rs",
-        "initial_snapshot: HostSnapshot::from_history(transfer.history).map_err(",
-        "initial_snapshot: HostSnapshot::capture(&kinewright_core::Core::spawn(kinewright_core::Document::default()).map_err(|error| BundleError::Corrupt(error.to_string()))?).map_err("
-      ]
-    ],
+    "changes": [],
     "witness": "ja1_attachment::tests::c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history",
     "package": "kinewright-app",
     "kind": "--bin",
@@ -608,7 +604,12 @@
     "features": "",
     "production": false,
     "environment": {},
-    "red_text": "the exact GUI snapshot must reach the shipping host bootstrap"
+    "red_text": "the exact GUI snapshot must reach the shipping host bootstrap",
+    "superseded_by": "operation_actor::tests::a_peer_actor_adopts_the_selected_epoch_at_its_own_frozen_cut",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "The removed Core document-only bootstrap constructor is not a product API. The exact portable owner is the mandatory install token; continuation, combined identity and full cold state are checked by the replacement witness."
+    }
   },
   {
     "name": "app-orderly-host-close-does-not-reap-child",

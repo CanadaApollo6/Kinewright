@@ -1,10 +1,11 @@
 //! The dialogue tools' cache adapter. Measurement stays on the media worker.
 use crate::dialogue_tools::{BoundDialogue, DialogueMeasurements, MediaIdentity, Refusal};
 use kinewright_core::{
-    Command, Core, Event, MediaAsset, Query, QueryResult, TranscriptStatus,
+    Command, Event, MediaAsset, Query, QueryResult, TranscriptStatus,
     dialogue::{Settings, Span, Word},
 };
 use kinewright_media::{SessionMedia, dialogue_cache::DialogueCacheRead};
+use kinewright_project::operation_actor::Core;
 use serde::Serialize;
 use std::{
     collections::VecDeque,

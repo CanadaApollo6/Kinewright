@@ -9,7 +9,7 @@ fn te13_fix3_owner_stop(
     preissued: bool,
 ) {
     let r = c5_fix10_run();
-    let expected = r.core.export_history().unwrap();
+    let expected = serde_json::to_value(r.core.export_history().unwrap()).unwrap();
     let (client, original) = te13_fix2_request(&r);
     let mut stop = preissued.then(|| r.f.control(&r.f.editor, &r.run, RunAction::Stop));
     let operation = if committed {
@@ -182,11 +182,7 @@ fn te13_fix3_owner_stop(
         ),
         "TE13_FIX3_STOP_OPEN"
     );
-    assert_eq!(
-        project.core().export_history().unwrap(),
-        expected,
-        "TE13_FIX3_STOP_EXACT"
-    );
+    assert_recovered_task_owner(project.core(), expected, "TE13_FIX3_STOP_EXACT");
 }
 
 #[test]
@@ -240,7 +236,7 @@ fn te13_fix3_root_publication_is_not_a_merge() {
     core.request(kinewright_core::Command::Do(history_marker(2)))
         .unwrap();
     core.request(kinewright_core::Command::Undo).unwrap();
-    let expected = core.export_history().unwrap();
+    let expected = serde_json::to_value(core.export_history().unwrap()).unwrap();
     let reply = director.wire(
         "finish_task",
         te13_control(&director, &execution.task, &core),
@@ -290,11 +286,7 @@ fn te13_fix3_root_publication_is_not_a_merge() {
         project.select_local(),
         kinewright_project::bundle_switch::ProjectSelectionResult::Activated(_)
     ));
-    assert_eq!(
-        project.core().export_history().unwrap(),
-        expected,
-        "TE13_FIX3_ROOT_EXACT"
-    );
+    assert_recovered_task_owner(project.core(), expected, "TE13_FIX3_ROOT_EXACT");
 }
 
 #[test]
@@ -341,7 +333,7 @@ fn te13_fix3_applied_receipt_settles_before_expired_continuation() {
 
 fn te13_fix3_observed_child_kept(parent_finishes: bool) {
     let r = c5_fix10_run();
-    let expected = r.core.export_history().unwrap();
+    let expected = serde_json::to_value(r.core.export_history().unwrap()).unwrap();
     let reply = r
         .editor
         .wire("finish_task", te13_control(&r.editor, &r.child, &r.core));
@@ -406,6 +398,40 @@ fn te13_fix3_observed_child_kept(parent_finishes: bool) {
         .into_iter()
         .find(|work| work.task == r.child)
         .expect("TE13_FIX3_REAL_OBSERVED_CHILD_KEPT");
+    let index = owner
+        .resolve_attachment(Some(&r.f.editor.bootstrap.auth.bearer()))
+        .unwrap();
+    let status = owner
+        .observe_run(index, &r.run, 0)
+        .unwrap()
+        .runtime_status
+        .unwrap();
+    assert!(
+        status.contains(&work.disclosure),
+        "COMPLETED_PARENT_DISCLOSES_EVERY_RETAINED_CHILD: expected={} actual={status}",
+        work.disclosure
+    );
+    // Startup readiness must preserve the same complete retained-work answer.
+    let prior_status = owner
+        .native_recovery_status
+        .replace("cleanup pending: checking native recovery".into());
+    let prior_pending = std::mem::replace(&mut owner.native_recovery_pending, true);
+    let index = owner
+        .resolve_attachment(Some(&r.f.editor.bootstrap.auth.bearer()))
+        .unwrap();
+    let observed = owner.observe_run(index, &r.run, 0).unwrap();
+    let status = observed.runtime_status.unwrap();
+    assert!(
+        status.contains("checking native recovery"),
+        "STARTUP_RECOVERY_STATUS_REMAINS_VISIBLE"
+    );
+    assert!(
+        status.contains(&work.disclosure),
+        "RETAINED_WORK_DISCLOSURE_SURVIVES_STARTUP_RECOVERY: expected={} actual={status}",
+        work.disclosure
+    );
+    owner.native_recovery_status = prior_status;
+    owner.native_recovery_pending = prior_pending;
     let project = owner.owner_mut().unwrap();
     project
         .prepare_recovery(
@@ -418,10 +444,10 @@ fn te13_fix3_observed_child_kept(parent_finishes: bool) {
         project.select_local(),
         kinewright_project::bundle_switch::ProjectSelectionResult::Activated(_)
     ));
-    assert_eq!(
-        project.core().export_history().unwrap(),
+    assert_recovered_task_owner(
+        project.core(),
         expected,
-        "TE13_FIX3_REAL_OBSERVED_CHILD_EXACT"
+        "TE13_FIX3_REAL_OBSERVED_CHILD_EXACT",
     );
 }
 #[test]

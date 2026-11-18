@@ -58,7 +58,7 @@ mod kept_audit {
                 .unwrap();
         }
         let kept = c5e_history(&b.f, &b.run, &b.child);
-        std::fs::write(handoff, serde_json::to_vec(&serde_json::json!({"root": b.f.temp.root(), "run": b.run, "task": b.child, "kept": kept})).unwrap()).unwrap();
+        std::fs::write(handoff, serde_json::to_vec(&serde_json::json!({"root": b.f.temp.root(), "run": b.run, "task": b.child, "kept": kept.into_transport().unwrap()})).unwrap()).unwrap();
         // No Drop, Stop, freeze, or final task checkpoint after the durable audits.
         std::process::exit(86);
     }
@@ -243,8 +243,8 @@ mod kept_audit {
             let root: std::path::PathBuf = serde_json::from_value(handoff["root"].take()).unwrap();
             let run: RunId = serde_json::from_value(handoff["run"].take()).unwrap();
             let task: TaskId = serde_json::from_value(handoff["task"].take()).unwrap();
-            let kept: kinewright_core::HistorySnapshot =
-                serde_json::from_value(handoff["kept"].take()).unwrap();
+            let kept: kinewright_project::operation_history::OwnerSnapshot =
+                decode_owner_fixture(handoff["kept"].take());
             let roots = SessionRoots {
                 read: vec![root.clone()],
                 write: vec![root.clone()],
@@ -314,7 +314,7 @@ mod kept_audit {
                 assert!(work.available && work.cleanup_settled);
                 (
                     work.source.branch,
-                    HostSnapshot::capture(owner.core()).unwrap(),
+                    received_snapshot_for_test(owner.core()).unwrap(),
                 )
             };
             let editor = host.client();
@@ -360,15 +360,10 @@ mod kept_audit {
                     .unwrap(),
                 "C4B_REVIEW_INSTALLED",
             );
+            assert_recovered_task_owner(shared.lock().unwrap().core(), serde_json::to_value(&kept).unwrap(), "C4B_EXACT_LAST_CHECKPOINT");
+            let replay = Core::open(kept.validate().unwrap(), kinewright_project::bundle_records::BranchId::fresh().unwrap(), kinewright_core::TimelineRevision::default()).unwrap();
             assert_eq!(
-                shared.lock().unwrap().core().export_history().unwrap(),
-                kept,
-                "C4B_EXACT_LAST_CHECKPOINT"
-            );
-            let replay = Core::spawn(Arc::clone(&kept.baseline)).unwrap();
-            replay.restore_history(kept).unwrap();
-            assert_eq!(
-                replay.export_history().unwrap().document.tracks[0]
+                replay.export_history().unwrap().history().document.tracks[0]
                     .clips
                     .len(),
                 if checkpoint { 1 } else { 3 }

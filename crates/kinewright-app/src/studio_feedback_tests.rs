@@ -10,8 +10,9 @@ use crate::{
     presenter::DisplayCell,
     studio::tests::{Retire, attach, fixtures, publish, wait_frame},
 };
-use kinewright_core::{Command, Core, Event, FrameStamp, Operation, Playback, Track, TrackId};
+use kinewright_core::{Command, Event, FrameStamp, Operation, Playback, Track, TrackId};
 use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{BundleWriteAdmission, LoadedBundle},
     studio_store::FrozenContext,
@@ -137,7 +138,7 @@ fn capture_cut(core: &Core, branch: &BranchId, frame_id: u64, at: i64) -> Draft 
         pixels: None,
         selection: None,
         requested: TimeCode(0),
-        manual: Some((cut, &history.document)),
+        manual: Some((cut, &history.history().document)),
         texture: [16, 9],
     })
     .unwrap()
@@ -153,8 +154,13 @@ fn new_project(
 ) {
     let temp = TempDirectory::new_in(&workspace_target_dir(), name);
     let path = temp.path("feedback.kinewright");
-    let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
+    let mut bundle = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let inputs = bundle.empty_inputs().unwrap().reference.clone();
     bundle.save(&core, &inputs).unwrap();
     (temp, path, bundle, core, inputs)
@@ -276,7 +282,7 @@ fn check_other_history() {
     let branch = bundle.manual_branch_id().clone();
     add_track(&published_core, 70);
     published_core.request(Command::Undo).unwrap();
-    let other_core = Core::spawn(Document::default()).unwrap();
+    let other_core = Core::for_test(Document::default()).unwrap();
     add_track(&other_core, 71);
     other_core.request(Command::Undo).unwrap();
     let own = AcceptedCut::of(&branch, &published_core.export_history().unwrap()).unwrap();
@@ -294,7 +300,7 @@ fn check_other_history() {
     let forked = bundle
         .fork_branch(
             &branch,
-            kinewright_project::history_record::HistoryRole::Ordinary,
+            kinewright_project::operation_history::Role::Ordinary,
         )
         .unwrap();
     let history = published_core.export_history().unwrap();
@@ -305,7 +311,7 @@ fn check_other_history() {
         requested: TimeCode(0),
         manual: Some((
             AcceptedCut::of(&forked, &history).unwrap(),
-            &history.document,
+            &history.history().document,
         )),
         texture: [16, 9],
     })
@@ -1127,7 +1133,15 @@ fn s3_batch_revision_and_lost_reply() {
     // Restart.
     drop(feedback);
     drop(bundle);
-    let reopened = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
+    let reopened = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
     let index = reopened.feedback_index().unwrap();
     assert_eq!(index.batches.len(), 2, "C3_EXACTLY_ONE_BATCH_PER_SUBMIT");
     assert_eq!(
@@ -1193,7 +1207,15 @@ fn restart(
     image: &[u8],
 ) -> (ProjectBundle, Feedback) {
     std::fs::write(kept, image).unwrap();
-    let bundle = LoadedBundle::read(path).unwrap().into_writer().unwrap();
+    let bundle = LoadedBundle::read(
+        path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
     let mut feedback = Feedback::default();
     feedback
         .open(
@@ -1451,7 +1473,14 @@ fn s3_fix2_recovery_follows_identity() {
     let ours = std::fs::read(&kept).unwrap();
 
     // A different project at the old path: none of them.
-    let other = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let other = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     assert_ne!(other.project_id(), &project);
     let feedback = kept_by(&temp, &other);
     assert!(
@@ -1694,8 +1723,24 @@ fn s3_fix3_one_owner_per_recovery_file() {
         &path.with_extension("kinewright-assets"),
         &copy.with_extension("kinewright-assets"),
     );
-    a_bundle = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
-    let mut b_bundle = LoadedBundle::read(&copy).unwrap().into_writer().unwrap();
+    a_bundle = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
+    let mut b_bundle = LoadedBundle::read(
+        &copy,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
     assert_eq!(a_bundle.project_id(), b_bundle.project_id(), "C3F3_SAME_ID");
     let kept = kept_file(&temp, &a_bundle);
 

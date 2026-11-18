@@ -1,7 +1,7 @@
 //! Settled runs keep their journal identities, not dormant actors.
 use super::{BundleError, HostCommandOwner};
 use crate::orchestration::orchestration_records::{AttemptState, RunCleanup, RunId, RunOutcome};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt::Write as _};
 
 pub(super) fn reopen_words(task: &str) -> String {
     format!(
@@ -30,6 +30,26 @@ impl HostCommandOwner {
         let mut active_candidates = BTreeSet::new();
         for run in self.hooks.runs.keys() {
             let Ok(Some(state)) = owner.orchestration_projection(run) else {
+                // A bad historical dependency can make the run projection
+                // unreadable before release gets to its task. Verify resident
+                // task cuts directly for disclosure; release nothing here.
+                for runtime in self.hooks.runs.values_mut() {
+                    for (id, actor) in &runtime.tasks {
+                        if let Err(error) = actor.verify_checkpointed(owner) {
+                            let words = reopen_words(id.0.as_str());
+                            let notice = runtime.release_notice.get_or_insert_with(String::new);
+                            if !notice.contains(&words) {
+                                if !notice.is_empty() {
+                                    notice.push(' ');
+                                }
+                                let _ = write!(
+                                    notice,
+                                    "{words} Its live work is kept in this session. {error}"
+                                );
+                            }
+                        }
+                    }
+                }
                 return;
             };
             if state.outcome == RunOutcome::Pending || state.cleanup != RunCleanup::Settled {
@@ -77,12 +97,18 @@ impl HostCommandOwner {
                     false
                 }
                 Err(BundleError::Corrupt(reason)) => {
-                    release_notice.get_or_insert_with(|| {
-                        format!(
-                            "{} Its live work is kept in this session. {reason}",
-                            reopen_words(id.0.as_str()),
-                        )
-                    });
+                    let words = reopen_words(id.0.as_str());
+                    if let Some(notice) = release_notice {
+                        if !notice.contains(&words) {
+                            notice.push(' ');
+                            notice.push_str(&words);
+                            notice.push_str(" Its live work is kept in this session.");
+                        }
+                    } else {
+                        *release_notice = Some(format!(
+                            "{words} Its live work is kept in this session. {reason}"
+                        ));
+                    }
                     true
                 }
                 _ => true,

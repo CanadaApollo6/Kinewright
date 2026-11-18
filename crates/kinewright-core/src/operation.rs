@@ -572,12 +572,13 @@ pub(crate) fn apply_batch_observed_in_place(
     apply_batch_unpublished(candidate, operations, true)
 }
 
-pub(crate) fn apply_batch_observed_replay(
+/// Replay immutable history after the caller reserves its validated step peak.
+/// Untrusted edits and record validation continue through the per-operation budget.
+pub(crate) fn apply_batch_prevalidated(
     candidate: &mut Document,
     operations: &[Operation],
-    budget: &mut crate::history_size::ReplayBudget,
-) -> Result<Vec<crate::OperationIdentityEffect>, BatchError> {
-    apply_batch_checked(candidate, operations, true, Some(budget))
+) -> Result<(), BatchError> {
+    apply_batch_unpublished(candidate, operations, false).map(|_| ())
 }
 
 fn apply_batch_inner(
@@ -595,21 +596,10 @@ fn apply_batch_inner(
     Ok(effects)
 }
 
-/// Validate and apply `operations` to an unpublished `candidate`. On `Err`
-/// the candidate may be partly edited; every caller discards it.
 fn apply_batch_unpublished(
     candidate: &mut Document,
     operations: &[Operation],
     capture_identities: bool,
-) -> Result<Vec<crate::OperationIdentityEffect>, BatchError> {
-    apply_batch_checked(candidate, operations, capture_identities, None)
-}
-
-fn apply_batch_checked(
-    candidate: &mut Document,
-    operations: &[Operation],
-    capture_identities: bool,
-    mut budget: Option<&mut crate::history_size::ReplayBudget>,
 ) -> Result<Vec<crate::OperationIdentityEffect>, BatchError> {
     if operations.is_empty() {
         return Err(BatchError::Empty);
@@ -624,15 +614,7 @@ fn apply_batch_checked(
         Vec::new()
     };
     for (index, operation) in operations.iter().enumerate() {
-        if let Some(budget) = budget.as_deref_mut() {
-            budget.check_operation(candidate, operation).map_err(|_| {
-                BatchError::OperationFailed {
-                    op_number: index + 1,
-                    error: OpError::HistoryReplayCapacity,
-                }
-            })?;
-        }
-        let before = capture_identities.then(|| clip_identities(candidate));
+        let before = capture_identities.then(|| clip_identities(candidate, None).0);
         let split_parent =
             if let (true, Operation::SplitClip { clip, .. }) = (capture_identities, operation) {
                 candidate.clip(*clip).cloned()
@@ -653,29 +635,37 @@ fn apply_batch_checked(
         })?;
         if let Some(before) = before {
             let effect = identity_effect(&before, candidate, split_parent);
-            if let Some(budget) = budget.as_deref_mut() {
-                budget
-                    .retain_identity(&effect)
-                    .map_err(|_| BatchError::OperationFailed {
-                        op_number: index + 1,
-                        error: OpError::HistoryReplayCapacity,
-                    })?;
-            }
             effects.push(effect);
         }
     }
     Ok(effects)
 }
 
-fn clip_identities(doc: &Document) -> std::collections::BTreeSet<ClipId> {
-    doc.tracks
+type ClipIdentities = std::collections::BTreeMap<ClipId, std::mem::Discriminant<ClipContent>>;
+fn clip_identities(
+    doc: &Document,
+    before: Option<&ClipIdentities>,
+) -> (ClipIdentities, Vec<(ClipId, ClipContent)>) {
+    #[cfg(feature = "history-metrics")]
+    crate::undo::metrics::identity();
+    let mut contents = Vec::new();
+    let identities = doc
+        .tracks
         .iter()
-        .flat_map(|t| t.clips.iter().map(|c| c.id))
-        .collect()
+        .flat_map(|track| &track.clips)
+        .map(|clip| {
+            let kind = std::mem::discriminant(&clip.content);
+            if before.is_some_and(|old| old.get(&clip.id) != Some(&kind)) {
+                contents.push((clip.id, clip.content.clone()));
+            }
+            (clip.id, kind)
+        })
+        .collect();
+    (identities, contents)
 }
 
 fn identity_effect(
-    before: &std::collections::BTreeSet<ClipId>,
+    before: &ClipIdentities,
     after: &Document,
     split_parent: Option<Clip>,
 ) -> crate::OperationIdentityEffect {
@@ -684,14 +674,23 @@ fn identity_effect(
             .tracks
             .iter()
             .flat_map(|track| &track.clips)
-            .filter(|clip| clip.id == parent.id || !before.contains(&clip.id))
+            .filter(|clip| clip.id == parent.id || !before.contains_key(&clip.id))
             .cloned()
             .collect()
     });
-    let after = clip_identities(after);
+    let (after, clip_contents) = clip_identities(after, Some(before));
     crate::OperationIdentityEffect {
-        created: after.difference(before).copied().collect(),
-        deleted: before.difference(&after).copied().collect(),
+        created: after
+            .keys()
+            .filter(|id| !before.contains_key(*id))
+            .copied()
+            .collect(),
+        deleted: before
+            .keys()
+            .filter(|id| !after.contains_key(*id))
+            .copied()
+            .collect(),
+        clip_contents,
         split_parent,
         split_results,
     }
@@ -711,8 +710,6 @@ impl ApplyOp for Operation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum OpError {
-    #[error("history replay memory capacity reached")]
-    HistoryReplayCapacity,
     #[error("asset {0} already exists")]
     DuplicateAsset(AssetId),
     #[error("bin {0} occurs more than once")]
@@ -5190,6 +5187,8 @@ fn validate_track_compatibility(asset: &MediaAsset, track: &crate::Track) -> Res
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
+    #[cfg(feature = "history-metrics")]
+    crate::undo::metrics::validation();
     if !doc.fps.is_valid() {
         return Err(OpError::InvalidProjectRate);
     }
@@ -6028,7 +6027,6 @@ impl OpError {
             | Self::UnknownTransition { .. }
             | Self::UnknownTrackAutomationParameter { .. } => IncidentFamily::UnknownName,
             Self::ClipIdExhausted { .. }
-            | Self::HistoryReplayCapacity
             | Self::LinkIdExhausted { .. }
             | Self::LutAssetIdExhausted { .. }
             | Self::TimeOverflow { .. } => IncidentFamily::Internal,
@@ -6297,7 +6295,7 @@ mod tests {
     /// another fails here instead of cancelling out against another move
     /// (review-2 S4, review-1 N2). It is transcribed from
     /// `docs/IN1B-ERROR-MIGRATION.md`'s Appendix A, not from the accessor.
-    const APPENDIX_A: [(&str, &str); 163] = [
+    const APPENDIX_A: [(&str, &str); 162] = [
         ("AudioBusLookaheadExceeded", "Bounds"),
         ("AudioBusKeyframeOutsideProject", "Bounds"),
         ("AudioBusGainOutOfRange", "Bounds"),
@@ -6449,7 +6447,6 @@ mod tests {
         ("LinkIdExhausted", "Internal"),
         ("LutAssetIdExhausted", "Internal"),
         ("TimeOverflow", "Internal"),
-        ("HistoryReplayCapacity", "Internal"),
         ("TimeMapping", "Internal"),
         ("ZeroConfidenceColorOverride", "ColorPolicy"),
         ("InvalidColorOverrideProvenance", "ColorPolicy"),
@@ -6540,7 +6537,7 @@ mod tests {
         ("SetSolidColor", "Clip"),
     ];
 
-    /// `IN1b` §9 clause 1: the match is exhaustive over all **163** `OpError`
+    /// `IN1b` §9 clause 1: the match is exhaustive over all **162** `OpError`
     /// variants with no wildcard, every family is non-empty, and **every
     /// variant** is in the family Appendix A gives it.
     #[test]
@@ -6566,10 +6563,10 @@ mod tests {
             .collect();
         assert_eq!(
             declared.len(),
-            163,
-            "Appendix A names 163 distinct variants"
+            162,
+            "Appendix A names 162 distinct variants"
         );
-        assert_eq!(implemented.len(), 163, "the accessor names 163 variants");
+        assert_eq!(implemented.len(), 162, "the accessor names 162 variants");
         for (variant, family) in &declared {
             assert_eq!(
                 implemented.get(variant),

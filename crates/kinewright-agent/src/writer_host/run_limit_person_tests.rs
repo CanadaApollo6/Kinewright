@@ -88,7 +88,7 @@ fn person_latched_fixture_inner(
             owner.persist_durable_branch(&mut candidate).unwrap();
             f.brief.scope.base = owner.candidate_binding(candidate.branch_id()).unwrap();
         }
-        owner.core().export_history().unwrap().document
+        document_for_test(owner.core())
     };
     f.brief.scope =
         crate::orchestration::policy::director_scope(&document, f.brief.scope.base.clone())
@@ -153,14 +153,31 @@ fn person_latched_fixture_inner(
         assert!(refused, "PERSON_STORAGE_LATCH");
     } else if matches!(latch, PersonLatch::Specialist) {
         let mut refused = false;
-        match owner.owner_mut().unwrap().fork_durable_branch(
-            "specialist quota pressure",
-            kinewright_project::editing_session::DurableBranchRole::RunCandidate,
-        ) {
-            Ok(mut branch) => {
-                for _ in 0..16 {
-                    let locked =
-                        branch.core().export_history().unwrap().document.tracks[0].sync_lock;
+        // A native specialist base is immutable, and forks from one head share
+        // it. Advance only the source's no-op close position, Save that head,
+        // then retain a distinct cold base per iteration to fill the same quota.
+        let slots = owner.owner().unwrap().store().unwrap().limits().versions;
+        let mut bases = BTreeSet::new();
+        for _ in 0..=slots {
+            owner.core().close_gesture().unwrap();
+            owner.owner_mut().unwrap().save_active().unwrap();
+            match owner.owner_mut().unwrap().fork_durable_branch(
+                "specialist quota pressure",
+                kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+            ) {
+                Ok(mut branch) => {
+                    assert!(
+                        bases.insert(branch.base().frozen_checkpoint_ref.sha256.clone()),
+                        "SPECIALIST_PRESSURE_USES_DISTINCT_FROZEN_BASES"
+                    );
+                    let locked = branch
+                        .core()
+                        .export_history()
+                        .unwrap()
+                        .history()
+                        .document
+                        .tracks[0]
+                        .sync_lock;
                     assert!(matches!(
                         branch
                             .core()
@@ -178,7 +195,16 @@ fn person_latched_fixture_inner(
                         .unwrap()
                         .persist_durable_branch(&mut branch)
                     {
-                        Ok(_) => {}
+                        Ok(_) => {
+                            assert!(
+                                owner
+                                    .owner_mut()
+                                    .unwrap()
+                                    .release_checkpointed_native_branch(&branch)
+                                    .unwrap(),
+                                "SPECIALIST_QUOTA_FIXTURE_RELEASES_ONLY_VERIFIED_COLD_BRANCHES"
+                            );
+                        }
                         Err(kinewright_project::bundle::BundleError::RunLimit) => {
                             refused = true;
                             break;
@@ -186,9 +212,12 @@ fn person_latched_fixture_inner(
                         Err(error) => panic!("C3_SPECIALIST_WRONG_REFUSAL {error}"),
                     }
                 }
+                Err(kinewright_project::bundle::BundleError::RunLimit) => {
+                    refused = true;
+                    break;
+                }
+                Err(error) => panic!("C3_SPECIALIST_WRONG_REFUSAL {error}"),
             }
-            Err(kinewright_project::bundle::BundleError::RunLimit) => refused = true,
-            Err(error) => panic!("C3_SPECIALIST_WRONG_REFUSAL {error}"),
         }
         assert!(refused, "C3_SPECIALIST_SLOT_LATCH");
     } else if matches!(latch, PersonLatch::Sends) {
@@ -270,7 +299,10 @@ fn person_latched_fixture_inner(
     (f, run, client)
 }
 
-fn person_history_redo(core: &Core, marker: u64) -> kinewright_core::HistorySnapshot {
+fn person_history_redo(
+    core: &Core,
+    marker: u64,
+) -> kinewright_project::operation_actor::PortableHistory {
     for command in [
         kinewright_core::Command::Do(history_marker(marker)),
         kinewright_core::Command::Do(history_marker(marker + 1)),
@@ -284,7 +316,7 @@ fn person_history_redo(core: &Core, marker: u64) -> kinewright_core::HistorySnap
             "PERSON_MANUAL_EDIT"
         );
     }
-    core.export_history().unwrap()
+    core.portable_history().unwrap()
 }
 
 fn person_voice_wav() -> Vec<u8> {
@@ -307,7 +339,7 @@ fn person_voice_wav() -> Vec<u8> {
     bytes
 }
 
-fn person_save(f: &Fixture, marker: u64) -> kinewright_core::HistorySnapshot {
+fn person_save(f: &Fixture, marker: u64) -> kinewright_project::operation_actor::PortableHistory {
     let history = {
         let host = f.host.owner.upgrade().unwrap();
         let owner = host.lock().unwrap();
@@ -316,15 +348,18 @@ fn person_save(f: &Fixture, marker: u64) -> kinewright_core::HistorySnapshot {
     let saved = ok(
         f.editor
             .request(HostCommand::Save {
-                snapshot: HostSnapshot::from_history(history.clone()).unwrap(),
+                snapshot: host_snapshot_for_test(&f.host),
             })
             .unwrap(),
         "PERSON_SAVE_APPLIED",
     );
     assert!(saved.saved.is_some(), "PERSON_VERIFIED_SAVE");
     assert_eq!(
-        saved.history.as_ref(),
-        Some(&history),
+        saved
+            .history
+            .as_ref()
+            .map(kinewright_project::operation_actor::PortableHistory::identity),
+        Some(history.identity()),
         "PERSON_SAVE_EXACT_REDO"
     );
     let host = f.host.owner.upgrade().unwrap();
@@ -403,7 +438,8 @@ fn person_metadata(f: &Fixture) -> kinewright_project::studio_records::SnapshotK
     {
         let host = f.host.owner.upgrade().unwrap();
         let owner = host.lock().unwrap();
-        let document = owner.core().export_history().unwrap().document;
+        let document_capture = owner.core().export_history().unwrap();
+        let document = &document_capture.history().document;
         revision.anchor.fps.numerator = document.fps.numerator();
         revision.anchor.fps.denominator = document.fps.denominator();
     }
@@ -461,6 +497,44 @@ fn person_metadata(f: &Fixture) -> kinewright_project::studio_records::SnapshotK
     revision.anchor.snapshot
 }
 
+// The reopen oracle keeps the complete combined identity and actor metadata,
+// not another full product capture across the next Save.
+fn person_copy_oracle(
+    before: kinewright_project::operation_actor::PortableHistory,
+    after: &kinewright_project::operation_actor::PortableHistory,
+) -> (
+    kinewright_project::operation_history::SnapshotIdentity,
+    kinewright_project::bundle_records::BranchId,
+    kinewright_core::TimelineRevision,
+) {
+    let owner_json = |history: &kinewright_project::operation_actor::PortableHistory| {
+        let wire = serde_json::to_value(&history.snapshot).unwrap();
+        serde_json::from_str::<serde_json::Value>(wire["body"].as_str().unwrap()).unwrap()
+    };
+    let mut expected = owner_json(&before);
+    let actual = owner_json(after);
+    expected["history"]["epoch"] =
+        serde_json::json!(expected["history"]["epoch"].as_u64().unwrap() + 1);
+    assert_eq!(
+        actual, expected,
+        "PERSON_COPY_EXACT_REDO_AND_OWNER_WITH_FRESH_EPOCH"
+    );
+    assert_eq!(after.branch, before.branch, "PERSON_COPY_PRESERVES_BRANCH");
+    assert_eq!(
+        after.revision.0,
+        before.revision.0 + 1,
+        "PERSON_COPY_INSTALL_REVISION"
+    );
+    let identity = before.identity();
+    let kinewright_project::operation_actor::PortableHistory {
+        snapshot,
+        branch,
+        revision,
+    } = before;
+    drop(snapshot);
+    (identity, branch, revision)
+}
+
 #[test]
 #[cfg_attr(
     all(target_os = "linux", not(feature = "slow-tests")),
@@ -505,10 +579,12 @@ fn run_limit_person_save_feedback_version_and_dirty_copy_survive_latches() {
                 "PERSON_DIRTY_SAVE_AS",
             );
             assert!(copied.saved.is_some());
-            assert_eq!(
-                copied.history.as_ref(),
-                Some(&dirty),
-                "PERSON_COPY_EXACT_REDO"
+            let (original_identity, original_branch, original_revision) = person_copy_oracle(
+                dirty,
+                copied
+                    .history
+                    .as_ref()
+                    .expect("PERSON_COPY_RETURNS_HISTORY"),
             );
             let final_history = {
                 let host = f.host.owner.upgrade().unwrap();
@@ -523,8 +599,22 @@ fn run_limit_person_save_feedback_version_and_dirty_copy_survive_latches() {
                     ),
                     "PERSON_LATER_MANUAL_EDIT"
                 );
-                owner.core().export_history().unwrap()
+                owner.core().portable_history().unwrap()
             };
+            {
+                let host = f.host.owner.upgrade().unwrap();
+                let owner = host.lock().unwrap();
+                assert_eq!(
+                    owner
+                        .core()
+                        .history_pool()
+                        .lease_counts(kinewright_project::operation_history::Role::Ordinary)
+                        .unwrap()
+                        .0,
+                    2,
+                    "PERSON_SAVE_HAS_ONLY_LIVE_AND_REQUEST_CAPTURES"
+                );
+            }
             let saved = ok(
                 f.editor
                     .request(HostCommand::Save {
@@ -537,12 +627,40 @@ fn run_limit_person_save_feedback_version_and_dirty_copy_survive_latches() {
             let original = f.temp.path("project.kinewright");
             let Fixture { host, temp, .. } = f;
             drop(host);
-            for (path, expected) in [(&original, &dirty), (&destination, &final_history)] {
-                let reopened = Ja1EditingSession::open(path).unwrap();
+            for (path, expected_identity, expected_branch, expected_revision) in [
+                (
+                    &original,
+                    original_identity,
+                    &original_branch,
+                    original_revision,
+                ),
+                (
+                    &destination,
+                    final_history.identity(),
+                    &final_history.branch,
+                    final_history.revision,
+                ),
+            ] {
+                let reopened = Ja1EditingSession::open(
+                    path,
+                    &kinewright_project::operation_history::HistoryPool::new(
+                        kinewright_project::operation_history::PoolLimits::default(),
+                    ),
+                )
+                .unwrap();
+                let actual = reopened.core().portable_history().unwrap();
                 assert_eq!(
-                    &reopened.core().export_history().unwrap(),
-                    expected,
-                    "PERSON_CLOSE_REOPEN {latch:?} phase={phase}"
+                    actual.identity(),
+                    expected_identity,
+                    "PERSON_CLOSE_REOPEN_FULL_COMBINED_IDENTITY {latch:?} phase={phase}"
+                );
+                assert_eq!(
+                    &actual.branch, expected_branch,
+                    "PERSON_CLOSE_REOPEN_BRANCH"
+                );
+                assert_eq!(
+                    actual.revision, expected_revision,
+                    "PERSON_CLOSE_REOPEN_REVISION"
                 );
                 assert_eq!(
                     reopened.studio_versions().unwrap().as_slice(),
@@ -574,7 +692,7 @@ fn run_limit_person_admission_is_unavailable_to_task_producers() {
         .lock()
         .unwrap()
         .core()
-        .export_history()
+        .portable_history()
         .unwrap();
     let before = f.projection(&run);
     let denied = model
@@ -723,8 +841,7 @@ fn run_limit_person_gui_history_publication_survives_the_run_latch() {
                 .unwrap(),
             "PERSON_GUI_ACQUIRE",
         );
-        let gui = Core::spawn(Document::default()).unwrap();
-        gui.restore_history(before).unwrap();
+        let gui = kinewright_project::operation_actor::Core::peer_for_test(before).unwrap();
         let replica = Ja1EditingSession::new(
             f.temp.root(),
             &gui,
@@ -732,7 +849,11 @@ fn run_limit_person_gui_history_publication_survives_the_run_latch() {
         )
         .unwrap();
         let permit = replica
-            .bind_manual_producer(lease.manual_lease.unwrap(), lease.manual_inputs.unwrap())
+            .bind_manual_producer(
+                lease.manual_lease.unwrap(),
+                lease.manual_inputs.unwrap(),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            )
             .unwrap();
         for command in [
             kinewright_core::Command::Do(history_marker(702)),
@@ -781,7 +902,13 @@ fn run_limit_person_gui_history_publication_survives_the_run_latch() {
         let path = f.temp.path("project.kinewright");
         let Fixture { host, temp, .. } = f;
         drop(host);
-        let reopened = Ja1EditingSession::open(&path).unwrap();
+        let reopened = Ja1EditingSession::open(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         assert_eq!(reopened.core().export_history().unwrap(), expected);
         drop(reopened);
         drop(temp);

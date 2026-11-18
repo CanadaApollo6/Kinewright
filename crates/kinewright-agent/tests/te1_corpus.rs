@@ -3,7 +3,8 @@ use kinewright_agent::orchestration::{
     orchestration_records::{BranchBinding, Role},
     policy::{TaskPolicy, director_scope},
 };
-use kinewright_core::{Command, Core, Document, Operation, Playback, TimeCode};
+use kinewright_core::{Command, Document, Operation, Playback, TimeCode};
+use kinewright_project::operation_actor::Core;
 #[cfg(target_os = "linux")]
 use kinewright_project::{
     bundle_records::BranchCheckpoint,
@@ -131,14 +132,17 @@ fn verify_combined_trim(
     );
 }
 fn replay_history(path: &Path, core: &Core) {
-    let expected = core.export_history().unwrap();
-    std::fs::write(path, serde_json::to_vec(&expected).unwrap()).unwrap();
-    let reopened = Core::spawn((*expected.baseline).clone()).unwrap();
-    reopened
-        .restore_history(serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
-        .unwrap();
+    let expected = serde_json::to_value(core.export_history().unwrap()).unwrap();
+    std::fs::write(
+        path,
+        serde_json::to_vec(&core.portable_history().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let reopened =
+        Core::peer_for_test(serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
+            .unwrap();
     assert_eq!(
-        reopened.export_history().unwrap(),
+        serde_json::to_value(reopened.export_history().unwrap()).unwrap(),
         expected,
         "exact reopened undo and redo history"
     );
@@ -148,7 +152,7 @@ fn verify_child_result(case: &Value, reads: &[String], original: &Document) {
         &std::fs::read(root().join(case["child_result"].as_str().unwrap())).unwrap(),
     )
     .unwrap();
-    let child_core = Core::spawn(original.clone()).unwrap();
+    let child_core = Core::for_test(original.clone()).unwrap();
     let child_operations: Vec<Operation> =
         serde_json::from_value(child["operations"].clone()).unwrap();
     child_core
@@ -157,7 +161,10 @@ fn verify_child_result(case: &Value, reads: &[String], original: &Document) {
     let document = load_document(&root().join(child["document"].as_str().unwrap()))
         .unwrap()
         .0;
-    assert_eq!(*child_core.export_history().unwrap().document, document);
+    assert_eq!(
+        *child_core.export_history().unwrap().history().document,
+        document
+    );
     assert_eq!(child["outcome"], "completed");
     assert_eq!(
         child["claimed_satisfied_notes"].as_array().unwrap().len(),
@@ -261,15 +268,21 @@ fn te1_frozen_six_case_operations_documents_histories_and_evidence() {
         let operations: Vec<Operation> =
             serde_json::from_value(case["operations"].clone()).unwrap();
         verify_scope_and_scripted_requirements(n, &case, &original, &operations);
-        let task = Core::spawn(original.clone()).unwrap();
+        let task = Core::for_test(original.clone()).unwrap();
         task.request(Command::DoBatch(operations.clone())).unwrap();
         let edited = task.export_history().unwrap();
         if n == 6 {
-            verify_combined_trim(&case, &original, &edited.document, &operations);
+            verify_combined_trim(&case, &original, &edited.history().document, &operations);
         }
-        assert_eq!(*edited.document, expected, "case {n} document oracle");
         assert_eq!(
-            edited.cursor.undo.last().unwrap().operations,
+            *edited.history().document,
+            expected,
+            "case {n} document oracle"
+        );
+        assert_eq!(
+            edited.history().undo.back().unwrap().commands()[0]
+                .operations
+                .as_ref(),
             operations,
             "case {n} exact operations"
         );
@@ -284,14 +297,15 @@ fn te1_frozen_six_case_operations_documents_histories_and_evidence() {
             };
             assert_eq!(find(&expected), find(&original));
         }
+        drop(edited);
         task.request(Command::Undo).unwrap();
         assert_eq!(
-            snapshot(&task.export_history().unwrap().document),
+            snapshot(&task.export_history().unwrap().history().document),
             snapshot(&original)
         );
         replay_history(&dir.path(&format!("task-{n}.json")), &task);
         task.request(Command::Redo).unwrap();
-        assert_eq!(*task.export_history().unwrap().document, expected);
+        assert_eq!(*task.export_history().unwrap().history().document, expected);
         let path = dir.path(&format!("case-{n}.kinewright"));
         write_project_document(&expected, &path, None).unwrap();
         assert_eq!(load_document(&path).unwrap().0, expected);
@@ -344,6 +358,10 @@ fn te1_six_case_rendered_evidence_uses_production_preview() {
 
 #[cfg(target_os = "linux")]
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one task lifecycle checks the retained source before creation and after close"
+)]
 fn te1_case1_task_fork_preserves_its_source_manual_history_and_redo() {
     let dir = kinewright_media::test_support::TempDirectory::new_in(
         &kinewright_media::test_support::workspace_target_dir(),
@@ -367,7 +385,7 @@ fn te1_case1_task_fork_preserves_its_source_manual_history_and_redo() {
     let case: Value =
         serde_json::from_slice(&std::fs::read(root().join("case-1.json")).unwrap()).unwrap();
     let operations: Vec<Operation> = serde_json::from_value(case["operations"].clone()).unwrap();
-    let manual = Core::spawn(original.clone()).unwrap();
+    let manual = Core::for_test(original.clone()).unwrap();
     manual
         .request(Command::Do(Operation::MoveMarker {
             marker: kinewright_core::MarkerId(2),
@@ -375,12 +393,29 @@ fn te1_case1_task_fork_preserves_its_source_manual_history_and_redo() {
         }))
         .unwrap();
     manual.request(Command::Undo).unwrap();
-    let before = manual.export_history().unwrap();
-    assert!(!before.cursor.redo.is_empty());
+    let before_save = serde_json::to_value(manual.export_history().unwrap()).unwrap();
+    assert!(
+        !before_save["history"]["redo"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     let mut owner = Ja1EditingSession::new(dir.root(), &manual, StorageLimits::default()).unwrap();
     owner
         .first_save(&dir.path("source.kinewright"), StorageLimits::default())
         .unwrap();
+    let before = serde_json::to_value(manual.export_history().unwrap()).unwrap();
+    assert!(
+        before["history"]["epoch"].as_u64().unwrap()
+            > before_save["history"]["epoch"].as_u64().unwrap(),
+        "FIRST_SAVE_STARTS_A_NAMESPACE_EPOCH"
+    );
+    let mut selected = before.clone();
+    selected["history"]["epoch"] = before_save["history"]["epoch"].clone();
+    assert_eq!(
+        selected, before_save,
+        "FIRST_SAVE_PRESERVES_COMMANDS_REDO_AND_OWNERS"
+    );
     let mut task = owner
         .fork_durable_branch("TE1 case 1 task", Session)
         .unwrap();
@@ -390,17 +425,25 @@ fn te1_case1_task_fork_preserves_its_source_manual_history_and_redo() {
             .unwrap()
             .read_record::<BranchCheckpoint>(&task.base().frozen_checkpoint_ref)
             .unwrap();
-        let source = owner
-            .store()
+        checkpoint
+            .open(
+                owner.store().unwrap(),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
             .unwrap()
-            .resolve_history(&checkpoint.history_ref)
-            .unwrap();
-        (*source).clone()
+            .into_reader()
+            .unwrap()
+            .into_capture()
+            .unwrap()
     };
     assert_eq!(
-        source_history, before,
+        serde_json::to_value(&source_history).unwrap(),
+        before,
         "TE1_TASK_SHARES_THE_ACTUAL_MANUAL_HISTORY_CUT"
     );
+    drop(source_history);
     assert!(matches!(
         task.core()
             .request(Command::DoBatch(operations.clone()))
@@ -408,16 +451,29 @@ fn te1_case1_task_fork_preserves_its_source_manual_history_and_redo() {
         kinewright_core::Event::DocumentChanged { .. }
     ));
     let edited = task.core().export_history().unwrap();
-    assert_eq!(*edited.document, expected);
-    assert_eq!(edited.cursor.undo.last().unwrap().operations, operations);
+    assert_eq!(*edited.history().document, expected);
+    assert_eq!(
+        edited.history().undo.back().unwrap().commands()[0]
+            .operations
+            .as_ref(),
+        operations
+    );
+    drop(edited);
     task.core().request(Command::Undo).unwrap();
-    assert_eq!(*task.core().export_history().unwrap().document, original);
+    assert_eq!(
+        *task.core().export_history().unwrap().history().document,
+        original
+    );
     replay_history(&dir.path("task-history.json"), task.core());
     task.core().request(Command::Redo).unwrap();
-    assert_eq!(*task.core().export_history().unwrap().document, expected);
-    owner.persist_durable_branch(&mut task).unwrap();
     assert_eq!(
-        manual.export_history().unwrap(),
+        *task.core().export_history().unwrap().history().document,
+        expected
+    );
+    owner.persist_durable_branch(&mut task).unwrap();
+    let task_binding = owner.task_checkpoint_binding(task.branch_id()).unwrap();
+    assert_eq!(
+        serde_json::to_value(manual.export_history().unwrap()).unwrap(),
         before,
         "TE1_TASK_EDIT_PRESERVES_MANUAL_REDO"
     );
@@ -427,20 +483,38 @@ fn te1_case1_task_fork_preserves_its_source_manual_history_and_redo() {
         .issue_manual_lease("person".into(), "corpus-history".into())
         .unwrap();
     let person = owner
-        .bind_manual_producer(lease, owner.manual_input_context().unwrap())
+        .bind_manual_producer(
+            lease,
+            owner.manual_input_context().unwrap(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        )
         .unwrap();
     assert!(matches!(
         person.request(Command::Redo).unwrap(),
         kinewright_core::Event::DocumentChanged { .. }
     ));
     let redone = manual.export_history().unwrap();
-    assert_eq!(redone.document.markers[1].position, TimeCode(94));
+    assert_eq!(redone.history().document.markers[1].position, TimeCode(94));
     assert_eq!(
-        redone.document.markers[0].position,
+        redone.history().document.markers[0].position,
         original.markers[0].position
     );
     assert_eq!(
-        task.core().export_history().unwrap().document.markers[0].position,
+        owner
+            .store()
+            .unwrap()
+            .read_record::<BranchCheckpoint>(&task_binding.checkpoint)
+            .unwrap()
+            .open(
+                owner.store().unwrap(),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            )
+            .unwrap()
+            .document()
+            .markers[0]
+            .position,
         TimeCode(6)
     );
 }

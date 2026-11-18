@@ -10,7 +10,7 @@ pub(super) struct SwitchConfirmation {
     installed: SwitchAttachmentIdentity,
     current: SwitchAttachmentIdentity,
     grant: Option<(
-        kinewright_project::manual_history::ManualLease,
+        kinewright_project::operation_protocol::Lease,
         kinewright_project::owned_inputs::OwnedInputManifest,
     )>,
 }
@@ -29,13 +29,13 @@ impl HostCommandOwner {
             reply.switch_preview = Some(self.owner()?.switch_preview()?);
             return Ok(());
         }
-        let lease = self.manual.clone().ok_or_else(|| {
+        let lease = self.manual.as_ref().ok_or_else(|| {
             HostRefusal::new(
                 "manual_lease",
                 "a current manual lease is required to prepare a switch",
             )
         })?;
-        let envelope = self.owner()?.switch_envelope(&lease, target)?;
+        let envelope = self.owner()?.switch_envelope(lease, target)?;
         if self.owner_mut()?.prepare_host_switch(&envelope)? != ReceiptLookup::Absent {
             return Err(BundleError::HistoryChanged.into());
         }
@@ -53,13 +53,36 @@ impl HostCommandOwner {
         envelope: &CommandEnvelope,
         reply: &mut HostReply,
     ) -> Result<(), HostError> {
-        match self.owner()?.manual_transition_receipt(envelope)? {
+        match self.owner()?.command_receipt(envelope)? {
             ReceiptLookup::Committed(receipt) | ReceiptLookup::Retired(receipt) => {
                 let ReceiptResult::Switch { result } = receipt.result else {
                     return Err(BundleError::HistoryChanged.into());
                 };
                 reply.switch_result = Some(*result);
-                reply.switch_attachment = Some(self.owner()?.current_switch_attachment()?);
+                let current = self.owner()?.current_switch_identity()?;
+                // Both fields of this reply describe the same writer-validated
+                // published owner. Retain its one immutable wire buffer once;
+                // a second full capture would block confirmation's preview.
+                reply.switch_attachment = Some(
+                    if let Some(history) = reply.history.as_ref().filter(|history| {
+                        history.identity() == current.current.history_digest
+                            && history.branch == current.current.branch
+                            && history.revision == current.current.revision
+                            && history.role() == current.current.history_role
+                    }) {
+                        kinewright_project::bundle_switch::SwitchAttachment {
+                            project: current.project,
+                            root_sha256: current.root_sha256,
+                            root_generation: current.root_generation,
+                            switch_generation: current.switch_generation,
+                            current: current.current,
+                            history: history.clone(),
+                            inputs: self.owner()?.manual_input_context()?,
+                        }
+                    } else {
+                        self.owner()?.current_switch_attachment()?
+                    },
+                );
                 Ok(())
             }
             ReceiptLookup::IdPayloadConflict => Err(HostRefusal::new(
@@ -134,7 +157,11 @@ impl HostCommandOwner {
             && continuation
             && let Some((lease, inputs)) = &confirmation.grant
             && lease.client == client
-            && self.manual.as_ref() == Some(lease)
+            && self
+                .manual
+                .as_ref()
+                .map(kinewright_project::editing_session::ManualAuthority::lease)
+                == Some(lease)
             && !self.switch_frozen
             && !self.recovering
             && !self.owner()?.has_unresolved_publication()
@@ -147,13 +174,12 @@ impl HostCommandOwner {
             || self.manual.is_some()
             || self.owner()?.has_unresolved_publication()
             || (current != *installed && !continuation)
-            || kinewright_project::manual_history::history_sha256(
-                &self
-                    .owner()?
-                    .core()
-                    .export_history()
-                    .map_err(|e| HostError::Protocol(e.to_string()))?,
-            )? != installed.current.history_digest
+            || self
+                .owner()?
+                .core()
+                .snapshot_identity()
+                .map_err(|e| HostError::Protocol(e.to_string()))?
+                != installed.current.history_digest
         {
             return Err(HostRefusal::new("switch_changed", "restore the exact current pointer, history, lineage and input context before acquiring authority").into());
         }
@@ -210,7 +236,6 @@ mod tests {
                 bundle::{BundleWriteAdmission, LoadedBundle, ProjectBundle},
                 bundle_recovery::RecoverySelection,
                 bundle_switch::SwitchTarget,
-                storage_budget::StorageLimits,
             };
             let parent = kinewright_media::test_support::workspace_target_dir();
             std::fs::create_dir_all(&parent).unwrap();
@@ -228,7 +253,7 @@ mod tests {
                     .collect(),
                 ..Document::default()
             };
-            let core = Core::spawn(doc).unwrap();
+            let core = Core::for_test(doc).unwrap();
             let grow = |core: &Core, count| {
                 for i in 0..count {
                     core.request(Command::Do(Operation::SetTrackSyncLock {
@@ -239,23 +264,40 @@ mod tests {
                 }
             };
             grow(&core, 12);
-            let mut bundle =
-                ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+            let mut bundle = ProjectBundle::activate(
+                &path,
+                BundleWriteAdmission::new_document(),
+                core.history_pool(),
+            )
+            .unwrap();
             let inputs = bundle.empty_inputs().unwrap().reference.clone();
             bundle.save(&core, &inputs).unwrap();
             let left = bundle.manual_branch_id().clone();
             let mut spare = vec![];
             for count in 16..22 {
                 let branch = bundle
-                    .fork_branch(
-                        &left,
-                        kinewright_project::history_record::HistoryRole::Ordinary,
-                    )
+                    .fork_branch(&left, kinewright_project::operation_history::Role::Ordinary)
                     .unwrap();
-                let other =
-                    Core::spawn((*core.export_history().unwrap().document).clone()).unwrap();
+                let checkpoint = bundle.checkpoint(&branch).unwrap();
+                let other = Core::open(
+                    checkpoint
+                        .open(bundle.store(), bundle.history_pool())
+                        .unwrap(),
+                    branch.clone(),
+                    checkpoint.revision,
+                )
+                .unwrap();
                 grow(&other, count);
                 bundle.save_branch(&branch, &other).unwrap();
+                drop(other);
+                assert_eq!(
+                    core.history_pool()
+                        .lease_counts(kinewright_project::operation_history::Role::Ordinary)
+                        .unwrap()
+                        .0,
+                    1,
+                    "W13_FINISHED_BRANCH_ACTOR_RELEASED_BEFORE_NEXT_OPEN"
+                );
                 spare.push(branch);
             }
             grow(&core, 8);
@@ -276,7 +318,9 @@ mod tests {
                 origin: HostOrigin::Headless,
             })
             .unwrap();
-            let run = |host: &mut HostCommandOwner, command| host.execute(command, roots.clone());
+            let run = |host: &mut HostCommandOwner, command| {
+                received_reply_for_test(host.execute(command, roots.clone()))
+            };
             let identity = "a".repeat(64);
             assert!(
                 run(
@@ -288,17 +332,66 @@ mod tests {
                 .error
                 .is_none()
             );
-            // Issuer creation rotates inventory. Establish distinct P1/P2 histories
-            // after lease acquisition so P1 is not merely the same-history issuer root.
+            // Drive accepted GUI messages through the real ordered writer. A
+            // writer shadow never has an applied, unpublished manual suffix.
+            let lease = host.manual.as_ref().unwrap().lease().clone();
+            let gui_pool = kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            );
+            let mut gui = host
+                .core()
+                .portable_history()
+                .unwrap()
+                .validate(&gui_pool)
+                .unwrap()
+                .open()
+                .unwrap();
+            let mut producer =
+                kinewright_project::operation_protocol::Producer::bind(lease.clone(), &mut gui)
+                    .unwrap();
             for _ in 0..2 {
-                grow(host.core(), 8);
-                let snapshot = HostSnapshot::capture(host.core()).unwrap();
+                for i in 0..8 {
+                    producer
+                        .execute(
+                            &mut gui,
+                            kinewright_project::operation_protocol::Action::Do {
+                                operations: vec![Operation::SetTrackSyncLock {
+                                    track: TrackId(1),
+                                    locked: i % 2 == 0,
+                                }],
+                                gesture: None,
+                            },
+                            kinewright_project::operation_actor::CommandContext {
+                                creation: kinewright_project::operation_history::CreationOrigin {
+                                    branch: lease.state.seed().branch.clone(),
+                                    batch: kinewright_project::bundle_records::BatchId::fresh()
+                                        .unwrap(),
+                                },
+                                inputs: vec![lease.inputs.clone()],
+                                approval: None,
+                                transition: None,
+                            },
+                        )
+                        .unwrap();
+                }
+                let committed = run(
+                    &mut host,
+                    HostCommand::CommitHistory {
+                        client: identity.clone(),
+                        messages: producer.pending(),
+                    },
+                );
+                assert!(committed.error.is_none(), "{:?}", committed.error);
+                producer.acknowledge(&committed.manual_ack).unwrap();
+                assert_eq!(
+                    host.core().snapshot_identity().unwrap(),
+                    gui.identity().unwrap(),
+                    "MANUAL_FIXTURE_DRAINS_THE_EXACT_ACCEPTED_CHAIN"
+                );
+                let snapshot = received_snapshot_for_test(host.core()).unwrap();
                 let saved = run(&mut host, HostCommand::Save { snapshot });
                 assert!(saved.error.is_none(), "{:?}", saved.error);
             }
-            let loaded = LoadedBundle::read(&path).unwrap();
-            let peak = loaded.usage_probe().unwrap().peak_live_history_bytes;
-            drop(loaded);
             let target = host
                 .owner()
                 .unwrap()
@@ -312,28 +405,6 @@ mod tests {
             else {
                 panic!("P2")
             };
-            let profile = StorageLimits {
-                // The exact lane checks a refusal reply at the current root's
-                // measured peak. Retry lanes also admit ordinary issuer and
-                // retirement metadata publications under this fixed test profile.
-                live_history_bytes: peak
-                    + if reply_only {
-                        0
-                    } else {
-                        // Retirement needs retained-history headroom, not
-                        // another complete replay peak in the shared pool.
-                        kinewright_core::history_size::restored_history_live_bytes(
-                            &host.core().export_history().unwrap(),
-                        )
-                        .unwrap()
-                            / 2
-                    },
-                ..StorageLimits::default()
-            };
-            host.owner_mut()
-                .unwrap()
-                .restrict_limits_probe(profile.clone())
-                .unwrap();
             let prepared = run(
                 &mut host,
                 HostCommand::PrepareSwitch {
@@ -355,6 +426,21 @@ mod tests {
                 .unwrap()
                 .1[&selected.sha256];
             assert!(pin_count > 0);
+            // Native owner records no longer consume the deleted aggregate
+            // history graph quota. Exercise the remaining real metadata pool
+            // with independently retained, bounded decoder reservations.
+            let store = host.owner().unwrap().store().unwrap();
+            let usage = store.usage().unwrap();
+            let mut left =
+                store.limits().metadata_bytes - usage.metadata_bytes - usage.decoded_bytes - 1;
+            let mut blockers = Vec::new();
+            while left > 0 {
+                let bytes = left.min(store.limits().decoded_record_bytes);
+                blockers.push(store.reserve_probe(bytes).unwrap());
+                left -= bytes;
+            }
+            let before_root = host.owner().unwrap().root_sha256().unwrap();
+            let before_state = host.core().snapshot_identity().unwrap();
             let refused = run(
                 &mut host,
                 HostCommand::Switch {
@@ -364,45 +450,38 @@ mod tests {
             assert_eq!(
                 refused.error.as_ref().map(|e| e.code.as_str()),
                 Some("storage_backpressure"),
-                "target={target_index} reply_only={reply_only} peak={peak} limit={} error={:?}",
-                profile.live_history_bytes,
+                "NATIVE_SELECTION_POOL_REFUSAL target={target_index} reply_only={reply_only} error={:?}",
                 refused.error
             );
-            assert!(
-                refused.switch_attachment.is_some(),
-                "quota refusal must carry the verified saved source attachment"
-            );
+            assert_eq!(host.owner().unwrap().root_sha256().unwrap(), before_root);
+            assert_eq!(host.core().snapshot_identity().unwrap(), before_state);
+            drop(blockers);
             if reply_only {
-                assert!(LoadedBundle::read_with_limits_probe(&path, profile).is_ok());
+                assert!(
+                    LoadedBundle::read(
+                        &path,
+                        &kinewright_project::operation_history::HistoryPool::new(
+                            kinewright_project::operation_history::PoolLimits::default()
+                        )
+                    )
+                    .is_ok()
+                );
                 continue;
             }
-            let confirmation = run(
-                &mut host,
-                HostCommand::ConfirmSwitch {
-                    client: identity.clone(),
-                    installed: Box::new(refused.switch_attachment.unwrap().identity().unwrap()),
-                },
-            );
-            assert!(
-                confirmation.error.is_none(),
-                "P1/P2 confirmation: {:?}; pool={} usage={:?}",
-                confirmation.error,
-                profile.live_history_bytes,
-                host.owner().unwrap().store().unwrap().usage()
-            );
-            assert!(
-                host.owner()
-                    .unwrap()
-                    .store()
-                    .unwrap()
-                    .retention_probe()
-                    .unwrap()
-                    .1
-                    .get(&selected.sha256)
-                    .copied()
-                    .unwrap_or_default()
-                    > 0
-            );
+            if let Some(attachment) = refused.switch_attachment {
+                let confirmation = run(
+                    &mut host,
+                    HostCommand::ConfirmSwitch {
+                        client: identity.clone(),
+                        installed: Box::new(attachment.identity().unwrap()),
+                    },
+                );
+                assert!(
+                    confirmation.error.is_none(),
+                    "NATIVE_REFUSAL_CONFIRMATION {:?}",
+                    confirmation.error
+                );
+            }
             let mut activated = None;
             for branch in spare {
                 let preview = run(
@@ -415,6 +494,15 @@ mod tests {
                     preview.error.is_none(),
                     "retirement preview: {:?}",
                     preview.error
+                );
+                assert!(
+                    host.core()
+                        .history_pool()
+                        .lease_counts(kinewright_project::operation_history::Role::Ordinary)
+                        .unwrap()
+                        .1
+                        <= 3,
+                    "RETIREMENT_DISCLOSURE_NEEDS_ONLY_ONE_COLD_READER"
                 );
                 let removed = run(&mut host, HostCommand::RemoveBranch);
                 assert!(
@@ -472,7 +560,7 @@ mod tests {
                 );
             }
             let activated = activated.expect(
-                "unrelated working-branch retirement must make the same pinned target usable",
+                "released pool room and unrelated branch retirement preserve the same pinned target",
             );
             assert_eq!(activated.history, target_payload.history);
             assert!(
@@ -484,10 +572,18 @@ mod tests {
                     .contains(&target)
             );
             drop(host);
-            let loaded = LoadedBundle::read_with_limits_probe(&path, profile).unwrap();
-            let fresh = Core::spawn(Document::default()).unwrap();
-            loaded.restore_manual(&fresh).unwrap();
-            assert_eq!(fresh.export_history().unwrap(), activated.history);
+            let mut loaded = LoadedBundle::read(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap();
+            let fresh = loaded.open_manual().unwrap();
+            assert_eq!(
+                fresh.snapshot_identity().unwrap(),
+                activated.history.identity()
+            );
         }
     }
     #[cfg(target_os = "linux")]
@@ -504,7 +600,7 @@ mod tests {
             let root =
                 kinewright_media::test_support::TempDirectory::new_in(&parent, "c11-host-target");
             let path = root.path("a.kinewright");
-            let core = Core::spawn(Document::default()).unwrap();
+            let core = Core::for_test(Document::default()).unwrap();
             let mut owner =
                 Ja1EditingSession::new(root.root(), &core, StorageLimits::default()).unwrap();
             owner.first_save(&path, StorageLimits::default()).unwrap();
@@ -523,7 +619,9 @@ mod tests {
                 origin: HostOrigin::Headless,
             })
             .unwrap();
-            let run = |host: &mut HostCommandOwner, command| host.execute(command, roots.clone());
+            let run = |host: &mut HostCommandOwner, command| {
+                received_reply_for_test(host.execute(command, roots.clone()))
+            };
             let identity = "a".repeat(64);
             assert!(
                 run(
@@ -566,8 +664,13 @@ mod tests {
                 AttachmentState::Frozen
             );
             assert!(matches!(
-                host.core().request(kinewright_core::Command::Undo).unwrap(),
-                kinewright_core::Event::MutationRefused { .. }
+                host.core().request(kinewright_core::Command::Undo),
+                Err(kinewright_project::operation_actor::Refusal {
+                    error: kinewright_project::operation_actor::Error::MutationRefused(
+                        kinewright_core::CoreMutationRefusal::Frozen
+                    ),
+                    ..
+                })
             ));
             assert!(
                 run(
@@ -633,7 +736,7 @@ mod tests {
                 .change_prepared_target_probe(changed_head)
                 .unwrap();
             let root_before = host.owner().unwrap().root_sha256().unwrap();
-            let history = host.core().export_history().unwrap();
+            let history = host.core().snapshot_identity().unwrap();
             let retry = run(
                 &mut host,
                 HostCommand::Switch {
@@ -642,7 +745,7 @@ mod tests {
             );
             assert!(retry.error.is_some());
             assert_eq!(host.owner().unwrap().root_sha256().unwrap(), root_before);
-            assert_eq!(host.core().export_history().unwrap(), history);
+            assert_eq!(host.core().snapshot_identity().unwrap(), history);
             assert_eq!(
                 host.owner()
                     .unwrap()
@@ -658,7 +761,7 @@ mod tests {
     #[test]
     fn w13_host_frozen_rescue_abandons_original_switch_and_preserves_disclosures() {
         use super::super::*;
-        use kinewright_core::{Command, Event, Operation, Track, TrackId, TrackKind};
+        use kinewright_core::{Command, Operation, Track, TrackId, TrackKind};
         use kinewright_project::{
             bundle_recovery::RecoverySelection, bundle_switch::SwitchTarget,
             editing_session::Ja1EditingSession, io_observer, storage_budget::StorageLimits,
@@ -673,7 +776,7 @@ mod tests {
             let a_parent = root.path("a");
             std::fs::create_dir(&a_parent).unwrap();
             let path = a_parent.join("a.kinewright");
-            let core = Core::spawn(Document {
+            let core = Core::for_test(Document {
                 tracks: vec![Track {
                     id: TrackId(1),
                     kind: TrackKind::Video,
@@ -708,7 +811,15 @@ mod tests {
                 origin: HostOrigin::Headless,
             })
             .unwrap();
-            let run = |host: &mut HostCommandOwner, command| host.execute(command, roots.clone());
+            let run = |host: &mut HostCommandOwner, command| {
+                received_reply_for_test(host.execute(command, roots.clone()))
+            };
+            host.core()
+                .request(Command::Do(Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked: false,
+                }))
+                .unwrap();
             assert!(
                 run(
                     &mut host,
@@ -719,6 +830,11 @@ mod tests {
                 .error
                 .is_none()
             );
+            if publication == 2 {
+                let snapshot = received_snapshot_for_test(host.core()).unwrap();
+                let saved = run(&mut host, HostCommand::Save { snapshot });
+                assert!(saved.error.is_none(), "{:?}", saved.error);
+            }
             let target = host
                 .owner()
                 .unwrap()
@@ -734,11 +850,8 @@ mod tests {
                 panic!("P2 checkpoint")
             };
             let old = host.core().clone();
-            old.request(Command::Do(Operation::SetTrackSyncLock {
-                track: TrackId(1),
-                locked: false,
-            }))
-            .unwrap();
+
+            let gui_frozen = received_snapshot_for_test(host.core()).unwrap();
             let prepared = run(
                 &mut host,
                 HostCommand::PrepareSwitch {
@@ -755,15 +868,14 @@ mod tests {
                     .unwrap()
                     .selection_availability()
                     .unwrap()
-                    .contains("will remove")
+                    .contains("still durably listed")
             );
-            let unknown = io_observer::fail_nth(
+            let unknown = io_observer::fail_once(
                 if landed {
                     "root_parent_sync"
                 } else {
                     "root_rename_io"
                 },
-                publication,
                 || {
                     run(
                         &mut host,
@@ -773,20 +885,28 @@ mod tests {
                     )
                 },
             );
-            assert!(unknown.error.is_some());
+            assert_eq!(
+                unknown.error.as_ref().map(|error| error.code.as_str()),
+                Some("durability_unknown"),
+                "ACTUAL_SWITCH_PUBLICATION_IS_UNCERTAIN {:?}",
+                unknown.error
+            );
             assert_eq!(old.attachment_state().unwrap(), AttachmentState::Frozen);
-            let frozen = old.export_history().unwrap();
+            let frozen = old.snapshot_identity().unwrap();
             let hidden = root.path("hidden-a");
             std::fs::rename(&a_parent, &hidden).unwrap();
             for fault in [Some("root_before_publish"), Some("root_parent_sync"), None] {
                 let preview = run(
                     &mut host,
                     HostCommand::PreviewRescue {
-                        snapshot: HostSnapshot::from_history(frozen.clone()).unwrap(),
+                        snapshot: gui_frozen.clone(),
                     },
                 );
                 assert!(preview.error.is_none(), "{:?}", preview.error);
-                assert!(preview.status.selection_availability.contains("Abandoning"));
+                assert!(
+                    !preview.status.selection_availability.is_empty(),
+                    "UNRESOLVED_SELECTION_DISCLOSES_REACHABILITY"
+                );
                 assert!(preview.status.close_disclosure.contains("Closing"));
                 assert!(
                     preview
@@ -808,10 +928,15 @@ mod tests {
                     assert!(result.activation.is_none());
                     assert!(result.status.frozen);
                     assert!(matches!(
-                        old.request(Command::Undo).unwrap(),
-                        Event::MutationRefused { .. }
+                        old.request(Command::Undo),
+                        Err(kinewright_project::operation_actor::Refusal {
+                            error: kinewright_project::operation_actor::Error::MutationRefused(
+                                kinewright_core::CoreMutationRefusal::Frozen
+                            ),
+                            ..
+                        })
                     ));
-                    assert_eq!(old.export_history().unwrap(), frozen);
+                    assert_eq!(old.snapshot_identity().unwrap(), frozen);
                 } else {
                     assert!(result.error.is_none(), "{:?}", result.error);
                     assert!(result.activation.is_some());
@@ -861,7 +986,7 @@ mod tests {
         let root =
             kinewright_media::test_support::TempDirectory::new_in(&parent, "c11-host-registered");
         let path = root.path("a.kinewright");
-        let core = Core::spawn(Document {
+        let core = Core::for_test(Document {
             tracks: vec![Track {
                 id: TrackId(1),
                 kind: TrackKind::Video,
@@ -889,7 +1014,7 @@ mod tests {
         })
         .unwrap();
         let run = |host: &mut HostCommandOwner, command| {
-            let reply = host.execute(command, roots.clone());
+            let reply = received_reply_for_test(host.execute(command, roots.clone()));
             assert!(reply.error.is_none(), "{:?}", reply.error);
             reply
         };

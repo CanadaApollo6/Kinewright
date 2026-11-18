@@ -100,9 +100,10 @@ pub(crate) fn caption_title_operations(
 #[cfg(test)]
 mod tests {
     use kinewright_core::{
-        AssetId, ClipId, Command, Core, Event, TimeCode, TitlePosition, Track, TrackId, TrackKind,
+        AssetId, ClipId, Command, Event, TimeCode, TitlePosition, Track, TrackId, TrackKind,
         apply_batch, srt, vtt,
     };
+    use kinewright_project::operation_actor::Core;
 
     use super::*;
 
@@ -188,7 +189,7 @@ mod tests {
             assert_eq!(title.fade_out_frames, TimeCode::ZERO);
         }
 
-        let core = Core::spawn(original.clone()).unwrap();
+        let core = Core::for_test(original.clone()).unwrap();
         assert!(matches!(
             core.request(Command::DoBatch(operations)).unwrap(),
             Event::DocumentChanged { .. }

@@ -25,7 +25,7 @@ fn capacity_document(clips: usize) -> Document {
 )]
 fn history_capacity_vertical_400_finish_merge_stop_reopen() {
     let r = c5_fix10_run_from(Fixture::with_document(false, capacity_document(400)));
-    assert_eq!(r.core.export_history().unwrap().batches.len(), 1);
+    assert_eq!(r.core.export_history().unwrap().history().undo.len(), 1);
     capacity_finish_merge_stop(r, None);
 }
 
@@ -34,7 +34,7 @@ fn history_capacity_vertical_400_finish_merge_stop_reopen() {
     reason = "one durable lifecycle with an optional real process exit before destructors"
 )]
 fn capacity_finish_merge_stop(r: C5Fix10Run, crash_handoff: Option<&std::path::Path>) {
-    use kinewright_project::history_record::{HistoryRecord, HistoryRole};
+    use kinewright_project::operation_history::Role;
     let expected = r.core.export_history().unwrap();
     let finish_control = te13_control(&r.editor, &r.child, &r.core);
     let finished = r.editor.wire("finish_task", finish_control);
@@ -56,18 +56,10 @@ fn capacity_finish_merge_stop(r: C5Fix10Run, crash_handoff: Option<&std::path::P
                 &history.source.checkpoint,
             )
             .unwrap();
-        let record = store
-            .read_record::<HistoryRecord>(&checkpoint.history_ref)
-            .unwrap();
-        assert_eq!(record.role, HistoryRole::Task);
-        assert_eq!(record.baseline_ref, checkpoint.baseline_ref);
-        assert_eq!(record.current_ref, checkpoint.document_ref);
-        assert_eq!(
-            *store.resolve_history(&checkpoint.history_ref).unwrap(),
-            expected,
-            "CAPACITY_REFERENCED_REPLAY"
-        );
-        let ids = checkpoint.batch_ids.clone();
+        assert_eq!(checkpoint.role, Role::Task);
+        let saved = checkpoint.open(store, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap().into_reader().unwrap().into_capture().unwrap();
+        assert_eq!(saved, expected, "CAPACITY_REFERENCED_REPLAY");
+        let ids: Vec<_> = saved.history().undo.iter().chain(saved.history().redo.iter().rev()).flat_map(|step| step.commands().iter().map(|command| (command.id, command.payload_digest))).collect();
         (history, ids)
     };
     let freeze: OrchestrationReceipt = serde_json::from_value(
@@ -111,7 +103,7 @@ fn capacity_finish_merge_stop(r: C5Fix10Run, crash_handoff: Option<&std::path::P
     let data = serde_json::json!({
         "root":r.f.temp.root(), "run":r.run, "child":r.child,
         "candidate":r.f.brief.scope.base.branch, "checkpoint":history.source.checkpoint,
-        "batch_ids":batch_ids, "expected":expected,
+        "command_ids":batch_ids, "expected":expected.into_transport().unwrap(),
     });
     if let Some(path) = crash_handoff {
         std::fs::write(path, serde_json::to_vec(&data).unwrap()).unwrap();
@@ -135,23 +127,23 @@ fn capacity_finish_merge_stop(r: C5Fix10Run, crash_handoff: Option<&std::path::P
 }
 
 fn capacity_check_reopen(data: &serde_json::Value) {
-    use kinewright_project::history_record::HistoryRole;
+    use kinewright_project::operation_history::Role;
     let root = std::path::PathBuf::from(data["root"].as_str().unwrap());
     let run: RunId = serde_json::from_value(data["run"].clone()).unwrap();
     let child: TaskId = serde_json::from_value(data["child"].clone()).unwrap();
-    let expected: kinewright_core::HistorySnapshot =
-        serde_json::from_value(data["expected"].clone()).unwrap();
+    let expected: kinewright_project::operation_history::OwnerSnapshot =
+        decode_owner_fixture(data["expected"].clone());
     let opened = Instant::now();
-    let owner = Ja1EditingSession::open(&root.join("project.kinewright")).unwrap();
+    let owner = Ja1EditingSession::open(&root.join("project.kinewright"), &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
     println!(
         "CAPACITY_NATIVE_OPEN seed_clips={} batches={} open_ms={:.3}",
-        expected
+        expected.history()
             .baseline
             .tracks
             .iter()
             .map(|track| track.clips.len())
             .sum::<usize>(),
-        expected.batches.len(),
+        expected.history().undo.len() + expected.history().redo.len(),
         opened.elapsed().as_secs_f64() * 1000.0
     );
 
@@ -172,16 +164,11 @@ fn capacity_check_reopen(data: &serde_json::Value) {
             &serde_json::from_value(data["checkpoint"].clone()).unwrap(),
         )
         .unwrap();
-    assert_eq!(
-        serde_json::to_value(&checkpoint.batch_ids).unwrap(),
-        data["batch_ids"],
-        "CAPACITY_BATCH_IDENTITIES_STABLE"
-    );
-    assert_eq!(
-        *store.resolve_history(&checkpoint.history_ref).unwrap(),
-        expected,
-        "CAPACITY_REOPEN_EXACT"
-    );
+    let saved = checkpoint.open(store, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap().into_reader().unwrap().into_capture().unwrap();
+    let ids: Vec<_> = saved.history().undo.iter().chain(saved.history().redo.iter().rev()).flat_map(|step| step.commands().iter().map(|command| (command.id, command.payload_digest))).collect();
+    assert_eq!(serde_json::to_value(&ids).unwrap(), data["command_ids"], "CAPACITY_COMMAND_IDENTITIES_STABLE");
+    assert_eq!(saved, expected, "CAPACITY_REOPEN_EXACT");
+    drop(saved);
     let kept_candidate = owner
         .candidate_binding(&serde_json::from_value(data["candidate"].clone()).unwrap())
         .unwrap();
@@ -190,20 +177,21 @@ fn capacity_check_reopen(data: &serde_json::Value) {
             &kept_candidate.checkpoint,
         )
         .unwrap();
-    let merged = store.resolve_history(&checkpoint.history_ref).unwrap();
-    assert_eq!(merged.document, expected.document);
-    assert_eq!(merged.batches.len(), 1, "CAPACITY_ONE_BOUNDARY_PER_MERGE");
-    if let Some(redo) = expected.cursor.redo.last() {
-        let core = Core::spawn(Document::default()).unwrap();
-        core.restore_history(expected.clone()).unwrap();
-        core.request(kinewright_core::Command::Redo).unwrap();
-        assert_eq!(
-            core.export_history().unwrap().document,
-            redo.document,
-            "CAPACITY_REOPEN_REDO_EXACT"
-        );
+    let merged = checkpoint.open(store, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap().into_reader().unwrap().into_capture().unwrap();
+    assert_eq!(merged.history().document, expected.history().document);
+    assert_eq!(merged.history().undo.len(), 1, "CAPACITY_ONE_BOUNDARY_PER_MERGE");
+    assert_eq!(checkpoint.role, Role::Candidate);
+    let undo_depth = expected.history().undo.len();
+    let redo_depth = expected.history().redo.len();
+    let mut replayed = expected.history().document.as_ref().clone();
+    for step in expected.history().redo.iter().rev() {
+        for command in step.commands() { for operation in &command.operations { operation.apply(&mut replayed).unwrap(); } }
     }
-    assert_eq!(checkpoint.history_role, HistoryRole::Candidate);
+    let core = kinewright_project::operation_actor::Core::open(expected.validate().unwrap(), checkpoint.branch_id.clone(), kinewright_core::TimelineRevision::default()).unwrap();
+    for _ in 0..redo_depth { core.request(kinewright_core::Command::Redo).unwrap(); }
+    assert_eq!(core.export_history().unwrap().history().document.as_ref(), &replayed, "CAPACITY_REOPEN_REDO_EXACT");
+    assert_eq!(core.export_history().unwrap().history().undo.len(), undo_depth + redo_depth);
+
 }
 
 fn capacity_stop(f: &Fixture, run: &RunId) {

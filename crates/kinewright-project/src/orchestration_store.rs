@@ -265,10 +265,10 @@ impl ProjectBundle {
             && self.checkpoint_reference(&base.branch)? == base.checkpoint
             && candidate.branch_id == base.branch
             && candidate.head_id == base.head
-            && candidate.batch_ids.is_empty()
-            && candidate.document_hash == base.document_hash
+            && candidate.position.position == 0
+            && candidate.document_ref.sha256 == base.document_hash
             && &manual.head_id == expected
-            && manual.document_hash == candidate.document_hash)
+            && manual.document_ref.sha256 == candidate.document_ref.sha256)
     }
     pub fn orchestration_cut(&self, run: &RunId) -> Result<Option<PublishedRunCut>, BundleError> {
         let _reading = crate::run_admission::reading(&self.store);
@@ -665,7 +665,7 @@ impl crate::editing_session::Ja1EditingSession {
         if project != &self.active_manual_project()?
             || checkpoint.branch_id != brief.scope.base.branch
             || checkpoint.head_id != brief.scope.base.head
-            || checkpoint.document_hash != brief.scope.base.document_hash
+            || checkpoint.document_ref.sha256 != brief.scope.base.document_hash
             || checkpoint.input_manifest_ref != brief.inputs
         {
             return Err(invalid("task base or inputs"));

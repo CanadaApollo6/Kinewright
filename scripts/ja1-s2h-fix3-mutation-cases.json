@@ -39,8 +39,8 @@
     "changes": [
       [
         "crates/kinewright-agent/src/writer_host/recovery.rs",
-        "&& self.recovery.as_ref() == Some(next)",
-        "&& false && self.recovery.as_ref() == Some(next)"
+        "            && installed == &barrier.after",
+        "            && false && installed == &barrier.after"
       ]
     ],
     "witness": "ja1_attachment::tests::s2h_floor_confirm_reply_loss_adopts_recorded_close_plan",
@@ -50,7 +50,11 @@
     "production": false,
     "features": "",
     "build_host": true,
-    "red_text": "Retry must complete recovery"
+    "red_text": "Retry must complete recovery",
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Same invariant at its native-history boundary."
+    }
   },
   {
     "name": "gui-republishes-floor-after-lost-confirm",
@@ -75,8 +79,8 @@
     "changes": [
       [
         "crates/kinewright-agent/src/writer_host/recovery.rs",
-        "&& self.manual == confirmed.manual_lease",
-        "&& false && self.manual == confirmed.manual_lease"
+        "                == confirmed.manual_lease.as_ref()",
+        "                == confirmed.manual_lease.as_ref().filter(|_| false)"
       ]
     ],
     "witness": "ja1_attachment::tests::s2h_close_confirm_reply_loss_reuses_delivered_authority",
@@ -86,7 +90,11 @@
     "production": false,
     "features": "",
     "build_host": true,
-    "red_text": "Retry must complete recovery"
+    "red_text": "Retry must complete recovery",
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Same invariant at its native-history boundary."
+    }
   },
   {
     "name": "completed-switch-keeps-pending-state",

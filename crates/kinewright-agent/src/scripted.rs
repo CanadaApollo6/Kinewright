@@ -434,14 +434,15 @@ fn scripted_worker(
 
 #[cfg(test)]
 mod tests {
-    use kinewright_core::{Core, Document};
+    use kinewright_core::Document;
     use kinewright_media::FfmpegMediaEngine;
+    use kinewright_project::operation_actor::Core;
 
     use super::*;
     use crate::{McpServer, mirror_agent_cost};
 
     fn live_server() -> McpServer {
-        let core = Core::spawn(Document::default()).expect("the fixture core starts");
+        let core = Core::for_test(Document::default()).expect("the fixture core starts");
         let media = Arc::new(FfmpegMediaEngine::legacy_fixture().expect("the media engine starts"));
         McpServer::start(core, Arc::clone(&media) as _, media as _).expect("the MCP server starts")
     }

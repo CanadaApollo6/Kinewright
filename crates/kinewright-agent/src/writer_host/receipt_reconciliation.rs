@@ -203,7 +203,7 @@ impl HostCommandOwner {
                     {
                         return Err(refused());
                     }
-                    return match self.owner()?.manual_transition_receipt(envelope)? {
+                    return match self.owner()?.command_receipt(envelope)? {
                         ReceiptLookup::Committed(receipt) | ReceiptLookup::Retired(receipt) => {
                             let receipt = serde_json::to_value(receipt)?;
                             Ok(ReceiptReply::Stored {

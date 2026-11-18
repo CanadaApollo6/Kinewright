@@ -1,0 +1,38 @@
+# Owner differential and audit contract differences
+
+The permanent switch differential uses the independent H1 model for documents,
+command identity and fates. A separate direct-operation replay reconstructs
+occurrence creation, split ancestry and every reachable boundary from the
+baseline seeds. Resource assertions inspect those model documents directly.
+Neither oracle uses the deleted boundary-document Core, lineage journal or
+old audit shortcut. The 67-kind matrix, both policies, conditional command
+normalisation, both stacks, coalescing, fold seeds, sibling uncertainty and
+save/encode/open identity checks remain.
+
+The same-line certainty property also runs in the session model. The historical
+H2a comparisons below explain the intentionally changed reader contract; their
+old implementation and shortcut adapter have been deleted. The new suite tests
+the selected command's fate directly and carries no mismatch exemption.
+
+## Historical H2a comparison
+
+The seeded H1 streams use all 67 operation kinds, Fold and NeverFold, two seeds, approvals, conditional-command acceptance, gesture closes and snapshot installs. The independent H1 model supplies documents and command fates. Fresh old Core actors and the actual `bundle_commit::lineage` journal rebuild every reachable boundary. Candidate input manifests pass through the actual old `retain_history_inputs`; direct document reference checks additionally cover unknown media fingerprints. The test adapter in `edit_audit.rs` calls the existing target-presence shortcut and `retained_batch_proof`; it does not implement another version of that walk.
+
+The run observed 6,512 generated transitions plus two folded-provenance probes and one sibling Do probe, 32 accepted approvals, 272 accepted DoIfRevision commands, 284 accepted DoBatchIfRevision commands, 48 explicitly recognized Do target-shortcut exemptions and two uncertain answers. The exemption requires an old certain Kept answer, an unapplied approved command, absent targets, and a different currently effective command which removed each target. A positive count assertion prevents it becoming vacuous. Every other old certain Do answer in these same-line streams must match; the separate sibling probe below records its specified uncertainty difference. Every transition approval also matches a separate model of subject location, prefix shape, terminal evidence and installed fold frontier.
+
+The recreation stream makes 26 observations where the old audit is uncertain and later creation of a removed target is independently recorded. Each new Do answer is asserted directly against its command fate, including those observations; recreation never produces Do uncertainty. There were zero other old-uncertain Do observations. This is a named, positive coverage class, not another exemption for a certain old answer.
+
+The differential also made 1,495 save/encode/open comparisons. The separate owner generator made 138, including 26 fold transitions and 14 checks with historic approval positions beyond the installed counter; eight malformed approval references were refused before commit. Both generators require positive coverage of their added classes.
+
+Four classes of certain old control answers differ from the new specified contract (54 observations across repeated state checks, not 53 independent approvals). These are reported differences, not Do exemptions:
+
+| New / old answer | Concrete witness, in order | Cause |
+| --- | --- | --- |
+| Approved Undo reversed / old Kept | Do AddTrack C; approve Undo C; Redo C; Do RemoveTrack C. | The approved Undo was reversed by Redo. A later command removes C, so the old target shortcut says Kept. |
+| Approved Redo discarded / old Kept | Do AddTrack C; approve Undo C; Redo C; Do RemoveTrack C as A; Undo A; approve Redo A; Undo A; Do RemoveTrack C as B. | B drops A from Redo and removes the same target. The approved transition's subject is gone; the old target shortcut says Kept. |
+| Approved Redo holds / old Missing | Approve Do C=RemoveTrack81; Undo C; capture T; Redo C; Do marker folds C; capture S before the Redo approval; install T; approve Redo C; install S. | S predates the control approval's cut but its bounded Do prefix stamp proves the target step is folded and applied. The new direction-specific answer holds; old complete coverage lacks the later approval cut. |
+| Approved Undo uncertain / old Missing | Do AddTrack C; capture T; Do marker folds C; capture S before approval; install T; approve Undo C; install S. | S has no evidence for that later approval, its subject is absent and older than S's validated exclusive fold frontier. Old complete kept-cut coverage says the approval cut is missing. The new contract deliberately reports uncertain. |
+
+`folded_snapshot_before_the_transition_approval_reports_only_uncertain` and the differential both assert that uncertainty cannot be counted or presented as held, kept, reversed or discarded. Matching folded or discarded evidence overrides the frontier. Absent targets newer than the frontier keep the exact direction-specific answer. No folded-command archive is retained. The sibling Do probe captures a folded removal on B before A approves the same key and payload, then installs B's capture on A. The old audit has no selected approval cut and reports Missing; the new ledger reports Uncertain. `sibling_do_missing_fold_provenance` counts that precise class once, independently of the target-satisfaction exemptions. Both generators assert that same-line installs keep Do answers certain.
+
+The named same-command snapshot tests also call the actual old audit: restoring applied A after Undo/drop/B agrees as Kept; restoring the snapshot where A was undone agrees as Missing. No exception covers either case. Full generated witness traces and counts are in `docs/measurements/undo-owner-differential.json`.

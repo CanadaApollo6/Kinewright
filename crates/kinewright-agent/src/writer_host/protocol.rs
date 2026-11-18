@@ -1,7 +1,7 @@
 //! Bounded foreground commands and the C9 accepted manual-history stream.
 #![allow(clippy::missing_errors_doc)]
 use super::HostAuth;
-use kinewright_core::HistorySnapshot;
+use kinewright_project::operation_actor::PortableHistory;
 use kinewright_project::{
     bundle::{BundleError, BundleSaveReport, PublicationState},
     bundle_records::{BranchId, HeadId, ObjectRef, ProjectId},
@@ -13,6 +13,145 @@ use std::{net::SocketAddr, path::PathBuf};
 
 pub const HOST_PROTOCOL: u32 = 1;
 pub const HOST_BODY_BYTES: usize = 40 * 1024 * 1024;
+/// Maximum serialized body at the borrowed-source callback endpoint.
+pub(super) const SOURCE_BODY_BYTES: usize = 4 * 1024 * 1024;
+/// Every request outside the payload: editor, operation, project, roots and the
+/// command's own small fields. A request without a payload is refused above it.
+pub const HOST_ENVELOPE_BYTES: usize = 256 * 1024;
+/// A full manual window as it crosses HTTP. Each message's raw JSON travels as
+/// a JSON string. Valid raw JSON escapes only `"`, `\`, tab, LF and CR, each to
+/// two bytes; every other byte stays one. Each message adds two quotes and a comma.
+pub const COMMIT_HISTORY_WINDOW_BYTES: u64 = 2
+    * kinewright_project::operation_protocol::PENDING_BYTES
+    + 3 * kinewright_project::operation_protocol::PENDING_COMMANDS as u64;
+/// The `CommitHistory` ingress cap. The codec refuses a window before HTTP can.
+pub const COMMIT_HISTORY_BODY_BYTES: u64 = COMMIT_HISTORY_WINDOW_BYTES + HOST_ENVELOPE_BYTES as u64;
+const _: () = assert!(
+    COMMIT_HISTORY_BODY_BYTES >= COMMIT_HISTORY_WINDOW_BYTES + HOST_ENVELOPE_BYTES as u64
+        && COMMIT_HISTORY_BODY_BYTES <= HOST_BODY_BYTES as u64,
+    "FULL_MANUAL_WINDOW_CROSSES_HTTP"
+);
+/// One snapshot's wire bytes outside its transport body: role, sizing,
+/// identity, branch, revision and `history_sha256`, with their JSON syntax.
+pub const SNAPSHOT_WIRE_HEADER_BYTES: u64 = 4096;
+/// Split the snapshot budget after reserving room for the envelope and
+/// `other` payload bytes. The client checks the serialized request separately.
+const fn snapshot_door_bytes(snapshots: u64, other: u64) -> u64 {
+    (HOST_BODY_BYTES as u64 - HOST_ENVELOPE_BYTES as u64 - other) / snapshots
+        - SNAPSHOT_WIRE_HEADER_BYTES
+}
+const fn snapshot_door_fits(cap: u64, snapshots: u64, other: u64) -> bool {
+    HOST_ENVELOPE_BYTES as u64 + other + snapshots * (cap + SNAPSHOT_WIRE_HEADER_BYTES)
+        <= HOST_BODY_BYTES as u64
+}
+/// `Save`, `SaveAs`, `FirstSave`, `PreviewRescue`, `PreviewRecovery`,
+/// `RefreshUnsavedInputs`, `PrepareOwnedMedia` and
+/// `PrepareMediaInterpretation` carry one snapshot.
+pub const SNAPSHOT_DOOR_BYTES: u64 = snapshot_door_bytes(1, 0);
+/// `BeginRecovery` carries one frozen snapshot and the pending manual window.
+pub const BEGIN_RECOVERY_SNAPSHOT_BYTES: u64 = snapshot_door_bytes(1, COMMIT_HISTORY_WINDOW_BYTES);
+/// `PublishBarrier` carries the barrier's two snapshots.
+pub const PUBLISH_BARRIER_SNAPSHOT_BYTES: u64 = snapshot_door_bytes(2, 0);
+/// `ConfirmBarrier` carries the barrier's two snapshots and the installed one.
+pub const CONFIRM_BARRIER_SNAPSHOT_BYTES: u64 = snapshot_door_bytes(3, 0);
+const _: () = assert!(
+    snapshot_door_fits(SNAPSHOT_DOOR_BYTES, 1, 0)
+        && snapshot_door_fits(
+            BEGIN_RECOVERY_SNAPSHOT_BYTES,
+            1,
+            COMMIT_HISTORY_WINDOW_BYTES
+        )
+        && snapshot_door_fits(PUBLISH_BARRIER_SNAPSHOT_BYTES, 2, 0)
+        && snapshot_door_fits(CONFIRM_BARRIER_SNAPSHOT_BYTES, 3, 0),
+    "SNAPSHOT_DOORS_CROSS_HTTP"
+);
+/// The snapshots one command carries and the escaped transport bytes each may take.
+pub(crate) struct SnapshotDoor<'a> {
+    pub cap: u64,
+    pub snapshots: [Option<&'a HostSnapshot>; 3],
+}
+impl HostCommand {
+    /// Maximum serialized request size at the foreground host endpoint.
+    #[must_use]
+    pub fn ingress_bytes(&self) -> usize {
+        if matches!(self, Self::CommitHistory { .. }) {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the const assertion bounds this value by HOST_BODY_BYTES, a usize"
+            )]
+            let limit = COMMIT_HISTORY_BODY_BYTES as usize;
+            limit
+        } else if self.snapshot_door().is_some() {
+            HOST_BODY_BYTES
+        } else {
+            HOST_ENVELOPE_BYTES
+        }
+    }
+
+    pub(super) fn check_request_capacity(
+        &self,
+        bytes: usize,
+        limit: usize,
+    ) -> Result<(), HostRefusal> {
+        if bytes <= limit {
+            return Ok(());
+        }
+        let code = if self.snapshot_door().is_some() {
+            "snapshot_capacity"
+        } else {
+            "request_capacity"
+        };
+        Err(HostRefusal::body_capacity(code, bytes, limit))
+    }
+
+    /// `None` for a command that carries no snapshot.
+    pub(crate) fn snapshot_door(&self) -> Option<SnapshotDoor<'_>> {
+        let (cap, snapshots) = match self {
+            Self::Save { snapshot }
+            | Self::SaveAs { snapshot, .. }
+            | Self::FirstSave { snapshot, .. }
+            | Self::PreviewRescue { snapshot }
+            | Self::PreviewRecovery { snapshot, .. }
+            | Self::RefreshUnsavedInputs { snapshot, .. }
+            | Self::PrepareOwnedMedia { snapshot, .. }
+            | Self::PrepareMediaInterpretation { snapshot, .. } => {
+                (SNAPSHOT_DOOR_BYTES, [Some(snapshot), None, None])
+            }
+            Self::BeginRecovery { frozen, .. } => {
+                (BEGIN_RECOVERY_SNAPSHOT_BYTES, [frozen.as_ref(), None, None])
+            }
+            Self::PublishBarrier { barrier } => (
+                PUBLISH_BARRIER_SNAPSHOT_BYTES,
+                [Some(&barrier.before), Some(&barrier.after), None],
+            ),
+            Self::ConfirmBarrier { barrier, installed } => (
+                CONFIRM_BARRIER_SNAPSHOT_BYTES,
+                [Some(&barrier.before), Some(&barrier.after), Some(installed)],
+            ),
+            _ => return None,
+        };
+        Some(SnapshotDoor { cap, snapshots })
+    }
+    /// Refuses a snapshot over its share before serializing the full request.
+    pub(crate) fn check_snapshot_capacity(&self) -> Result<(), HostRefusal> {
+        let Some(door) = self.snapshot_door() else {
+            return Ok(());
+        };
+        for snapshot in door.snapshots.into_iter().flatten() {
+            let bytes = snapshot.history.snapshot.escaped_body_bytes();
+            if bytes > door.cap {
+                return Err(HostRefusal::new(
+                    "snapshot_capacity",
+                    &format!(
+                        "this history's snapshot is {bytes} escaped bytes, and this request carries at most {} escaped bytes per snapshot",
+                        door.cap
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
 pub const HOST_COMMAND_CAPACITY: usize = 64;
 pub const RETENTION_LOST: &str = "The host could not re-establish this session's retained data. Your edits remain here. Saving and rescue are paused, including saving elsewhere. Close this editing context explicitly to end it.";
 
@@ -65,7 +204,7 @@ pub enum HostOrigin {
     Headless,
     Gui {
         retention: HostSourceBinding,
-        initial_snapshot: HostSnapshot,
+        initial_snapshot: Option<HostSnapshot>,
         expected_root_sha256: Option<String>,
         expected_project_id: Option<ProjectId>,
     },
@@ -103,56 +242,32 @@ pub struct HostBootstrap {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostSnapshot {
-    pub history: HistorySnapshot,
+    pub history: PortableHistory,
     pub history_sha256: String,
 }
 impl HostSnapshot {
-    pub fn capture(core: &kinewright_core::Core) -> Result<Self, super::HostError> {
-        let history = core
-            .export_history()
-            .map_err(|e| super::HostError::Protocol(e.to_string()))?;
-        Self::from_history(history)
+    pub fn capture(
+        core: &kinewright_project::operation_actor::Core,
+    ) -> Result<Self, super::HostError> {
+        Self::from_history(
+            core.portable_history()
+                .map_err(|e| super::HostError::Protocol(e.to_string()))?,
+        )
     }
-    pub fn from_history(history: HistorySnapshot) -> Result<Self, super::HostError> {
-        let transport = kinewright_core::HistoryTransport::capture(&history)
-            .map_err(|error| super::HostError::Protocol(error.to_string()))?;
-        // Capturing a transport does not acknowledge a persisted cut. Keep this
-        // sender check from materializing boundary documents; the receiver runs bounded replay before
-        // it can publish anything. Do not add another, unreserved replay here.
-        let live = kinewright_core::history_size::restored_history_live_bytes(&history).map_err(
-            |error| match error {
-                kinewright_core::HistoryError::Capacity => {
-                    super::HostError::from(BundleError::Capacity("foreground history snapshot"))
-                }
-                other => super::HostError::Protocol(other.to_string()),
-            },
-        )?;
-        if live > kinewright_core::history_size::TRANSPORT_LIVE_BYTES {
-            return Err(BundleError::Capacity("foreground history snapshot").into());
-        }
-        let history_sha256 = kinewright_media::sha256_bytes(&serde_json::to_vec(&transport)?);
+    pub fn from_history(history: PortableHistory) -> Result<Self, super::HostError> {
+        let history_sha256 = history.identity().to_string();
         Ok(Self {
             history,
             history_sha256,
         })
     }
+    /// Cheap envelope check only. All payloads cross `SnapshotTransport`'s
+    /// lease admission and complete semantic validation before they can install.
     pub(crate) fn verify(&self) -> Result<(), super::HostError> {
-        if kinewright_media::sha256_bytes(&serde_json::to_vec(&self.history)?)
-            != self.history_sha256
-        {
-            return Err(HostRefusal::new(
-                "history_changed",
-                "captured history digest does not match its bytes",
-            )
-            .into());
-        }
-        if self
-            .history
-            .encoded_bytes()
-            .map_err(|e| super::HostError::Protocol(e.to_string()))?
-            > kinewright_project::storage_budget::StorageLimits::default().branch_history_bytes
-        {
-            return Err(BundleError::Capacity("foreground history snapshot").into());
+        if self.history.identity().to_string() != self.history_sha256 {
+            return Err(
+                HostRefusal::new("history_changed", "combined snapshot identity differs").into(),
+            );
         }
         Ok(())
     }
@@ -162,29 +277,39 @@ impl HostSnapshot {
 mod snapshot_capacity_tests {
     #[test]
     fn host_snapshot_forged_cursor_counts_refuse_before_adoption() {
-        let core = kinewright_core::Core::spawn(kinewright_core::Document::default()).unwrap();
-        let before = core.export_history().unwrap();
-        let mut oversized = before.clone();
-        oversized.batches.push(kinewright_core::HistoryBatch {
-            order: 0,
-            command: kinewright_core::JournalCommand::Undo,
-            identity_effects: vec![],
-            undo_entries: kinewright_core::HISTORY_COMMANDS,
-            redo_entries: 0,
-        });
-        // The counter is not a replay allocation hint. Capturing a sender's
-        // value is cheap; the receiving bounded resolver executes and rejects
-        // the invented cursor before any history can be adopted.
-        let snapshot = super::HostSnapshot::from_history(oversized).unwrap();
-        let wire = serde_json::to_vec(&snapshot).unwrap();
-        let error = serde_json::from_slice::<super::HostSnapshot>(&wire).unwrap_err();
+        let core = kinewright_project::operation_actor::Core::for_test(
+            kinewright_core::Document::default(),
+        )
+        .unwrap();
+        let before = core.snapshot_identity().unwrap();
+        let portable = core.portable_history().unwrap();
+        let mut wire = serde_json::to_value(&portable).unwrap();
+        let mut body: serde_json::Value =
+            serde_json::from_str(wire["snapshot"]["body"].as_str().unwrap()).unwrap();
+        body["history"]["position"] = serde_json::json!(u64::MAX);
+        wire["snapshot"]["body"] = serde_json::json!(serde_json::to_string(&body).unwrap());
+        let forged: kinewright_project::operation_actor::PortableHistory =
+            serde_json::from_value(wire).unwrap();
+        let error = forged
+            .validate(&kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ))
+            .err()
+            .expect("forged transport refused");
         assert!(
-            error
-                .to_string()
-                .contains(&kinewright_core::HistoryError::Corrupt.to_string()),
-            "{error}"
+            matches!(
+                error,
+                kinewright_project::operation_history::Error::InvalidRecord
+                    | kinewright_project::operation_history::Error::IdentityMismatch
+                    | kinewright_project::operation_history::Error::History(_)
+            ),
+            "FORGED_POSITION_REFUSES_BEFORE_ADOPTION: {error:?}"
         );
-        assert_eq!(core.export_history().unwrap(), before);
+        assert_eq!(
+            core.snapshot_identity().unwrap(),
+            before,
+            "FORGED_CAPTURE_CANNOT_CHANGE_SOURCE"
+        );
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,7 +348,7 @@ pub struct HostSessionConfig {
 pub struct RecoveryBarrier {
     pub switch_generation: u64,
     pub client: String,
-    pub envelope: kinewright_project::receipts::CommandEnvelope,
+    pub acknowledged: Vec<kinewright_project::operation_protocol::Receipt>,
     pub checkpoint_ref: ObjectRef,
     pub before: HostSnapshot,
     pub after: HostSnapshot,
@@ -348,8 +473,7 @@ pub enum HostCommand {
     BeginRecovery {
         client: String,
         frozen: Option<HostSnapshot>,
-        pending: Vec<kinewright_core::AcceptedHistory>,
-        discard_batches: Option<usize>,
+        pending: Vec<kinewright_project::operation_protocol::EncodedMessage>,
     },
     PublishBarrier {
         barrier: Box<RecoveryBarrier>,
@@ -378,7 +502,7 @@ pub enum HostCommand {
     },
     CommitHistory {
         client: String,
-        messages: Vec<kinewright_core::AcceptedHistory>,
+        messages: Vec<kinewright_project::operation_protocol::EncodedMessage>,
     },
     Attach,
     AdmitDestination {
@@ -404,7 +528,7 @@ pub enum HostCommand {
     PreviewRescue {
         snapshot: HostSnapshot,
     },
-    ConsentTrim,
+
     ConsentOmission,
     RescueTo {
         destination: PathBuf,
@@ -516,6 +640,12 @@ impl HostRefusal {
             native_code: None,
         }
     }
+    pub(super) fn body_capacity(code: &str, bytes: usize, limit: usize) -> Self {
+        Self::new(
+            code,
+            &format!("this request is {bytes} bytes and may carry at most {limit} bytes"),
+        )
+    }
     pub(crate) fn roots(message: &str) -> Self {
         Self::new("root_refused", message)
     }
@@ -529,6 +659,14 @@ impl std::error::Error for HostRefusal {}
 impl From<BundleError> for HostRefusal {
     fn from(value: BundleError) -> Self {
         let code = match &value {
+            BundleError::Operation(kinewright_project::operation_actor::Error::History(
+                kinewright_project::operation_history::Error::PoolFull(_)
+                | kinewright_project::operation_history::Error::Reservation,
+            )) => "history_backpressure",
+            BundleError::Operation(kinewright_project::operation_actor::Error::Protocol(_)) => {
+                "history_conflict"
+            }
+            BundleError::Operation(_) => "history_refused",
             BundleError::RescueMissingOwnedBytes(_) => "rescue_missing_owned_bytes",
             BundleError::CoreMutationRefused(_) => "core_mutation_refused",
             BundleError::Io(_) => "io",
@@ -561,9 +699,6 @@ impl From<BundleError> for HostRefusal {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostSaveReport {
-    pub history_floor_offset: Option<u64>,
-    pub removed_undo: u64,
-    pub floor_disclosure: String,
     pub path: PathBuf,
     pub history_sha256: String,
     pub root_sha256: String,
@@ -573,9 +708,6 @@ pub struct HostSaveReport {
 impl From<&BundleSaveReport> for HostSaveReport {
     fn from(r: &BundleSaveReport) -> Self {
         Self {
-            history_floor_offset: None,
-            removed_undo: 0,
-            floor_disclosure: String::new(),
             path: r.path.clone(),
             history_sha256: r.history_sha256.clone(),
             root_sha256: r.root_sha256.clone(),
@@ -633,13 +765,13 @@ pub struct HostStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_checkpoint: Option<ObjectRef>,
     pub choice: Option<HostChoiceKind>,
-    pub rescue_trim_required: bool,
-    pub rescue_trim_accepted: bool,
+
     pub rescue_omission_required: bool,
     pub rescue_omission_accepted: bool,
     pub admitted_roots: SessionRoots,
     pub association: Option<PathBuf>,
     pub saved_digest: Option<String>,
+    pub saved_position: Option<kinewright_core::undo::CommandKey>,
     pub frozen: bool,
     pub retention_proven: bool,
     pub prepared_selection: bool,
@@ -659,7 +791,7 @@ pub struct HostStatus {
     pub selection_availability: String,
     pub save_disclosure: String,
     pub message: String,
-    pub rescue_removed_undo: u64,
+
     pub rescue_omissions: Vec<String>,
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -672,7 +804,7 @@ pub struct HostSessionStatus {
     pub events: Vec<HostAgentEvent>,
     pub overflowed: bool,
     pub stop: Option<String>,
-    pub history: Option<HistorySnapshot>,
+    pub history: Option<PortableHistory>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostAgentEvent {
@@ -756,13 +888,17 @@ pub struct HostReply {
     pub switch_attachment: Option<kinewright_project::bundle_switch::SwitchAttachment>,
     pub recovery: Option<RecoveryBarrier>,
     pub barrier_checkpoint: Option<kinewright_project::bundle_records::BranchCheckpoint>,
-    pub manual_lease: Option<kinewright_project::manual_history::ManualLease>,
+    pub manual_lease: Option<kinewright_project::operation_protocol::Lease>,
     pub manual_inputs: Option<kinewright_project::owned_inputs::OwnedInputManifest>,
-    pub manual_ack: Vec<kinewright_core::AcceptedHistory>,
+    pub manual_ack: Vec<kinewright_project::operation_protocol::Receipt>,
+    /// When present, `error` refused the message at `manual_ack.len()`.
+    /// This counts the messages after it that the host did not attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_unattempted: Option<usize>,
     pub activation: Option<HostActivation>,
     pub status: HostStatus,
     pub saved: Option<HostSaveReport>,
-    pub history: Option<HistorySnapshot>,
+    pub history: Option<PortableHistory>,
     pub session: Option<HostSessionStatus>,
     pub error: Option<HostRefusal>,
 }

@@ -69,7 +69,7 @@ fn s3_fix1_lost_first_commit(colour: bool) {
     if colour {
         let history = app.owner.core().export_history().unwrap();
         let operation =
-            crate::color_ui::assume_sdr_rec709_operation(&history.document.media_pool[0]);
+            crate::color_ui::assume_sdr_rec709_operation(&history.history().document.media_pool[0]);
         app.apply(Action::ChangeMediaInterpretation(Box::new(operation)))
             .unwrap();
     } else {
@@ -81,7 +81,7 @@ fn s3_fix1_lost_first_commit(colour: bool) {
     }))
     .unwrap();
     app.settle_manual_for_test();
-    let expected = app.owner.core().export_history().unwrap();
+    let expected = serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while !app.read_only() && std::time::Instant::now() < deadline {
         app.poll_host();
@@ -89,19 +89,31 @@ fn s3_fix1_lost_first_commit(colour: bool) {
     }
     assert!(proxy.dropped.load(std::sync::atomic::Ordering::Acquire));
     assert!(app.read_only());
-    assert_eq!(app.owner.core().export_history().unwrap(), expected);
+    assert_continuity_owner(
+        app.owner.core(),
+        &expected,
+        "CONTINUITY_PRESERVES_THE_COMPLETE_OWNER",
+    );
     std::fs::remove_file(source).unwrap();
     app.apply(Action::Retry).unwrap();
     s2h_fix3_wait(&mut app);
     assert!(!app.read_only(), "C0_FIX1_ACCEPTED_SUFFIX: {}", app.message);
     app.apply(Action::Save).unwrap();
     assert!(!app.is_dirty(), "{}", app.message);
-    let restored = Core::spawn(Document::default()).unwrap();
-    LoadedBundle::read(&path)
-        .unwrap()
-        .restore_manual(&restored)
-        .unwrap();
-    assert_eq!(restored.export_history().unwrap(), expected);
+    let restored = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .open_manual()
+    .unwrap();
+    assert_continuity_owner(
+        &restored,
+        &expected,
+        "CONTINUITY_PRESERVES_THE_COMPLETE_OWNER",
+    );
     assert!(app.close());
     drop(proxy);
 }
@@ -124,10 +136,11 @@ fn s3_owned_colour_reply_loss_preserves_prior_interpretation_for_undo() {
     }
     assert!(!app.is_dirty(), "import setup must commit");
     let before = app.owner.core().export_history().unwrap();
-    let asset = &before.document.media_pool[0];
+    let asset = &before.history().document.media_pool[0];
     let operation = crate::color_ui::assume_sdr_rec709_operation(asset);
-    let mut expected = (*before.document).clone();
+    let mut expected = (*before.history().document).clone();
     operation.apply(&mut expected).unwrap();
+    let before = serde_json::to_value(before).unwrap();
     let proxy = app
         .host
         .as_mut()
@@ -137,7 +150,10 @@ fn s3_owned_colour_reply_loss_preserves_prior_interpretation_for_undo() {
         app.apply(Action::ChangeMediaInterpretation(Box::new(operation)))
             .is_err()
     );
-    assert_eq!(app.owner.core().export_history().unwrap(), before);
+    assert_eq!(
+        serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap(),
+        before
+    );
     assert!(app.read_only());
     let _ = app.poll_host();
     assert!(
@@ -155,31 +171,54 @@ fn s3_owned_colour_reply_loss_preserves_prior_interpretation_for_undo() {
         "interpretation must commit after exact replay"
     );
     assert_eq!(
-        *app.owner.core().export_history().unwrap().document,
+        *app.owner
+            .core()
+            .export_history()
+            .unwrap()
+            .history()
+            .document,
         expected
     );
     app.send_manual(Command::Undo).unwrap();
     app.settle_manual_for_test();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while (app.is_dirty() || app.owner.core().export_history().unwrap().document != before.document)
+    while (app.is_dirty()
+        || app
+            .owner
+            .core()
+            .export_history()
+            .unwrap()
+            .history()
+            .document
+            .as_ref()
+            != &serde_json::from_value::<Document>(before["history"]["document"].clone()).unwrap())
         && std::time::Instant::now() < deadline
     {
         app.poll_host();
         std::thread::yield_now();
     }
     assert_eq!(
-        app.owner.core().export_history().unwrap().document,
-        before.document
+        *app.owner
+            .core()
+            .export_history()
+            .unwrap()
+            .history()
+            .document,
+        serde_json::from_value::<Document>(before["history"]["document"].clone()).unwrap()
     );
     assert!(
         !app.is_dirty(),
         "old interpretation must remain saveable after undo"
     );
-    let restored = Core::spawn(Document::default()).unwrap();
-    LoadedBundle::read(&path)
-        .unwrap()
-        .restore_manual(&restored)
-        .unwrap();
+    let restored = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .open_manual()
+    .unwrap();
     assert_eq!(
         restored.export_history().unwrap(),
         app.owner.core().export_history().unwrap()
@@ -207,7 +246,7 @@ fn s3_owned_import_lost_reply_refreshes_the_gui_lease_once() {
         ),
     )
     .unwrap();
-    let before = app.owner.core().export_history().unwrap();
+    let before = serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap();
     let proxy = app
         .host
         .as_mut()
@@ -216,7 +255,10 @@ fn s3_owned_import_lost_reply_refreshes_the_gui_lease_once() {
     assert!(app.apply(Action::ImportMedia(source.clone())).is_err());
     assert!(app.read_only());
     assert!(!app.retention_lost);
-    assert_eq!(app.owner.core().export_history().unwrap(), before);
+    assert_eq!(
+        serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap(),
+        before
+    );
     std::fs::remove_file(source).unwrap();
     let _ = app.poll_host();
     assert!(
@@ -230,14 +272,18 @@ fn s3_owned_import_lost_reply_refreshes_the_gui_lease_once() {
         std::thread::yield_now();
     }
     let history = app.owner.core().export_history().unwrap();
-    assert_eq!(history.document.media_pool.len(), 1);
+    assert_eq!(history.history().document.media_pool.len(), 1);
     assert!(!app.read_only(), "{}", app.message);
     assert!(!app.is_dirty(), "{}", app.message);
-    let restored = Core::spawn(Document::default()).unwrap();
-    LoadedBundle::read(&path)
-        .unwrap()
-        .restore_manual(&restored)
-        .unwrap();
+    let restored = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .open_manual()
+    .unwrap();
     assert_eq!(restored.export_history().unwrap(), history);
     assert!(app.close());
     drop(proxy);
@@ -252,7 +298,7 @@ fn s3_owned_pending_import_host_death_preserves_both_gui_contexts() {
             s2h_fix3_app(false)
         } else {
             let temp = temp();
-            let core = Core::spawn(doc()).unwrap();
+            let core = Core::for_test(doc()).unwrap();
             let owner = kinewright_project::editing_session::Ja1EditingSession::new(
                 temp.root(),
                 &core,
@@ -303,7 +349,7 @@ fn s3_owned_pending_import_host_death_preserves_both_gui_contexts() {
             false,
         );
         assert!(app.apply(Action::ImportMedia(source)).is_err());
-        let retained = app.owner.core().export_history().unwrap();
+        let retained = serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap();
         let persisted_root = named.then(|| std::fs::read(&project_path).unwrap());
         let charged = retained_source.as_ref().map(|(usage, _)| usage().unwrap());
         if let Some(charged) = &charged {
@@ -320,7 +366,10 @@ fn s3_owned_pending_import_host_death_preserves_both_gui_contexts() {
         let destination = temp.path("refused-rescue.kinewright");
         assert!(app.apply(Action::SaveAs(destination.clone())).is_err());
         assert!(!destination.exists());
-        assert_eq!(app.owner.core().export_history().unwrap(), retained);
+        assert_eq!(
+            serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap(),
+            retained
+        );
         if let Some((usage, source_root)) = retained_source {
             assert!(source_root.exists());
             assert_eq!(
@@ -331,12 +380,19 @@ fn s3_owned_pending_import_host_death_preserves_both_gui_contexts() {
         }
         if let Some(persisted_root) = persisted_root {
             assert_eq!(std::fs::read(&project_path).unwrap(), persisted_root);
-            let restored = Core::spawn(Document::default()).unwrap();
-            LoadedBundle::read(&project_path)
-                .unwrap()
-                .restore_manual(&restored)
-                .unwrap();
-            assert_eq!(restored.export_history().unwrap(), retained);
+            let restored = LoadedBundle::read(
+                &project_path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap()
+            .open_manual()
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(restored.export_history().unwrap()).unwrap(),
+                retained
+            );
         }
         drop(proxy);
     }
@@ -349,7 +405,7 @@ fn s3_owned_unsaved_host_import_transfers_its_new_manifest_on_first_save() {
         HostCommand, HostSnapshot, HostSourceBinding, SessionRoots, SourceServer,
     };
     let temp = temp();
-    let core = Core::spawn(doc()).unwrap();
+    let core = Core::for_test(doc()).unwrap();
     let owner = kinewright_project::editing_session::Ja1EditingSession::new(
         temp.root(),
         &core,
@@ -366,7 +422,7 @@ fn s3_owned_unsaved_host_import_transfers_its_new_manifest_on_first_save() {
         },
     )
     .unwrap();
-    let foreign_core = Core::spawn(doc()).unwrap();
+    let foreign_core = Core::for_test(doc()).unwrap();
     let mut foreign = kinewright_project::editing_session::Ja1EditingSession::new(
         temp.root(),
         &foreign_core,
@@ -413,7 +469,15 @@ fn s3_owned_unsaved_host_import_transfers_its_new_manifest_on_first_save() {
         app.read_only(),
         "unsaved import cannot bypass first-save manual gating"
     );
-    assert_eq!(core.export_history().unwrap().document.media_pool.len(), 1);
+    assert_eq!(
+        core.export_history()
+            .unwrap()
+            .history()
+            .document
+            .media_pool
+            .len(),
+        1
+    );
     std::fs::remove_file(source).unwrap();
     app.apply(Action::Retry).unwrap();
     assert!(app.read_only());
@@ -421,11 +485,15 @@ fn s3_owned_unsaved_host_import_transfers_its_new_manifest_on_first_save() {
     let destination = temp.path("imported.kinewright");
     app.apply(Action::FirstSave(destination.clone())).unwrap();
     assert!(!app.read_only(), "{}", app.message);
-    let restored = Core::spawn(Document::default()).unwrap();
-    LoadedBundle::read(&destination)
-        .unwrap()
-        .restore_manual(&restored)
-        .unwrap();
+    let restored = LoadedBundle::read(
+        &destination,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .open_manual()
+    .unwrap();
     assert_eq!(
         restored.export_history().unwrap(),
         core.export_history().unwrap()
@@ -471,8 +539,11 @@ impl AppSession {
             kinewright_project::editing_session::Ja1EditingSession::new(parent, core, limits)?,
         )?))
     }
-    fn open(path: &Path) -> Result<Self, BundleError> {
-        Ok(Self(Ja1Attachment::open(path)?))
+    fn open(
+        path: &Path,
+        pool: &kinewright_project::operation_history::HistoryPool,
+    ) -> Result<Self, BundleError> {
+        Ok(Self(Ja1Attachment::open(path, pool)?))
     }
     fn from_bundle(
         bundle: ProjectBundle,
@@ -560,33 +631,25 @@ impl AppSession {
         consent: &RescueConsent,
         destination: &DestinationInspection,
     ) -> Result<RescueOutcome, BundleError> {
-        let choices = selection.consent_choices_probe(consent);
+        let choices = selection.omission_consent_probe(consent);
         let fresh = if choices.is_ok() {
             selection.consent()
         } else {
             consent.clone()
         };
-        let (trim, omission) = choices.unwrap_or((false, false));
+        let omission = choices.unwrap_or(false);
         self.0.message = rescue_preview(&selection);
-        let removed = selection.removed_undo();
         let omitted = !selection.omissions().is_empty();
         self.0.choice = Some(Choice::Rescue {
             selection: Box::new(selection),
             consent: fresh,
-            trim: false,
             omission: false,
         });
-        if removed > 0 {
-            assert!(rendered(&self.0).contains("Undo before step"));
-        }
         if omitted {
             assert!(
                 rendered(&self.0)
                     .contains("Older recovery points from A are not in the rescue copy")
             );
-        }
-        if trim {
-            self.0.apply(Action::ConsentTrim)?;
         }
         if omission {
             self.0.apply(Action::ConsentOmission)?;
@@ -742,15 +805,86 @@ pub(crate) fn painted_text(output: &egui::FullOutput) -> String {
 #[test]
 fn w14_unsupported_rescue_refuses_before_session_mutation() {
     admission::matrix(|path| {
-        let mut app = Ja1Attachment::open(path)?;
+        let mut app = Ja1Attachment::open(
+            path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )?;
         app.apply(Action::Save)?;
         Ok(())
     });
 }
 #[cfg(target_os = "linux")]
+fn assert_continuity_owner(core: &Core, before: &serde_json::Value, marker: &str) {
+    let actual = serde_json::to_value(core.export_history().unwrap()).unwrap();
+    let epoch = actual["history"]["epoch"].as_u64().unwrap();
+    let previous = before["history"]["epoch"].as_u64().unwrap();
+    assert!(epoch >= previous, "{marker}: epoch never goes backwards");
+    let mut expected = before.clone();
+    if epoch > previous {
+        expected["history"]["epoch"] = serde_json::json!(epoch);
+        for command in expected["ledger"]["commands"].as_array_mut().unwrap() {
+            if command["fate"] == "Redone" {
+                command["fate"] = serde_json::json!("Applied");
+            }
+            command["install_epoch"] = serde_json::json!(epoch);
+        }
+    }
+    assert_eq!(
+        actual, expected,
+        "{marker}: document, both stacks, original keys and digests, ledger, lineage, resources and creation descriptor"
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn assert_recovered_task_owner(core: &Core, mut expected: serde_json::Value, marker: &str) {
+    let mut actual = serde_json::to_value(core.export_history().unwrap()).unwrap();
+    assert_eq!(
+        actual["role"], "Ordinary",
+        "{marker}: person recovery uses ordinary retention"
+    );
+    assert_eq!(
+        actual["sizing"]["kind"], "Ordinary",
+        "{marker}: fresh immutable sizing"
+    );
+    assert_eq!(
+        actual["history"]["policy"], "Fold",
+        "{marker}: product retention policy"
+    );
+    if expected["role"] == "Ordinary" {
+        assert_eq!(
+            actual["sizing"], expected["sizing"],
+            "{marker}: ordinary creation sizing is preserved"
+        );
+    }
+    let epoch = actual["history"]["epoch"].as_u64().unwrap();
+    assert!(
+        epoch > expected["history"]["epoch"].as_u64().unwrap(),
+        "{marker}: fresh install epoch"
+    );
+    expected["history"]["epoch"] = serde_json::json!(epoch);
+    for command in expected["ledger"]["commands"].as_array_mut().unwrap() {
+        if command["fate"] == "Redone" {
+            command["fate"] = serde_json::json!("Applied");
+        }
+        command["install_epoch"] = serde_json::json!(epoch);
+    }
+    // Reprofiling changes only admission and future retention. Every native
+    // document, stack, command identity, owner fact and resource stays exact.
+    for value in [&mut actual, &mut expected] {
+        let object = value.as_object_mut().unwrap();
+        object.remove("role");
+        object.remove("sizing");
+        value["history"].as_object_mut().unwrap().remove("policy");
+    }
+    assert_eq!(actual, expected, "{marker}");
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn named() -> (TempDirectory, Ja1Attachment) {
     let temp = temp();
-    let core = Core::spawn(doc()).unwrap();
+    let core = Core::for_test(doc()).unwrap();
     let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
         temp.root(),
         &core,
@@ -783,7 +917,10 @@ pub(crate) fn unknown_selection(app: &mut Ja1Attachment, temp: &TempDirectory, l
         preview.contains("Saving your current work will remove this recovery point"),
         "{preview}"
     );
-    assert!(preview.contains("oldest Undo"));
+    assert!(
+        !preview.contains("oldest Undo"),
+        "SAVE_PRESERVES_EXECUTOR_UNDO: {preview}"
+    );
     let trigger = if landed {
         "root_parent_sync"
     } else {
@@ -834,27 +971,44 @@ fn w05_capture_races_and_infallible_handoff() {
     );
     assert_eq!(
         prepared.document,
-        app.owner.core().export_history().unwrap().document
+        app.owner
+            .core()
+            .export_history()
+            .unwrap()
+            .history()
+            .document
     );
     assert!(matches!(
-        before.request(Command::Undo).unwrap(),
-        Event::MutationRefused { .. }
+        before.request(Command::Undo),
+        Err(kinewright_project::operation_actor::Refusal {
+            error: kinewright_project::operation_actor::Error::MutationRefused(reason),
+            ..
+        }) if reason == kinewright_core::CoreMutationRefusal::Sealed
     ));
     drop(app);
-    LoadedBundle::read(&temp.path("drive/a.kinewright")).unwrap();
+    LoadedBundle::read(
+        &temp.path("drive/a.kinewright"),
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
 }
 #[test]
 #[cfg(target_os = "linux")]
 fn w03_choices_never_supply_implicit_consent() {
     let (temp, mut app) = named();
     unknown_selection(&mut app, &temp, true);
-    let before = app.owner.core().export_history().unwrap();
+    let before = serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap();
     let slots = app.owner.rescue_slots();
     app.apply(Action::PreviewRescue).unwrap();
     assert_eq!(app.owner.rescue_slots(), slots);
     assert!(!temp.path("b.kinewright").exists());
     app.apply(Action::Cancel).unwrap();
-    assert_eq!(app.owner.core().export_history().unwrap(), before);
+    assert_eq!(
+        serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap(),
+        before
+    );
     assert_eq!(
         app.owner.core().attachment_state().unwrap(),
         AttachmentState::Frozen
@@ -863,7 +1017,7 @@ fn w03_choices_never_supply_implicit_consent() {
 }
 #[test]
 #[cfg(target_os = "linux")]
-fn w03_trim_choice_requires_its_own_consent_and_keeps_a_exact() {
+fn w03_native_rescue_keeps_all_undo_without_requesting_trim_consent() {
     use kinewright_project::io_observer;
     let temp = temp();
     let document = Document {
@@ -877,7 +1031,7 @@ fn w03_trim_choice_requires_its_own_consent_and_keeps_a_exact() {
             .collect(),
         ..Document::default()
     };
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     for i in 0..40 {
         edit(&core, i % 2 == 0);
     }
@@ -887,41 +1041,44 @@ fn w03_trim_choice_requires_its_own_consent_and_keeps_a_exact() {
         StorageLimits::default(),
     )
     .unwrap();
-    let profile = StorageLimits {
-        branch_history_bytes: 1 << 20,
-        ..StorageLimits::default()
-    };
     assert!(matches!(
         io_observer::fail_once("root_parent_sync", || owner
-            .first_save(&temp.path("drive/a.kinewright"), profile))
+            .first_save(&temp.path("drive/a.kinewright"), StorageLimits::default()))
         .unwrap(),
         CopyStatus::DurabilityUnknown
     ));
     std::fs::rename(temp.path("drive"), temp.path("hidden-drive")).unwrap();
-    let expected = core.export_history().unwrap();
+    let expected = serde_json::to_value(core.export_history().unwrap()).unwrap();
     let mut app = Ja1Attachment::new(owner).unwrap();
+    assert!(
+        app.apply(Action::ConsentOmission).is_err(),
+        "UNSELECTED_OMISSION_CONSENT_IS_REFUSED"
+    );
     app.apply(Action::PreviewRescue).unwrap();
     let text = rendered(&app);
-    assert!(text.contains("Undo before step"), "{text}");
-    assert!(text.contains("Remove this older Undo history in B"));
     assert!(
-        !text.contains("Save rescue copy to…"),
-        "no implicit trim consent: {text}"
+        text.contains("all Undo and Redo kept"),
+        "NATIVE_RESCUE_KEEPS_THE_FULL_EXECUTOR_HISTORY: {text}"
     );
-    assert!(
-        app.apply(Action::RescueTo(temp.path("refused.kinewright")))
-            .is_err()
-    );
-    assert!(!temp.path("refused.kinewright").exists());
-    assert_eq!(core.export_history().unwrap(), expected);
-    app.apply(Action::PreviewRescue).unwrap();
-    app.apply(Action::ConsentTrim).unwrap();
-    assert!(rendered(&app).contains("Save rescue copy to…"));
+    assert!(!text.contains("Remove this older Undo history"));
+    assert!(text.contains("Save rescue copy to…"));
     app.apply(Action::RescueTo(temp.path("b.kinewright")))
         .unwrap();
-    assert_eq!(core.export_history().unwrap(), expected);
+    assert!(
+        matches!(
+            core.export_history(),
+            Err(kinewright_project::operation_actor::Error::Retired)
+        ),
+        "COMPLETE_RESCUE_CAPTURE_RELEASES_THE_OLD_LIVE_HOLDER"
+    );
     assert_eq!(core.attachment_state().unwrap(), AttachmentState::Sealed);
+    assert_recovered_task_owner(
+        app.owner.core(),
+        expected,
+        "NATIVE_RESCUE_KEEPS_ALL_FORTY_STEPS",
+    );
 }
+
 #[test]
 #[cfg(target_os = "linux")]
 fn w15_late_rescue_is_capture_only_and_release_is_explicit() {
@@ -942,24 +1099,31 @@ fn w15_late_rescue_is_capture_only_and_release_is_explicit() {
         .unwrap();
     let b = app.owner.core().clone();
     edit(&b, false);
-    let history = b.export_history().unwrap();
+    let history = serde_json::to_value(b.export_history().unwrap()).unwrap();
     let dirty = app.owner.dirty().unwrap();
     std::fs::rename(temp.path("hidden-drive"), temp.path("drive")).unwrap();
     app.apply(Action::Reconcile(temp.path("drive/a.kinewright")))
         .unwrap();
-    assert_eq!(b.export_history().unwrap(), history);
+    assert_eq!(
+        serde_json::to_value(b.export_history().unwrap()).unwrap(),
+        history
+    );
     assert_eq!(app.owner.dirty().unwrap(), dirty);
     assert_eq!(app.owner.core().actor_identity(), b.actor_identity());
     app.apply(Action::Save).unwrap();
     drop(app);
-    let reopened = Core::spawn(Document::default()).unwrap();
-    LoadedBundle::read(&temp.path("b.kinewright"))
-        .unwrap()
-        .restore_manual(&reopened)
-        .unwrap();
+    let reopened = LoadedBundle::read(
+        &temp.path("b.kinewright"),
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .open_manual()
+    .unwrap();
     assert_eq!(
-        reopened.export_history().unwrap(),
-        b.export_history().unwrap()
+        serde_json::to_value(reopened.export_history().unwrap()).unwrap(),
+        history
     );
 }
 #[test]
@@ -967,7 +1131,7 @@ fn w15_late_rescue_is_capture_only_and_release_is_explicit() {
 fn w13_preview_close_and_every_destination_disclose_session_pin_loss() {
     let (temp, mut app) = named();
     unknown_selection(&mut app, &temp, false);
-    let before = app.owner.core().export_history().unwrap();
+    let before = serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap();
     let close = app.close_text();
     assert!(
         close.contains("no longer in the project's automatic list"),
@@ -993,7 +1157,10 @@ fn w13_preview_close_and_every_destination_disclose_session_pin_loss() {
             "{text}"
         );
     }
-    assert_eq!(app.owner.core().export_history().unwrap(), before);
+    assert_eq!(
+        serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap(),
+        before
+    );
     assert!(app.apply(Action::Abandon).is_err());
     std::fs::rename(temp.path("hidden-drive"), temp.path("drive")).unwrap();
     app.apply(Action::Retry).unwrap();
@@ -1066,12 +1233,15 @@ fn w15_completed_capture_release_keeps_sources_and_active_c_exact() {
                 .unwrap();
         }
         let actor = app.owner.core().actor_identity();
-        let history = app.owner.core().export_history().unwrap();
+        let history = serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap();
         let dirty = app.owner.dirty().unwrap();
         let slots = app.owner.rescue_slots();
         assert!(
             kinewright_project::editing_session::Ja1EditingSession::open(
-                &temp.path("b.kinewright")
+                &temp.path("b.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
             )
             .is_err()
         );
@@ -1084,23 +1254,57 @@ fn w15_completed_capture_release_keeps_sources_and_active_c_exact() {
         assert!(text.contains("as of capture"));
         assert!(text.contains("separately read-only"));
         assert_eq!(app.owner.core().actor_identity(), actor);
-        assert_eq!(app.owner.core().export_history().unwrap(), history);
+        assert_eq!(
+            serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap(),
+            history
+        );
         assert_eq!(app.owner.dirty().unwrap(), dirty);
         app.apply(Action::PreviewRelease(temp.path("b.kinewright")))
             .unwrap();
-        app.apply(Action::Release).unwrap();
+        if app
+            .owner
+            .completed_capture_backs_recovery(&temp.path("b.kinewright"))
+            .unwrap()
+        {
+            assert!(
+                app.message.contains("archived recovery states"),
+                "COLD_ARCHIVE_OWNER_IS_DISCLOSED_BEFORE_RELEASE: {}",
+                app.message
+            );
+            assert!(app.apply(Action::Release).is_err());
+            assert!(
+                kinewright_project::editing_session::Ja1EditingSession::open(
+                    &temp.path("b.kinewright"),
+                    &kinewright_project::operation_history::HistoryPool::new(
+                        kinewright_project::operation_history::PoolLimits::default()
+                    ),
+                )
+                .is_err(),
+                "COLD_ARCHIVE_CANNOT_LOSE_ITS_ACTUAL_NAMESPACE_OWNER"
+            );
+        } else {
+            app.apply(Action::Release).unwrap();
+            let mut separate = kinewright_project::editing_session::Ja1EditingSession::open(
+                &temp.path("b.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .expect("INDEPENDENTLY_ARCHIVED_COPY_CAN_BE_RELEASED");
+            separate.save_active().unwrap();
+        }
         assert_eq!(app.owner.rescue_slots(), slots);
-        assert_eq!(app.owner.core().export_history().unwrap(), history);
-        let mut separate = kinewright_project::editing_session::Ja1EditingSession::open(
-            &temp.path("b.kinewright"),
-        )
-        .unwrap();
-        separate.save_active().unwrap();
-        drop(separate);
+        assert_eq!(
+            serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap(),
+            history
+        );
         std::fs::rename(temp.path("hidden-drive"), temp.path("drive")).unwrap();
         assert!(
             kinewright_project::editing_session::Ja1EditingSession::open(
-                &temp.path("drive/a.kinewright")
+                &temp.path("drive/a.kinewright"),
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
             )
             .is_err()
         );
@@ -1131,6 +1335,7 @@ fn n2_sealed_a_discloses_committed_b_and_offers_open() {
     let binder = ProjectBundle::activate(
         &temp.path("cut-authority.kinewright"),
         BundleWriteAdmission::new_document(),
+        app.owner.core().history_pool(),
     )
     .unwrap();
     let outcome = app
@@ -1147,8 +1352,8 @@ fn n2_sealed_a_discloses_committed_b_and_offers_open() {
     app.finish_rescue(&outcome, None, &path, &loss);
     app.refresh();
     let text = rendered(&app);
-    assert!(text.contains("A is sealed"), "{text}");
-    assert!(text.contains("committed rescue copy"), "{text}");
+    assert!(text.contains("A remains intact; B is retained"), "{text}");
+    assert!(text.contains("Committed"), "{text}");
     assert!(text.contains(&path.display().to_string()), "{text}");
     assert!(
         !text.contains("Editing continues in the original session"),
@@ -1157,20 +1362,22 @@ fn n2_sealed_a_discloses_committed_b_and_offers_open() {
     assert!(!text.contains("B's save outcome is unknown"), "{text}");
     let action = click_control(&app, &format!("Open B read-only: {}", path.display()));
     assert!(matches!(action, Action::OpenCapture(ref p) if p == &path));
-    assert_eq!(
-        original.attachment_state().unwrap(),
-        AttachmentState::Sealed
-    );
+    assert_eq!(original.attachment_state().unwrap(), AttachmentState::Live);
     assert!(app.owner.is_capture_destination(&path));
 }
 
 #[cfg(target_os = "linux")]
 pub(crate) fn observe_s2(revised: bool) -> serde_json::Value {
     let (temp, mut app) = named();
-    let control = LoadedBundle::read(&temp.path("drive/a.kinewright"))
-        .unwrap()
-        .admission()
-        .inspection_document()
+    let control = LoadedBundle::read(
+        &temp.path("drive/a.kinewright"),
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .admission()
+    .inspection_document()
         == Some(&doc());
     if !revised {
         return serde_json::json!({"control_reopened":control,"surface":"pending_baseline_witness"});
@@ -1182,11 +1389,15 @@ pub(crate) fn observe_s2(revised: bool) -> serde_json::Value {
     let captured = original.export_history().unwrap();
     app.apply(Action::RescueTo(temp.path("b.kinewright")))
         .unwrap();
-    let fresh = Core::spawn(Document::default()).unwrap();
-    LoadedBundle::read(&temp.path("b.kinewright"))
-        .unwrap()
-        .restore_manual(&fresh)
-        .unwrap();
+    let fresh = LoadedBundle::read(
+        &temp.path("b.kinewright"),
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .open_manual()
+    .unwrap();
     serde_json::json!({"control_reopened":control,"app_rescue":original.attachment_state().unwrap() == AttachmentState::Sealed && original.actor_identity() != app.owner.core().actor_identity() && fresh.export_history().unwrap() == captured && text.contains("not in B") && text.contains("A keeps it only if the selection completed")})
 }
 
@@ -1277,7 +1488,7 @@ fn r3_rendered_ordinary_first_and_prepared_retry_offer_preview() {
     for mode in ["ordinary", "first", "prepared"] {
         let (temp, mut app) = if mode == "first" {
             let temp = temp();
-            let core = Core::spawn(doc()).unwrap();
+            let core = Core::for_test(doc()).unwrap();
             let owner = kinewright_project::editing_session::Ja1EditingSession::new(
                 temp.root(),
                 &core,
@@ -1387,7 +1598,7 @@ fn g04_startup_journal_retirement_uses_scanned_parent_and_bytes() {
 fn c8_retention_loss_fences_every_action_and_keeps_actual_source_until_close() {
     use std::io::Read as _;
     let temp = temp();
-    let core = Core::spawn(doc()).unwrap();
+    let core = Core::for_test(doc()).unwrap();
     edit(&core, false);
     core.request(Command::Undo).unwrap();
     let owner = kinewright_project::editing_session::Ja1EditingSession::new(
@@ -1397,11 +1608,11 @@ fn c8_retention_loss_fences_every_action_and_keeps_actual_source_until_close() {
     )
     .unwrap();
     let mut app = Ja1Attachment::new(owner).unwrap();
-    let history = core.export_history().unwrap();
     let transfer = app.owner.prepare_host_attachment().unwrap();
     let descriptor = transfer.source.unwrap();
     let service = transfer.source_service.unwrap();
     let input = transfer.inputs;
+    drop(transfer.history);
     let source = app.owner.source().unwrap();
     let source_root = source
         .store()
@@ -1436,6 +1647,7 @@ fn c8_retention_loss_fences_every_action_and_keeps_actual_source_until_close() {
     reader.read_to_end(&mut exact).unwrap();
     assert_eq!(kinewright_media::sha256_bytes(&exact), input.sha256);
 
+    let history = serde_json::to_value(core.export_history().unwrap()).unwrap();
     app.operation_panicked();
     assert!(app.read_only());
     assert_eq!(core.attachment_state(), Ok(AttachmentState::Frozen));
@@ -1451,7 +1663,6 @@ fn c8_retention_loss_fences_every_action_and_keeps_actual_source_until_close() {
         Action::OpenRecovery,
         Action::Abandon,
         Action::PreviewRescue,
-        Action::ConsentTrim,
         Action::ConsentOmission,
         Action::RescueTo(destination.clone()),
         Action::Cancel,
@@ -1471,7 +1682,7 @@ fn c8_retention_loss_fences_every_action_and_keeps_actual_source_until_close() {
             !destination.parent().unwrap().exists(),
             "refused before parent creation"
         );
-        assert_eq!(core.export_history().unwrap(), history);
+        assert_continuity_owner(&core, &history, "RETENTION_LOSS_REFUSES_EVERY_ACTION");
         assert_eq!(admission::tree(&source_root), source_bytes);
         assert_eq!(
             app.owner
@@ -1492,8 +1703,8 @@ fn c8_retention_loss_fences_every_action_and_keeps_actual_source_until_close() {
         Event::QueryResult(_)
     ));
     assert!(matches!(
-        core.request(Command::Redo).unwrap(),
-        Event::MutationRefused { .. }
+        core.request(Command::Redo),
+        Err(kinewright_project::operation_actor::Refusal { .. })
     ));
     assert!(rendered(&app).contains("retained data"));
     assert!(
@@ -1540,7 +1751,7 @@ fn c8_retention_loss_fences_every_action_and_keeps_actual_source_until_close() {
 fn c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history() {
     use kinewright_agent::writer_host::{HostCommand, SessionRoots};
     let temp = temp();
-    let core = Core::spawn(doc()).unwrap();
+    let core = Core::for_test(doc()).unwrap();
     let owner = kinewright_project::editing_session::Ja1EditingSession::new(
         temp.root(),
         &core,
@@ -1574,7 +1785,10 @@ fn c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history() {
         .request(HostCommand::ReadHistory)
         .unwrap();
     assert!(attached.error.is_none());
-    assert_eq!(attached.history.unwrap(), core.export_history().unwrap());
+    assert_eq!(
+        attached.history.unwrap().identity(),
+        core.snapshot_identity().unwrap()
+    );
     let source_root = app
         .owner
         .source()
@@ -1605,11 +1819,15 @@ fn c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history() {
         "only the publisher digest marks this exact history Saved"
     );
     assert_eq!(app.project_path().as_deref(), Some(path.as_path()));
-    let reopened = Core::spawn(Document::default()).unwrap();
-    LoadedBundle::read(&path)
-        .unwrap()
-        .restore_manual(&reopened)
-        .unwrap();
+    let reopened = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .open_manual()
+    .unwrap();
     assert_eq!(
         reopened.export_history().unwrap(),
         core.export_history().unwrap()
@@ -1677,7 +1895,7 @@ fn c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history() {
 fn c11_host_first_save_then_current_edit_reads_through_the_lease() {
     use kinewright_agent::writer_host::SessionRoots;
     let temp = temp();
-    let core = Core::spawn(doc()).unwrap();
+    let core = Core::for_test(doc()).unwrap();
     let owner = kinewright_project::editing_session::Ja1EditingSession::new(
         temp.root(),
         &core,
@@ -1709,7 +1927,12 @@ fn c11_host_first_save_then_current_edit_reads_through_the_lease() {
     app.apply(Action::FirstSave(path.clone())).unwrap();
     assert_eq!(app.project_path().as_deref(), Some(path.as_path()));
     let scope = app.studio_playback_scope().expect("C11_FIRST_SAVE_SCOPE");
-    let document = core.export_history().unwrap().document;
+    let Event::QueryResult(kinewright_core::QueryResult::Document(document)) = core
+        .request(Command::Query(kinewright_core::Query::Document))
+        .unwrap()
+    else {
+        panic!("current playback document")
+    };
     let inputs = app
         .studio_current_reader(&scope)
         .expect("C11_FIRST_SAVE_LEASE")
@@ -1734,7 +1957,7 @@ fn c11_host_first_save_then_current_edit_reads_through_the_lease() {
 #[test]
 fn c8_failed_host_launch_keeps_source_and_restores_local_editing() {
     let temp = temp();
-    let core = Core::spawn(doc()).unwrap();
+    let core = Core::for_test(doc()).unwrap();
     edit(&core, false);
     let owner = kinewright_project::editing_session::Ja1EditingSession::new(
         temp.root(),
@@ -1764,7 +1987,7 @@ fn c8_failed_host_launch_keeps_source_and_restores_local_editing() {
         .unwrap()
         .physical_bytes;
     assert!(initial_physical > 0);
-    let history = core.export_history().unwrap();
+    let history = serde_json::to_value(core.export_history().unwrap()).unwrap();
     let roots = kinewright_agent::writer_host::SessionRoots {
         read: vec![temp.root().to_path_buf()],
         write: vec![temp.root().to_path_buf()],
@@ -1789,37 +2012,43 @@ fn c8_failed_host_launch_keeps_source_and_restores_local_editing() {
     assert!(source.store().usage().unwrap().reserved_copy_bytes > 0);
     assert!(!app.read_only());
     assert_eq!(core.attachment_state(), Ok(AttachmentState::Live));
-    assert_eq!(core.export_history().unwrap(), history);
+    assert_continuity_owner(&core, &history, "FAILED_LAUNCH_PRESERVES_SOURCE_WORK");
     let fresh = temp.path("elsewhere/new.kinewright");
     app.apply(Action::FirstSave(fresh.clone())).unwrap();
-    let reopened = Core::spawn(Document::default()).unwrap();
-    LoadedBundle::read(&fresh)
-        .unwrap()
-        .restore_manual(&reopened)
-        .unwrap();
-    assert_eq!(reopened.export_history().unwrap(), history);
+    let reopened = LoadedBundle::read(
+        &fresh,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .open_manual()
+    .unwrap();
+    assert_continuity_owner(
+        &reopened,
+        &history,
+        "FIRST_SAVE_PRESERVES_FAILED_LAUNCH_WORK",
+    );
     assert_eq!(admission::tree(&root), source_bytes);
     app.close();
     drop(app);
     assert!(!root.exists());
 }
 
-/// Completion adapter: exact publisher-written floors stay on the existing GUI actor;
+/// Completion adapter: exact publisher-written snapshots stay on the existing GUI actor;
 /// an explicit committed recovery activation creates a fresh actor even for equal content.
 #[cfg(target_os = "linux")]
 #[test]
 fn c8_app_publisher_floor_keeps_actor_and_committed_recovery_activates_fresh_actor() {
     use kinewright_agent::writer_host::{
-        HostConfig, HostOrigin, HostReply, HostSaveReport, HostSourceBinding, HostStatus,
-        SessionRoots, SourceServer, WriterHost,
+        HostConfig, HostOrigin, HostSourceBinding, SessionRoots, SourceServer, WriterHost,
     };
-    use kinewright_core::HistoryTransition;
     let temp = temp();
-    let core = Core::spawn(doc()).unwrap();
+    let core = Core::for_test(doc()).unwrap();
     for n in 0..10 {
         edit(&core, n % 2 == 0);
     }
-    let before = core.export_history().unwrap();
+    let before = core.snapshot_identity().unwrap();
     let owner = kinewright_project::editing_session::Ja1EditingSession::new(
         temp.root(),
         &core,
@@ -1839,10 +2068,10 @@ fn c8_app_publisher_floor_keeps_actor_and_committed_recovery_activates_fresh_act
             write: vec![temp.root().to_path_buf()],
         },
         origin: HostOrigin::Gui {
-            initial_snapshot: kinewright_agent::writer_host::HostSnapshot::from_history(
-                transfer.history.clone(),
-            )
-            .unwrap(),
+            initial_snapshot: Some(
+                kinewright_agent::writer_host::HostSnapshot::from_history(transfer.history.clone())
+                    .unwrap(),
+            ),
             retention: HostSourceBinding {
                 source: transfer.source.clone(),
                 inputs: Some(transfer.inputs.clone()),
@@ -1855,6 +2084,7 @@ fn c8_app_publisher_floor_keeps_actor_and_committed_recovery_activates_fresh_act
     .unwrap();
     let initial = app.owner.freeze_host_cut().unwrap();
     app.owner.complete_host_cut(&initial, None, None).unwrap();
+    drop(transfer.history);
     app.host = Some(
         host::HostAttachment::connected(
             writer.client(),
@@ -1867,64 +2097,22 @@ fn c8_app_publisher_floor_keeps_actor_and_committed_recovery_activates_fresh_act
     );
     app.frozen = false;
 
-    // This report is from a real constrained publisher, rather than a live GUI history hash.
-    let publisher_core = Core::spawn(Document::default()).unwrap();
-    publisher_core.restore_history(before.clone()).unwrap();
-    let mut publisher = kinewright_project::editing_session::Ja1EditingSession::new(
-        temp.root(),
-        &publisher_core,
-        StorageLimits::default(),
-    )
-    .unwrap();
-    let selected = HistoryTransition::floor(before.clone(), 5).unwrap();
-    let limits = StorageLimits {
-        branch_history_bytes: kinewright_project::bundle_commit::history_cost_probe(
-            selected.after(),
-            &StorageLimits::default(),
-        )
-        .unwrap()
-        .max(
-            kinewright_project::bundle_commit::ordinary_history_admission_cost_probe(
-                selected.after(),
-                &StorageLimits::default(),
-            )
-            .unwrap(),
-        ),
-        ..StorageLimits::default()
-    };
-    let path = temp.path("committed_history-floor.kinewright");
-    let CopyStatus::Committed(report) = publisher.first_save(&path, limits).unwrap() else {
-        panic!("real constrained publisher must commit");
-    };
-    let committed_history = publisher_core.export_history().unwrap();
-    assert!(committed_history.floor_offset > before.floor_offset);
-    assert_eq!(
-        kinewright_media::sha256_bytes(&serde_json::to_vec(&committed_history).unwrap()),
-        report.history_sha256
-    );
     let actor = core.actor_identity();
-    let cut = app.owner.freeze_host_cut().unwrap();
-    app.host.as_mut().unwrap().cut = Some(cut);
-    app.accept_host_reply(HostReply {
-        status: HostStatus {
-            retention_proven: true,
-            association: Some(path),
-            saved_digest: Some(report.history_sha256.clone()),
-            ..HostStatus::default()
-        },
-        saved: Some(HostSaveReport::from(&report)),
-        history: Some(committed_history.clone()),
-        ..HostReply::default()
-    })
-    .unwrap();
-    assert_eq!(app.owner.core().actor_identity(), actor);
-    assert_eq!(core.export_history().unwrap(), committed_history);
-    assert_eq!(app.owner.retained_host_actor_count(), 0);
-
-    // Continue through actual App -> loopback host commands for recovery, using the original
-    // host's own newly named branch. Its cut is this exact, already-floor-installed GUI history.
     app.apply(Action::FirstSave(temp.path("host-a.kinewright")))
         .unwrap();
+    assert_eq!(
+        app.owner.core().actor_identity(),
+        actor,
+        "FIRST_SAVE_INSTALL_PRESERVES_GUI_ACTOR"
+    );
+    assert_ne!(
+        core.snapshot_identity().unwrap(),
+        before,
+        "FIRST_SAVE_SELECTS_A_NEW_INSTALL_EPOCH"
+    );
+    assert_eq!(app.owner.retained_host_actor_count(), 0);
+    assert!(!app.is_dirty());
+
     for value in [true, false, true] {
         edit_attachment(&mut app, value);
         app.apply(Action::Save).unwrap();
@@ -1977,7 +2165,7 @@ fn c8_person_picked_external_first_save_and_save_as_keep_source_and_narrowed_aut
     for directory in [&allowed, &external, &other] {
         std::fs::create_dir_all(directory).unwrap();
     }
-    let core = Core::spawn(doc()).unwrap();
+    let core = Core::for_test(doc()).unwrap();
     let owner = kinewright_project::editing_session::Ja1EditingSession::new(
         &allowed,
         &core,
@@ -2011,10 +2199,10 @@ fn c8_person_picked_external_first_save_and_save_as_keep_source_and_narrowed_aut
         path: None,
         roots: initial_roots,
         origin: HostOrigin::Gui {
-            initial_snapshot: kinewright_agent::writer_host::HostSnapshot::from_history(
-                transfer.history.clone(),
-            )
-            .unwrap(),
+            initial_snapshot: Some(
+                kinewright_agent::writer_host::HostSnapshot::from_history(transfer.history.clone())
+                    .unwrap(),
+            ),
             retention: HostSourceBinding {
                 source: transfer.source.clone(),
                 inputs: Some(transfer.inputs.clone()),
@@ -2027,6 +2215,7 @@ fn c8_person_picked_external_first_save_and_save_as_keep_source_and_narrowed_aut
     .unwrap();
     let cut = app.owner.freeze_host_cut().unwrap();
     app.owner.complete_host_cut(&cut, None, None).unwrap();
+    drop(transfer.history);
     app.host = Some(
         host::HostAttachment::connected(
             writer.client(),
@@ -2068,11 +2257,15 @@ fn c8_person_picked_external_first_save_and_save_as_keep_source_and_narrowed_aut
     app.apply(Action::SaveAs(second.clone())).unwrap();
     assert_eq!(app.project_path().as_deref(), Some(second.as_path()));
     assert!(!app.is_dirty());
-    let reopened = Core::spawn(Document::default()).unwrap();
-    LoadedBundle::read(&second)
-        .unwrap()
-        .restore_manual(&reopened)
-        .unwrap();
+    let reopened = LoadedBundle::read(
+        &second,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .open_manual()
+    .unwrap();
     assert_eq!(
         reopened.export_history().unwrap(),
         core.export_history().unwrap()
@@ -2168,7 +2361,14 @@ fn edit_attachment(app: &mut Ja1Attachment, locked: bool) {
     .unwrap();
     app.settle_manual_for_test();
     assert_eq!(
-        app.owner.core().export_history().unwrap().document.tracks[0].sync_lock,
+        app.owner
+            .core()
+            .export_history()
+            .unwrap()
+            .history()
+            .document
+            .tracks[0]
+            .sync_lock,
         locked
     );
 }
@@ -2182,16 +2382,34 @@ fn g05l_w05_all_manual_producers_respect_the_actor_cut() {
 #[cfg(target_os = "linux")]
 #[test]
 fn g05l_every_producer_stays_frozen_until_equivalence() {
-    for floor in [false, true] {
-        observe_c10(floor);
+    for first_save in [false, true] {
+        observe_c10(first_save);
     }
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn observe_c10(floor: bool) -> serde_json::Value {
+fn assert_recovery_install(
+    before: &serde_json::Value,
+    after: &kinewright_project::operation_history::OwnerSnapshot,
+) {
+    assert_eq!(
+        after.history().epoch,
+        before["history"]["epoch"].as_u64().unwrap() + 1,
+        "RECOVERY_SELECTS_EXACTLY_ONE_NEW_EPOCH"
+    );
+    let mut expected = before.clone();
+    expected["history"]["epoch"] = serde_json::json!(after.history().epoch);
+    assert!(
+        expected == serde_json::to_value(after).unwrap(),
+        "RECOVERY_PRESERVES_DOCUMENT_STACKS_LEDGER_LINEAGE_AND_RESOURCES"
+    );
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn observe_c10(first_save: bool) -> serde_json::Value {
     use kinewright_agent::writer_host::{HostCommand, SessionRoots};
     let temp = temp();
-    let core = Core::spawn(doc()).unwrap();
+    let core = Core::for_test(doc()).unwrap();
     let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
         temp.root(),
         &core,
@@ -2199,7 +2417,7 @@ pub(crate) fn observe_c10(floor: bool) -> serde_json::Value {
     )
     .unwrap();
     let path = temp.path("c10.kinewright");
-    if !floor {
+    if !first_save {
         owner.first_save(&path, StorageLimits::default()).unwrap();
     }
     let mut app = Ja1Attachment::new(owner).unwrap();
@@ -2212,7 +2430,7 @@ pub(crate) fn observe_c10(floor: bool) -> serde_json::Value {
         },
     )
     .unwrap();
-    if floor {
+    if first_save {
         app.apply(Action::FirstSave(path.clone())).unwrap();
     }
     let source_usage = app.owner.source().map(|s| s.store().usage().unwrap());
@@ -2232,8 +2450,9 @@ pub(crate) fn observe_c10(floor: bool) -> serde_json::Value {
     gate.send(Command::Do(operation.clone())).unwrap();
     // The actor barrier drains the submitted send; it cannot become a post-cut edit.
     let cut = app.owner.freeze_host_cut().unwrap();
-    assert_eq!(cut.history().batches.len(), 1);
-    app.host.as_mut().unwrap().cut = Some(cut.clone());
+    let before = serde_json::to_value(core.export_history().unwrap()).unwrap();
+    assert_eq!(before["history"]["undo"].as_array().unwrap().len(), 1);
+    app.host.as_mut().unwrap().cut = Some(cut);
     let commands = [
         Command::Do(operation.clone()),
         Command::DoBatch(vec![operation.clone()]),
@@ -2244,12 +2463,12 @@ pub(crate) fn observe_c10(floor: bool) -> serde_json::Value {
         Command::Undo,
         Command::Redo,
         Command::DoIfRevision {
-            expected: cut.revision(),
+            expected: cut.change().revision,
             operation: operation.clone(),
             token: None,
         },
         Command::DoBatchIfRevision {
-            expected: cut.revision(),
+            expected: cut.change().revision,
             operations: vec![operation],
         },
     ];
@@ -2261,21 +2480,23 @@ pub(crate) fn observe_c10(floor: bool) -> serde_json::Value {
         app.settle_manual_for_test();
         assert!(
             matches!(
-                gate.request(command.clone()).unwrap(),
-                Event::MutationRefused {
-                    reason: kinewright_core::CoreMutationRefusal::Frozen,
+                gate.request(command.clone()),
+                Err(kinewright_project::operation_actor::Refusal {
+                    error: kinewright_project::operation_actor::Error::MutationRefused(
+                        kinewright_core::CoreMutationRefusal::Frozen
+                    ),
                     ..
-                }
+                })
             ),
             "{command:?}"
         );
         refused += 1;
         core.send(command).unwrap();
-        assert_eq!(core.export_history().unwrap(), *cut.history());
+        assert_eq!(core.snapshot_identity().unwrap(), cut.identity());
     }
     assert!(
         app.owner
-            .install_host_snapshot(cut.history().clone())
+            .install_host_snapshot(core.portable_history().unwrap())
             .is_err()
     );
     let client = app.host_client().unwrap();
@@ -2290,7 +2511,7 @@ pub(crate) fn observe_c10(floor: bool) -> serde_json::Value {
     app.host
         .as_mut()
         .unwrap()
-        .begin_manual_recovery_with_floor(&mut app.owner, floor.then_some(1))
+        .begin_manual_recovery(&mut app.owner)
         .unwrap();
     assert!(app.apply(Action::Save).is_err());
     assert!(
@@ -2312,12 +2533,12 @@ pub(crate) fn observe_c10(floor: bool) -> serde_json::Value {
         std::thread::park_timeout(std::time::Duration::from_millis(5));
     }
     assert!(matches!(
-        gate.request(Command::Undo).unwrap(),
-        Event::MutationRefused { .. }
+        gate.request(Command::Undo),
+        Err(kinewright_project::operation_actor::Refusal { .. })
     ));
     assert_eq!(
-        core.export_history().unwrap().document,
-        cut.history().document
+        *core.export_history().unwrap().history().document,
+        serde_json::from_value::<Document>(before["history"]["document"].clone()).unwrap()
     );
     assert!(!app.is_dirty());
     if let Some(before) = source_usage {
@@ -2326,18 +2547,10 @@ pub(crate) fn observe_c10(floor: bool) -> serde_json::Value {
         assert!(after.reserved_copy_bytes >= before.reserved_copy_bytes);
     }
     let actual = core.export_history().unwrap();
-    let base = if floor {
-        kinewright_core::HistoryTransition::floor(cut.history().clone(), 1)
-            .unwrap()
-            .after()
-            .clone()
-    } else {
-        cut.history().clone()
-    };
-    let expected = kinewright_core::HistoryTransition::recovery_close(base.clone(), &base).unwrap();
+    assert_recovery_install(&before, &actual);
     let observed = serde_json::json!({"query": matches!(core.request(Command::Query(Query::Snapshot)).unwrap(), Event::QueryResult(_)), "recovery": {
-        "exact": actual == *expected.after(), "frozen_producers": refused == producer_count,
-        "fresh_lease": !app.read_only(), "saved": !app.is_dirty(), "floor": actual.floor_offset == u64::from(floor),
+        "exact": actual.identity().unwrap() == core.snapshot_identity().unwrap(), "frozen_producers": refused == producer_count,
+        "fresh_lease": !app.read_only(), "saved": !app.is_dirty(), "stacks_preserved": serde_json::to_value(&actual.history().undo).unwrap() == before["history"]["undo"] && serde_json::to_value(&actual.history().redo).unwrap() == before["history"]["redo"],
     }});
     assert!(app.close());
     observed
@@ -2359,7 +2572,7 @@ pub(crate) fn observe_c11(reply_drop: bool) -> serde_json::Value {
 fn observe_c11_fault(fault: Option<(&'static str, bool)>) -> serde_json::Value {
     use kinewright_agent::writer_host::{HostCommand, SessionRoots};
     let temp = temp();
-    let core = Core::spawn(doc()).unwrap();
+    let core = Core::for_test(doc()).unwrap();
     let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
         temp.root(),
         &core,
@@ -2373,8 +2586,7 @@ fn observe_c11_fault(fault: Option<(&'static str, bool)>) -> serde_json::Value {
     edit(&core, true);
     core.request(Command::Undo).unwrap();
     owner.save_active().unwrap();
-    let target = owner.list_recovery_points().unwrap().remove(0);
-    let old_history = core.export_history().unwrap();
+    let mut old_history = serde_json::to_value(core.export_history().unwrap()).unwrap();
     let mut app = Ja1Attachment::new(owner).unwrap();
     app.launch_host_at(
         &host::executable(),
@@ -2405,6 +2617,11 @@ fn observe_c11_fault(fault: Option<(&'static str, bool)>) -> serde_json::Value {
         .unwrap()
         .permit
         .clone();
+    // Pick a recovery point the writer currently offers after continuity and
+    // stream authority have been published; an automatic point is not pinned.
+    let target = app.host.as_ref().unwrap().status.recovery_points[0]
+        .clone()
+        .into();
     app.apply(Action::PreviewRecovery(target)).unwrap();
     let staged_actor = app
         .host
@@ -2418,8 +2635,8 @@ fn observe_c11_fault(fault: Option<(&'static str, bool)>) -> serde_json::Value {
     );
     let frozen = app.read_only()
         && matches!(
-            old_permit.request(Command::Undo).unwrap(),
-            Event::MutationRefused { .. }
+            old_permit.request(Command::Undo),
+            Err(kinewright_project::operation_actor::Refusal { .. })
         );
     assert!(frozen);
     let proxy =
@@ -2437,7 +2654,7 @@ fn observe_c11_fault(fault: Option<(&'static str, bool)>) -> serde_json::Value {
         app.apply(Action::OpenRecovery).unwrap();
     }
     assert!(!app.read_only());
-    let selected = app.owner.core().export_history().unwrap();
+    let selected = serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap();
     let selected_actor = app.owner.core().actor_identity();
     assert_eq!(selected_actor, staged_actor.actor_identity());
     let fresh = app
@@ -2452,23 +2669,38 @@ fn observe_c11_fault(fault: Option<(&'static str, bool)>) -> serde_json::Value {
     fresh
         .request(Command::Do(Operation::SetTrackSyncLock {
             track: TrackId(1),
-            locked: !selected.document.tracks[0].sync_lock,
+            locked: !selected["history"]["document"]["tracks"][0]["sync_lock"]
+                .as_bool()
+                .unwrap(),
         }))
         .unwrap();
     fresh.request(Command::Undo).unwrap();
-    let first_undo = app.owner.core().export_history().unwrap().document == selected.document;
+    let first_undo = *app
+        .owner
+        .core()
+        .export_history()
+        .unwrap()
+        .history()
+        .document
+        == serde_json::from_value::<Document>(selected["history"]["document"].clone()).unwrap();
     assert!(first_undo);
     app.apply(Action::PreviewRecovery(RecoverySelection::WorkingBranch(
         old_branch.clone(),
     )))
     .unwrap();
     app.apply(Action::OpenRecovery).unwrap();
-    let exact = app.owner.core().export_history().unwrap() == old_history;
+    let restored = serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap();
+    assert!(
+        restored["history"]["epoch"].as_u64().unwrap()
+            > old_history["history"]["epoch"].as_u64().unwrap()
+    );
+    old_history["history"]["epoch"] = restored["history"]["epoch"].clone();
+    let exact = restored == old_history;
     assert!(exact);
     assert_ne!(app.owner.core().actor_identity(), selected_actor);
     let stale = matches!(
-        old_permit.request(Command::Redo).unwrap(),
-        Event::MutationRefused { .. }
+        old_permit.request(Command::Redo),
+        Err(kinewright_project::operation_actor::Refusal { .. })
     );
     assert!(stale);
     let attachment = app
@@ -2492,7 +2724,13 @@ fn observe_c11_fault(fault: Option<(&'static str, bool)>) -> serde_json::Value {
     );
     assert!(app.close());
     drop(app);
-    let mut reopened = Ja1Attachment::open(&path).unwrap();
+    let mut reopened = Ja1Attachment::open(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     reopened
         .launch_host_at(
             &host::executable(),
@@ -2525,7 +2763,7 @@ fn observe_c11_fault(fault: Option<(&'static str, bool)>) -> serde_json::Value {
             .unwrap()
             .events
             .try_iter()
-            .any(|event| matches!(event, Event::DocumentChanged { .. })),
+            .any(|event| matches!(event, Ok(Event::DocumentChanged { .. }))),
         "the actual restored view must receive the first edit's Core event"
     );
     assert!(reopened.close());
@@ -2552,7 +2790,7 @@ fn s2h_unlaunchable_host_restores_local_writer_and_both_saves() {
     for corrupt in [false, true] {
         let temp = temp();
         let path = temp.path("a.kinewright");
-        let core = Core::spawn(doc()).unwrap();
+        let core = Core::for_test(doc()).unwrap();
         let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
             temp.root(),
             &core,
@@ -2561,7 +2799,7 @@ fn s2h_unlaunchable_host_restores_local_writer_and_both_saves() {
         .unwrap();
         owner.first_save(&path, StorageLimits::default()).unwrap();
         edit(&core, false);
-        let expected = core.export_history().unwrap();
+        let expected = serde_json::to_value(core.export_history().unwrap()).unwrap();
         let executable = temp.path("broken-host");
         if corrupt {
             use std::os::unix::fs::PermissionsExt;
@@ -2592,9 +2830,18 @@ fn s2h_unlaunchable_host_restores_local_writer_and_both_saves() {
         assert!(app.close());
         drop(app);
         for destination in [&path, &copy] {
-            let reopened =
-                kinewright_project::editing_session::Ja1EditingSession::open(destination).unwrap();
-            assert_eq!(reopened.core().export_history().unwrap(), expected);
+            let reopened = kinewright_project::editing_session::Ja1EditingSession::open(
+                destination,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap();
+            assert_continuity_owner(
+                reopened.core(),
+                &expected,
+                "CONTINUITY_PRESERVES_THE_COMPLETE_OWNER",
+            );
         }
     }
 }
@@ -2606,7 +2853,7 @@ fn s2h_manual_and_save_reply_loss_reconcile_originals_and_kill_is_l2() {
     for command in ["commit_history", "save"] {
         let temp = temp();
         let path = temp.path("a.kinewright");
-        let core = Core::spawn(doc()).unwrap();
+        let core = Core::for_test(doc()).unwrap();
         let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
             temp.root(),
             &core,
@@ -2643,11 +2890,8 @@ fn s2h_manual_and_save_reply_loss_reconcile_originals_and_kill_is_l2() {
             Event::DocumentChanged { .. }
         ));
         let accepted = permit.pending().unwrap();
-        let original =
-            kinewright_project::manual_history::AcceptedManualCommand::decode(&accepted[0])
-                .unwrap()
-                .envelope;
-        let expected = core.export_history().unwrap();
+        let original = accepted[0].decode().unwrap();
+        let expected = serde_json::to_value(core.export_history().unwrap()).unwrap();
         let proxy = app.host.as_mut().unwrap().drop_http_reply(command, false);
         assert!(app.apply(Action::Save).is_err());
         assert!(proxy.dropped.load(std::sync::atomic::Ordering::Acquire));
@@ -2689,9 +2933,11 @@ fn s2h_manual_and_save_reply_loss_reconcile_originals_and_kill_is_l2() {
         assert!(!app.retention_lost);
         // Recovery-close may close the gesture; it cannot add or replay an edit.
         let after = core.export_history().unwrap();
-        assert_eq!(after.document, expected.document);
-        assert_eq!(after.batches, expected.batches);
-        assert_eq!(after.cursor.undo, expected.cursor.undo);
+        assert_eq!(
+            *after.history().document,
+            serde_json::from_value::<Document>(expected["history"]["document"].clone()).unwrap()
+        );
+        assert_recovery_install(&expected, &after);
         app.host.as_mut().unwrap().kill_owned_child();
         app.poll_host();
         assert!(
@@ -2704,12 +2950,29 @@ fn s2h_manual_and_save_reply_loss_reconcile_originals_and_kill_is_l2() {
         );
         assert!(app.close());
         drop(app);
-        let writer = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
-        assert!(matches!(
-            writer.receipt_lookup(&original).unwrap(),
-            kinewright_project::receipts::ReceiptLookup::Committed(_)
-                | kinewright_project::receipts::ReceiptLookup::Retired(_)
-        ));
+        let writer = LoadedBundle::read(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap()
+        .into_writer()
+        .unwrap();
+        let install = writer
+            .checkpoint(writer.manual_branch_id())
+            .unwrap()
+            .install
+            .as_ref()
+            .unwrap();
+        let receipt = install
+            .stream
+            .as_ref()
+            .unwrap()
+            .lookup(&original)
+            .unwrap()
+            .expect("RECOVERY_RETAINS_ORIGINAL_NATIVE_RECEIPT");
+        assert_eq!(receipt.command, original.digest().unwrap());
     }
 }
 
@@ -2725,9 +2988,9 @@ fn s2h_direct_legacy_handoff_keeps_exact_history_until_local_studio_save() {
         kinewright_project::serialize_project_document(&document).unwrap(),
     )
     .unwrap();
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     edit(&core, false);
-    let expected = core.export_history().unwrap();
+    let expected = serde_json::to_value(core.export_history().unwrap()).unwrap();
     let admission = BundleWriteAdmission::read(&path).unwrap();
     let owner = kinewright_project::editing_session::Ja1EditingSession::activate(
         &path, admission, &core, None,
@@ -2747,12 +3010,22 @@ fn s2h_direct_legacy_handoff_keeps_exact_history_until_local_studio_save() {
     );
     assert!(!app.retention_lost);
     assert!(!app.read_only());
-    assert_eq!(core.export_history().unwrap(), expected);
+    assert_continuity_owner(&core, &expected, "CONTINUITY_PRESERVES_THE_COMPLETE_OWNER");
     app.apply(Action::Save).unwrap();
     assert!(app.close());
     drop(app);
-    let reopened = kinewright_project::editing_session::Ja1EditingSession::open(&path).unwrap();
-    assert_eq!(reopened.core().export_history().unwrap(), expected);
+    let reopened = kinewright_project::editing_session::Ja1EditingSession::open(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    assert_continuity_owner(
+        reopened.core(),
+        &expected,
+        "CONTINUITY_PRESERVES_THE_COMPLETE_OWNER",
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -2760,7 +3033,7 @@ fn s2h_fix3_app(dirty: bool) -> (TempDirectory, Ja1Attachment, PathBuf) {
     use kinewright_agent::writer_host::SessionRoots;
     let temp = temp();
     let path = temp.path("fix3.kinewright");
-    let core = Core::spawn(doc()).unwrap();
+    let core = Core::for_test(doc()).unwrap();
     let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
         temp.root(),
         &core,
@@ -2798,7 +3071,7 @@ fn s2h_fix3_wait(app: &mut Ja1Attachment) {
 }
 
 #[cfg(target_os = "linux")]
-fn s2h_fix3_barrier_reply(command: &'static str, floor: bool) {
+fn s2h_fix3_barrier_reply(command: &'static str, explicit_recovery: bool) {
     use kinewright_agent::writer_host::HostCommand;
     let (_temp, mut app, path) = s2h_fix3_app(false);
     app.send_manual(Command::Do(Operation::SetTrackSyncLock {
@@ -2813,17 +3086,17 @@ fn s2h_fix3_barrier_reply(command: &'static str, floor: bool) {
     }))
     .unwrap();
     app.settle_manual_for_test();
-    let expected = app.owner.core().export_history().unwrap();
+    let expected = serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap();
     let actor = app.owner.core().actor_identity();
     let proxy = app.host.as_mut().unwrap().drop_http_reply("save", false);
     assert!(app.apply(Action::Save).is_err());
     assert!(proxy.dropped.load(std::sync::atomic::Ordering::Acquire));
     let barrier_proxy = app.host.as_mut().unwrap().drop_http_reply(command, false);
-    if floor {
+    if explicit_recovery {
         app.host
             .as_mut()
             .unwrap()
-            .begin_manual_recovery_with_floor(&mut app.owner, Some(1))
+            .begin_manual_recovery(&mut app.owner)
             .unwrap();
     } else {
         app.apply(Action::Retry).unwrap();
@@ -2840,23 +3113,16 @@ fn s2h_fix3_barrier_reply(command: &'static str, floor: bool) {
     s2h_fix3_wait(&mut app);
     assert!(
         !app.read_only(),
-        "Retry must complete recovery: {}",
-        app.message
+        "Retry must complete recovery: {}; host={}",
+        app.message,
+        app.host.as_ref().unwrap().status.message
     );
     assert_eq!(app.owner.core().actor_identity(), actor);
-    let base = if floor {
-        kinewright_core::HistoryTransition::floor(expected, 1)
-            .unwrap()
-            .after()
-            .clone()
-    } else {
-        expected
-    };
-    let exact = kinewright_core::HistoryTransition::recovery_close(base.clone(), &base)
-        .unwrap()
-        .after()
-        .clone();
-    assert_eq!(app.owner.core().export_history().unwrap(), exact);
+    let installed = app.owner.core().export_history().unwrap();
+    assert_recovery_install(&expected, &installed);
+    let exact = installed.identity().unwrap();
+    drop(installed);
+    drop(expected);
     let host_history = app
         .host_client()
         .unwrap()
@@ -2864,15 +3130,18 @@ fn s2h_fix3_barrier_reply(command: &'static str, floor: bool) {
         .unwrap()
         .history
         .unwrap();
-    assert_eq!(host_history, exact);
+    assert_eq!(host_history.identity(), exact);
     assert!(app.close());
     drop(app);
-    let restored = Core::spawn(kinewright_core::Document::default()).unwrap();
-    LoadedBundle::read(&path)
-        .unwrap()
-        .restore_manual(&restored)
-        .unwrap();
-    assert_eq!(restored.export_history().unwrap(), exact);
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let restored = loaded.open_manual().unwrap();
+    assert_eq!(restored.snapshot_identity().unwrap(), exact);
 }
 
 #[cfg(target_os = "linux")]
@@ -2914,7 +3183,7 @@ fn s2h_completed_switch_then_lost_save_uses_c10_on_same_actor() {
     }))
     .unwrap();
     app.settle_manual_for_test();
-    let expected = app.owner.core().export_history().unwrap();
+    let expected = serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap();
     // Drain the acknowledgement before losing the later Save response.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while app.host.as_ref().unwrap().pending_count() > 0 && std::time::Instant::now() < deadline {
@@ -2928,22 +3197,21 @@ fn s2h_completed_switch_then_lost_save_uses_c10_on_same_actor() {
     s2h_fix3_wait(&mut app);
     assert!(!app.read_only(), "{}", app.message);
     assert_eq!(app.owner.core().actor_identity(), actor);
-    let exact = kinewright_core::HistoryTransition::recovery_close(expected.clone(), &expected)
-        .unwrap()
-        .after()
-        .clone();
-    assert_eq!(
-        app.owner.core().export_history().unwrap(),
-        exact,
-        "completed switch must route a later lost Save through C10"
-    );
+    let installed = app.owner.core().export_history().unwrap();
+    assert_recovery_install(&expected, &installed);
+    let exact = installed.identity().unwrap();
+    drop(installed);
+    drop(expected);
     assert_eq!(
         app.host_client()
             .unwrap()
             .request(HostCommand::ReadHistory)
             .unwrap()
-            .history,
-        Some(exact)
+            .history
+            .unwrap()
+            .identity(),
+        exact,
+        "COMPLETED_SWITCH_RETAINS_LATER_RECOVERY_IDENTITY"
     );
     assert!(matches!(
         app.host
@@ -2967,7 +3235,7 @@ fn s2h_status_heartbeat_never_thaws_unknown_save_with_or_without_permit() {
     for dirty in [false, true] {
         let (_temp, mut app, _path) = s2h_fix3_app(dirty);
         assert_eq!(app.host.as_ref().unwrap().manual.is_none(), dirty);
-        let before = app.owner.core().export_history().unwrap();
+        let before = serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap();
         let status_proxy = app.host.as_mut().unwrap().drop_http_reply("status", false);
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1300);
         while std::time::Instant::now() < deadline {
@@ -2995,10 +3263,13 @@ fn s2h_status_heartbeat_never_thaws_unknown_save_with_or_without_permit() {
                 Ok(AttachmentState::Frozen),
                 "heartbeat must keep producers fenced"
             );
-            assert_eq!(app.owner.core().export_history().unwrap(), before);
+            assert_eq!(
+                serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap(),
+                before
+            );
             assert!(matches!(
-                app.owner.core().request(Command::Undo).unwrap(),
-                Event::MutationRefused { .. }
+                app.owner.core().request(Command::Undo),
+                Err(kinewright_project::operation_actor::Refusal { .. })
             ));
             std::thread::park_timeout(std::time::Duration::from_millis(5));
         }
@@ -3017,7 +3288,7 @@ fn s2h_status_heartbeat_never_thaws_unknown_save_with_or_without_permit() {
 fn s2h_lost_save_as_and_preview_replies_replay_original_results() {
     use kinewright_agent::writer_host::HostCommand;
     let (temp, mut app, _path) = s2h_fix3_app(false);
-    let expected = app.owner.core().export_history().unwrap();
+    let expected = serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap();
     let actor = app.owner.core().actor_identity();
     let proxy = app.host.as_mut().unwrap().drop_http_reply("save_as", false);
     let destination = temp.path("saved-as.kinewright");
@@ -3030,7 +3301,11 @@ fn s2h_lost_save_as_and_preview_replies_replay_original_results() {
         app.message
     );
     assert_eq!(app.owner.core().actor_identity(), actor);
-    assert_eq!(app.owner.core().export_history().unwrap(), expected);
+    assert_continuity_owner(
+        app.owner.core(),
+        &expected,
+        "CONTINUITY_PRESERVES_THE_COMPLETE_OWNER",
+    );
     let target = app.host.as_ref().unwrap().status.recovery_points[0].clone();
     let preview_proxy = app
         .host
@@ -3052,14 +3327,17 @@ fn s2h_lost_save_as_and_preview_replies_replay_original_results() {
     );
     assert!(app.close());
     drop(app);
-    let restored = Core::spawn(kinewright_core::Document::default()).unwrap();
-    LoadedBundle::read(&destination)
-        .unwrap()
-        .restore_manual(&restored)
-        .unwrap();
+    let mut loaded = LoadedBundle::read(
+        &destination,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let restored = loaded.open_manual().unwrap();
     assert_eq!(
-        restored.export_history().unwrap().document,
-        expected.document
+        *restored.export_history().unwrap().history().document,
+        serde_json::from_value::<Document>(expected["history"]["document"].clone()).unwrap()
     );
     drop((proxy, preview_proxy));
 }
@@ -3074,7 +3352,7 @@ fn s2h_lost_save_floor_stays_frozen_until_exact_publisher_result() {
     use kinewright_agent::writer_host::{HostCommand, SessionRoots};
     let temp = temp();
     let path = temp.path("floor.kinewright");
-    let core = Core::spawn(doc()).unwrap();
+    let core = Core::for_test(doc()).unwrap();
     let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
         temp.root(),
         &core,
@@ -3082,18 +3360,22 @@ fn s2h_lost_save_floor_stays_frozen_until_exact_publisher_result() {
     )
     .unwrap();
     owner.first_save(&path, StorageLimits::default()).unwrap();
-    // Keep the original 12,000-edit cut: it must require a real Save floor
-    // while fitting the independently checked portable replay window.
+    // Keep the original 12,000-step cut. A lost Save must preserve it exactly
+    // while producers remain frozen until the recorded publisher result wins.
     for index in 0..12_000 {
         edit(&core, index % 2 == 0);
     }
     let before = core.export_history().unwrap();
-    assert!(
-        kinewright_project::bundle_commit::history_cost_probe(&before, &StorageLimits::default())
-            .map_or(true, |cost| cost
-                > StorageLimits::default().branch_history_bytes),
-        "fixture must require a real Save floor"
+    assert_eq!(
+        before.history().undo.len(),
+        12_000,
+        "TWELVE_THOUSAND_RETAINED_EXECUTOR_STEPS"
     );
+    let mut before = {
+        let value = serde_json::to_value(&before).unwrap();
+        drop(before);
+        value
+    };
     let mut app = Ja1Attachment::new(owner).unwrap();
     app.launch_host_at(
         &host::executable(),
@@ -3105,6 +3387,22 @@ fn s2h_lost_save_floor_stays_frozen_until_exact_publisher_result() {
     )
     .unwrap();
     assert!(app.host.as_ref().unwrap().manual.is_none());
+    // Handover starts a fresh attachment epoch before the Save request. The
+    // frozen cut below must preserve that complete state until its exact reply.
+    let handed = core.export_history().unwrap();
+    let handed_json = serde_json::to_value(&handed).unwrap();
+    assert_eq!(
+        handed_json["history"]["epoch"].as_u64(),
+        before["history"]["epoch"].as_u64().map(|epoch| epoch + 1),
+        "SAVE_FLOOR_HANDOVER_ADVANCES_ONLY_INSTALL_EPOCH"
+    );
+    before["history"]["epoch"] = handed_json["history"]["epoch"].clone();
+    assert_eq!(
+        handed_json, before,
+        "SAVE_FLOOR_HANDOVER_PRESERVES_ALL_RETAINED_WORK"
+    );
+    let before = handed.identity().unwrap();
+    drop(handed);
     let proxy = app.host.as_mut().unwrap().drop_http_reply("save", false);
     assert!(app.apply(Action::Save).is_err());
     let remote = app
@@ -3114,33 +3412,39 @@ fn s2h_lost_save_floor_stays_frozen_until_exact_publisher_result() {
         .unwrap()
         .history
         .unwrap();
-    assert!(
-        remote.floor_offset > before.floor_offset,
-        "lost Save must actually install a floor"
+    let peer = Core::peer_for_test(remote.clone()).unwrap();
+    assert_eq!(
+        peer.export_history().unwrap().history().undo.len(),
+        12_000,
+        "SAVE_CANNOT_FOLD_A_RETAINED_EXECUTOR_SUFFIX"
     );
+    drop(peer);
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1400);
     let mut replies = 0;
     while std::time::Instant::now() < deadline {
         replies += usize::from(app.poll_host());
         assert!(
             app.read_only(),
-            "heartbeat must not thaw the old unfloored cut"
+            "heartbeat must not thaw the cut before publisher confirmation"
         );
-        assert_eq!(core.export_history().unwrap(), before);
+        assert_eq!(core.snapshot_identity().unwrap(), before);
         std::thread::park_timeout(std::time::Duration::from_millis(5));
     }
     assert!(replies > 0);
     app.apply(Action::Retry).unwrap();
     assert!(!app.read_only(), "{}", app.message);
-    assert_eq!(core.export_history().unwrap(), remote);
+    assert_eq!(core.snapshot_identity().unwrap(), remote.identity());
     assert!(app.close());
     drop(app);
-    let restored = Core::spawn(kinewright_core::Document::default()).unwrap();
-    LoadedBundle::read(&path)
-        .unwrap()
-        .restore_manual(&restored)
-        .unwrap();
-    assert_eq!(restored.export_history().unwrap(), remote);
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let restored = loaded.open_manual().unwrap();
+    assert_eq!(restored.snapshot_identity().unwrap(), remote.identity());
     drop(proxy);
 }
 
@@ -3150,7 +3454,7 @@ fn s2h_lost_destination_admission_and_manual_grant_replies_retry_in_context() {
     for command in ["admit_destination", "acquire_manual", "first_save"] {
         use kinewright_agent::writer_host::SessionRoots;
         let temp = temp();
-        let core = Core::spawn(doc()).unwrap();
+        let core = Core::for_test(doc()).unwrap();
         let owner = kinewright_project::editing_session::Ja1EditingSession::new(
             temp.root(),
             &core,
@@ -3167,7 +3471,7 @@ fn s2h_lost_destination_admission_and_manual_grant_replies_retry_in_context() {
             },
         )
         .unwrap();
-        let expected = core.export_history().unwrap();
+        let expected = serde_json::to_value(core.export_history().unwrap()).unwrap();
         let proxy = app.host.as_mut().unwrap().drop_http_reply(command, false);
         assert!(
             app.apply(Action::FirstSave(temp.path("first.kinewright")))
@@ -3177,7 +3481,7 @@ fn s2h_lost_destination_admission_and_manual_grant_replies_retry_in_context() {
         app.apply(Action::Retry)
             .unwrap_or_else(|error| panic!("{command}: {error}"));
         assert!(!app.read_only(), "{command}: {}", app.message);
-        assert_eq!(core.export_history().unwrap(), expected);
+        assert_continuity_owner(&core, &expected, "CONTINUITY_PRESERVES_THE_COMPLETE_OWNER");
         assert!(!app.retention_lost);
         assert!(app.close());
         drop(proxy);
@@ -3198,7 +3502,7 @@ fn s2h_lost_initial_attach_reply_keeps_owned_host_and_retries() {
         );
         let child = app.host.as_ref().unwrap().child_id();
         let actor = app.owner.core().actor_identity();
-        let expected = app.owner.core().export_history().unwrap();
+        let expected = serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap();
         app.apply(Action::Retry).unwrap();
         if dirty {
             assert!(app.read_only());
@@ -3211,7 +3515,11 @@ fn s2h_lost_initial_attach_reply_keeps_owned_host_and_retries() {
         );
         assert_eq!(app.host.as_ref().unwrap().child_id(), child);
         assert_eq!(app.owner.core().actor_identity(), actor);
-        assert_eq!(app.owner.core().export_history().unwrap(), expected);
+        assert_continuity_owner(
+            app.owner.core(),
+            &expected,
+            "CONTINUITY_PRESERVES_THE_COMPLETE_OWNER",
+        );
         assert!(app.close());
         drop(proxy);
     }
@@ -3222,7 +3530,7 @@ fn s2h_lost_initial_attach_reply_keeps_owned_host_and_retries() {
 fn s2h_lost_initial_manual_grant_keeps_original_request_for_retry() {
     use kinewright_agent::writer_host::SessionRoots;
     let temp = temp();
-    let core = Core::spawn(doc()).unwrap();
+    let core = Core::for_test(doc()).unwrap();
     let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
         temp.root(),
         &core,
@@ -3235,7 +3543,7 @@ fn s2h_lost_initial_manual_grant_keeps_original_request_for_retry() {
             StorageLimits::default(),
         )
         .unwrap();
-    let expected = core.export_history().unwrap();
+    let expected = serde_json::to_value(core.export_history().unwrap()).unwrap();
     let mut app = Ja1Attachment::new(owner).unwrap();
     let (launched, proxy) = host::transport_tests::drop_launch_reply("acquire_manual", || {
         app.launch_host_at(
@@ -3263,7 +3571,7 @@ fn s2h_lost_initial_manual_grant_keeps_original_request_for_retry() {
         app.message
     );
     assert_eq!(app.host.as_ref().unwrap().child_id(), child);
-    assert_eq!(core.export_history().unwrap(), expected);
+    assert_continuity_owner(&core, &expected, "CONTINUITY_PRESERVES_THE_COMPLETE_OWNER");
     assert!(app.close());
     drop(proxy);
 }
@@ -3274,7 +3582,7 @@ fn s2h_foreground_identity_refusal_cannot_thaw_unknown_operation() {
     use kinewright_agent::writer_host::SessionRoots;
     let (_temp, mut app, _path) = s2h_fix3_app(false);
     let actor = app.owner.core().actor_identity();
-    let expected = app.owner.core().export_history().unwrap();
+    let expected = serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap();
     let proxy = app.host.as_mut().unwrap().drop_http_reply("cancel", false);
     assert!(app.apply(Action::Cancel).is_err());
     assert!(proxy.dropped.load(std::sync::atomic::Ordering::Acquire));
@@ -3293,7 +3601,11 @@ fn s2h_foreground_identity_refusal_cannot_thaw_unknown_operation() {
         app.owner.core().attachment_state(),
         Ok(AttachmentState::Frozen)
     );
-    assert_eq!(app.owner.core().export_history().unwrap(), expected);
+    assert_continuity_owner(
+        app.owner.core(),
+        &expected,
+        "CONTINUITY_PRESERVES_THE_COMPLETE_OWNER",
+    );
     app.host.as_mut().unwrap().client = original;
     app.apply(Action::Retry).unwrap();
     assert!(
@@ -3302,7 +3614,11 @@ fn s2h_foreground_identity_refusal_cannot_thaw_unknown_operation() {
         app.message
     );
     assert_eq!(app.owner.core().actor_identity(), actor);
-    assert_eq!(app.owner.core().export_history().unwrap(), expected);
+    assert_continuity_owner(
+        app.owner.core(),
+        &expected,
+        "CONTINUITY_PRESERVES_THE_COMPLETE_OWNER",
+    );
     assert!(app.close());
     drop(proxy);
 }
@@ -3317,12 +3633,7 @@ include!("ja1_hooks_tests.rs");
 fn te13_fix1_retained_app(
     hosted: bool,
     completion: bool,
-) -> (
-    TempDirectory,
-    Ja1Attachment,
-    BranchId,
-    kinewright_core::HistorySnapshot,
-) {
+) -> (TempDirectory, Ja1Attachment, BranchId, serde_json::Value) {
     te13_fix2_retained_app(hosted, completion, false)
 }
 #[cfg(target_os = "linux")]
@@ -3334,12 +3645,7 @@ fn te13_fix2_retained_app(
     hosted: bool,
     completion: bool,
     bad_history: bool,
-) -> (
-    TempDirectory,
-    Ja1Attachment,
-    BranchId,
-    kinewright_core::HistorySnapshot,
-) {
+) -> (TempDirectory, Ja1Attachment, BranchId, serde_json::Value) {
     te13_fix3_retained_app(
         hosted,
         completion,
@@ -3355,12 +3661,7 @@ fn te13_fix3_retained_app(
     hosted: bool,
     completion: bool,
     scenario: &str,
-) -> (
-    TempDirectory,
-    Ja1Attachment,
-    BranchId,
-    kinewright_core::HistorySnapshot,
-) {
+) -> (TempDirectory, Ja1Attachment, BranchId, serde_json::Value) {
     use kinewright_agent::orchestration::{machine, orchestration_records::*};
     use kinewright_project::{
         orchestration_commit::{CommandDecision, ValidatedRunUpdate, commit_orchestration},
@@ -3368,7 +3669,7 @@ fn te13_fix3_retained_app(
     };
     let temp = temp();
     let path = temp.path("retained.kinewright");
-    let core = Core::spawn(doc()).unwrap();
+    let core = Core::for_test(doc()).unwrap();
     let mut owner = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
     owner.first_save(&path, StorageLimits::default()).unwrap();
     let mut candidate = owner
@@ -3385,7 +3686,7 @@ fn te13_fix3_retained_app(
     edit(source.core(), false);
     edit(source.core(), true);
     source.core().request(Command::Undo).unwrap();
-    let expected = source.core().export_history().unwrap();
+    let expected = serde_json::to_value(source.core().export_history().unwrap()).unwrap();
     let base_ref = owner.persist_durable_branch(&mut source).unwrap();
     let source = owner.candidate_binding(source.branch_id()).unwrap();
     assert_eq!(
@@ -3394,8 +3695,8 @@ fn te13_fix3_retained_app(
             .unwrap()
             .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(&source.checkpoint)
             .unwrap()
-            .history_role,
-        kinewright_project::history_record::HistoryRole::Task,
+            .role,
+        kinewright_project::operation_history::Role::Task,
         "RETAINED_SOURCE_IS_A_NATIVE_TASK"
     );
     let mut other_base_ref = None;
@@ -3595,17 +3896,45 @@ fn te13_fix3_retained_app(
     commit_orchestration(&mut owner, update, None).unwrap();
     // Reopen removes runtime-only registrations; the retained task records remain.
     drop(owner);
-    let mut app = Ja1Attachment::open(&path).unwrap();
+    let mut app = Ja1Attachment::open(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     if hosted {
-        app.launch_host_at(
-            &host::executable(),
-            "te13-fix1-app".into(),
-            kinewright_agent::writer_host::SessionRoots {
-                read: vec![temp.root().into()],
-                write: vec![temp.root().into()],
-            },
-        )
-        .unwrap();
+        use kinewright_agent::writer_host::{
+            HostCommand, ProtocolFixture, ProtocolFixtureMode, RecoveryPhase, SessionRoots,
+        };
+        let roots = SessionRoots {
+            read: vec![temp.root().into()],
+            write: vec![temp.root().into()],
+        };
+        if scenario == "live" {
+            let fixture = ProtocolFixture::new(temp.root(), ProtocolFixtureMode::Dormant);
+            let writer = app
+                .launch_protocol_fixture(roots, temp.path("settings"), &fixture)
+                .unwrap();
+            app.fixture_host = Some(writer);
+            // Completed is emitted after recover_on_open finishes its MachineClaim
+            // and RecoveryExit publishes the settled startup status.
+            assert!(
+                fixture.wait_recovery(RecoveryPhase::Completed, std::time::Duration::from_secs(5))
+            );
+            let reply = app
+                .host
+                .as_ref()
+                .unwrap()
+                .client
+                .request(HostCommand::Status)
+                .unwrap();
+            app.accept_host_reply(reply).unwrap();
+            app.start_host_manual().unwrap();
+        } else {
+            app.launch_host_at(&host::executable(), "te13-fix1-app".into(), roots)
+                .unwrap();
+        }
     }
     (temp, app, source.branch, expected)
 }
@@ -3625,14 +3954,19 @@ fn te13_fix1_studio_recovery(hosted: bool, completion: bool) {
     }))
     .unwrap();
     app.settle_manual_for_test();
-    let manual = app.owner.core().export_history().unwrap();
+    let manual = app.owner.core().snapshot_identity().unwrap();
     let path = app.project_path().unwrap();
-    let manual_branch = LoadedBundle::read(&path)
-        .unwrap()
-        .manual_checkpoint()
-        .unwrap()
-        .branch_id
-        .clone();
+    let manual_branch = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .manual_checkpoint()
+    .unwrap()
+    .branch_id
+    .clone();
     let action = click_control(&app, &label);
     assert!(
         matches!(action, Action::PreviewRecovery(_)),
@@ -3641,18 +3975,14 @@ fn te13_fix1_studio_recovery(hosted: bool, completion: bool) {
     app.apply(action).unwrap();
     let action = click_control(&app, "Save current work, then open recovery point");
     app.apply(action).unwrap();
-    assert_eq!(
-        app.owner.core().export_history().unwrap(),
-        expected,
-        "TE13_FIX1_STUDIO_TASK_EXACT {hosted}"
-    );
+    assert_recovered_task_owner(app.owner.core(), expected, "TE13_FIX1_STUDIO_TASK_EXACT");
     assert!(
         app.message.contains("open") || app.message.contains("Opened"),
         "TE13_FIX1_STUDIO_CONFIRMATION {}",
         app.message
     );
     assert!(
-        rendered(&app).contains("work is open on your timeline"),
+        rendered(&app).contains("work was opened for review on working branch"),
         "TE13_FIX1_STUDIO_OPEN_DISCLOSURE hosted={hosted} completion={completion} {:?}: {}",
         app.owner.retained_task_discovery(),
         rendered(&app)
@@ -3667,16 +3997,25 @@ fn te13_fix1_studio_recovery(hosted: bool, completion: bool) {
     assert!(!app.read_only(), "TE13_FIX1_STUDIO_CONTINUES_EDITING");
     assert!(app.close());
     drop(app);
-    let bundle = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
+    let bundle = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
     assert!(
         bundle.branches_probe().contains_key(&manual_branch),
         "TE13_FIX1_STUDIO_PERSON_BRANCH"
     );
-    let saved = bundle
-        .store()
-        .resolve_history(&bundle.branches_probe()[&manual_branch].history_ref)
-        .unwrap();
-    assert_eq!(*saved, manual, "TE13_FIX1_STUDIO_PERSON_HISTORY");
+    let saved = bundle.branch_history(&manual_branch).unwrap();
+    assert_eq!(
+        saved.identity().unwrap(),
+        manual,
+        "TE13_FIX1_STUDIO_PERSON_HISTORY"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -3735,7 +4074,7 @@ fn te13_fix2_bad_history_studio(hosted: bool) {
         )),
         "TE13_FIX2_BAD_TASK_NO_BUTTON"
     );
-    let before = app.owner.core().export_history().unwrap();
+    let before = serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap();
     assert!(
         app.apply(Action::PreviewRecovery(RecoverySelection::WorkingBranch(
             failed_branch.clone()
@@ -3747,16 +4086,19 @@ fn te13_fix2_bad_history_studio(hosted: bool) {
         app.apply(Action::PreviewRetirement(failed_branch)).is_err(),
         "TE13_FIX2_BAD_REMOVAL_REFUSED"
     );
-    assert_eq!(app.owner.core().export_history().unwrap(), before);
+    assert_eq!(
+        serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap(),
+        before
+    );
     let action = click_control(&app, &label);
     app.apply(action)
         .unwrap_or_else(|error| panic!("TE13_FIX2_HEALTHY_TASK_RECOVERY {error}"));
     let action = click_control(&app, "Save current work, then open recovery point");
     app.apply(action).unwrap();
-    assert_eq!(
-        app.owner.core().export_history().unwrap(),
+    assert_recovered_task_owner(
+        app.owner.core(),
         expected,
-        "TE13_FIX2_HEALTHY_TASK_RECOVERED"
+        "TE13_FIX2_HEALTHY_TASK_RECOVERED",
     );
     assert!(app.close());
 }
@@ -3790,7 +4132,7 @@ fn te13_fix2_reviewed_studio(hosted: bool) {
     .unwrap();
     app.settle_manual_for_test();
     app.apply(Action::Save).unwrap();
-    let expected = app.owner.core().export_history().unwrap();
+    let expected = serde_json::to_value(app.owner.core().export_history().unwrap()).unwrap();
     let path = app.project_path().unwrap();
     let text = rendered(&app);
     assert!(
@@ -3799,8 +4141,18 @@ fn te13_fix2_reviewed_studio(hosted: bool) {
     );
     assert!(app.close());
     drop(app);
-    let app = Ja1Attachment::open(&path).unwrap();
-    assert_eq!(app.owner.core().export_history().unwrap(), expected);
+    let app = Ja1Attachment::open(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    assert_continuity_owner(
+        app.owner.core(),
+        &expected,
+        "CONTINUITY_PRESERVES_THE_COMPLETE_OWNER",
+    );
     let text = rendered(&app);
     assert!(
         text.contains("work was opened for review") && !text.contains(&label),

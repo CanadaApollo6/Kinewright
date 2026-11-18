@@ -827,40 +827,27 @@ pub fn acquire_project_lock_with_policy(
         project_path,
         mode,
         endpoint,
-        recovery_dir,
+        Some(recovery_dir),
         attempts,
         retry_delay,
-        true,
     )
 }
 
 /// Claim a legacy GUI writer. Existing journals remain pending for explicit GUI decisions.
 /// # Errors
 /// Returns the ordinary identity, contention or IO refusal.
-pub fn acquire_gui_project_lock(
-    project_path: &Path,
-    recovery_dir: &Path,
-) -> Result<AcquiredLock, LockfileError> {
-    acquire_with_recovery_policy(
-        project_path,
-        LockMode::Gui,
-        "",
-        recovery_dir,
-        1,
-        Duration::ZERO,
-        false,
-    )
+pub fn acquire_gui_project_lock(project_path: &Path) -> Result<AcquiredLock, LockfileError> {
+    acquire_with_recovery_policy(project_path, LockMode::Gui, "", None, 1, Duration::ZERO)
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)]
 fn acquire_with_recovery_policy(
     project_path: &Path,
     mode: LockMode,
     endpoint: &str,
-    recovery_dir: &Path,
+    recovery_dir: Option<&Path>,
     attempts: u32,
     retry_delay: Duration,
-    check_recovery: bool,
 ) -> Result<AcquiredLock, LockfileError> {
     // J2: the identity resolves exactly once; claim, lock, discovery and
     // the pending-journal scan all derive from it, so a link re-pointed
@@ -965,7 +952,7 @@ fn acquire_with_recovery_policy(
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("after_flock_before_scan"); // RACE-REVIEW
         // Holding the flock: pending recovery (or lookup failure) refuses first.
-        if check_recovery {
+        if let Some(recovery_dir) = recovery_dir {
             match pending_journal_for_identity(recovery_dir, &identity) {
                 Ok(Some(journal)) => {
                     return Err(LockfileError::PendingRecovery { journal });

@@ -89,7 +89,7 @@
     "changes": [
       [
         "crates/kinewright-project/src/editing_session/switch.rs",
-        "request.checkpoint_generation != checkpoint.checkpoint_generation",
+        "request.checkpoint_generation != checkpoint.generation",
         "false"
       ]
     ],
@@ -99,24 +99,27 @@
     "target": "ja_s2_switch",
     "features": "test-util",
     "production": false,
-    "build_host": false
+    "build_host": false,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Same invariant at its native-history boundary."
+    }
   },
   {
     "name": "source-floor-ignored",
-    "changes": [
-      [
-        "crates/kinewright-project/src/editing_session/switch.rs",
-        "request.floor_generation != checkpoint.floor_generation",
-        "false"
-      ]
-    ],
+    "changes": [],
     "witness": "linux::g05a_each_source_identity_is_required_before_selection",
     "package": "kinewright-project",
     "kind": "--test",
     "target": "ja_s2_switch",
     "features": "test-util",
     "production": false,
-    "build_host": false
+    "build_host": false,
+    "superseded_by": "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Save floor generation no longer exists; selected checkpoint reference/generation and complete native identity replace it."
+    }
   },
   {
     "name": "source-switch-ignored",
@@ -140,7 +143,7 @@
     "changes": [
       [
         "crates/kinewright-project/src/editing_session/switch.rs",
-        "envelope.expected_revision\n                != self\n                    .attachment\n                    .capture()\n                    .map_err(crate::bundle::history_error)?\n                    .revision()",
+        "envelope.expected_revision\n                != self\n                    .attachment\n                    .capture()\n                    .map_err(crate::bundle::operation_error)?\n                    .change()\n                    .revision",
         "false"
       ]
     ],
@@ -150,7 +153,11 @@
     "target": "ja_s2_switch",
     "features": "test-util",
     "production": false,
-    "build_host": false
+    "build_host": false,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Same invariant at its native-history boundary."
+    }
   },
   {
     "name": "source-sequence-ignored",
@@ -310,7 +317,7 @@
     "changes": [
       [
         "crates/kinewright-project/src/bundle_switch.rs",
-        "                    owner.resume(&cut).map_err(crate::bundle::history_error)?;",
+        "                    owner.resume(&cut).map_err(crate::bundle::operation_error)?;",
         "                    let _ = &cut;"
       ]
     ],
@@ -320,7 +327,11 @@
     "target": "ja_s2_switch",
     "features": "test-util",
     "production": false,
-    "build_host": false
+    "build_host": false,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Same invariant at its native-history boundary."
+    }
   },
   {
     "name": "lease-before-restored-equivalence",
@@ -341,13 +352,7 @@
   },
   {
     "name": "confirmation-trusts-supplied-pointer",
-    "changes": [
-      [
-        "crates/kinewright-agent/src/writer_host/switch.rs",
-        "            || self.owner()?.current_switch_attachment()?.identity()? != *installed",
-        "            || false"
-      ]
-    ],
+    "changes": [],
     "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
     "package": "kinewright-agent",
     "kind": "--test",
@@ -376,33 +381,27 @@
   },
   {
     "name": "delayed-old-lease-acknowledged-after-return",
-    "changes": [
-      [
-        "crates/kinewright-agent/src/writer_host/manual.rs",
-        "            if envelope.manual.as_ref().map(|m| &m.binding) != Some(&lease) {",
-        "            if false {"
-      ],
-      [
-        "crates/kinewright-project/src/editing_session/manual.rs",
-        "        if envelope.manual.as_ref().map(|m| &m.binding) != Some(lease) {",
-        "        if false {"
-      ]
-    ],
+    "changes": [],
     "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
     "package": "kinewright-agent",
     "kind": "--test",
     "target": "ja_s2_host",
     "features": "kinewright-project/test-util",
     "production": true,
-    "build_host": false
+    "build_host": false,
+    "superseded_by": "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "The old echoed envelope/lease equality is replaced by publisher, sequence, chain, exact receipt and attachment namespace fences."
+    }
   },
   {
     "name": "old-gui-actor-never-sealed",
     "changes": [
       [
         "crates/kinewright-project/src/editing_session.rs",
-        "        if let Err(error) = self.attachment.seal(cut) {",
-        "        if let Err(error) = self.attachment.capture().map(|_| ()) {"
+        "if let Err(error) = self.attachment.retire(cut) {",
+        "if let Err(error) = self.attachment.capture().map(|_| ()) {"
       ]
     ],
     "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
@@ -411,7 +410,11 @@
     "target": "ja_s2_host",
     "features": "kinewright-project/test-util",
     "production": true,
-    "build_host": false
+    "build_host": false,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Same invariant at its native-history boundary."
+    }
   },
   {
     "name": "shadow-resumed-before-gui-confirmation",
@@ -583,13 +586,7 @@
   },
   {
     "name": "host-fork-without-registration",
-    "changes": [
-      [
-        "crates/kinewright-project/src/editing_session/durable.rs",
-        "    pub fn fork_durable_branch(\n        &mut self,\n        name: &str,\n    ) -> Result<DurableBranchSessionGuard, BundleError> {\n        if self\n            .core\n            .attachment_state()\n            .map_err(crate::bundle::history_error)?\n            != kinewright_core::AttachmentState::Live\n        {\n            return Err(BundleError::Unsettled);\n        }\n        let charge = self.registration_capacity(name)?;\n        let live = self\n            .core\n            .export_history()\n            .map_err(crate::bundle::history_error)?;\n        if self.dirty()? {\n            return Err(BundleError::HistoryChanged);\n        }\n        let core = Core::spawn((*live.document).clone())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let bundle = self.active_bundle_mut()?;\n        let target = bundle.manual_branch_id().clone();\n        if live != *bundle.branch_history(&target)? {\n            return Err(BundleError::HistoryChanged);\n        }\n        let checkpoint = bundle.checkpoint(&target)?.clone();\n        let base = SpecialistBaseRecord {\n            target_branch: target.clone(),\n            base_head: checkpoint.head_id,\n            base_document_hash: checkpoint.document_hash,\n            original_baseline_ref: checkpoint.document_ref,\n            frozen_checkpoint_ref: bundle.checkpoint_reference(&target)?,\n            full_applied_delta: vec![],\n        };\n        let pin = bundle\n            .store\n            .pin(std::slice::from_ref(&base.frozen_checkpoint_ref))?;\n        let encoded = serde_json::to_vec(&base).map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let base = Arc::new(bundle.store.reserve_retained_capture(&encoded)?.hold(base));\n        let attachment = bundle.attach_core(&core)?;\n        let candidate_cut = attachment.freeze().map_err(crate::bundle::history_error)?;\n        if !candidate_cut.history().batches.is_empty() {\n            attachment\n                .resume(&candidate_cut)\n                .map_err(crate::bundle::history_error)?;\n            return Err(BundleError::HistoryChanged);\n        }\n        let encoded = serde_json::to_vec(candidate_cut.history())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let floor_source = Arc::new(\n            bundle\n                .store\n                .reserve_retained_capture(&encoded)?\n                .hold(candidate_cut.history().clone()),\n        );\n        let branch = match bundle.fork_branch(&target) {\n            Ok(branch) => branch,\n            Err(error) => {\n                attachment\n                    .seal(&candidate_cut)\n                    .map_err(crate::bundle::history_error)?;\n                return Err(error);\n            }\n        };\n        let guard = DurableBranchSessionGuard {\n            branch,\n            floor_source,\n            base,\n            core: core.clone(),\n            epoch: bundle.store.owner_epoch(),\n        };\n        self.durable_sessions.push(RegisteredSession {\n            guard: guard.clone(),\n            name: name.into(),\n            pin,\n            _charge: charge,\n        });\n        attachment\n            .resume(&candidate_cut)\n            .map_err(crate::bundle::history_error)?;\n        Ok(guard)\n    }",
-        "    pub fn fork_durable_branch(\n        &mut self,\n        name: &str,\n    ) -> Result<DurableBranchSessionGuard, BundleError> {\n        if self\n            .core\n            .attachment_state()\n            .map_err(crate::bundle::history_error)?\n            != kinewright_core::AttachmentState::Live\n        {\n            return Err(BundleError::Unsettled);\n        }\n        let charge = self.registration_capacity(name)?;\n        let live = self\n            .core\n            .export_history()\n            .map_err(crate::bundle::history_error)?;\n        if self.dirty()? {\n            return Err(BundleError::HistoryChanged);\n        }\n        let core = Core::spawn((*live.document).clone())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let bundle = self.active_bundle_mut()?;\n        let target = bundle.manual_branch_id().clone();\n        if live != *bundle.branch_history(&target)? {\n            return Err(BundleError::HistoryChanged);\n        }\n        let checkpoint = bundle.checkpoint(&target)?.clone();\n        let base = SpecialistBaseRecord {\n            target_branch: target.clone(),\n            base_head: checkpoint.head_id,\n            base_document_hash: checkpoint.document_hash,\n            original_baseline_ref: checkpoint.document_ref,\n            frozen_checkpoint_ref: bundle.checkpoint_reference(&target)?,\n            full_applied_delta: vec![],\n        };\n        let pin = bundle\n            .store\n            .pin(std::slice::from_ref(&base.frozen_checkpoint_ref))?;\n        let encoded = serde_json::to_vec(&base).map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let base = Arc::new(bundle.store.reserve_retained_capture(&encoded)?.hold(base));\n        let attachment = bundle.attach_core(&core)?;\n        let candidate_cut = attachment.freeze().map_err(crate::bundle::history_error)?;\n        if !candidate_cut.history().batches.is_empty() {\n            attachment\n                .resume(&candidate_cut)\n                .map_err(crate::bundle::history_error)?;\n            return Err(BundleError::HistoryChanged);\n        }\n        let encoded = serde_json::to_vec(candidate_cut.history())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let floor_source = Arc::new(\n            bundle\n                .store\n                .reserve_retained_capture(&encoded)?\n                .hold(candidate_cut.history().clone()),\n        );\n        let branch = match bundle.fork_branch(&target) {\n            Ok(branch) => branch,\n            Err(error) => {\n                attachment\n                    .seal(&candidate_cut)\n                    .map_err(crate::bundle::history_error)?;\n                return Err(error);\n            }\n        };\n        let guard = DurableBranchSessionGuard {\n            branch,\n            floor_source,\n            base,\n            core: core.clone(),\n            epoch: bundle.store.owner_epoch(),\n        };\n        drop(RegisteredSession {\n            guard: guard.clone(),\n            name: name.into(),\n            pin,\n            _charge: charge,\n        });\n        attachment\n            .resume(&candidate_cut)\n            .map_err(crate::bundle::history_error)?;\n        Ok(guard)\n    }"
-      ]
-    ],
+    "changes": [],
     "witness": "writer_host::switch::tests::w13_registered_host_create_reopen_refuses_retirement_and_preserves_unsaved_edits",
     "package": "kinewright-agent",
     "kind": "--lib",
@@ -601,13 +598,7 @@
   },
   {
     "name": "host-reopen-without-registration",
-    "changes": [
-      [
-        "crates/kinewright-project/src/editing_session/durable.rs",
-        "    pub fn reopen_durable_branch(\n        &mut self,\n        branch: BranchId,\n        base_ref: &ObjectRef,\n        name: &str,\n    ) -> Result<DurableBranchSessionGuard, BundleError> {\n        if self\n            .core\n            .attachment_state()\n            .map_err(crate::bundle::history_error)?\n            != kinewright_core::AttachmentState::Live\n            || self.active_bundle()?.unsettled\n        {\n            return Err(BundleError::Unsettled);\n        }\n        if self.active_bundle()?.manual_branch_id() == &branch\n            || self\n                .durable_sessions\n                .iter()\n                .any(|r| r.guard.branch == branch)\n        {\n            return Err(BundleError::Contention(\n                \"durable branch already has a live session\".into(),\n            ));\n        }\n        let charge = self.registration_capacity(name)?;\n        let bundle = self.active_bundle()?;\n        let base = bundle.store.read_record::<SpecialistBaseRecord>(base_ref)?;\n        let checkpoint = bundle\n            .store\n            .read_record::<crate::bundle_records::BranchCheckpoint>(&base.frozen_checkpoint_ref)?;\n        if checkpoint.branch_id != base.target_branch\n            || checkpoint.head_id != base.base_head\n            || checkpoint.document_hash != base.base_document_hash\n            || checkpoint.document_ref != base.original_baseline_ref\n            || !bundle.branches.contains_key(&base.target_branch)\n        {\n            return Err(BundleError::HistoryChanged);\n        }\n        let history = bundle.branch_history(&branch)?;\n        let core =\n            Core::spawn(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        bundle\n            .attach_core(&core)?\n            .restore_history((*history).clone())\n            .map_err(crate::bundle::history_error)?;\n        let attachment = bundle.attach_core(&core)?;\n        let candidate_cut = attachment.freeze().map_err(crate::bundle::history_error)?;\n        let pin = bundle\n            .store\n            .pin(&[base_ref.clone(), bundle.checkpoint_reference(&branch)?])?;\n        let encoded = serde_json::to_vec(candidate_cut.history())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let floor_source = Arc::new(\n            bundle\n                .store\n                .reserve_retained_capture(&encoded)?\n                .hold(candidate_cut.history().clone()),\n        );\n        let guard = DurableBranchSessionGuard {\n            branch,\n            floor_source,\n            base: Arc::new(base),\n            core: core.clone(),\n            epoch: bundle.store.owner_epoch(),\n        };\n        self.durable_sessions.push(RegisteredSession {\n            guard: guard.clone(),\n            name: name.into(),\n            pin,\n            _charge: charge,\n        });\n        attachment\n            .resume(&candidate_cut)\n            .map_err(crate::bundle::history_error)?;\n        Ok(guard)\n    }",
-        "    pub fn reopen_durable_branch(\n        &mut self,\n        branch: BranchId,\n        base_ref: &ObjectRef,\n        name: &str,\n    ) -> Result<DurableBranchSessionGuard, BundleError> {\n        if self\n            .core\n            .attachment_state()\n            .map_err(crate::bundle::history_error)?\n            != kinewright_core::AttachmentState::Live\n            || self.active_bundle()?.unsettled\n        {\n            return Err(BundleError::Unsettled);\n        }\n        if self.active_bundle()?.manual_branch_id() == &branch\n            || self\n                .durable_sessions\n                .iter()\n                .any(|r| r.guard.branch == branch)\n        {\n            return Err(BundleError::Contention(\n                \"durable branch already has a live session\".into(),\n            ));\n        }\n        let charge = self.registration_capacity(name)?;\n        let bundle = self.active_bundle()?;\n        let base = bundle.store.read_record::<SpecialistBaseRecord>(base_ref)?;\n        let checkpoint = bundle\n            .store\n            .read_record::<crate::bundle_records::BranchCheckpoint>(&base.frozen_checkpoint_ref)?;\n        if checkpoint.branch_id != base.target_branch\n            || checkpoint.head_id != base.base_head\n            || checkpoint.document_hash != base.base_document_hash\n            || checkpoint.document_ref != base.original_baseline_ref\n            || !bundle.branches.contains_key(&base.target_branch)\n        {\n            return Err(BundleError::HistoryChanged);\n        }\n        let history = bundle.branch_history(&branch)?;\n        let core =\n            Core::spawn(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        bundle\n            .attach_core(&core)?\n            .restore_history((*history).clone())\n            .map_err(crate::bundle::history_error)?;\n        let attachment = bundle.attach_core(&core)?;\n        let candidate_cut = attachment.freeze().map_err(crate::bundle::history_error)?;\n        let pin = bundle\n            .store\n            .pin(&[base_ref.clone(), bundle.checkpoint_reference(&branch)?])?;\n        let encoded = serde_json::to_vec(candidate_cut.history())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let floor_source = Arc::new(\n            bundle\n                .store\n                .reserve_retained_capture(&encoded)?\n                .hold(candidate_cut.history().clone()),\n        );\n        let guard = DurableBranchSessionGuard {\n            branch,\n            floor_source,\n            base: Arc::new(base),\n            core: core.clone(),\n            epoch: bundle.store.owner_epoch(),\n        };\n        drop(RegisteredSession {\n            guard: guard.clone(),\n            name: name.into(),\n            pin,\n            _charge: charge,\n        });\n        attachment\n            .resume(&candidate_cut)\n            .map_err(crate::bundle::history_error)?;\n        Ok(guard)\n    }"
-      ]
-    ],
+    "changes": [],
     "witness": "writer_host::switch::tests::w13_registered_host_create_reopen_refuses_retirement_and_preserves_unsaved_edits",
     "package": "kinewright-agent",
     "kind": "--lib",
@@ -738,37 +729,35 @@
   },
   {
     "name": "first-r-save-remints-shared-batches",
-    "changes": [
-      [
-        "crates/kinewright-project/src/bundle_commit.rs",
-        "        let all_batch_ids = batch_ids.clone();",
-        "        if old_switch == 1 && selection.is_none() { for id in &mut batch_ids { *id = BatchId::fresh()?; } } let all_batch_ids = batch_ids.clone();"
-      ]
-    ],
+    "changes": [],
     "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
     "package": "kinewright-agent",
     "kind": "--test",
     "target": "ja_s2_host",
     "features": "kinewright-project/test-util",
     "production": true,
-    "build_host": false
+    "build_host": false,
+    "superseded_by": "operation_history::tests::folding_advances_seeds_and_resources",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Old publication batch-id vector removed; native commands and immutable origins retain the original accepted identity."
+    }
   },
   {
     "name": "return-save-remints-old-batches",
-    "changes": [
-      [
-        "crates/kinewright-project/src/bundle_commit.rs",
-        "        let all_batch_ids = batch_ids.clone();",
-        "        if old_switch >= 2 && selection.is_none() { for id in &mut batch_ids { *id = BatchId::fresh()?; } } let all_batch_ids = batch_ids.clone();"
-      ]
-    ],
+    "changes": [],
     "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
     "package": "kinewright-agent",
     "kind": "--test",
     "target": "ja_s2_host",
     "features": "kinewright-project/test-util",
     "production": true,
-    "build_host": false
+    "build_host": false,
+    "superseded_by": "operation_history::tests::folding_advances_seeds_and_resources",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Old publication batch-id vector removed; native commands and immutable origins retain the original accepted identity."
+    }
   },
   {
     "name": "original-retry-starts-another-selection",

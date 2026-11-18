@@ -78,13 +78,12 @@ fn te13_fix3_retained_studio(hosted: bool, scenario: &str) {
                 after_sequence: 0,
             })
             .unwrap();
+        let status = reply.run_view.unwrap().runtime_status;
         assert!(
-            reply
-                .run_view
-                .unwrap()
-                .runtime_status
+            status
+                .as_ref()
                 .is_some_and(|s| s.contains(work.task.0.as_str()) && s.contains(&label)),
-            "TE13_FIX3_UNMERGED_RUN_MESSAGE"
+            "TE13_FIX3_UNMERGED_RUN_MESSAGE {scenario}: {status:?}"
         );
     }
     let action = click_control(
@@ -102,10 +101,10 @@ fn te13_fix3_retained_studio(hosted: bool, scenario: &str) {
     app.apply(action).unwrap();
     let action = click_control(&app, "Save current work, then open recovery point");
     app.apply(action).unwrap();
-    assert_eq!(
-        app.owner.core().export_history().unwrap(),
+    assert_recovered_task_owner(
+        app.owner.core(),
         expected,
-        "TE13_FIX3_UNMERGED_STUDIO_EXACT"
+        "TE13_FIX3_UNMERGED_STUDIO_EXACT",
     );
     assert!(
         !rendered(&app).contains(&label),
@@ -148,12 +147,17 @@ fn te13_fix3_host_completed_parent() {
 fn te13_fix3_fork_removed_studio(hosted: bool) {
     let (_temp, mut app, branch, expected) = te13_fix1_retained_app(hosted, true);
     let path = app.project_path().unwrap();
-    let original_manual = LoadedBundle::read(&path)
-        .unwrap()
-        .manual_checkpoint()
-        .unwrap()
-        .branch_id
-        .clone();
+    let original_manual = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .manual_checkpoint()
+    .unwrap()
+    .branch_id
+    .clone();
     let label = format!("Save current edit, then open {}", branch.as_str());
     let action = click_control(&app, &label);
     app.apply(action).unwrap();
@@ -166,12 +170,17 @@ fn te13_fix3_fork_removed_studio(hosted: bool) {
     .unwrap();
     app.settle_manual_for_test();
     app.apply(Action::Save).unwrap();
-    let fork = LoadedBundle::read(&path)
-        .unwrap()
-        .manual_checkpoint()
-        .unwrap()
-        .branch_id
-        .clone();
+    let fork = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .manual_checkpoint()
+    .unwrap()
+    .branch_id
+    .clone();
     assert_ne!(fork, branch);
     app.apply(Action::PreviewRecovery(RecoverySelection::WorkingBranch(
         original_manual,
@@ -191,7 +200,13 @@ fn te13_fix3_fork_removed_studio(hosted: bool) {
         text.contains(&label) && !text.contains("work was opened for review"),
         "TE13_FIX3_REMOVED_FORK_REOFFERS {hosted}: {text}"
     );
-    let root = LoadedBundle::read(&path).unwrap();
+    let root = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     assert!(
         !root
             .root()
@@ -205,10 +220,10 @@ fn te13_fix3_fork_removed_studio(hosted: bool) {
     app.apply(action).unwrap();
     let action = click_control(&app, "Save current work, then open recovery point");
     app.apply(action).unwrap();
-    assert_eq!(
-        app.owner.core().export_history().unwrap(),
+    assert_recovered_task_owner(
+        app.owner.core(),
         expected,
-        "TE13_FIX3_REMOVED_FORK_ORIGINAL_EXACT"
+        "TE13_FIX3_REMOVED_FORK_ORIGINAL_EXACT",
     );
     assert!(app.close());
 }
@@ -414,10 +429,10 @@ fn te15_b202_recover_words(reason: &str) {
         app.apply(action).unwrap();
         let action = click_control(&app, instructions[3]);
         app.apply(action).unwrap();
-        assert_eq!(
-            app.owner.core().export_history().unwrap(),
+        assert_recovered_task_owner(
+            app.owner.core(),
             expected,
-            "B202_INSTRUCTIONS_RECOVER_EXACT_HISTORY"
+            "B202_INSTRUCTIONS_RECOVER_EXACT_HISTORY",
         );
         assert!(app.close());
     }

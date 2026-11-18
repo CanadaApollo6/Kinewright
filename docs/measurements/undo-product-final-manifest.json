@@ -1,0 +1,20 @@
+{
+  "source": "a3d34c1a8fa5b68466a68c79d3a603f5bd8c54e9",
+  "source_diff": "",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "frozen_control": {
+    "commit": "c00db31acd77cb008db5e50cc535c66770de47d9",
+    "binary_sha256": "eb48e632512c4ebee1e4f9b479ddc5bfc2c60035f01e96de5fe61c58197d74fd",
+    "fixture_sha256": "2bb131b0c2665135864366f19a208a4d9fd69237854654541ef375563d799326",
+    "benchmark_sha256": "afca78b01cef92985e777cd153d4b941a44d25a49a4a36a8b246a89a8491d9f1",
+    "cargo_lock_sha256": "07c79cd1aa76544bf95d03401be7880c4bed49bae1ae5a7bbbea50ebeedcd92e",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+    "command": "source scripts/setup-ffmpeg.sh && flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 nice -n 10 cargo build -p kinewright-project --release --example undo_product_bench --features test-util,history-metrics"
+  },
+  "binaries": {
+    "target/hx-deletion/frozen-control/old-core-control": "eb48e632512c4ebee1e4f9b479ddc5bfc2c60035f01e96de5fe61c58197d74fd",
+    "target/release/examples/undo_product_bench": "07c478cafdbf524ce6ba7d068dd8cf7d1e56cdea3d3b5ac6fcfa97d43f73aa05"
+  },
+  "fixture_sha256": "2bb131b0c2665135864366f19a208a4d9fd69237854654541ef375563d799326",
+  "method": "#!/usr/bin/env bash\nset -euo pipefail\nsource scripts/setup-ffmpeg.sh\nmkdir -p target/hx-deletion/paired\nnice -n 19 python3 -I -B - <<'VERIFY'\nimport hashlib,json\nfrom pathlib import Path\nm=json.loads(Path('target/hx-deletion/frozen-control/manifest.json').read_text())\nwith Path('target/hx-deletion/frozen-control/old-core-control').open('rb') as f:\n    assert hashlib.file_digest(f,'sha256').hexdigest()==m['binary_sha256']\nassert hashlib.sha256(Path('crates/kinewright-core/tests/support/undo_fixture.rs').read_bytes()).hexdigest()==m['fixture_sha256']\nprint('Frozen control and unchanged fixture hashes verified',flush=True)\nVERIFY\n# Fixed five-pair order; no retry, timing selection or quiet-machine wait.\nfor pair in 0 1 2 3 4; do\n    if (( pair % 2 == 0 )); then sides=(old product); else sides=(product old); fi\n    for side in \"${sides[@]}\"; do\n        out=\"target/hx-deletion/paired/${pair}-${side}\"\n        test ! -e \"$out.json\"\n        if [[ \"$side\" == old ]]; then binary=target/hx-deletion/frozen-control/old-core-control; else binary=target/release/examples/undo_product_bench; fi\n        printf 'Measuring fixed pair %s %s\\n' \"$pair\" \"$side\"\n        flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 nice -n 10 bash -c '\n            TIMEFORMAT='\"'\"'{\"wall_seconds\":%R,\"user_seconds\":%U,\"system_seconds\":%S}'\"'\"'\n            date -u +%FT%TZ > \"$3.started\"\n            uptime > \"$3.load-before\"\n            { time \"$1\" \"$2\" > \"$3.json\" 2> \"$3.stderr\"; } 2> \"$3.time.json\"\n            result=$?\n            printf \"%s\\n\" \"$result\" > \"$3.exit\"\n            uptime > \"$3.load-after\"\n            date -u +%FT%TZ > \"$3.finished\"\n            exit \"$result\"\n        ' benchmark \"$binary\" \"$side\" \"$out\"\n        nice -n 19 python3 -I -B - \"$out\" <<'PY'\nimport json,sys\nfrom pathlib import Path\np=Path(sys.argv[1]);r=json.loads(p.with_suffix('.json').read_text());assert r['errors']==0\nprint(json.dumps(r['metrics'],sort_keys=True),flush=True)\nPY\n    done\ndone\n"
+}

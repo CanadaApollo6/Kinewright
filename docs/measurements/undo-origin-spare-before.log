@@ -1,0 +1,19 @@
+   Compiling kinewright-project v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-4492ddab-ddc6f77f95db0f24/crates/kinewright-project)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.54s
+     Running unittests src/lib.rs (target/debug/deps/kinewright_project-b9cef42ee480bbd9)
+
+running 1 test
+
+thread 'operation_history::fold_tests::origin_array_spare_capacity_stays_charged_after_redo_discard' (1329384) panicked at crates/kinewright-project/src/operation_history/fold_tests.rs:358:5:
+OWNER_BOUND_COUNTS_ORIGIN_ARRAY_SPARE_CAPACITY: bound=9952 array=45056
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test operation_history::fold_tests::origin_array_spare_capacity_stays_charged_after_redo_discard ... FAILED
+
+failures:
+
+failures:
+    operation_history::fold_tests::origin_array_spare_capacity_stays_charged_after_redo_discard
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 292 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p kinewright-project --lib`

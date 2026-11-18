@@ -8,11 +8,15 @@ use kinewright_agent::writer_host::{ProtocolFixture, ProtocolFixtureMode, Sessio
 use kinewright_core::*;
 use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
 use kinewright_project::bundle::LoadedBundle;
+use kinewright_project::operation_actor::Core;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
 };
+
+#[path = "../../kinewright-core/tests/support/undo_fixture.rs"]
+mod undo_fixture;
 
 struct Fixture {
     app: KinewrightApp,
@@ -24,8 +28,6 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let temp = TempDirectory::new_in(&workspace_target_dir(), "manual-final-value");
-        let path = temp.path("p.kinewright");
         let mut document = Document {
             tracks: vec![Track {
                 id: TrackId(1),
@@ -59,8 +61,14 @@ impl Fixture {
         }
         .apply(&mut document)
         .unwrap();
+        Self::with_document(document)
+    }
+
+    fn with_document(document: Document) -> Self {
+        let temp = TempDirectory::new_in(&workspace_target_dir(), "manual-final-value");
+        let path = temp.path("p.kinewright");
         let before = Arc::new(document);
-        let core = Core::spawn(Arc::clone(&before)).unwrap();
+        let core = Core::for_test(Arc::clone(&before)).unwrap();
         let mut owner = Ja1EditingSession::activate(
             &path,
             kinewright_project::bundle::BundleWriteAdmission::new_document(),
@@ -84,7 +92,9 @@ impl Fixture {
         attachment.fixture_host = Some(writer);
         assert!(
             attachment.host.as_ref().unwrap().manual.is_some(),
-            "MANUAL_REAL_LEASE"
+            "MANUAL_REAL_LEASE status={:?} current={}",
+            attachment.host.as_ref().unwrap().status,
+            attachment.owner.core().snapshot_identity().unwrap()
         );
         attachment.host.as_mut().unwrap().manual_publication_hold = true;
         let (mut app, engine) = in1_harness(Document::default());
@@ -142,7 +152,11 @@ impl Fixture {
                 Instant::now() < deadline,
                 "MANUAL_TEST_BOUND status={} message={:?}",
                 self.app.status,
-                self.attachment().manual_edit_message()
+                self.app
+                    .focused()
+                    .ja1
+                    .as_ref()
+                    .and_then(Ja1Attachment::manual_edit_message)
             );
             self.tick();
         }
@@ -157,13 +171,17 @@ impl Fixture {
         self.attempt();
     }
     fn fill(&mut self) {
-        // Full curve values fill the real byte window; no transport acknowledgement is allowed.
-        for step in 1..30 {
-            self.send_value(step);
-            if self.edits().waiting_for_ack() {
-                break;
-            }
+        // Fill the actual command window before opening the drag. No-op closes
+        // change no document or stack, so the final drag still has one Undo.
+        // The new 1 MiB coalesced-step cap is smaller than the 2 MiB outbox;
+        // repeatedly extending that step would test a different refusal.
+        for _ in 1..kinewright_project::operation_protocol::PENDING_COMMANDS {
+            self.gate().permit.close_gesture().unwrap();
         }
+        self.send_value(1);
+        // Already exported packets retain their identity and cannot take another sample.
+        let _ = self.gate().permit.pending().unwrap();
+        self.send_value(2);
         assert!(self.edits().waiting_for_ack(), "MANUAL_FULL_WINDOW");
         let pending = self.gate().permit.pending().unwrap();
         assert!(!pending.is_empty());
@@ -217,6 +235,9 @@ impl Drop for Fixture {
         in1_shutdown(&mut self.app);
     }
 }
+#[path = "manual_window_tests.rs"]
+mod manual_window_tests;
+
 fn param(value: i64) -> Operation {
     Operation::SetEffectParam {
         clip: ClipId(1),
@@ -242,6 +263,437 @@ fn curve(count: i64, value: i64) -> Operation {
                 .collect(),
         },
     }
+}
+
+fn root_generation(path: &std::path::Path) -> u64 {
+    let root: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    root["studio"]["generation"].as_u64().unwrap()
+}
+
+#[test]
+fn hx_h4_one_publication_per_request() {
+    use kinewright_agent::writer_host::HostCommand;
+    use kinewright_project::operation_protocol::PENDING_COMMANDS;
+
+    let f = Fixture::with_document(undo_fixture::heavy());
+    let host = f.attachment().host.as_ref().unwrap();
+    let path = f.temp.path("p.kinewright");
+    let mut counts = Vec::new();
+    for size in [1, PENDING_COMMANDS] {
+        for _ in 0..size {
+            f.gate().permit.close_gesture().unwrap();
+        }
+        let messages = f.gate().permit.pending().unwrap();
+        assert_eq!(messages.len(), size);
+        let before = root_generation(&path);
+        let start = Instant::now();
+        let reply = host
+            .client
+            .request(HostCommand::CommitHistory {
+                client: host.manual_identity_for_test(),
+                messages,
+            })
+            .unwrap();
+        let elapsed = start.elapsed();
+        let count = root_generation(&path) - before;
+        println!("HX_H4_REQUEST size={size} publications={count} wall={elapsed:?}");
+        assert!(reply.error.is_none(), "{:?}", reply.error);
+        assert_eq!(reply.manual_ack.len(), size);
+        f.attachment()
+            .owner
+            .acknowledge_manual(&f.gate().permit, reply.manual_ack)
+            .unwrap();
+        counts.push(count);
+    }
+    assert_eq!(counts, [1, 1], "HX_H4_ONE_ROOT_PER_REQUEST");
+}
+
+#[test]
+fn hx_h4_refused_message_leaves_only_the_durable_prefix() {
+    use kinewright_agent::writer_host::HostCommand;
+
+    let f = Fixture::new();
+    let attachment = f.attachment();
+    let host = attachment.host.as_ref().unwrap();
+    let path = f.temp.path("p.kinewright");
+    let request = |messages| {
+        host.client
+            .request(HostCommand::CommitHistory {
+                client: host.manual_identity_for_test(),
+                messages,
+            })
+            .unwrap()
+    };
+    let mut identities = Vec::new();
+    for value in 1..=4 {
+        f.gate()
+            .permit
+            .request(Command::DoBatchCoalesced {
+                operations: vec![param(value)],
+                coalesce_key: "prefix".into(),
+            })
+            .unwrap();
+        // Give each command a wire identity for the out-of-order prefix test.
+        let _ = f.gate().permit.pending().unwrap();
+        identities.push(attachment.owner.core().snapshot_identity().unwrap());
+    }
+    let messages = f.gate().permit.pending().unwrap();
+    let before = root_generation(&path);
+    let zero = request(vec![messages[1].clone(), messages[0].clone()]);
+    assert_eq!(zero.error.unwrap().code, "history_conflict");
+    assert_eq!(zero.manual_unattempted, Some(1));
+    assert!(zero.manual_ack.is_empty());
+    assert_eq!(root_generation(&path), before);
+
+    let prefix = request(vec![
+        messages[0].clone(),
+        messages[1].clone(),
+        messages[3].clone(),
+        messages[2].clone(),
+    ]);
+    assert_eq!(prefix.error.unwrap().code, "history_conflict");
+    assert_eq!(prefix.manual_unattempted, Some(1));
+    assert_eq!(prefix.manual_ack.len(), 2);
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        loaded.open_manual().unwrap().snapshot_identity().unwrap(),
+        identities[1]
+    );
+    assert_eq!(
+        loaded.root().unwrap().generation,
+        before + 1,
+        "HX_H4_ATOMIC_PREFIX"
+    );
+    drop(loaded);
+
+    let mixed = request(messages);
+    assert!(mixed.error.is_none(), "{:?}", mixed.error);
+    assert_eq!(mixed.manual_unattempted, None);
+    assert_eq!(mixed.manual_ack.len(), 4);
+    assert_eq!(mixed.manual_ack[..2], prefix.manual_ack);
+    assert_eq!(
+        root_generation(&path),
+        before + 2,
+        "HX_H4_RETRY_PUBLISHES_ONLY_NEW"
+    );
+}
+
+#[test]
+fn hx_h4_app_retry_resends_the_unattempted_edits() {
+    use kinewright_agent::writer_host::HostCommand;
+
+    let mut f = Fixture::new();
+    for value in 1..=4 {
+        f.gate()
+            .permit
+            .request(Command::DoBatchCoalesced {
+                operations: vec![param(value)],
+                coalesce_key: "retained".into(),
+            })
+            .unwrap();
+        // Each command is exported before adding the next packet to the suffix.
+        let _ = f.gate().permit.pending().unwrap();
+    }
+    let originals = f.gate().permit.pending().unwrap();
+    let host = f.attachment().host.as_ref().unwrap();
+    let reply = host
+        .client
+        .request(HostCommand::CommitHistory {
+            client: host.manual_identity_for_test(),
+            messages: vec![
+                originals[0].clone(),
+                originals[2].clone(),
+                originals[3].clone(),
+            ],
+        })
+        .unwrap();
+    assert_eq!(reply.manual_unattempted, Some(1));
+    let attachment = f.app.focused_mut().ja1.as_mut().unwrap();
+    assert!(attachment.accept_host_reply(reply).is_err());
+    assert_eq!(f.gate().permit.pending().unwrap(), originals[1..]);
+    f.release();
+    f.app.start_ja1(Action::Retry);
+    f.until(|f| {
+        !f.attachment().read_only()
+            && f.gate().permit.pending().unwrap().is_empty()
+            && !f.attachment().is_dirty()
+    });
+    assert_eq!(f.scalar(), 4);
+    let mut cold = LoadedBundle::read(
+        &f.temp.path("p.kinewright"),
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        cold.open_manual()
+            .unwrap()
+            .export_history()
+            .unwrap()
+            .history()
+            .document
+            .clip(ClipId(1))
+            .unwrap()
+            .effects[0]
+            .parameters["exposure_milli_stops"],
+        ParamValue::Integer(4),
+    );
+}
+
+#[test]
+fn hx_h4_full_distinct_window_displays_accepted_solid_color() {
+    let mut f = Fixture::new();
+    for _ in 0..kinewright_project::operation_protocol::PENDING_COMMANDS {
+        f.gate().permit.close_gesture().unwrap();
+    }
+    let clip = ClipId(1);
+    let operation = Operation::SetSolidColor {
+        clip,
+        color: SolidColor { r: 255, g: 0, b: 0 },
+    };
+    f.app
+        .send_operations_coalesced(vec![operation.clone()], f.key.clone());
+    f.attempt();
+    assert!(f.edits().waiting_for_ack());
+    assert_eq!(f.edits().backpressure_refusals, 1);
+    assert_eq!(*f.app.focused().document, *f.before);
+    assert_eq!(
+        f.edits().message(),
+        Some(crate::manual_edits::PENDING_WORDS)
+    );
+    assert_eq!(f.edits().desired_solid_color(clip), None);
+
+    f.finish();
+    let mut expected = (*f.before).clone();
+    operation.apply(&mut expected).unwrap();
+    assert_eq!(*f.app.focused().document, expected);
+}
+
+#[test]
+fn hx_h4_pre_rename_error_retries_original_manual_packets() {
+    ambiguous_root_retries_original_manual_packets("root_rename_io");
+}
+
+#[test]
+fn hx_h4_parent_sync_error_retries_original_manual_packets() {
+    ambiguous_root_retries_original_manual_packets("root_parent_sync");
+}
+
+fn ambiguous_root_retries_original_manual_packets(point: &'static str) {
+    let mut f = Fixture::new();
+    let path = f.temp.path("p.kinewright");
+    let before = root_generation(&path);
+    for value in [1, 119] {
+        f.app
+            .send_operations_coalesced(vec![param(value)], f.key.clone());
+        f.attempt();
+    }
+    assert_eq!(f.gate().permit.pending_count().unwrap(), 1);
+    f.attachment()
+        .fixture_host
+        .as_ref()
+        .unwrap()
+        .fail_manual_root_for_test(point, 1);
+    f.release();
+    f.until(|f| f.attachment().read_only() || f.gate().permit.pending_count().unwrap() == 0);
+    assert!(
+        !f.attachment().read_only(),
+        "{point}: {}",
+        f.attachment().message
+    );
+    f.finish();
+    assert_eq!(f.gate().permit.pending_count().unwrap(), 0);
+    assert_eq!(root_generation(&path), before + 1);
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        loaded.open_manual().unwrap().snapshot_identity().unwrap(),
+        f.attachment().owner.core().snapshot_identity().unwrap()
+    );
+    assert_eq!(f.scalar(), 119);
+    println!("HX_H4_ROOT_RETRY {point} saved=119 publications=1 pending=0");
+}
+
+#[test]
+fn hx_h4_ambiguous_root_retry_exhaustion_keeps_edits_read_only() {
+    let mut f = Fixture::new();
+    let path = f.temp.path("p.kinewright");
+    let before = root_generation(&path);
+    f.send_value(119);
+    f.attachment()
+        .fixture_host
+        .as_ref()
+        .unwrap()
+        .fail_manual_root_for_test("root_rename_io", 2);
+    f.release();
+    f.until(|f| f.attachment().read_only());
+    assert_eq!(f.attachment().message, "durability_unknown");
+    assert_eq!(f.value(), 119);
+    assert_eq!(f.gate().permit.pending_count().unwrap(), 1);
+    assert!(f.attachment().is_dirty());
+    assert_eq!(root_generation(&path), before);
+}
+
+fn strict_drag(control: &str, operation: impl Fn(i64) -> Operation) -> usize {
+    let mut f = Fixture::with_document(undo_fixture::heavy());
+    f.release();
+    let before = Arc::clone(&f.before);
+    let interval = Duration::from_millis(39);
+    let mut accepted = 0;
+    let mut sent = Instant::now();
+    for value in 0..120 {
+        let previous = f.attachment().owner.core().change_id().unwrap().position;
+        sent = Instant::now();
+        f.app
+            .send_operations_coalesced(vec![operation(value)], f.key.clone());
+        f.attempt();
+        let current = f.attachment().owner.core().change_id().unwrap().position;
+        if current.position == previous.position + 1 && !f.edits().waiting_for_ack() {
+            accepted += 1;
+        }
+        if value < 119 {
+            while sent.elapsed() < interval {
+                f.tick();
+                std::thread::park_timeout(Duration::from_millis(1));
+            }
+        }
+    }
+    println!("HX_H4_DRAG_SENT {control} accepted={accepted}/120");
+    f.finish();
+    println!(
+        "HX_H4_DRAG {control} accepted={accepted}/120 last_ack={:?}",
+        sent.elapsed()
+    );
+    assert_eq!(
+        f.edits().backpressure_refusals,
+        0,
+        "HX_H4_NO_BACKPRESSURE {control}"
+    );
+    let mut expected = (*before).clone();
+    operation(119).apply(&mut expected).unwrap();
+    assert_eq!(*f.app.focused().document, expected, "HX_H4_DRAG_FINAL");
+    let mut loaded = LoadedBundle::read(
+        &f.temp.path("p.kinewright"),
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let cold = loaded.open_manual().unwrap().export_history().unwrap();
+    assert_eq!(*cold.history().document, expected, "HX_H4_DRAG_COLD");
+    drop(cold);
+    drop(loaded);
+    f.app.undo();
+    f.finish();
+    assert_eq!(*f.app.focused().document, *before, "HX_H4_DRAG_UNDO");
+    accepted
+}
+
+fn held_reply_drag(control: &str, operation: impl Fn(i64) -> Operation) -> (usize, usize) {
+    let mut f = Fixture::with_document(undo_fixture::heavy());
+    let gate = Arc::new(SendGate::default());
+    let _release = Release(Arc::clone(&gate));
+    let held = Arc::clone(&gate);
+    f.app
+        .focused_mut()
+        .ja1
+        .as_mut()
+        .unwrap()
+        .host
+        .as_mut()
+        .unwrap()
+        .after_first_manual_reply = Some(Box::new(move || held.hold()));
+    f.release();
+    let mut accepted = 0;
+    let path = f.temp.path("p.kinewright");
+    for value in 0..120 {
+        let before = f.attachment().owner.core().change_id().unwrap().position;
+        f.app
+            .send_operations_coalesced(vec![operation(value)], f.key.clone());
+        f.attempt();
+        if value == 0 {
+            f.until(|_| gate.entered());
+        }
+        let after = f.attachment().owner.core().change_id().unwrap().position;
+        accepted += usize::from(after.position == before.position + 1);
+    }
+    assert_eq!(f.gate().permit.pending_count().unwrap(), 2);
+    println!("HX_H4_HELD {control} issued=120 accepted={accepted} pending=2");
+    let before = root_generation(&path);
+    gate.release();
+    f.finish();
+    let publications = root_generation(&path) - before;
+    let mut expected = (*f.before).clone();
+    operation(119).apply(&mut expected).unwrap();
+    assert_eq!(*f.app.focused().document, expected, "HX_H4_HELD_LAST_VALUE");
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        *loaded
+            .open_manual()
+            .unwrap()
+            .export_history()
+            .unwrap()
+            .history()
+            .document,
+        expected,
+        "HX_H4_HELD_COLD"
+    );
+    drop(loaded);
+    f.app.undo();
+    f.finish();
+    assert_eq!(*f.app.focused().document, *f.before, "HX_H4_HELD_ONE_UNDO");
+    println!(
+        "HX_H4_HELD {control} publications_after_release={publications} cold_reopen_and_undo=ok"
+    );
+    assert!(publications <= 2, "HX_H4_HELD_PUBLICATIONS {publications}");
+    (accepted, f.edits().backpressure_refusals)
+}
+
+#[test]
+fn hx_h4_held_first_reply_folds_unsent_gesture() {
+    let exposure = held_reply_drag("exposure", param);
+    let sync_lock = held_reply_drag("sync-lock", |value| Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: value % 2 == 0,
+    });
+    assert_eq!(
+        [exposure, sync_lock],
+        [(120, 0), (120, 0)],
+        "HX_H4_HELD_NO_BACKPRESSURE"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn hx_h4_strict_drag_saves_all_sub_batches() {
+    let exposure = strict_drag("exposure", param);
+    let sync_lock = strict_drag("sync-lock", |value| Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: value % 2 == 0,
+    });
+    assert_eq!([exposure, sync_lock], [120, 120], "HX_H4_NO_BACKPRESSURE");
 }
 
 #[test]
@@ -283,11 +735,16 @@ fn manual_value_final_drag_is_saved_and_one_undo() {
     let path = f.temp.path("p.kinewright");
     f.app.focused_mut().ja1.as_mut().unwrap().close();
     f.app.focused_mut().ja1 = None;
-    let loaded = LoadedBundle::read(&path).unwrap();
-    let cold = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&cold).unwrap();
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let cold = loaded.open_manual().unwrap();
     assert_eq!(
-        *cold.export_history().unwrap().document,
+        *cold.export_history().unwrap().history().document,
         *final_document,
         "MANUAL_FINAL_COLD_VALUE"
     );
@@ -308,7 +765,10 @@ fn manual_value_final_capacity_refusal_is_truthful() {
     let reasons = events
         .try_iter()
         .filter_map(|event| match event {
-            Event::MutationRefused { reason, .. } => Some(reason),
+            Err(kinewright_project::operation_actor::Refusal {
+                error: kinewright_project::operation_actor::Error::MutationRefused(reason),
+                ..
+            }) => Some(reason),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -331,7 +791,13 @@ fn manual_value_final_capacity_refusal_is_truthful() {
         "MANUAL_REFUSED_SCREEN_VALUE"
     );
     assert_eq!(
-        *f.app.focused().core.export_history().unwrap().document,
+        *f.app
+            .focused()
+            .core
+            .export_history()
+            .unwrap()
+            .history()
+            .document,
         *accepted
     );
 }
@@ -375,7 +841,8 @@ fn manual_value_close_and_quit_ask_for_unapplied_value() {
     let held = Arc::clone(&gate);
     f.edits_mut().before_send = Some(Box::new(move || held.hold()));
     f.release();
-    f.until(|f| gate.entered() && f.gate().permit.pending().unwrap().is_empty());
+    f.until(|_| gate.entered());
+    assert_ne!(f.value(), -555, "HELD_FINAL_VALUE_HAS_NOT_BEEN_ACCEPTED");
     assert!(
         f.attachment()
             .host
@@ -448,16 +915,17 @@ fn manual_value_discrete_edits_are_ordered_and_bounded() {
     assert_eq!(f.scalar(), -15, "MANUAL_DISCRETE_FINAL_ORDER");
     let history = f.app.focused().core.export_history().unwrap();
     let values = history
-        .batches
+        .history()
+        .undo
         .iter()
         .rev()
         .take(15)
         .rev()
-        .map(|b| match &b.command {
-            JournalCommand::Do(Operation::SetEffectParam {
+        .map(|step| match &step.commands()[0].operations[0] {
+            Operation::SetEffectParam {
                 value: ParamValue::Integer(v),
                 ..
-            }) => *v,
+            } => *v,
             other => panic!("{other:?}"),
         })
         .collect::<Vec<_>>();
@@ -535,13 +1003,17 @@ fn manual_value_fix1_paused_recovery_keeps_retry_and_accepted_edits() {
     assert_ne!(f.value(), -555);
     assert!(!f.gate().permit.pending().unwrap().is_empty());
     {
-        let saved = Core::spawn(Document::default()).unwrap();
-        LoadedBundle::read(&f.temp.path("p.kinewright"))
-            .unwrap()
-            .restore_manual(&saved)
-            .unwrap();
+        let saved = LoadedBundle::read(
+            &f.temp.path("p.kinewright"),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap()
+        .open_manual()
+        .unwrap();
         assert_ne!(
-            *saved.export_history().unwrap().document,
+            *saved.export_history().unwrap().history().document,
             *accepted,
             "MANUAL_RECOVERY_PREFIX_WAS_NOT_SAVED"
         );
@@ -653,13 +1125,17 @@ fn manual_value_fix1_paused_recovery_keeps_retry_and_accepted_edits() {
         f.app.focused().ja1_job.is_none()
             && f.attachment().project_path().as_ref() == Some(&recovered)
     });
-    let cold = Core::spawn(Document::default()).unwrap();
-    LoadedBundle::read(&recovered)
-        .unwrap()
-        .restore_manual(&cold)
-        .unwrap();
+    let cold = LoadedBundle::read(
+        &recovered,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .open_manual()
+    .unwrap();
     assert_eq!(
-        *cold.export_history().unwrap().document,
+        *cold.export_history().unwrap().history().document,
         *accepted,
         "MANUAL_RECOVERY_COPY_KEEPS_ACCEPTED"
     );
@@ -797,6 +1273,9 @@ fn manual_value_fix1_revision_conflict_notice_survives_later_acceptance() {
 #[test]
 fn manual_value_fix1_open_gesture_does_not_claim_backpressure() {
     let mut f = Fixture::new();
+    for _ in 1..kinewright_project::operation_protocol::PENDING_COMMANDS {
+        f.gate().permit.close_gesture().unwrap();
+    }
     f.send_value(10);
     assert!(f.attachment().manual_edits_pending());
     assert_eq!(
@@ -804,6 +1283,8 @@ fn manual_value_fix1_open_gesture_does_not_claim_backpressure() {
         None,
         "MANUAL_OPEN_GESTURE_IS_NOT_WAITING"
     );
+    // Export the last slot before issuing a value that really needs space.
+    let _ = f.gate().permit.pending().unwrap();
     f.send_value(-555);
     assert!(f.edits().waiting_for_ack());
     assert_eq!(
@@ -910,7 +1391,14 @@ fn manual_value_fix1_recovery_owns_late_results_and_counts_only_refusals() {
         } else {
             f.edits_mut().after_send = Some(Box::new(move || held.hold()));
         }
-        let next = if refused { curve(450, 20) } else { param(20) };
+        let next = if refused {
+            Operation::SetTrackSyncLock {
+                track: TrackId(404),
+                locked: false,
+            }
+        } else {
+            param(20)
+        };
         f.app.send_operations_coalesced(vec![next], f.key.clone());
         f.until(|_| gate.entered());
         if before_send {
@@ -922,7 +1410,15 @@ fn manual_value_fix1_recovery_owns_late_results_and_counts_only_refusals() {
                     .unwrap();
             }
         }
-        let accepted = f.app.focused().core.export_history().unwrap().document;
+        let Event::QueryResult(QueryResult::Document(accepted)) = f
+            .app
+            .focused()
+            .core
+            .request(Command::Query(Query::Document))
+            .unwrap()
+        else {
+            panic!("LATE_RESULT_ORACLE_IS_THE_ACTORS_ACCEPTED_DOCUMENT");
+        };
         let attachment = f.app.focused_mut().ja1.as_mut().unwrap();
         attachment
             .host
@@ -971,7 +1467,7 @@ fn manual_value_fix1_recovery_owns_late_results_and_counts_only_refusals() {
 
 #[test]
 fn manual_value_glm_prepared_media_clean_refusal_stays_editable() {
-    for capacity in [true, false] {
+    for forged_counter in [true, false] {
         let mut f = Fixture::new();
         let source = f.temp.path("refused.wav");
         std::fs::write(
@@ -984,15 +1480,15 @@ fn manual_value_glm_prepared_media_clean_refusal_stays_editable() {
         )
         .unwrap();
         let before = f.app.focused().core.export_history().unwrap();
-        f.app.focused_mut().ja1.as_mut().unwrap().before_host_reply = Some(if capacity {
-            limit_prepared_media_reply
+        f.app.focused_mut().ja1.as_mut().unwrap().before_host_reply = Some(if forged_counter {
+            forge_prepared_media_counter
         } else {
             unbind_prepared_media_reply
         });
-        let reason = if capacity {
-            CoreMutationRefusal::ManualHistoryCapacity
+        let words = if forged_counter {
+            kinewright_project::operation_protocol::Conflict::Snapshot.to_string()
         } else {
-            CoreMutationRefusal::ManualInputRequired
+            CoreMutationRefusal::ManualInputRequired.to_string()
         };
         let error = f
             .app
@@ -1003,14 +1499,38 @@ fn manual_value_glm_prepared_media_clean_refusal_stays_editable() {
             .apply(Action::ImportMedia(source))
             .unwrap_err();
         assert!(
-            matches!(error, BundleError::CoreMutationRefused(actual) if actual == reason),
-            "MANUAL_PREPARED_REAL_CORE_REFUSAL: {error}"
+            if forged_counter {
+                matches!(
+                    error,
+                    BundleError::HistoryChanged
+                        | BundleError::Operation(
+                            kinewright_project::operation_actor::Error::Protocol(
+                                kinewright_project::operation_protocol::Conflict::Snapshot
+                            )
+                        )
+                )
+            } else {
+                matches!(
+                    error,
+                    BundleError::CoreMutationRefused(CoreMutationRefusal::ManualInputRequired)
+                )
+            },
+            "MANUAL_PREPARED_REAL_CORE_REFUSAL forged={forged_counter}: {error}"
         );
         assert_eq!(f.app.focused().core.export_history().unwrap(), before);
         assert!(
             f.attachment().imported_media.is_none(),
             "MANUAL_REFUSED_ASSET_NOT_ANNOUNCED"
         );
+        if forged_counter {
+            assert!(
+                f.attachment().read_only(),
+                "FORGED_PREPARED_COUNTER_FREEZES_INTO_RECOVERY"
+            );
+            let host = f.attachment().host.as_ref().unwrap();
+            assert!(host.cut.is_some() && host.unknown_operation);
+            continue;
+        }
         assert!(
             !f.attachment().read_only(),
             "MANUAL_PREPARED_REFUSAL_STAYS_EDITABLE: {}",
@@ -1018,16 +1538,16 @@ fn manual_value_glm_prepared_media_clean_refusal_stays_editable() {
         );
         let host = f.attachment().host.as_ref().unwrap();
         assert!(host.cut.is_none() && !host.unknown_operation && !host.recovery_running());
-        assert_eq!(f.attachment().message, reason.to_string());
-        f.until(|f| f.app.status.contains(&reason.to_string()) && !f.attachment().read_only());
+        assert_eq!(f.attachment().message, words);
+        f.until(|f| f.app.status.contains(&words) && !f.attachment().read_only());
         assert!(!f.attachment().read_only());
         assert!(
-            f.app.status.contains(&reason.to_string()),
+            f.app.status.contains(&words),
             "MANUAL_PREPARED_REASON_REMAINS_VISIBLE"
         );
         assert!(!f.app.status.contains("reply was not confirmed"));
         assert!(f.app.focused().pending_timeline_adds.is_empty());
-        if !capacity {
+        if !forged_counter {
             f.app.send_operation(Operation::SetTrackSyncLock {
                 track: TrackId(1),
                 locked: false,
@@ -1043,16 +1563,10 @@ fn manual_value_glm_prepared_media_clean_refusal_stays_editable() {
     }
 }
 
-fn limit_prepared_media_reply(reply: &mut kinewright_agent::writer_host::HostReply) {
+fn forge_prepared_media_counter(reply: &mut kinewright_agent::writer_host::HostReply) {
     assert!(reply.error.is_none() && reply.owned_media.is_some());
     let lease = reply.manual_lease.as_mut().expect("real manual lease");
-    lease.history_limits = kinewright_project::manual_history::OrdinaryHistoryLimits::from_limits(
-        &kinewright_project::storage_budget::StorageLimits {
-            command_bytes: 1,
-            ..kinewright_project::storage_budget::StorageLimits::default()
-        },
-    )
-    .unwrap();
+    lease.next_key.position = lease.next_key.position.checked_add(1).unwrap();
 }
 fn unbind_prepared_media_reply(reply: &mut kinewright_agent::writer_host::HostReply) {
     assert!(reply.error.is_none() && reply.manual_lease.is_some());
@@ -1089,6 +1603,38 @@ fn manual_value_fix2_healthy_previews_wait_without_abandoning() {
         assert!(f.edits().notice().is_none());
         assert_eq!(f.app.focused().core.export_history().unwrap(), before);
     }
+    {
+        // Every preview has been checked against the complete owner. The
+        // oracle is no longer needed while the real pending work drains.
+        let pool = f.app.focused().core.history_pool();
+        let leases = pool
+            .lease_counts(kinewright_project::operation_history::Role::Ordinary)
+            .unwrap()
+            .0;
+        drop(before);
+        assert_eq!(
+            pool.lease_counts(kinewright_project::operation_history::Role::Ordinary)
+                .unwrap()
+                .0,
+            leases - 1,
+            "MANUAL_PREVIEW_ORACLE_RELEASES_ITS_FULL_LEASE_BEFORE_DRAIN"
+        );
+    }
     f.finish();
     assert!(f.edits().notice().is_none());
+    let Event::QueryResult(QueryResult::Snapshot { document, .. }) = f
+        .app
+        .focused()
+        .core
+        .request(Command::Query(Query::Snapshot))
+        .unwrap()
+    else {
+        panic!("MANUAL_HEALTHY_PREVIEW_HAS_ITS_ACTUAL_DOCUMENT");
+    };
+    assert_eq!(
+        document.clip(ClipId(1)).unwrap().effects[0].keyframes["exposure_milli_stops"].keyframes[0]
+            .value,
+        2,
+        "MANUAL_HEALTHY_PREVIEW_DRAINS_THE_RETAINED_FINAL_VALUE"
+    );
 }

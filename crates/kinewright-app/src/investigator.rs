@@ -1373,12 +1373,8 @@ impl KinewrightApp {
             .map(|session| session.settings.clone())
             .unwrap_or_default();
         let live_revision = self.projects[project_index].revision;
-        let branch = TimelineBranch::new_at(
-            "investigate",
-            live_revision,
-            Arc::clone(&self.projects[project_index].document),
-        )
-        .map_err(|_| ())?;
+        let branch = TimelineBranch::fork("investigate", &self.projects[project_index].core, true)
+            .map_err(|_| ())?;
         if !preload.is_empty()
             && !matches!(
                 branch.core().request(Command::DoBatchIfRevision {
@@ -1866,16 +1862,12 @@ impl KinewrightApp {
             .as_ref()?
             .running
             .as_ref()?;
-        match running
+        running
             .branch
             .core()
-            .request(Command::Query(Query::AppliedOperations))
-        {
-            Ok(Event::QueryResult(QueryResult::AppliedOperations(operations))) => {
-                Some(operations.len())
-            }
-            _ => None,
-        }
+            .operations(false)
+            .ok()
+            .map(|operations| operations.len())
     }
 }
 
@@ -2392,6 +2384,9 @@ mod tests {
             harness: "fixture".into(),
             model: None,
             branch: TimelineBranch::new(
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
                 "spawn-failure",
                 TimelineRevision::default(),
                 Arc::default(),

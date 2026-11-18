@@ -33,8 +33,13 @@ pub(super) fn fixture() -> (
     std::fs::create_dir_all(&parent).unwrap();
     let temp = kinewright_media::test_support::TempDirectory::new_in(&parent, "s3-capabilities");
     let path = temp.path("a.kinewright");
-    let core = Core::spawn(Document::default()).unwrap();
-    let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
+    let mut bundle = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let inputs = bundle.empty_inputs().unwrap().reference.clone();
     let refs = [
         b"original feedback".as_slice(),
@@ -113,14 +118,14 @@ fn s3_gui_source_admission_stays_private_and_command_bound() {
     let owner = host.owner.upgrade().unwrap();
     let snapshot = {
         let mut owner = owner.lock().unwrap();
-        let snapshot = HostSnapshot::capture(owner.core()).unwrap();
+        let snapshot = received_snapshot_for_test(owner.core()).unwrap();
         owner.config.origin = HostOrigin::Gui {
             retention: HostSourceBinding {
                 source: None,
                 inputs: None,
                 callback: private.bootstrap(),
             },
-            initial_snapshot: snapshot.clone(),
+            initial_snapshot: Some(snapshot.clone()),
             expected_root_sha256: None,
             expected_project_id: None,
         };
@@ -177,11 +182,11 @@ fn request(client: &HostClient, command: HostCommand) -> HostRequest {
 }
 
 fn direct(host: &WriterHost, client: &HostClient, command: HostCommand) -> HostReply {
-    HostCommandOwner::execute_attached_shared(
+    received_reply_for_test(HostCommandOwner::execute_attached_shared(
         &host.owner.upgrade().unwrap(),
         &client.bootstrap.auth,
         request(client, command),
-    )
+    ))
 }
 
 #[expect(
@@ -200,7 +205,7 @@ fn mcp(client: &HostClient, command: HostCommand) -> Result<HostReply, HostError
 fn state(host: &WriterHost) -> serde_json::Value {
     let owner = host.owner.upgrade().unwrap();
     let owner = owner.lock().unwrap();
-    serde_json::json!({"root": owner.owner().unwrap().root_sha256().unwrap(), "history": owner.core().export_history().unwrap(), "lease": owner.manual, "next_manual": owner.next_manual_generation, "sessions": owner.sessions.len(), "next_session": owner.next_session, "dispatches": owner.dispatches, "status": owner.status(), "admitted": owner.admitted.len()})
+    serde_json::json!({"root": owner.owner().unwrap().root_sha256().unwrap(), "history": owner.core().snapshot_identity().unwrap(), "lease": owner.manual.as_ref().map(kinewright_project::editing_session::ManualAuthority::lease), "next_manual": owner.next_manual_generation, "sessions": owner.sessions.len(), "next_session": owner.next_session, "dispatches": owner.dispatches, "status": owner.status(), "admitted": owner.admitted.len()})
 }
 
 #[expect(
@@ -386,8 +391,7 @@ fn viewer_attempts(
     viewer: &HostClient,
     producer: &HostClient,
 ) -> Vec<(HostCommand, &'static str)> {
-    let snapshot =
-        HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
+    let snapshot = host_snapshot_for_test(host);
     let client = "e".repeat(64);
     let (envelope, identity) = {
         let owner = host.owner.upgrade().unwrap();
@@ -398,7 +402,7 @@ fn viewer_attempts(
             .unwrap();
         let identity = owner.current_switch_identity().unwrap();
         let target = kinewright_project::bundle_switch::SwitchTarget::WorkingBranch {
-            branch: lease.branch.clone(),
+            branch: identity.current.branch.clone(),
         };
         (owner.switch_envelope(&lease, target).unwrap(), identity)
     };
@@ -625,16 +629,19 @@ fn s3_viewer_capabilities() {
     );
 
     // A real C10 close releases the previous lease, with no lifecycle change.
-    let begin = accepted(
-        editor
-            .request(HostCommand::BeginRecovery {
-                client: "e".repeat(64),
-                frozen: None,
-                pending: vec![],
-                discard_batches: None,
-            })
-            .unwrap(),
+    let begin = editor
+        .request(HostCommand::BeginRecovery {
+            client: "e".repeat(64),
+            frozen: None,
+            pending: vec![],
+        })
+        .unwrap();
+    assert!(
+        begin.error.is_none(),
+        "RECOVERY_ROTATION_FITS_THREE_ORDINARY_LEASES: {:?}",
+        begin.error
     );
+
     let barrier = begin.recovery.unwrap();
     assert!(
         host.owner
@@ -658,6 +665,34 @@ fn s3_viewer_capabilities() {
             })
             .unwrap(),
     );
+    let mut forged = serde_json::to_value(&barrier.after).unwrap();
+    let mut body: serde_json::Value =
+        serde_json::from_str(forged["history"]["snapshot"]["body"].as_str().unwrap()).unwrap();
+    body["history"]["position"] =
+        serde_json::json!(body["history"]["position"].as_u64().unwrap() + 1);
+    forged["history"]["snapshot"]["body"] =
+        serde_json::json!(serde_json::to_string(&body).unwrap());
+    let rejected = editor
+        .request(HostCommand::ConfirmBarrier {
+            barrier: Box::new(barrier.clone()),
+            installed: serde_json::from_value(forged).unwrap(),
+        })
+        .unwrap();
+    assert_eq!(
+        rejected.error.unwrap().code,
+        "recovery_unconfirmed",
+        "RECOVERY_CONFIRMATION_REQUIRES_THE_TRUSTED_BODY_NOT_ITS_IDENTITY_CLAIM"
+    );
+    assert!(
+        host.owner
+            .upgrade()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .manual
+            .is_none(),
+        "FORGED_RECOVERY_CONFIRMATION_GRANTS_NO_MANUAL_AUTHORITY"
+    );
     accepted(
         editor
             .request(HostCommand::ConfirmBarrier {
@@ -665,6 +700,30 @@ fn s3_viewer_capabilities() {
                 installed: barrier.after,
             })
             .unwrap(),
+    );
+    assert!(
+        host.owner
+            .upgrade()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .core()
+            .history_pool()
+            .lease_counts(kinewright_project::operation_history::Role::Ordinary)
+            .unwrap()
+            .1
+            <= 3,
+        "RECOVERY_ROTATION_AND_CONFIRMATION_NEVER_NEED_A_FOURTH_ORDINARY_LEASE"
+    );
+    let saved = editor
+        .request(HostCommand::Save {
+            snapshot: host_snapshot_for_test(&host),
+        })
+        .unwrap();
+    assert!(
+        saved.error.is_none(),
+        "SAVE_AFTER_CONFIRMED_RECOVERY_IS_ADMITTED: {:?}",
+        saved.error
     );
     feedback_controls(&host, &viewer, &producer, &refs);
     // C10 returns a new lease. Detach revokes the credential independently of it.
@@ -867,8 +926,7 @@ fn s3_foreground_replay_is_attachment_subject_bound() {
     )
     .unwrap()
     .with_manual_editor("e".repeat(64));
-    let snapshot =
-        HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
+    let snapshot = host_snapshot_for_test(&host);
     let command = HostCommand::Save { snapshot };
     accepted(first.request_operation(command.clone(), Some(1)).unwrap());
     let before = state(&host);
@@ -878,6 +936,112 @@ fn s3_foreground_replay_is_attachment_subject_bound() {
     );
     assert_eq!(state(&host), before, "C1_FOREGROUND_SUBJECT_REPLAY");
     accepted(first.request_operation(command, Some(1)).unwrap());
+}
+
+#[test]
+fn recovery_confirmation_cache_releases_its_preceding_line() {
+    let (_temp, host, _) = fixture();
+    let editor = host.client().with_manual_editor("e".repeat(64));
+    accepted(
+        editor
+            .request_operation(
+                HostCommand::AcquireManual {
+                    client: "e".repeat(64),
+                },
+                Some(1),
+            )
+            .unwrap(),
+    );
+    let mut old_confirmation = None;
+    for round in 0..3 {
+        let base = round * 4 + 2;
+        let begun = editor
+            .request_operation(
+                HostCommand::BeginRecovery {
+                    client: "e".repeat(64),
+                    frozen: None,
+                    pending: vec![],
+                },
+                Some(base),
+            )
+            .unwrap();
+        assert!(
+            begun.error.is_none(),
+            "NEXT_RECOVERY_RELEASES_THE_PREVIOUS_CONFIRMATION_HOLDERS: {:?}",
+            begun.error
+        );
+        let barrier = begun.recovery.unwrap();
+        if let Some(old) = old_confirmation.take() {
+            let refused = editor.request(old).unwrap();
+            assert!(
+                refused.error.is_some() && refused.manual_lease.is_none(),
+                "OLD_CONFIRMATION_CANNOT_RESTORE_A_REVOKED_GRANT"
+            );
+            assert!(
+                host.owner
+                    .upgrade()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .manual
+                    .is_none()
+            );
+        }
+        accepted(
+            editor
+                .request_operation(
+                    HostCommand::PublishBarrier {
+                        barrier: Box::new(barrier.clone()),
+                    },
+                    Some(base + 1),
+                )
+                .unwrap(),
+        );
+        let confirmation = HostCommand::ConfirmBarrier {
+            barrier: Box::new(barrier.clone()),
+            installed: barrier.after,
+        };
+        let confirmed = accepted(
+            editor
+                .request_operation(confirmation.clone(), Some(base + 2))
+                .unwrap(),
+        );
+        let repeated = accepted(
+            editor
+                .request_operation(confirmation.clone(), Some(base + 2))
+                .unwrap(),
+        );
+        assert_eq!(
+            confirmed.manual_lease, repeated.manual_lease,
+            "CONFIRMATION_REPLAY_RETURNS_ITS_ORIGINAL_GRANT"
+        );
+        let saved = editor
+            .request_operation(
+                HostCommand::Save {
+                    snapshot: host_snapshot_for_test(&host),
+                },
+                Some(base + 3),
+            )
+            .unwrap();
+        assert!(
+            saved.error.is_none(),
+            "SAVE_AFTER_REPEATED_CONFIRMATION_FITS_THE_FIXED_POOL: {:?}",
+            saved.error
+        );
+        old_confirmation = Some(confirmation);
+        let owner = host.owner.upgrade().unwrap();
+        let owner = owner.lock().unwrap();
+        assert!(
+            owner
+                .core()
+                .history_pool()
+                .lease_counts(kinewright_project::operation_history::Role::Ordinary)
+                .unwrap()
+                .1
+                <= 3,
+            "RECOVERY_REPLAY_CACHE_HAS_AT_MOST_THREE_ORDINARY_LEASES"
+        );
+    }
 }
 
 fn foreground_state(host: &WriterHost) -> Vec<u8> {
@@ -908,11 +1072,11 @@ fn foreground_request(
         )
         .unwrap()
     } else {
-        HostCommandOwner::execute_attached_shared(
+        received_reply_for_test(HostCommandOwner::execute_attached_shared(
             &host.owner.upgrade().unwrap(),
             &client.bootstrap.auth,
             request,
-        )
+        ))
     }
 }
 
@@ -930,8 +1094,7 @@ fn acquire_and_save_foreground(host: &WriterHost, editor: &HostClient, over_http
         grant.manual_lease.is_some(),
         "C1_FOREGROUND_EDITOR_ACQUIRES"
     );
-    let snapshot =
-        HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
+    let snapshot = host_snapshot_for_test(host);
     let saved = accepted(foreground_request(
         host,
         editor,
@@ -1163,14 +1326,14 @@ fn discard_foreground_reply(
     }
     let owner = host.owner.upgrade().unwrap();
     let owner = owner.lock().unwrap();
-    accepted(
+    received_reply_for_test(accepted(
         owner
             .foreground_reply
             .as_ref()
             .expect("C2_LOST_REPLY_RETAINED")
             .3
             .clone(),
-    )
+    ))
 }
 
 fn assert_original_foreground(mut repeated: HostReply, original: &HostReply, marker: &str) {
@@ -1243,8 +1406,7 @@ fn s3_fix2_same_subject_detach_preserves_lost_grant() {
             "C2_SAME_CLIENT_OTHER_INSTANCE_REFUSED"
         );
         assert_eq!(foreground_state(&host), before);
-        let snapshot =
-            HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
+        let snapshot = host_snapshot_for_test(&host);
         assert!(
             accepted(foreground_request(
                 &host,
@@ -1302,8 +1464,7 @@ fn s3_fix2_unnumbered_lease_guards_empty_slot() {
             before,
             "C2_LEASE_REFUSAL_SLOT_BYTES"
         );
-        let snapshot =
-            HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
+        let snapshot = host_snapshot_for_test(&host);
         for command in [
             HostCommand::Status,
             HostCommand::Save {
@@ -1363,7 +1524,14 @@ fn s3_fix2_unnumbered_lease_guards_empty_slot() {
             .is_some()
         );
         assert_eq!(
-            host.owner.upgrade().unwrap().lock().unwrap().manual,
+            host.owner
+                .upgrade()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .manual
+                .as_ref()
+                .map(|authority| authority.lease().clone()),
             original.manual_lease
         );
     }
@@ -1391,8 +1559,7 @@ fn s3_fix2_detach_reattach_replays_lost_save() {
         ))
         .manual_lease
         .unwrap();
-        let snapshot =
-            HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
+        let snapshot = host_snapshot_for_test(&host);
         let command = HostCommand::Save { snapshot };
         let original = discard_foreground_reply(&host, &editor, command.clone(), 2, over_http);
         assert!(original.saved.is_some());
@@ -1422,7 +1589,13 @@ fn s3_fix2_detach_reattach_replays_lost_save() {
                     .attachment
                     .is_none()
             );
-            assert_eq!(owner.manual.as_ref(), Some(&lease));
+            assert_eq!(
+                owner
+                    .manual
+                    .as_ref()
+                    .map(kinewright_project::editing_session::ManualAuthority::lease),
+                Some(&lease)
+            );
             assert_eq!(
                 serde_json::to_value(
                     &owner
@@ -1522,7 +1695,8 @@ fn s3_fix2_detach_reattach_replays_lost_save() {
                 .lock()
                 .unwrap()
                 .manual
-                .as_ref(),
+                .as_ref()
+                .map(kinewright_project::editing_session::ManualAuthority::lease),
             Some(&lease)
         );
     }
@@ -1574,8 +1748,7 @@ fn s3_fix2_no_lease_acquisition_preempts_non_authority_slot() {
             "C2_NO_LEASE_ACQUIRE_PREEMPTS: {:?}",
             grant.error
         );
-        let snapshot =
-            HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
+        let snapshot = host_snapshot_for_test(&host);
         assert!(
             accepted(foreground_request(
                 &host,
@@ -1632,8 +1805,7 @@ fn s3_fix2_no_lease_reads_and_refusals_cannot_replace_slot() {
             "C2_OPERATION_COMMAND_CLIENT_BOUND"
         );
         assert_eq!(foreground_state(&host), before);
-        let mut snapshot =
-            HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
+        let mut snapshot = host_snapshot_for_test(&host);
         snapshot.history_sha256 = "0".repeat(64);
         let denied = foreground_request(
             &host,
@@ -1846,9 +2018,7 @@ fn s3_fix3_lost_save_as_and_switch_retry() {
                     envelope: Box::new(envelope),
                 }
             } else {
-                let snapshot =
-                    HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core())
-                        .unwrap();
+                let snapshot = host_snapshot_for_test(&host);
                 HostCommand::SaveAs {
                     destination: temp.path("saved-as.kinewright"),
                     snapshot,
@@ -1858,6 +2028,25 @@ fn s3_fix3_lost_save_as_and_switch_retry() {
             let (root, identity) = {
                 let owner = host.owner.upgrade().unwrap();
                 let owner = owner.lock().unwrap();
+                if switching {
+                    let cached = &owner.foreground_reply.as_ref().unwrap().3;
+                    let saved = cached.history.as_ref().unwrap();
+                    let installed = &cached.switch_attachment.as_ref().unwrap().history;
+                    assert!(
+                        std::sync::Arc::ptr_eq(&saved.snapshot, &installed.snapshot),
+                        "SWITCH_REPLY_RETAINS_ONE_FULL_CAPTURE"
+                    );
+                    assert!(
+                        owner
+                            .core()
+                            .history_pool()
+                            .lease_counts(kinewright_project::operation_history::Role::Ordinary)
+                            .unwrap()
+                            .0
+                            <= 2,
+                        "SWITCH_REPLY_LEAVES_ROOM_FOR_CONFIRMATION"
+                    );
+                }
                 assert!(owner.manual.is_none(), "C3_HANDOFF_RELEASES_LEASE");
                 assert_eq!(owner.switch_frozen, switching);
                 (
@@ -1978,9 +2167,7 @@ fn s3_fix3_lost_save_as_and_switch_retry() {
                 .manual_lease
                 .is_some()
             );
-            let snapshot =
-                HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core())
-                    .unwrap();
+            let snapshot = host_snapshot_for_test(&host);
             assert!(
                 accepted(foreground_request(
                     &host,
@@ -2004,8 +2191,7 @@ fn s3_attachment_role_binding() {
         .unwrap()
         .with_manual_editor("e".repeat(64));
     let editor = host.client().with_manual_editor("e".repeat(64));
-    let snapshot =
-        HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
+    let snapshot = host_snapshot_for_test(&host);
     accepted(editor.request(HostCommand::Save { snapshot }).unwrap());
     refused(
         &host,
@@ -2067,8 +2253,7 @@ fn lost_detached_handoff(over_http: bool, switching: bool) -> LostDetachedHandof
             envelope: Box::new(envelope),
         }
     } else {
-        let snapshot =
-            HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
+        let snapshot = host_snapshot_for_test(&host);
         HostCommand::SaveAs {
             destination: temp.path("handoff.kinewright"),
             snapshot,
@@ -2129,9 +2314,7 @@ fn s3_followup_detached_handoff_requires_explicit_discard() {
             let before = foreground_state(host);
             let root = state(host)["root"].clone();
             for operation in [None, Some(3)] {
-                let snapshot =
-                    HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core())
-                        .unwrap();
+                let snapshot = host_snapshot_for_test(host);
                 for command in [
                     HostCommand::AcquireManual {
                         client: other_client.clone(),
@@ -2249,9 +2432,7 @@ fn s3_followup_detached_handoff_requires_explicit_discard() {
                 .manual_lease
                 .is_some()
             );
-            let snapshot =
-                HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core())
-                    .unwrap();
+            let snapshot = host_snapshot_for_test(host);
             assert!(
                 accepted(foreground_request(
                     host,
@@ -2377,8 +2558,7 @@ fn s3_followup_repeated_reads_dedupe_reference_pins_at_capacity() {
         Some(1),
         false,
     ));
-    let snapshot =
-        HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
+    let snapshot = host_snapshot_for_test(&host);
     accepted(foreground_request(
         &host,
         &editor,

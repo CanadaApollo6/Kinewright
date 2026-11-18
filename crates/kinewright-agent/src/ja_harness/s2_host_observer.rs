@@ -2,13 +2,18 @@
 use crate::writer_host::{
     HostAuth, HostClient, HostCommand, HostConfig, HostOrigin, SessionRoots, WriterHost,
 };
-use kinewright_core::{Core, Document};
+use kinewright_core::Document;
+use kinewright_project::operation_actor::Core;
 use serde_json::{Value, json};
 use std::path::Path;
 
 pub(super) fn observe(root: &Path, revised: bool) -> Result<Value, String> {
-    let core = Core::spawn(Document::default()).map_err(|e| e.to_string())?;
-    let local_control = core.export_history().map_err(|e| e.to_string())?.document
+    let core = Core::for_test(Document::default()).map_err(|e| e.to_string())?;
+    let local_control = core
+        .export_history()
+        .map_err(|e| e.to_string())?
+        .history()
+        .document
         == std::sync::Arc::new(Document::default());
     if !revised {
         return Ok(json!({"control":local_control,"surface":"pending_baseline_witness"}));

@@ -1,9 +1,40 @@
 //! Release native actors only after a fresh, exact persisted replay.
 #![allow(clippy::missing_errors_doc)]
 use super::{BundleError, DurableBranchSessionGuard, Ja1EditingSession};
-use crate::{bundle_records::BranchId, history_record::HistoryRecord};
+use crate::{bundle_records::BranchId, operation_history::Role};
 
 impl Ja1EditingSession {
+    /// Diagnose a retained task without releasing it or relying on a readable
+    /// run projection. Damaged run dependencies must not hide its live work.
+    pub fn verify_registered_task_checkpoint(
+        &self,
+        guard: &DurableBranchSessionGuard,
+    ) -> Result<bool, BundleError> {
+        let bundle = self.registered_bundle(guard)?;
+        let checkpoint = bundle.checkpoint(guard.branch_id())?;
+        if guard
+            .core()
+            .snapshot_identity()
+            .map_err(crate::bundle::operation_error)?
+            != checkpoint.identity
+        {
+            return Ok(false);
+        }
+        let reference = bundle.checkpoint_reference(guard.branch_id())?;
+        let recorded = bundle
+            .store()
+            .read_record::<crate::bundle_records::BranchCheckpoint>(&reference)?;
+        if *recorded != *checkpoint {
+            return Err(BundleError::Corrupt(
+                "saved native checkpoint differs from its accepted cut".into(),
+            ));
+        }
+        let opened = checkpoint.open(bundle.store(), bundle.history_pool())?;
+        if opened.identity() != checkpoint.identity {
+            return Err(BundleError::HistoryChanged);
+        }
+        Ok(true)
+    }
     /// The caller owns one guard; the registration owns the other Core handle.
     /// Additional handles, pending checkpoints and dirty work postpone release.
     pub fn release_checkpointed_native_branch(
@@ -18,8 +49,7 @@ impl Ja1EditingSession {
     pub fn is_registered_run_candidate(&self, branch: &BranchId) -> bool {
         self.durable_sessions.iter().any(|session| {
             session.guard.branch_id() == branch
-                && session.guard.base().history_role
-                    == crate::history_record::HistoryRole::Candidate
+                && session.guard.base().history_role == Role::Candidate
         })
     }
 
@@ -30,8 +60,7 @@ impl Ja1EditingSession {
     ) -> Result<bool, BundleError> {
         let Some(index) = self.durable_sessions.iter().position(|session| {
             session.guard.branch_id() == branch
-                && session.guard.base().history_role
-                    == crate::history_record::HistoryRole::Candidate
+                && session.guard.base().history_role == Role::Candidate
         }) else {
             return Ok(true);
         };
@@ -53,7 +82,7 @@ impl Ja1EditingSession {
     fn verify_native_release(&self, index: usize, handles: usize) -> Result<bool, BundleError> {
         let guard = &self.durable_sessions[index].guard;
         if guard.core().handle_count() != handles
-            || guard.base().history_role == crate::history_record::HistoryRole::Ordinary
+            || guard.base().history_role == Role::Ordinary
             || self.durable_sessions.iter().any(|session| {
                 session.guard.branch_id() != guard.branch_id()
                     && &session.guard.base().target_branch == guard.branch_id()
@@ -67,79 +96,44 @@ impl Ja1EditingSession {
             || self
                 .core
                 .attachment_state()
-                .map_err(crate::bundle::history_error)?
+                .map_err(crate::bundle::operation_error)?
                 != kinewright_core::AttachmentState::Live
         {
             return Ok(false);
         }
-        bundle.store().replay_gate().with(|| {
-            let owner = bundle.attach_core(guard.core())?;
-            let cut = owner.capture().map_err(crate::bundle::history_error)?;
-            let checkpoint = bundle.checkpoint(guard.branch_id())?;
-            // This detects dirty or behind-checkpoint work; a matching digest
-            // never substitutes for decoding the persisted journal below.
-            if crate::manual_history::history_sha256(cut.history())? != checkpoint.history_digest {
-                return Ok(false);
-            }
-            let verified = bundle
-                .store()
-                .read_record::<crate::bundle_records::BranchCheckpoint>(
-                    &bundle.checkpoint_reference(guard.branch_id())?,
-                )?;
-            if *verified != *checkpoint {
-                return Err(BundleError::Corrupt(
-                    "saved native checkpoint differs from its accepted cut".into(),
-                ));
-            }
-            let replayed = bundle.store().resolve_history(&checkpoint.history_ref)?;
-            HistoryRecord::verify_checkpoint(checkpoint, &replayed)?;
-            if *replayed != *cut.history() || checkpoint.batch_ids.len() != replayed.batches.len() {
-                return Err(BundleError::Corrupt(
-                    "saved native history differs from its live actor".into(),
-                ));
-            }
-            let lineage = bundle.branch_lineage(guard.branch_id())?;
-            crate::history_size::verify_history_lineage(
-                &replayed,
-                &lineage,
-                checkpoint.history_role,
-                bundle.store().limits(),
-            )?;
-            let lineage_shadow = crate::lineage_journal::live_bytes(&lineage)?;
-            if replayed
-                .decoded_charge()
-                .checked_add(lineage.decoded_charge())
-                .and_then(|bytes| bytes.checked_add(lineage_shadow))
-                .is_none_or(|bytes| bytes > bundle.store().limits().decoded_record_bytes)
-            {
-                return Err(BundleError::Capacity("history replay memory"));
-            }
-            let _lineage_shadow =
-                bundle
-                    .store()
-                    .reserve_copy_read(0, lineage_shadow, 0, false, true)?;
-            let rebuilt = crate::bundle_commit::lineage(
-                guard.branch_id(),
-                &replayed,
-                &checkpoint.batch_ids,
-                Some(&lineage),
-                Some(&lineage),
-            )?;
-            if rebuilt != *lineage {
-                return Err(BundleError::Corrupt(
-                    "saved native lineage differs from replay".into(),
-                ));
-            }
-            let frozen = owner.freeze().map_err(crate::bundle::history_error)?;
-            if frozen != cut {
-                owner
-                    .resume(&frozen)
-                    .map_err(crate::bundle::history_error)?;
-                return Err(BundleError::HistoryChanged);
-            }
-            owner.seal(&frozen).map_err(crate::bundle::history_error)?;
-            Ok(true)
-        })?
+        let owner = bundle.attach_core(guard.core())?;
+        let cut = owner.capture().map_err(crate::bundle::operation_error)?;
+        let checkpoint = bundle.checkpoint(guard.branch_id())?;
+        if cut.identity() != checkpoint.identity {
+            return Ok(false);
+        }
+        let reference = bundle.checkpoint_reference(guard.branch_id())?;
+        let verified = bundle
+            .store()
+            .read_record::<crate::bundle_records::BranchCheckpoint>(&reference)?;
+        if *verified != *checkpoint {
+            return Err(BundleError::Corrupt(
+                "saved native checkpoint differs from its accepted cut".into(),
+            ));
+        }
+        // Opening validates replay, lineage, fates and the exact resource union.
+        // Drop this independent cold reader before dropping the live role lease.
+        let replayed = checkpoint.open(bundle.store(), bundle.history_pool())?;
+        if replayed.identity() != cut.identity() {
+            return Err(BundleError::HistoryChanged);
+        }
+        drop(replayed);
+        let frozen = owner.freeze().map_err(crate::bundle::operation_error)?;
+        if frozen != cut {
+            owner
+                .resume(&frozen)
+                .map_err(crate::bundle::operation_error)?;
+            return Err(BundleError::HistoryChanged);
+        }
+        owner
+            .retire(&frozen)
+            .map_err(crate::bundle::operation_error)?;
+        Ok(true)
     }
 }
 

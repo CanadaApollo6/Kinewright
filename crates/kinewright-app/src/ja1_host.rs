@@ -2,10 +2,11 @@
 use super::{Action, RETENTION_LOST_TEXT};
 use eframe::egui;
 use kinewright_agent::writer_host::{
-    HostChoiceKind, HostClient, HostCommand, HostConfig, HostOrigin, HostReply, HostSnapshot,
-    HostSourceBinding, HostStatus, SessionRoots, SourceServer,
+    HostChoiceKind, HostClient, HostCommand, HostConfig, HostError, HostOrigin, HostReply,
+    HostSnapshot, HostSourceBinding, HostStatus, SessionRoots, SourceServer,
 };
-use kinewright_core::AcceptedCut;
+use kinewright_project::operation_actor::AcceptedCut;
+use kinewright_project::operation_protocol::EncodedMessage;
 use kinewright_project::{
     bundle::BundleError, bundle_records::ObjectRef, editing_session::Ja1EditingSession,
     source_boundary::BorrowedSourceDescriptor,
@@ -80,7 +81,7 @@ pub(super) struct HostAttachment {
     context: std::sync::Weak<std::sync::atomic::AtomicBool>,
     recovery: Option<JoinHandle<Result<recovery::RecoveredManual, BundleError>>>,
     recovery_plan: std::sync::Arc<std::sync::Mutex<Option<recovery::RecoveryPlan>>>,
-    recovery_originals: Vec<kinewright_core::AcceptedHistory>,
+    recovery_originals: Vec<kinewright_project::operation_protocol::EncodedMessage>,
     pub client: HostClient,
     pub status: HostStatus,
     source: Option<BorrowedSourceDescriptor>,
@@ -99,6 +100,8 @@ pub(super) struct HostAttachment {
     manual_client: String,
     #[cfg(all(test, target_os = "linux"))]
     pub(super) manual_publication_hold: bool,
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) after_first_manual_reply: Option<Box<dyn FnOnce() + Send>>,
     manual_inflight:
         Option<JoinHandle<Result<HostReply, kinewright_agent::writer_host::HostError>>>,
 }
@@ -106,6 +109,26 @@ pub(super) struct HostAttachment {
 type StatusLane = JoinHandle<Result<HostReply, kinewright_agent::writer_host::HostError>>;
 
 impl HostAttachment {
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn set_fixture_issuer(&mut self, issuer: kinewright_agent::writer_host::HostIssuer) {
+        self.issuer = Some(issuer);
+    }
+    fn owner_document(
+        owner: &Ja1EditingSession,
+    ) -> Result<std::sync::Arc<kinewright_core::Document>, BundleError> {
+        match owner
+            .core()
+            .request(kinewright_core::Command::Query(
+                kinewright_core::Query::Document,
+            ))
+            .map_err(|error| BundleError::Corrupt(error.to_string()))?
+        {
+            kinewright_core::Event::QueryResult(kinewright_core::QueryResult::Document(
+                document,
+            )) => Ok(document),
+            _ => Err(BundleError::HistoryChanged),
+        }
+    }
     pub fn import_unsaved_media(
         &mut self,
         owner: &mut Ja1EditingSession,
@@ -146,14 +169,7 @@ impl HostAttachment {
             callback: server.bootstrap(),
         };
         self.pending_source_server = Some(server);
-        let snapshot = HostSnapshot::from_history(
-            self.cut
-                .as_ref()
-                .ok_or(BundleError::HistoryChanged)?
-                .history()
-                .clone(),
-        )
-        .map_err(host_error)?;
+        let snapshot = HostSnapshot::capture(owner.core()).map_err(host_error)?;
         let reply =
             self.foreground_request(HostCommand::RefreshUnsavedInputs { binding, snapshot })?;
         if reply.error.is_none() {
@@ -175,7 +191,9 @@ impl HostAttachment {
     }
 
     #[cfg(all(test, target_os = "linux"))]
-    pub(super) fn prepared_switch_probe(&self) -> Option<kinewright_core::Core> {
+    pub(super) fn prepared_switch_probe(
+        &self,
+    ) -> Option<kinewright_project::operation_actor::Core> {
         self.prepared_switch
             .as_ref()
             .map(|(actor, _)| actor.core().clone())
@@ -185,9 +203,9 @@ impl HostAttachment {
         owner: &mut Ja1EditingSession,
         committed: &kinewright_project::bundle_switch::SwitchAttachment,
     ) -> Result<(HostReply, super::PreparedView), BundleError> {
-        committed.verify()?;
+        drop(committed.verify(owner.core().history_pool())?);
         if let Some((installed, _)) = &self.installed_switch
-            && installed != committed
+            && installed.identity()? != committed.identity()?
         {
             return Err(BundleError::HistoryChanged);
         }
@@ -330,7 +348,7 @@ impl HostAttachment {
                 roots,
                 origin: HostOrigin::Gui {
                     retention,
-                    initial_snapshot: HostSnapshot::from_history(transfer.history).map_err(
+                    initial_snapshot: Some(HostSnapshot::from_history(transfer.history).map_err(
                         |error| {
                             Self::failed_launch(
                                 owner,
@@ -339,7 +357,7 @@ impl HostAttachment {
                                 host_error(error),
                             )
                         },
-                    )?,
+                    )?),
                     expected_root_sha256: transfer.expected_root_sha256,
                     expected_project_id: transfer.project_id,
                 },
@@ -423,6 +441,8 @@ impl HostAttachment {
             manual_client,
             #[cfg(all(test, target_os = "linux"))]
             manual_publication_hold: false,
+            #[cfg(all(test, target_os = "linux"))]
+            after_first_manual_reply: None,
             manual_inflight: None,
             edits: crate::manual_edits::ManualEdits::default(),
         })
@@ -497,6 +517,8 @@ impl HostAttachment {
             .to_owned(),
             #[cfg(all(test, target_os = "linux"))]
             manual_publication_hold: false,
+            #[cfg(all(test, target_os = "linux"))]
+            after_first_manual_reply: None,
             manual_inflight: None,
             edits: crate::manual_edits::ManualEdits::default(),
         })
@@ -514,13 +536,13 @@ impl HostAttachment {
         {
             return Ok(None);
         }
-        if self
-            .manual
-            .as_ref()
-            .is_some_and(|gate| gate.actor == owner.core().actor_identity())
+        if let Some(gate) = &self.manual
+            && gate.actor == owner.core().actor_identity()
+            && gate.permit.is_current().map_err(BundleError::Operation)?
         {
             return Ok(None);
         }
+        self.manual = None;
         // C9 has no absent-suffix/floor/recovery authorization. A first-save or
         // dirty bootstrap must explicitly Save before granting a durable identity.
         let digest = HostSnapshot::capture(owner.core())
@@ -574,7 +596,7 @@ impl HostAttachment {
         let lease = reply.manual_lease.ok_or(BundleError::HistoryChanged)?;
         let inputs = reply.manual_inputs.ok_or(BundleError::HistoryChanged)?;
         let permit = if let Some(cut) = &self.cut {
-            let digest = lease.history_sha256.clone();
+            let digest = lease.snapshot.to_string();
             let endpoint = owner.manual_recovery_endpoint(cut, vec![])?;
             let permit = endpoint.finish(
                 lease,
@@ -584,7 +606,11 @@ impl HostAttachment {
             owner.finish_host_manual_recovery(&digest)?;
             permit
         } else {
-            owner.bind_manual_producer(lease, inputs)?
+            owner.bind_manual_producer(
+                lease,
+                inputs,
+                self.context.upgrade().ok_or(BundleError::HistoryChanged)?,
+            )?
         };
         self.client = self.client.with_manual_editor(self.manual_client.clone());
         self.manual = Some(super::ManualProducerGate {
@@ -615,13 +641,9 @@ impl HostAttachment {
                 .pending()
                 .map_err(|e| BundleError::Identity(e.to_string()))?;
             if !messages.is_empty() {
-                let reply = self
-                    .client
-                    .request(HostCommand::CommitHistory {
-                        client: self.manual_client.clone(),
-                        messages,
-                    })
-                    .map_err(host_error)?;
+                let reply =
+                    request_manual_history(&self.client, self.manual_client.clone(), messages)
+                        .map_err(host_error)?;
                 self.accept_manual_ack(&reply, owner)?;
                 self.accept_status(reply.status);
                 if let Some(error) = reply.error {
@@ -823,18 +845,14 @@ impl HostAttachment {
                 .ensure_host_snapshot(self.cut.as_ref().ok_or(BundleError::HistoryChanged)?)?;
         }
         let snapshot = || -> Result<HostSnapshot, BundleError> {
-            let history = self
+            if self
                 .cut
                 .as_ref()
-                .ok_or(BundleError::HistoryChanged)?
-                .history()
-                .clone();
-            let bytes =
-                serde_json::to_vec(&history).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            Ok(HostSnapshot {
-                history,
-                history_sha256: kinewright_media::sha256_bytes(&bytes),
-            })
+                .is_none_or(|cut| owner.core().change_id().ok() != Some(cut.change()))
+            {
+                return Err(BundleError::HistoryChanged);
+            }
+            HostSnapshot::capture(owner.core()).map_err(host_error)
         };
         let command = match action {
             Action::DismissManualNotice
@@ -853,9 +871,7 @@ impl HostAttachment {
             }
             Action::ImportMedia(path) => {
                 let asset_id = kinewright_core::AssetId(
-                    snapshot()?
-                        .history
-                        .document
+                    Self::owner_document(owner)?
                         .media_pool
                         .iter()
                         .map(|asset| asset.id.0)
@@ -913,7 +929,7 @@ impl HostAttachment {
             Action::PreviewRescue => HostCommand::PreviewRescue {
                 snapshot: snapshot()?,
             },
-            Action::ConsentTrim => HostCommand::ConsentTrim,
+
             Action::ConsentOmission => HostCommand::ConsentOmission,
             Action::RescueTo(destination) => HostCommand::RescueTo { destination },
             Action::Cancel => HostCommand::Cancel,
@@ -976,8 +992,8 @@ impl HostAttachment {
     pub fn pending_count(&self) -> usize {
         self.manual
             .as_ref()
-            .and_then(|gate| gate.permit.pending().ok())
-            .map_or(0, |messages| messages.len())
+            .and_then(|gate| gate.permit.pending_count().ok())
+            .unwrap_or(0)
     }
     pub fn read_only(&self) -> bool {
         self.manual.is_none()
@@ -1067,14 +1083,18 @@ impl HostAttachment {
                 let stale = self.take_heartbeat();
                 let client = self.client.clone();
                 let identity = self.manual_client.clone();
+                #[cfg(all(test, target_os = "linux"))]
+                let after_reply = self.after_first_manual_reply.take();
                 self.manual_inflight = Some(std::thread::spawn(move || {
                     if let Some(stale) = stale {
                         let _ = stale.join();
                     }
-                    client.request(HostCommand::CommitHistory {
-                        client: identity,
-                        messages,
-                    })
+                    let reply = request_manual_history(&client, identity, messages);
+                    #[cfg(all(test, target_os = "linux"))]
+                    if let Some(after_reply) = after_reply {
+                        after_reply();
+                    }
+                    reply
                 }));
             }
         }
@@ -1262,19 +1282,12 @@ impl HostAttachment {
                 }
             }
             Some(HostChoiceKind::Rescue) => {
-                let trim = self.status.rescue_trim_accepted;
                 let omission = self.status.rescue_omission_accepted;
-                let needs_trim = self.status.rescue_trim_required;
                 let needs_omission = self.status.rescue_omission_required;
-                if needs_trim && !trim && ui.button("Remove this older Undo history in B").clicked()
-                {
-                    action = Some(Action::ConsentTrim);
-                }
                 for text in &self.status.rescue_omissions {
                     ui.label(text);
                 }
                 if needs_omission
-                    && (!needs_trim || trim)
                     && !omission
                     && ui
                         .button("Omit these unavailable recovery points")
@@ -1282,8 +1295,7 @@ impl HostAttachment {
                 {
                     action = Some(Action::ConsentOmission);
                 }
-                if (!needs_trim || trim)
-                    && (!needs_omission || omission)
+                if (!needs_omission || omission)
                     && ui.button("Save rescue copy to…").clicked()
                     && let Some(path) = rfd::FileDialog::new()
                         .add_filter("Kinewright project", &["kinewright"])
@@ -1432,11 +1444,53 @@ impl HostAttachment {
     }
 }
 
+fn request_manual_history(
+    client: &HostClient,
+    identity: String,
+    messages: Vec<EncodedMessage>,
+) -> Result<HostReply, HostError> {
+    let packet_count = messages.len();
+    let send = |command| {
+        let reply = client.request(command)?;
+        let acknowledged = reply.manual_ack.len();
+        let valid = match (reply.error.is_some(), reply.manual_unattempted) {
+            (false, None) => acknowledged == packet_count,
+            (true, Some(unattempted)) => {
+                packet_count.checked_sub(acknowledged + 1) == Some(unattempted)
+            }
+            (true, None) => acknowledged == 0,
+            (false, Some(_)) => false,
+        };
+        if !valid {
+            return Err(HostError::Protocol("invalid manual history reply".into()));
+        }
+        Ok(reply)
+    };
+    let command = HostCommand::CommitHistory {
+        client: identity,
+        messages,
+    };
+    let reply = send(command.clone())?;
+    if reply.status.retention_proven
+        && reply.manual_unattempted.is_none()
+        && reply
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == "durability_unknown")
+    {
+        // Only this publication door can settle the live writer's candidate.
+        // Resend the same immutable packets once before exposing recovery.
+        return send(command);
+    }
+    // A refused command and its original suffix stay in the outbox for recovery.
+    Ok(reply)
+}
+
 #[allow(
     clippy::needless_pass_by_value,
     reason = "map_err consumes the owned transport error at this boundary"
 )]
-fn host_error(error: kinewright_agent::writer_host::HostError) -> BundleError {
+fn host_error(error: HostError) -> BundleError {
     BundleError::Identity(error.to_string())
 }
 

@@ -4,13 +4,12 @@ use crate::manual_edits::{
     ManualEdits,
     tests::{Proof, ack, add, collect, fixture_with_document},
 };
-use kinewright_core::{
-    Command, Core, CoreAttachment, Event, ManualPermit, Track, TrackId, TrackKind,
-};
+use kinewright_core::{Command, Event, Track, TrackId, TrackKind};
+use kinewright_project::operation_actor::{Attachment, Core, ManualPermit};
 
 struct WheelProbe {
     core: Core,
-    owner: CoreAttachment<Proof>,
+    owner: Attachment<Proof>,
     permit: ManualPermit,
     edits: ManualEdits,
     document: Arc<Document>,
@@ -157,7 +156,8 @@ impl WheelProbe {
         self.acknowledge();
     }
     fn values(&self) -> [i64; 3] {
-        let document = self.core.export_history().unwrap().document;
+        let document_capture = self.core.export_history().unwrap();
+        let document = &document_capture.history().document;
         let effect = &document.clip(ClipId(1)).unwrap().effects[0];
         let params = ColorWheelsParams::from_effect(effect);
         [
@@ -207,12 +207,13 @@ fn manual_widget_return_queued_has_no_edit_or_undo() {
     );
     let after = h.core.export_history().unwrap();
     assert_eq!(
-        after.cursor.undo.len(),
-        before.cursor.undo.len(),
+        after.history().undo.len(),
+        before.history().undo.len(),
         "WIDGET_RETURN_QUEUED_NO_UNDO"
     );
     assert_eq!(
-        *after.document, *before.document,
+        *after.history().document,
+        *before.history().document,
         "WIDGET_RETURN_QUEUED_DOCUMENT_UNCHANGED"
     );
 }
@@ -251,24 +252,32 @@ impl WheelProbe {
         self.frame(vec![button(at, false)]);
     }
     fn refresh(&mut self) {
-        self.document = self.core.export_history().unwrap().document;
-        self.revision = self.core.history_change_id().unwrap().revision();
+        let Event::QueryResult(kinewright_core::QueryResult::Document(document)) = self
+            .core
+            .request(Command::Query(kinewright_core::Query::Document))
+            .unwrap()
+        else {
+            panic!("document query")
+        };
+        self.document = document;
+        self.revision = self.core.change_id().unwrap().revision;
     }
-    fn assert_one_undo(&mut self, before: &kinewright_core::HistorySnapshot) {
+    fn assert_one_undo(&mut self, before: &kinewright_project::operation_history::OwnerSnapshot) {
         let after = self.core.export_history().unwrap();
         assert_eq!(
-            after.cursor.undo.len(),
-            before.cursor.undo.len() + 1,
+            after.history().undo.len(),
+            before.history().undo.len() + 1,
             "WIDGET_RETURN_ONE_UNDO"
         );
+        drop(after);
         self.acknowledge();
         assert!(matches!(
             self.permit.request(Command::Undo).unwrap(),
             Event::DocumentChanged { .. }
         ));
         assert_eq!(
-            *self.core.export_history().unwrap().document,
-            *before.document,
+            *self.core.export_history().unwrap().history().document,
+            *before.history().document,
             "WIDGET_RETURN_UNDO_RESTORES_START"
         );
     }
@@ -467,7 +476,7 @@ fn curve_widget_emits_its_complete_return_to_the_document() {
 }
 
 #[test]
-fn solid_picker_input_is_the_pending_colour_until_it_is_replaced_or_abandoned() {
+fn solid_picker_shows_accepted_colour_until_a_refused_value_is_applied() {
     fn contains(shape: &egui::Shape, desired: kinewright_core::SolidColor) -> bool {
         match shape {
             egui::Shape::Rect(rect) => {
@@ -497,7 +506,7 @@ fn solid_picker_input_is_the_pending_colour_until_it_is_replaced_or_abandoned() 
         .unwrap();
     collect(&mut h.edits);
     assert!(h.edits.waiting_for_ack());
-    assert_eq!(h.edits.desired_solid_color(ClipId(1)), Some(desired));
+    assert_eq!(h.edits.desired_solid_color(ClipId(1)), None);
     let accepted = kinewright_core::SolidColor { r: 0, g: 0, b: 0 };
     let output = h.ctx.run_ui(egui::RawInput::default(), |ui| {
         let mut pending = InspectorEdits::default();
@@ -510,15 +519,22 @@ fn solid_picker_input_is_the_pending_colour_until_it_is_replaced_or_abandoned() 
         );
         assert!(
             pending.operations.is_empty(),
-            "painting requested input does not send"
+            "painting the accepted swatch does not send"
         );
     });
     assert!(
         output
             .shapes
             .iter()
+            .any(|shape| contains(&shape.shape, accepted)),
+        "PICKER_SHOWS_ACCEPTED_COLOUR"
+    );
+    assert!(
+        !output
+            .shapes
+            .iter()
             .any(|shape| contains(&shape.shape, desired)),
-        "PICKER_SHOWS_REQUESTED_COLOUR"
+        "PICKER_HIDES_REFUSED_COLOUR"
     );
     h.acknowledge();
     h.edits.start_next(&h.permit);
@@ -622,7 +638,8 @@ fn astra_matte_numeric_typed_return_keeps_final_value() {
     h.edits.end_gestures();
     h.drain();
     assert_eq!(h.edits.message(), None);
-    let doc = h.core.export_history().unwrap().document;
+    let doc_capture = h.core.export_history().unwrap();
+    let doc = &doc_capture.history().document;
     let params = &doc.clip(ClipId(1)).unwrap().effects[0].parameters;
     assert_eq!(
         params["matte_hue_center_centidegrees"],
@@ -909,7 +926,7 @@ fn typed_numeric_returns_reach_every_producer_family() {
         h.edits.end_gestures();
         h.drain();
         assert_eq!(
-            family.value(&h.core.export_history().unwrap().document),
+            family.value(&h.core.export_history().unwrap().history().document),
             0,
             "NUMERIC_TYPED_RETURN_FINAL {family:?}"
         );
@@ -945,6 +962,10 @@ fn invalid_numeric_text_and_unchanged_focus_make_no_edit() {
     }
 }
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the pointer interaction checks both unchanged clicks and the resulting history and keyframe state"
+)]
 fn unchanged_slider_click_does_not_auto_key_or_add_undo() {
     fn circle(shape: &egui::Shape) -> Option<egui::Pos2> {
         match shape {
@@ -1028,22 +1049,27 @@ fn unchanged_slider_click_does_not_auto_key_or_add_undo() {
     );
     h.drain();
     let after = h.core.export_history().unwrap();
-    let curve = &after.document.clip(ClipId(1)).unwrap().effects[0].keyframes["scale_x_percent"];
+    let curve =
+        &after.history().document.clip(ClipId(1)).unwrap().effects[0].keyframes["scale_x_percent"];
     assert_eq!(
         curve.value_at(TimeCode(50)),
         Some(100),
         "NUMERIC_MOVED_SLIDER_RETURN"
     );
     assert_eq!(
-        after.cursor.undo.len(),
-        before.cursor.undo.len() + 1,
+        after.history().undo.len(),
+        before.history().undo.len() + 1,
         "NUMERIC_MOVED_SLIDER_ONE_UNDO"
     );
+    drop(after);
     assert!(matches!(
         h.permit.request(Command::Undo).unwrap(),
         Event::DocumentChanged { .. }
     ));
-    assert_eq!(h.core.export_history().unwrap().document, before.document);
+    assert_eq!(
+        h.core.export_history().unwrap().history().document,
+        before.history().document
+    );
 }
 
 fn integer_value(value: &ParamValue) -> i64 {
@@ -1072,7 +1098,10 @@ fn numeric_text_and_enter_in_one_frame_preserve_the_return() {
         let (_, count) = h.numeric_frame(events, |ui, doc, p| family.draw(ui, doc, p));
         assert!(count > 0, "NUMERIC_TEXT_AND_ENTER_RETURN {family:?}");
         h.drain();
-        assert_eq!(family.value(&h.core.export_history().unwrap().document), 0);
+        assert_eq!(
+            family.value(&h.core.export_history().unwrap().history().document),
+            0
+        );
         assert!(!h.edits.pending());
         assert_eq!(h.edits.message(), None);
     }

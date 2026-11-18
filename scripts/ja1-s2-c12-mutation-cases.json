@@ -89,7 +89,7 @@
     "changes": [
       [
         "crates/kinewright-project/src/editing_session/switch.rs",
-        "request.checkpoint_generation != checkpoint.checkpoint_generation",
+        "request.checkpoint_generation != checkpoint.generation",
         "false"
       ]
     ],
@@ -99,24 +99,27 @@
     "target": "ja_s2_switch",
     "features": "test-util",
     "production": false,
-    "build_host": false
+    "build_host": false,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Same invariant at its native-history boundary."
+    }
   },
   {
     "name": "source-floor-ignored",
-    "changes": [
-      [
-        "crates/kinewright-project/src/editing_session/switch.rs",
-        "request.floor_generation != checkpoint.floor_generation",
-        "false"
-      ]
-    ],
+    "changes": [],
     "witness": "linux::g05a_each_source_identity_is_required_before_selection",
     "package": "kinewright-project",
     "kind": "--test",
     "target": "ja_s2_switch",
     "features": "test-util",
     "production": false,
-    "build_host": false
+    "build_host": false,
+    "superseded_by": "operation_actor::tests::capture_keeps_its_state_without_stopping_live_folds",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Save floor generation no longer exists; selected checkpoint reference/generation and complete native identity replace it."
+    }
   },
   {
     "name": "source-switch-ignored",
@@ -140,7 +143,7 @@
     "changes": [
       [
         "crates/kinewright-project/src/editing_session/switch.rs",
-        "envelope.expected_revision\n                != self\n                    .attachment\n                    .capture()\n                    .map_err(crate::bundle::history_error)?\n                    .revision()",
+        "envelope.expected_revision\n                != self\n                    .attachment\n                    .capture()\n                    .map_err(crate::bundle::operation_error)?\n                    .change()\n                    .revision",
         "false"
       ]
     ],
@@ -150,7 +153,11 @@
     "target": "ja_s2_switch",
     "features": "test-util",
     "production": false,
-    "build_host": false
+    "build_host": false,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Same invariant at its native-history boundary."
+    }
   },
   {
     "name": "source-sequence-ignored",
@@ -310,7 +317,7 @@
     "changes": [
       [
         "crates/kinewright-project/src/bundle_switch.rs",
-        "                    owner.resume(&cut).map_err(crate::bundle::history_error)?;",
+        "                    owner.resume(&cut).map_err(crate::bundle::operation_error)?;",
         "                    let _ = &cut;"
       ]
     ],
@@ -320,7 +327,11 @@
     "target": "ja_s2_switch",
     "features": "test-util",
     "production": false,
-    "build_host": false
+    "build_host": false,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Same invariant at its native-history boundary."
+    }
   },
   {
     "name": "lease-before-restored-equivalence",
@@ -375,33 +386,27 @@
   },
   {
     "name": "delayed-old-lease-acknowledged-after-return",
-    "changes": [
-      [
-        "crates/kinewright-agent/src/writer_host/manual.rs",
-        "            if envelope.manual.as_ref().map(|m| &m.binding) != Some(&lease) {",
-        "            if false {"
-      ],
-      [
-        "crates/kinewright-project/src/editing_session/manual.rs",
-        "        if envelope.manual.as_ref().map(|m| &m.binding) != Some(lease) {",
-        "        if false {"
-      ]
-    ],
+    "changes": [],
     "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
     "package": "kinewright-agent",
     "kind": "--test",
     "target": "ja_s2_host",
     "features": "kinewright-project/test-util",
     "production": true,
-    "build_host": false
+    "build_host": false,
+    "superseded_by": "editing_session::manual::c0_fix1_tests::production_manual_receipts_survive_restart_and_a_fresh_install_epoch",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "The old echoed envelope/lease equality is replaced by publisher, sequence, chain, exact receipt and attachment namespace fences."
+    }
   },
   {
     "name": "old-gui-actor-never-sealed",
     "changes": [
       [
         "crates/kinewright-project/src/editing_session.rs",
-        "        if let Err(error) = self.attachment.seal(cut) {",
-        "        if let Err(error) = self.attachment.capture().map(|_| ()) {"
+        "if let Err(error) = self.attachment.retire(cut) {",
+        "if let Err(error) = self.attachment.capture().map(|_| ()) {"
       ]
     ],
     "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
@@ -410,7 +415,11 @@
     "target": "ja_s2_host",
     "features": "kinewright-project/test-util",
     "production": true,
-    "build_host": false
+    "build_host": false,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Same invariant at its native-history boundary."
+    }
   },
   {
     "name": "shadow-resumed-before-gui-confirmation",
@@ -735,37 +744,35 @@
   },
   {
     "name": "first-r-save-remints-shared-batches",
-    "changes": [
-      [
-        "crates/kinewright-project/src/bundle_commit.rs",
-        "        let all_batch_ids = batch_ids.clone();",
-        "        if old_switch == 1 && selection.is_none() { for id in &mut batch_ids { *id = BatchId::fresh()?; } } let all_batch_ids = batch_ids.clone();"
-      ]
-    ],
+    "changes": [],
     "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
     "package": "kinewright-agent",
     "kind": "--test",
     "target": "ja_s2_host",
     "features": "kinewright-project/test-util",
     "production": true,
-    "build_host": false
+    "build_host": false,
+    "superseded_by": "operation_history::tests::folding_advances_seeds_and_resources",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Old publication batch-id vector removed; native commands and immutable origins retain the original accepted identity."
+    }
   },
   {
     "name": "return-save-remints-old-batches",
-    "changes": [
-      [
-        "crates/kinewright-project/src/bundle_commit.rs",
-        "        let all_batch_ids = batch_ids.clone();",
-        "        if old_switch >= 2 && selection.is_none() { for id in &mut batch_ids { *id = BatchId::fresh()?; } } let all_batch_ids = batch_ids.clone();"
-      ]
-    ],
+    "changes": [],
     "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
     "package": "kinewright-agent",
     "kind": "--test",
     "target": "ja_s2_host",
     "features": "kinewright-project/test-util",
     "production": true,
-    "build_host": false
+    "build_host": false,
+    "superseded_by": "operation_history::tests::folding_advances_seeds_and_resources",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Old publication batch-id vector removed; native commands and immutable origins retain the original accepted identity."
+    }
   },
   {
     "name": "original-retry-starts-another-selection",
@@ -954,18 +961,22 @@
     "changes": [
       [
         "crates/kinewright-project/src/editing_session.rs",
-        "        if let Err(error) = self.attachment.seal(cut) {",
-        "        if let Err(error) = self.attachment.capture().map(|_| ()) {"
+        "if let Err(error) = self.attachment.retire(cut) {",
+        "if let Err(error) = self.attachment.capture().map(|_| ()) {"
       ]
     ],
-    "witness": "rescue_and_switch_share_one_owner_after_restart",
+    "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
     "package": "kinewright-agent",
     "kind": "--test",
     "target": "ja_s2_host",
     "features": "kinewright-project/test-util",
     "production": true,
     "build_host": false,
-    "environment": {}
+    "environment": {},
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Same invariant at its native-history boundary."
+    }
   },
   {
     "name": "composed-receipt-grants-lease",
@@ -1187,19 +1198,23 @@
     "changes": [
       [
         "crates/kinewright-project/src/store.rs",
-        "crate::bundle_recovery::validate_publication_reopen_fit(\n                n,\n                bytes,\n                self.limits(),\n                &mut *self\n                    .inner\n                    .verified_memo\n                    .lock()\n                    .map_err(|_| BundleError::Capacity(\"memo poisoned\"))?,\n            )",
+        "crate::bundle_recovery::validate_publication_reopen_fit(\n                n,\n                bytes,\n                self.limits(),\n                &mut *self\n                    .inner\n                    .verified_memo\n                    .lock()\n                    .map_err(|_| BundleError::Capacity(\"memo poisoned\"))?,\n                self.inner\n                    .history_pool\n                    .lock()\n                    .map_err(|_| BundleError::Capacity(\"history pool poisoned\"))?\n                    .as_ref()\n                    .ok_or(BundleError::HistoryBarrierInvariant)?,\n            )",
         "Ok(())"
       ]
     ],
-    "witness": "durable::w13_selection_fresh_open_exact_and_one_byte_over",
+    "witness": "bundle_commit::fu1_tests::root_admission_refuses_an_unopenable_owner_graph_before_staging",
     "package": "kinewright-project",
-    "kind": "--test",
-    "target": "ja_s2_rescue_record",
+    "kind": "--lib",
+    "target": "",
     "features": "test-util",
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": "ROOT_ADMISSION_REFUSES_UNOPENABLE_OWNER_GRAPH",
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Skip publication fresh-open validation including native creation-profile admission, without changing any other graph guard."
+    }
   },
   {
     "name": "repeat-c4-committed-selection-phase-erased",
@@ -1218,7 +1233,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-portable-nonzero-switch-refused",
@@ -1237,7 +1256,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-compaction-attachment-drops-independent-root",
@@ -1256,7 +1279,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-ack-exact-receipt-lookup-omitted",
@@ -1275,7 +1302,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-selected-pin-omitted",
@@ -1294,7 +1325,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-selected-pin-released-before-activation",
@@ -1313,15 +1348,19 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-resolve-by-automatic-list-position",
     "changes": [
       [
         "crates/kinewright-project/src/bundle_switch.rs",
-        "let restore = self.prepare_checkpoint_restore(&target)?;",
-        "let wrong = match &target { RecoverySelection::Checkpoint { branch, .. } => RecoverySelection::Checkpoint { root: self.recovery.predecessors[0].clone(), branch: branch.clone() }, other => other.clone() }; let restore = self.prepare_checkpoint_restore(&wrong)?;"
+        "        let restore = self.prepare_checkpoint_restore(core, &target, target_branch.clone())?;",
+        "        let wrong = match &target { RecoverySelection::Checkpoint { branch, .. } => RecoverySelection::Checkpoint { root: self.recovery.predecessors[0].clone(), branch: branch.clone() }, other => other.clone() };\n        let restore = self.prepare_checkpoint_restore(core, &wrong, target_branch.clone())?;"
       ]
     ],
     "witness": "durable::w13_local_selection_mapping_limits_and_retry",
@@ -1332,7 +1371,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Resolve a retained exact checkpoint by the mutable automatic-list position instead of its selected identity."
+    }
   },
   {
     "name": "repeat-c4-require-continued-automatic-membership",
@@ -1340,7 +1383,7 @@
       [
         "crates/kinewright-project/src/bundle_switch.rs",
         "// Verify the original identity even after its automatic slot has rotated away.",
-        "if !self.recovery.references().contains(&target_ref) { owner.resume(&cut).map_err(crate::bundle::history_error)?; return Err(BundleError::Unsettled); }\n        // Verify the original identity even after its automatic slot has rotated away."
+        "if !self.recovery.references().contains(&target_ref) { owner.resume(&cut).map_err(crate::bundle::operation_error)?; return Err(BundleError::Unsettled); }\n        // Verify the original identity even after its automatic slot has rotated away."
       ]
     ],
     "witness": "durable::w13_local_selection_mapping_limits_and_retry",
@@ -1351,15 +1394,19 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The same forbidden automatic-membership condition now resumes through the native attachment error type."
+    }
   },
   {
     "name": "repeat-c4-restored-history-truncated",
     "changes": [
       [
-        "crates/kinewright-project/src/bundle_recovery/restore.rs",
-        ".restore_history((*history).clone())",
-        ".restore_history(kinewright_core::HistoryTransition::floor((*history).clone(), 1).map_err(crate::bundle::history_error)?.after().clone())"
+        "crates/kinewright-core/src/undo/record.rs",
+        "    pub fn into_history(self) -> Result<History, Error> {\n        let cache = Cache::new(\n            self.bounds.checkpoint_documents,\n            self.bounds.decoded_history_bytes,\n        )?;\n        let Record {\n            baseline,\n            document,\n            undo,\n            redo,\n            position,\n            epoch,\n            policy,\n        } = self.record;\n        Ok(History {\n            baseline,\n            baseline_bound: self.baseline_bound,\n            document,\n            document_bound: self.document_bound,\n            undo,\n            redo,\n            position,\n            epoch,\n            policy,\n            bounds: self.bounds,\n            undo_charge: self.undo_charge,\n            redo_charge: self.redo_charge,\n            cache,\n            recorder: None,\n            recorder_bytes: 0,\n            merge_guard: self.merge_guard,\n        })\n    }",
+        "    pub fn into_history(self) -> Result<History, Error> {\n        let cache = Cache::new(\n            self.bounds.checkpoint_documents,\n            self.bounds.decoded_history_bytes,\n        )?;\n        let Record {\n            baseline,\n            document,\n            undo,\n            redo,\n            position,\n            epoch,\n            policy,\n        } = self.record;\n        Ok(History {\n            baseline,\n            baseline_bound: self.baseline_bound,\n            document,\n            document_bound: self.document_bound,\n            undo: undo.into_iter().take(1).collect(),\n            redo,\n            position,\n            epoch,\n            policy,\n            bounds: self.bounds,\n            undo_charge: self.undo_charge,\n            redo_charge: self.redo_charge,\n            cache,\n            recorder: None,\n            recorder_bytes: 0,\n            merge_guard: self.merge_guard,\n        })\n    }"
       ]
     ],
     "witness": "durable::w13_local_selection_mapping_limits_and_retry",
@@ -1370,17 +1417,15 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Truncate the validated Undo stack while constructing history; full native state checks must refuse or expose it."
+    }
   },
   {
     "name": "repeat-c4-shared-prefix-batches-reminted",
-    "changes": [
-      [
-        "crates/kinewright-project/src/bundle_commit.rs",
-        "let all_batch_ids = batch_ids.clone();",
-        "for id in &mut batch_ids { *id = BatchId::fresh()?; } let all_batch_ids = batch_ids.clone();"
-      ]
-    ],
+    "changes": [],
     "witness": "durable_branch::tests::w13_shared_prefix_occurrence_identity_survives_branch_saves",
     "package": "kinewright-agent",
     "kind": "--lib",
@@ -1389,17 +1434,16 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "superseded_by": "scripts/undo-retargeted-mutations.json:c4:shared-prefix-batches-reminted",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "The old publication-time batch-id prefix vector is gone. Native capture copies immutable command keys/digests and command origins; no remint/fallback branch remains."
+    }
   },
   {
     "name": "repeat-c4-occurrences-restamped",
-    "changes": [
-      [
-        "crates/kinewright-project/src/bundle_commit.rs",
-        "let origin = origins.get(id).unwrap_or(branch);",
-        "let _ = &origins; let origin = branch;"
-      ]
-    ],
+    "changes": [],
     "witness": "durable_branch::tests::w13_shared_prefix_occurrence_identity_survives_branch_saves",
     "package": "kinewright-agent",
     "kind": "--lib",
@@ -1408,17 +1452,16 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "superseded_by": "scripts/undo-retargeted-mutations.json:c4:occurrences-restamped",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "The occurrence journal and its fallback origin lookup are gone. Native immutable command-origin and seed maps are captured with the combined identity."
+    }
   },
   {
     "name": "repeat-c4-floor-forgets-shared-origins",
-    "changes": [
-      [
-        "crates/kinewright-project/src/bundle_commit.rs",
-        "old_lineage.as_deref().or(seed),",
-        "None,"
-      ]
-    ],
+    "changes": [],
     "witness": "durable_branch::tests::w13_shared_prefix_occurrence_identity_survives_branch_saves",
     "package": "kinewright-agent",
     "kind": "--lib",
@@ -1427,7 +1470,12 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "superseded_by": "scripts/undo-retargeted-mutations.json:c4:floor-forgets-shared-origins",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Save-side floor/lineage journal seed selection removed. Native executor folding advances the affected seeds and preserves original command origins."
+    }
   },
   {
     "name": "repeat-c4-definite-pointer-not-refreshed",
@@ -1446,7 +1494,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-reconciled-pointer-not-refreshed",
@@ -1465,7 +1517,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-later-save-resets-switch-generation",
@@ -1484,7 +1540,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-retry-allocates-new-target",
@@ -1503,15 +1563,19 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-frozen-direct-save-allowed",
     "changes": [
       [
         "crates/kinewright-project/src/bundle.rs",
-        "kinewright_core::AttachmentState::Frozen => {\n            return Err(history_error(\n                kinewright_core::HistoryError::MutationRefused(\n                    kinewright_core::CoreMutationRefusal::Frozen,\n                ),\n            ));\n        }",
-        "kinewright_core::AttachmentState::Frozen => {}"
+        "        kinewright_core::AttachmentState::Frozen => kinewright_core::CoreMutationRefusal::Frozen,",
+        "        kinewright_core::AttachmentState::Frozen => return Ok(()),"
       ]
     ],
     "witness": "durable::w13_local_selection_mapping_limits_and_retry",
@@ -1522,7 +1586,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Permit a raw direct Save to cross the frozen native attachment fence."
+    }
   },
   {
     "name": "repeat-c4-pin-admission-charge-omitted",
@@ -1541,7 +1609,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-raw-switch-requirement-omitted",
@@ -1560,7 +1632,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-supported-switch-unconditionally-refused",
@@ -1579,15 +1655,19 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-record-ack-edge-omitted",
     "changes": [
       [
         "crates/kinewright-project/src/rescue_record.rs",
-        "self.acknowledged_root.iter().cloned().collect()",
-        "vec![]"
+        "        self.acknowledged_root\n            .iter()\n            .chain(&self.capture_checkpoints)",
+        "        self.acknowledged_root\n            .iter().filter(|_| false)\n            .chain(&self.capture_checkpoints)"
       ]
     ],
     "witness": "durable::w13_ack_and_two_predecessors_reopen_rotate_and_recover",
@@ -1598,15 +1678,19 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Omit only the acknowledgement dependency while keeping full-capture edges."
+    }
   },
   {
     "name": "repeat-c4-record-digest-only-ack",
     "changes": [
       [
         "crates/kinewright-project/src/rescue_record.rs",
-        "self.acknowledged_root.iter().cloned().collect()",
-        "vec![]"
+        "        self.acknowledged_root\n            .iter()\n            .chain(&self.capture_checkpoints)",
+        "        self.acknowledged_root\n            .iter().filter(|_| false)\n            .chain(&self.capture_checkpoints)"
       ]
     ],
     "witness": "durable::w14_raw_role_schema_api_and_checkpoint_edges_are_required",
@@ -1617,7 +1701,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Omit only the acknowledgement dependency while keeping full-capture edges."
+    }
   },
   {
     "name": "repeat-c4-two-predecessor-validator-weakened",
@@ -1636,7 +1724,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-record-role-admission-omitted",
@@ -1655,7 +1747,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-record-edge-admission-omitted",
@@ -1674,7 +1770,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-record-schema-accepted",
@@ -1693,7 +1793,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-record-omitted-before-publication",
@@ -1712,7 +1816,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-provenance-count-unbounded",
@@ -1731,7 +1839,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-provenance-overflow-lost",
@@ -1750,7 +1862,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-provenance-treated-as-absent",
@@ -1769,7 +1885,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-origin-digest-conflict-ignored",
@@ -1788,7 +1908,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-l1-document-payload-change",
@@ -1797,11 +1921,6 @@
         "crates/kinewright-project/src/bundle_recovery/restore.rs",
         "if before.inspection_document() != after.inspection_document()",
         "if false && (before.inspection_document() != after.inspection_document()"
-      ],
-      [
-        "crates/kinewright-project/src/bundle_recovery/restore.rs",
-        "|| left.issuer_state_ref != right.issuer_state_ref\n    {",
-        "|| left.issuer_state_ref != right.issuer_state_ref)\n    {"
       ]
     ],
     "witness": "durable::w13_projection_preserves_every_non_linkage_payload",
@@ -1814,7 +1933,11 @@
     "environment": {
       "JA_C4_L1_CASE": "document"
     },
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-l1-batch-payload-change",
@@ -1823,11 +1946,6 @@
         "crates/kinewright-project/src/bundle_recovery/restore.rs",
         "if before.inspection_document() != after.inspection_document()",
         "if false && (before.inspection_document() != after.inspection_document()"
-      ],
-      [
-        "crates/kinewright-project/src/bundle_recovery/restore.rs",
-        "|| left.issuer_state_ref != right.issuer_state_ref\n    {",
-        "|| left.issuer_state_ref != right.issuer_state_ref)\n    {"
       ]
     ],
     "witness": "durable::w13_projection_preserves_every_non_linkage_payload",
@@ -1840,7 +1958,11 @@
     "environment": {
       "JA_C4_L1_CASE": "batch"
     },
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-l1-input-payload-change",
@@ -1849,11 +1971,6 @@
         "crates/kinewright-project/src/bundle_recovery/restore.rs",
         "if before.inspection_document() != after.inspection_document()",
         "if false && (before.inspection_document() != after.inspection_document()"
-      ],
-      [
-        "crates/kinewright-project/src/bundle_recovery/restore.rs",
-        "|| left.issuer_state_ref != right.issuer_state_ref\n    {",
-        "|| left.issuer_state_ref != right.issuer_state_ref)\n    {"
       ]
     ],
     "witness": "durable::w13_projection_preserves_every_non_linkage_payload",
@@ -1866,7 +1983,11 @@
     "environment": {
       "JA_C4_L1_CASE": "input"
     },
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-independent-projection-root-dropped",
@@ -1885,7 +2006,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-current-provenance-summarized",
@@ -1904,7 +2029,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-current-omission-dropped",
@@ -1923,7 +2052,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-oversized-raw-role-hidden",
@@ -1942,7 +2075,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-archived-raw-switch-requirement-skipped",
@@ -1961,7 +2098,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-missing-raw-requirement-accepted",
@@ -1980,7 +2121,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-rack-counted-as-third-predecessor",
@@ -1999,7 +2144,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-selected-predecessor-dropped",
@@ -2018,15 +2167,19 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c4-b-activation-rewrites-origin-inputs",
     "changes": [
       [
         "crates/kinewright-project/src/bundle_commit.rs",
-        "let historical_input_owner = switch_generation != 0",
-        "let historical_input_owner = false && switch_generation != 0"
+        "    pub(crate) fn publish_selection(\n        bundle: &mut ProjectBundle,\n        selection: &crate::bundle_switch::PreparedProjectSelection,\n    ) -> Result<BundleSaveReport, BundleError> {\n        #[cfg(any(test, feature = \"test-util\"))]\n        crate::test_hook(\"switch_before_publish\");\n        let result = Self::publish_branch_impl(\n            bundle,\n            Some(PublicationView::Selection(selection)),\n            &selection.restore.checkpoint.input_manifest_ref,\n            &selection.target_branch,\n            Some(selection),\n            false,\n            &[],\n            None,\n            None,\n            None,\n        )?\n        .published();\n        #[cfg(any(test, feature = \"test-util\"))]\n        if result.is_ok() {\n            crate::test_hook(\"switch_after_publish\");\n        }\n        result\n    }\n    pub(crate) fn publish_snapshot(",
+        "    pub(crate) fn publish_selection(\n        bundle: &mut ProjectBundle,\n        selection: &crate::bundle_switch::PreparedProjectSelection,\n    ) -> Result<BundleSaveReport, BundleError> {\n        #[cfg(any(test, feature = \"test-util\"))]\n        crate::test_hook(\"switch_before_publish\");\n        let wrong_inputs = bundle.checkpoint(bundle.manual_branch_id())?.input_manifest_ref.clone();\n        let result = Self::publish_branch_impl(\n            bundle,\n            Some(PublicationView::Selection(selection)),\n            &wrong_inputs,\n            &selection.target_branch,\n            Some(selection),\n            false,\n            &[],\n            None,\n            None,\n            None,\n        )?\n        .published();\n        #[cfg(any(test, feature = \"test-util\"))]\n        if result.is_ok() {\n            crate::test_hook(\"switch_after_publish\");\n        }\n        result\n    }\n    pub(crate) fn publish_snapshot("
       ]
     ],
     "witness": "durable::w13_checkpoint_restore_uses_b_identity_without_rewriting_inputs",
@@ -2037,17 +2190,15 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Publish selection with current inputs rather than its selected immutable context."
+    }
   },
   {
     "name": "repeat-c5-target-only-ordinary-publisher",
-    "changes": [
-      [
-        "crates/kinewright-project/src/bundle_recovery/publication.rs",
-        "        let _ = id;",
-        "        let active = active && *id == root.manual_branch_id;"
-      ]
-    ],
+    "changes": [],
     "witness": "linux::w13_every_publication_fits_fresh_open",
     "package": "kinewright-project",
     "kind": "--test",
@@ -2056,17 +2207,16 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": "live history bytes"
+    "red_text": "live history bytes",
+    "superseded_by": "scripts/undo-retargeted-mutations.json:c5:target-only-ordinary-publisher",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Old store-wide history-byte ledger removed; native creation profiles and every-owner cold validation replace it."
+    }
   },
   {
     "name": "repeat-c5-target-only-c5-sparse-cache",
-    "changes": [
-      [
-        "crates/kinewright-project/src/bundle_recovery/publication.rs",
-        "        let _ = id;",
-        "        let active = active && *id == root.manual_branch_id;"
-      ]
-    ],
+    "changes": [],
     "witness": "c5_pressure::w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_retry",
     "package": "kinewright-project",
     "kind": "--test",
@@ -2075,7 +2225,12 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": "published candidate cannot exceed independent fresh-open capacity"
+    "red_text": "published candidate cannot exceed independent fresh-open capacity",
+    "superseded_by": "scripts/undo-retargeted-mutations.json:c5:target-only-c5-sparse-cache",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Old store-wide history-byte ledger removed; physical graph/decoded-record proofs remain active independently."
+    }
   },
   {
     "name": "repeat-c5-select-before-definite-ordinary-save",
@@ -2094,17 +2249,15 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-refuse-legal-ordinary-floor",
-    "changes": [
-      [
-        "crates/kinewright-project/src/bundle.rs",
-        "let bounded = crate::bundle_commit::select_history(&aligned, self.store.limits())?;",
-        "let bounded = crate::bundle_commit::select_history(&aligned, self.store.limits())?; if bounded.floor.is_some() { return Err(BundleError::Capacity(\"mutant refuses legal floor\")); }"
-      ]
-    ],
+    "changes": [],
     "witness": "c5::w13_preliminary_save_uses_ordinary_floor_with_redo_or_gesture",
     "package": "kinewright-project",
     "kind": "--test",
@@ -2113,17 +2266,16 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "superseded_by": "scripts/undo-retargeted-mutations.json:c5:refuse-legal-ordinary-floor",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Save no longer chooses a history floor; native executor folds before publication."
+    }
   },
   {
     "name": "repeat-c5-bypass-ordinary-select-history",
-    "changes": [
-      [
-        "crates/kinewright-project/src/bundle.rs",
-        "let bounded = crate::bundle_commit::select_history(&aligned, self.store.limits())?;",
-        "let bounded = crate::bundle_commit::BoundedHistory { history: aligned.clone(), floor: None };"
-      ]
-    ],
+    "changes": [],
     "witness": "c5::w13_preliminary_save_uses_ordinary_floor_with_redo_or_gesture",
     "package": "kinewright-project",
     "kind": "--test",
@@ -2132,7 +2284,12 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "superseded_by": "scripts/undo-retargeted-mutations.json:c5:bypass-ordinary-select-history",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Save-side history selection removed; native snapshot publication retains both stacks."
+    }
   },
   {
     "name": "repeat-c5-unfreeze-selection-unknown",
@@ -2151,7 +2308,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-drop-l-on-later-r-save",
@@ -2170,7 +2331,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-drop-r-on-later-l-save",
@@ -2189,17 +2354,15 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-remint-shared-prefix-on-first-r-save",
-    "changes": [
-      [
-        "crates/kinewright-project/src/bundle_commit.rs",
-        "        let all_batch_ids = batch_ids.clone();",
-        "        if old_switch == 1 && selection.is_none() { for id in &mut batch_ids { *id = BatchId::fresh()?; } } let all_batch_ids = batch_ids.clone();"
-      ]
-    ],
+    "changes": [],
     "witness": "c5::w13_checkpoint_recovery_preserves_dirty_b_before_activation",
     "package": "kinewright-project",
     "kind": "--test",
@@ -2208,7 +2371,12 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "superseded_by": "scripts/undo-retargeted-mutations.json:c5:remint-shared-prefix-on-first-r-save",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Old per-publication batch-id prefix removed; retained commands preserve their original key and digest."
+    }
   },
   {
     "name": "repeat-c5-omit-quota-retirement-action",
@@ -2219,15 +2387,19 @@
         "            .filter(|(_, _, _)| false)"
       ]
     ],
-    "witness": "writer_host::switch::tests::w13_registered_host_create_reopen_refuses_retirement_and_preserves_unsaved_edits",
+    "witness": "durable_branch::tests::w13_registered_session_blocks_branch_retirement",
     "package": "kinewright-agent",
     "kind": "--lib",
     "target": "",
-    "features": "kinewright-project/test-util",
+    "features": "eval-harness",
     "production": true,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-release-target-pin-before-quota-retry",
@@ -2251,7 +2423,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-offer-prepared-target-for-retirement",
@@ -2270,7 +2446,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-remove-prepared-target-directly",
@@ -2289,15 +2469,19 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-existing-target-head-not-revalidated",
     "changes": [
       [
         "crates/kinewright-project/src/bundle_switch.rs",
-        "            && prepared.existing_head.as_ref().is_none_or(|head| {\n                self.branches\n                    .get(&prepared.target_branch)\n                    .is_some_and(|c| c.head_id == *head)\n            });",
-        "            && prepared.existing_head.as_ref().is_none_or(|_| self.branches.contains_key(&prepared.target_branch));"
+        "            && prepared.existing_head.as_ref().is_none_or(|head| {\n                self.branches\n                    .get(match &prepared.target {\n                        RecoverySelection::WorkingBranch(source) => source,\n                        RecoverySelection::Checkpoint { branch, .. } => branch,\n                    })\n                    .is_some_and(|c| c.head_id == *head)\n            });",
+        "            && prepared.existing_head.as_ref().is_none_or(|head| {\n                self.branches\n                    .get(match &prepared.target {\n                        RecoverySelection::WorkingBranch(source) => source,\n                        RecoverySelection::Checkpoint { branch, .. } => branch,\n                    })\n                    .is_some_and(|_| true)\n            });"
       ]
     ],
     "witness": "c5::w13_existing_target_retry_requires_current_membership_and_head",
@@ -2308,14 +2492,18 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Remove exact head validation while retaining current membership."
+    }
   },
   {
     "name": "repeat-c5-resurrect-missing-existing-target",
     "changes": [
       [
         "crates/kinewright-project/src/bundle_switch.rs",
-        "            && prepared.existing_head.as_ref().is_none_or(|head| {\n                self.branches\n                    .get(&prepared.target_branch)\n                    .is_some_and(|c| c.head_id == *head)\n            });",
+        "            && prepared.existing_head.as_ref().is_none_or(|head| {\n                self.branches\n                    .get(match &prepared.target {\n                        RecoverySelection::WorkingBranch(source) => source,\n                        RecoverySelection::Checkpoint { branch, .. } => branch,\n                    })\n                    .is_some_and(|c| c.head_id == *head)\n            });",
         "            && true;"
       ],
       [
@@ -2332,7 +2520,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Permit resurrecting a selected branch missing from the current index."
+    }
   },
   {
     "name": "repeat-c5-retire-active-working-branch",
@@ -2356,7 +2548,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-retirement-without-explicit-consent",
@@ -2375,7 +2571,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-duplicate-retirement-acknowledged",
@@ -2394,7 +2594,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-resume-after-frozen-cancel",
@@ -2413,7 +2617,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-resume-after-frozen-preview-refusal",
@@ -2432,15 +2640,19 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-resume-after-frozen-publication-failure",
     "changes": [
       [
         "crates/kinewright-project/src/editing_session/rescue.rs",
-        "                if !was_frozen {",
-        "                if true {"
+        "        let mut copy = match publication {\n            Ok(copy) => copy,\n            Err(error) => {\n                if let Some(reservation) = reservation {\n                    self.rescue.slots.finish(reservation, None)?;\n                }\n                if !was_frozen {\n                    self.attachment\n                        .resume(&old_cut)\n                        .map_err(crate::bundle::operation_error)?;\n                }\n                return Err(error);",
+        "        let mut copy = match publication {\n            Ok(copy) => copy,\n            Err(error) => {\n                if let Some(reservation) = reservation {\n                    self.rescue.slots.finish(reservation, None)?;\n                }\n                if true {\n                    self.attachment\n                        .resume(&old_cut)\n                        .map_err(crate::bundle::operation_error)?;\n                }\n                return Err(error);"
       ]
     ],
     "witness": "c5::w13_frozen_cut_rescue_at_both_unknown_publications_and_late_a_isolation",
@@ -2451,7 +2663,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Resume the frozen source on a failed rescue publication."
+    }
   },
   {
     "name": "repeat-c5-resume-after-frozen-unknown-b",
@@ -2470,7 +2686,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-late-a-seals-b",
@@ -2489,15 +2709,19 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-rescue-shares-original-core",
     "changes": [
       [
         "crates/kinewright-project/src/editing_session/rescue.rs",
-        "let b_core = Core::spawn((*selection.history.baseline).clone())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;",
-        "let b_core = self.core.clone();"
+        "            let b_core = match materialised {\n                Ok(core) => core,",
+        "            let b_core = match materialised {\n                Ok(_) => self.core.clone(),"
       ]
     ],
     "witness": "c5::w01_first_save_rescue_is_independent",
@@ -2508,7 +2732,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Use the originating actor for the independently selected rescue."
+    }
   },
   {
     "name": "repeat-c5-rescue-record-not-published",
@@ -2519,15 +2747,19 @@
         "        let _ = &record;"
       ]
     ],
-    "witness": "writer_host::c12_tests::rescue_cases::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
-    "package": "kinewright-agent",
-    "kind": "--lib",
-    "target": "",
-    "features": "kinewright-project/test-util",
+    "witness": "c5::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
     "production": true,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-rescue-drops-default-ack",
@@ -2538,15 +2770,19 @@
         "                let _ = projected; record.acknowledged_root = None; record.acknowledged_absence = Some(\"mutant dropped ack\".into());"
       ]
     ],
-    "witness": "writer_host::c12_tests::rescue_cases::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
-    "package": "kinewright-agent",
-    "kind": "--lib",
-    "target": "",
-    "features": "kinewright-project/test-util",
+    "witness": "c5::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
     "production": true,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-rescue-drops-selected-p2",
@@ -2557,34 +2793,42 @@
         "                .take(1).map(|(_, r)| r.clone())\n                .collect();"
       ]
     ],
-    "witness": "writer_host::c12_tests::rescue_cases::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
-    "package": "kinewright-agent",
-    "kind": "--lib",
-    "target": "",
-    "features": "kinewright-project/test-util",
+    "witness": "c5::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
     "production": true,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-rotation-forgets-ack-record",
     "changes": [
       [
         "crates/kinewright-project/src/bundle_commit.rs",
-        "        let mut evidence = bundle.evidence.clone();",
-        "        let mut evidence = bundle.evidence.iter().filter(|r| crate::rescue_record::parse(&bundle.store.read_evidence(r).unwrap()).unwrap().is_none()).cloned().collect::<Vec<_>>();"
+        "        let evidence = bundle.evidence.clone();",
+        "        let evidence = bundle.evidence.iter().filter(|r| crate::rescue_record::parse(&bundle.store.read_evidence(r).unwrap()).unwrap().is_none()).cloned().collect::<Vec<_>>();"
       ]
     ],
-    "witness": "writer_host::c12_tests::rescue_cases::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
-    "package": "kinewright-agent",
-    "kind": "--lib",
-    "target": "",
-    "features": "kinewright-project/test-util",
-    "production": true,
+    "witness": "c5::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
+    "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Drop the rescue acknowledgement record at normal rotation."
+    }
   },
   {
     "name": "repeat-c5-ack-retirement-clears-independent-evidence",
@@ -2595,44 +2839,46 @@
         "            let _ = &old; bundle.evidence.clear();"
       ]
     ],
-    "witness": "writer_host::c12_tests::rescue_cases::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
-    "package": "kinewright-agent",
-    "kind": "--lib",
-    "target": "",
-    "features": "kinewright-project/test-util",
+    "witness": "c5::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
     "production": true,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-silent-recovery-omission",
     "changes": [
       [
         "crates/kinewright-project/src/bundle_rescue.rs",
-        "|| (!self.omissions.is_empty() && !consent.omission)",
-        "|| false && (!self.omissions.is_empty() && !consent.omission)"
+        "        if !self.omissions.is_empty() && !consent.omission {",
+        "        if false && !self.omissions.is_empty() && !consent.omission {"
       ]
     ],
-    "witness": "writer_host::c12_tests::rescue_cases::w13_omission_only_precedes_trim",
-    "package": "kinewright-agent",
-    "kind": "--lib",
-    "target": "",
-    "features": "kinewright-project/test-util",
-    "production": true,
+    "witness": "c5::w13_omission_only_precedes_trim",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
+    "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Skip only the independently required recovery omission consent."
+    }
   },
   {
     "name": "repeat-c5-one-consent-authorizes-both-losses",
-    "changes": [
-      [
-        "crates/kinewright-project/src/bundle_rescue.rs",
-        "        consent.trim = true;",
-        "        consent.trim = true; consent.omission = true;"
-      ]
-    ],
+    "changes": [],
     "witness": "writer_host::c12_tests::rescue_cases::w13_trim_then_separate_omission_recomputes_closure",
     "package": "kinewright-agent",
     "kind": "--lib",
@@ -2641,17 +2887,16 @@
     "production": true,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "superseded_by": "scripts/undo-retargeted-mutations.json:c5:one-consent-authorizes-both-losses",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "History-trim action/consent removed; recovery omission consent remains independent."
+    }
   },
   {
     "name": "repeat-c5-silent-history-trim",
-    "changes": [
-      [
-        "crates/kinewright-project/src/bundle_rescue.rs",
-        "(self.removed_undo > 0 && !consent.trim)",
-        "(false && self.removed_undo > 0 && !consent.trim)"
-      ]
-    ],
+    "changes": [],
     "witness": "c5::w04_oldest_first_trim_preserves_redo_gesture_and_inputs",
     "package": "kinewright-project",
     "kind": "--test",
@@ -2660,22 +2905,16 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "superseded_by": "scripts/undo-retargeted-mutations.json:c5:silent-history-trim",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Rescue cannot trim history; only the executor folds."
+    }
   },
   {
     "name": "repeat-c5-skip-omission-alone-before-trim",
-    "changes": [
-      [
-        "crates/kinewright-project/src/editing_session/rescue_selection.rs",
-        "        } else if let Ok(roots) = self.rescue_graph(before, &unavailable, &limits) {",
-        "        } else if let Ok(roots) = self.rescue_graph(before, &[], &limits) {"
-      ],
-      [
-        "crates/kinewright-project/src/editing_session/rescue_selection.rs",
-        "            let ordinary = crate::bundle_commit::select_history(before, &limits)?;",
-        "            let mut ordinary = crate::bundle_commit::select_history(before, &limits)?; ordinary.history = kinewright_core::HistoryTransition::floor(before.clone(), 1).map_err(crate::bundle::history_error)?.after().clone();"
-      ]
-    ],
+    "changes": [],
     "witness": "writer_host::c12_tests::rescue_cases::w13_omission_only_precedes_trim",
     "package": "kinewright-agent",
     "kind": "--lib",
@@ -2684,7 +2923,12 @@
     "production": true,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "superseded_by": "scripts/undo-retargeted-mutations.json:c5:skip-omission-alone-before-trim",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Two-stage trim selection removed; omission closure and complete native history are the current contract."
+    }
   },
   {
     "name": "repeat-c5-omit-available-roots-for-quota",
@@ -2703,7 +2947,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-omitted-inventory-reintroduced",
@@ -2714,15 +2962,19 @@
         "        self.copy_selected_graph(source, roots, true, true)"
       ]
     ],
-    "witness": "writer_host::c12_tests::rescue_cases::w13_omission_only_precedes_trim",
-    "package": "kinewright-agent",
-    "kind": "--lib",
-    "target": "",
-    "features": "kinewright-project/test-util",
+    "witness": "c5::w13_omission_only_precedes_trim",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
     "production": true,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-close-leaves-uncertain-source-reuse",
@@ -2741,7 +2993,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-copied-record-profile-not-admitted",
@@ -2760,7 +3016,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-selected-graph-bounds-not-admitted",
@@ -2779,7 +3039,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-late-a-replaces-active-core",
@@ -2798,17 +3062,15 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-no-ticket-reconcile-restores-live-history",
-    "changes": [
-      [
-        "crates/kinewright-project/src/bundle.rs",
-        "            self.pending_save = None;\n            return Ok(());\n        };",
-        "            if let Some(live) = live { if live.attachment_state().map_err(history_error)? == kinewright_core::AttachmentState::Live { self.attach_core(live)?.restore_history((*self.branch_history(&self.manual_branch_id)?).clone()).map_err(history_error)?; } }\n            self.pending_save = None;\n            return Ok(());\n        };"
-      ]
-    ],
+    "changes": [],
     "witness": "c5::w10_pending_command_exclusion_and_original_id_lookup",
     "package": "kinewright-project",
     "kind": "--test",
@@ -2817,37 +3079,69 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "superseded_by": "scripts/undo-retargeted-mutations.json:c5:no-ticket-reconcile-restores-live-history",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "No-pending-publication settlement has no state-install path; native receipt/install tests cover preservation."
+    }
   },
   {
     "name": "repeat-c5-exact-ticket-settlement-omitted-a",
     "changes": [
       [
         "crates/kinewright-project/src/bundle.rs",
-        "    pub(crate) fn settle_destination_ticket(\n        &mut self,\n        live: Option<&Core>,\n    ) -> Result<(), BundleError> {\n        let Some(attempt) = self.pending_attempt() else {\n            self.pending_save = None;\n            return Ok(());\n        };\n        if let Some(live) = live {\n            let attachment = self.attach_core(live)?;\n            if attachment.settle_attempt(&attempt)?\n                || (live.actor_identity() == attempt.actor()\n                    && live\n                        .pending_history_save()\n                        .map_err(history_error)?\n                        .is_none())\n            {\n                self.pending_save = None;\n            }\n        }\n        Ok(())\n    }\n\n    pub(crate) fn settle_pending_save(",
-        "    pub(crate) fn settle_destination_ticket(\n        &mut self,\n        live: Option<&Core>,\n    ) -> Result<(), BundleError> {\n        let Some(attempt) = self.pending_attempt() else {\n            self.pending_save = None;\n            return Ok(());\n        };\n        if let Some(live) = None::<&Core> {\n            let attachment = self.attach_core(live)?;\n            if attachment.settle_attempt(&attempt)?\n                || (live.actor_identity() == attempt.actor()\n                    && live\n                        .pending_history_save()\n                        .map_err(history_error)?\n                        .is_none())\n            {\n                self.pending_save = None;\n            }\n        }\n        Ok(())\n    }\n\n    pub(crate) fn settle_pending_save("
+        "                let installed = if commit {",
+        "                let installed = if false && commit {"
       ]
     ],
-    "witness": "c5::w16_first_save_a_writer_and_later_floor_continue",
+    "witness": "h2_candidate_unknown_publication_reconciles_only_its_registered_core",
     "package": "kinewright-project",
     "kind": "--test",
-    "target": "ja_s2_rescue",
+    "target": "ja_s4_candidate",
     "features": "test-util",
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Native ordinary Save has no executor floor ticket; the replacement obligation is settling the retained prepared candidate update at its exact committed namespace outcome, without touching the manual actor."
+    }
   },
   {
     "name": "repeat-c5-exact-ticket-settlement-omitted-b",
     "changes": [
       [
         "crates/kinewright-project/src/bundle.rs",
-        "    pub(crate) fn settle_destination_ticket(\n        &mut self,\n        live: Option<&Core>,\n    ) -> Result<(), BundleError> {\n        let Some(attempt) = self.pending_attempt() else {\n            self.pending_save = None;\n            return Ok(());\n        };\n        if let Some(live) = live {\n            let attachment = self.attach_core(live)?;\n            if attachment.settle_attempt(&attempt)?\n                || (live.actor_identity() == attempt.actor()\n                    && live\n                        .pending_history_save()\n                        .map_err(history_error)?\n                        .is_none())\n            {\n                self.pending_save = None;\n            }\n        }\n        Ok(())\n    }\n\n    pub(crate) fn settle_pending_save(",
-        "    pub(crate) fn settle_destination_ticket(\n        &mut self,\n        live: Option<&Core>,\n    ) -> Result<(), BundleError> {\n        let Some(attempt) = self.pending_attempt() else {\n            self.pending_save = None;\n            return Ok(());\n        };\n        if let Some(live) = None::<&Core> {\n            let attachment = self.attach_core(live)?;\n            if attachment.settle_attempt(&attempt)?\n                || (live.actor_identity() == attempt.actor()\n                    && live\n                        .pending_history_save()\n                        .map_err(history_error)?\n                        .is_none())\n            {\n                self.pending_save = None;\n            }\n        }\n        Ok(())\n    }\n\n    pub(crate) fn settle_pending_save("
+        "                let installed = if commit {",
+        "                let installed = if false && commit {"
       ]
     ],
-    "witness": "c5::w16_repeated_active_b_attempts_settle_only_their_tickets",
+    "witness": "editing_session::durable::fu2_tests::fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit",
+    "package": "kinewright-project",
+    "kind": "--lib",
+    "target": "",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Native ordinary Save has no executor floor ticket; the replacement obligation is settling the retained prepared candidate update at its exact committed namespace outcome, without touching the manual actor."
+    }
+  },
+  {
+    "name": "repeat-c5-published-ack-has-no-dedicated-edge",
+    "changes": [
+      [
+        "crates/kinewright-project/src/rescue_record.rs",
+        "        self.acknowledged_root\n            .iter()\n            .chain(&self.capture_checkpoints)",
+        "        self.acknowledged_root\n            .iter().filter(|_| false)\n            .chain(&self.capture_checkpoints)"
+      ]
+    ],
+    "witness": "c5::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
     "package": "kinewright-project",
     "kind": "--test",
     "target": "ja_s2_rescue",
@@ -2855,26 +3149,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
-  },
-  {
-    "name": "repeat-c5-published-ack-has-no-dedicated-edge",
-    "changes": [
-      [
-        "crates/kinewright-project/src/rescue_record.rs",
-        "self.acknowledged_root.iter().cloned().collect()",
-        "vec![]"
-      ]
-    ],
-    "witness": "writer_host::c12_tests::rescue_cases::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
-    "package": "kinewright-agent",
-    "kind": "--lib",
-    "target": "",
-    "features": "kinewright-project/test-util",
-    "production": true,
-    "build_host": false,
-    "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Omit only the acknowledgement dependency while keeping full-capture edges."
+    }
   },
   {
     "name": "repeat-c5-published-ack-counted-as-third-predecessor",
@@ -2885,15 +3164,19 @@
         "recovery.predecessors.truncate(2); if recovery.predecessors.len() == 2 && !bundle.rescue_records()?.is_empty() { return Err(BundleError::Capacity(\"third recovery root\")); }"
       ]
     ],
-    "witness": "writer_host::c12_tests::rescue_cases::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
-    "package": "kinewright-agent",
-    "kind": "--lib",
-    "target": "",
-    "features": "kinewright-project/test-util",
+    "witness": "c5::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
     "production": true,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-preliminary-save-unknown-resumes-o",
@@ -2901,7 +3184,7 @@
       [
         "crates/kinewright-project/src/editing_session/recovery.rs",
         "                    self.recovery_save_pending = true;",
-        "                    self.recovery_save_pending = true; let cut = self.attachment.capture().map_err(crate::bundle::history_error)?; self.attachment.resume(&cut).map_err(crate::bundle::history_error)?;"
+        "                    self.recovery_save_pending = true; let cut = self.attachment.capture().map_err(crate::bundle::operation_error)?; self.attachment.resume(&cut).map_err(crate::bundle::operation_error)?;"
       ]
     ],
     "witness": "c5::w13_preliminary_save_faults_keep_exact_cut_and_do_not_select",
@@ -2912,7 +3195,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Use native attachment errors for the same forbidden unknown-publication resume."
+    }
   },
   {
     "name": "repeat-c5-completed-reply-allocates-another-r",
@@ -2931,7 +3218,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-overwrite-l-on-later-r-save",
@@ -2950,17 +3241,15 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-remint-shared-prefix-on-later-l-save",
-    "changes": [
-      [
-        "crates/kinewright-project/src/bundle_commit.rs",
-        "        let all_batch_ids = batch_ids.clone();",
-        "        if old_switch >= 2 && selection.is_none() { for id in &mut batch_ids { *id = BatchId::fresh()?; } } let all_batch_ids = batch_ids.clone();"
-      ]
-    ],
+    "changes": [],
     "witness": "c5::w13_checkpoint_recovery_preserves_dirty_b_before_activation",
     "package": "kinewright-project",
     "kind": "--test",
@@ -2969,7 +3258,12 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "superseded_by": "scripts/undo-retargeted-mutations.json:c5:remint-shared-prefix-on-later-l-save",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Old per-publication batch-id prefix removed; retained commands preserve their original key and digest."
+    }
   },
   {
     "name": "repeat-c5-rescue-owned-graph-copy-omitted",
@@ -2988,7 +3282,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-rescue-rewrites-input-profile",
@@ -3007,15 +3305,19 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-rescue-closes-open-gesture",
     "changes": [
       [
         "crates/kinewright-project/src/editing_session/rescue.rs",
-        "        let b_cut = b_attachment",
-        "        if selection.history.cursor.undo.last().is_some_and(|e| e.coalesce_key.is_some()) { b_attachment.install_history_transition(kinewright_core::HistoryTransition::recovery_close(selection.history.clone(), &selection.history).map_err(crate::bundle::history_error)?).map_err(crate::bundle::history_error)?; } let b_cut = b_attachment"
+        "            let b_cut = b_attachment",
+        "            let bad_close = b_attachment.freeze().map_err(crate::bundle::operation_error)?;\n            b_attachment.resume(&bad_close).map_err(crate::bundle::operation_error)?;\n            b_core.close_gesture().map_err(crate::bundle::operation_error)?;\n            eprintln!(\"MUTATION_SELECTED_GESTURE_WAS_CLOSED\");\n            let b_cut = b_attachment"
       ]
     ],
     "witness": "c5::w04_oldest_first_trim_preserves_redo_gesture_and_inputs",
@@ -3026,7 +3328,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": "MUTATION_SELECTED_GESTURE_WAS_CLOSED",
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Illegally close the selected gesture before freezing the independent actor."
+    }
   },
   {
     "name": "repeat-c5-rescue-discards-redo",
@@ -3045,7 +3351,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-unknown-preliminary-save-acknowledged",
@@ -3064,7 +3374,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-activate-without-selection-root",
@@ -3093,7 +3407,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-registered-guard-routes-to-current-project",
@@ -3117,7 +3435,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-original-guard-blocks-independent-b-copy",
@@ -3136,7 +3458,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-registered-original-ticket-not-settled",
@@ -3155,17 +3481,15 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-registered-proposal-loses-floored-prefix",
-    "changes": [
-      [
-        "crates/kinewright-project/src/editing_session/durable.rs",
-        "            let mut full_delta = specialist_floor_delta_from_baseline(\n                canonical.base(),\n                &original,\n                &*self.durable_branch_baseline(&canonical)?,\n            )?;\n            full_delta.extend(cut.history().applied_operations());",
-        "            let full_delta = cut.history().applied_operations();"
-      ]
-    ],
+    "changes": [],
     "witness": "durable_branch::tests::w13_registered_session_keeps_original_namespace_after_rescue",
     "package": "kinewright-agent",
     "kind": "--lib",
@@ -3174,15 +3498,20 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "superseded_by": "scripts/undo-retargeted-mutations.json:c5:registered-proposal-loses-floored-prefix",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Delta Cores never fold, so there is no discarded prefix to reconstruct; complete retained delta remains tested."
+    }
   },
   {
     "name": "repeat-c5-specialist-base-not-in-branch-publication",
     "changes": [
       [
-        "crates/kinewright-project/src/editing_session/durable.rs",
-        "            let reference = bundle.stage_specialist_base(guard.base())?;",
-        "            let reference = bundle.store.admit_record(guard.base())?.reference.clone();"
+        "crates/kinewright-project/src/bundle_branch.rs",
+        "        if !self.evidence.contains(&reference) {\n            self.evidence.push(reference.clone());\n            self.pending_evidence.push(sealed.into_pin());\n        }",
+        "        if false && !self.evidence.contains(&reference) {\n            self.evidence.push(reference.clone());\n            self.pending_evidence.push(sealed.into_pin());\n        }"
       ]
     ],
     "witness": "durable_branch::tests::w13_registered_session_keeps_original_namespace_after_rescue",
@@ -3193,15 +3522,19 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The base is immutable and rooted at the initial fork. Omit its first evidence/pin admission, rather than bypassing an idempotent later re-stage of that same base."
+    }
   },
   {
     "name": "repeat-c5-registered-close-warning-omitted",
     "changes": [
       [
         "crates/kinewright-project/src/editing_session/recovery.rs",
-        "        for registered in &self.durable_sessions {",
-        "        for registered in self.durable_sessions.iter().take(0) {"
+        "        for registered in &self.durable_sessions {\n            let bundle = self.registered_bundle(&registered.guard)?;\n            let change = registered\n                .guard\n                .core()\n                .change_id()\n                .map_err(crate::bundle::operation_error)?;\n            if bundle.unsettled\n                || bundle.checkpoint(&registered.guard.branch)?.position != change.position\n            {\n                disclosure.push(' ');\n                disclosure.push_str(&registered.name);\n                disclosure.push_str(\" has unsaved work or an unresolved save in its original project. Save or close that session first; closing this context can discard its accepted work.\");\n            }\n        }\n        Ok(disclosure)",
+        "        Ok(disclosure)"
       ]
     ],
     "witness": "durable_branch::tests::w13_registered_session_keeps_original_namespace_after_rescue",
@@ -3212,7 +3545,11 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Omit registered-session warnings without changing the other close disclosure."
+    }
   },
   {
     "name": "repeat-c5-stale-guard-replaces-canonical-state",
@@ -3231,55 +3568,68 @@
     "production": false,
     "build_host": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "The independent native invariant and exact witness remain unchanged."
+    }
   },
   {
     "name": "repeat-c5-prune-independent-root-for-rescue",
     "changes": [
       [
         "crates/kinewright-project/src/editing_session/rescue_selection.rs",
-        "        for reference in &bundle.acknowledged_evidence()? {\n            if reference.record_kind == RecordKind::OwnedEvidence\n                && let Ok(bytes) = bundle.store.read_copy_evidence(reference, true)\n                && crate::rescue_record::parse(&bytes)?.is_some()\n            {\n                continue;\n            }\n            // Unreadable evidence remains a required root. Retained admission\n            // reports its exact missing bytes/uses instead of losing that diagnostic\n            // while trying to classify an unavailable rescue record.\n            roots.push(reference.clone());\n        }\n",
-        ""
+        "        for reference in &bundle.acknowledged_evidence()? {\n            if reference.record_kind == RecordKind::OwnedEvidence\n                && let Ok(bytes) = bundle.store.read_copy_evidence(reference, true)\n                && crate::rescue_record::parse(&bytes)?.is_some()\n            {\n                continue;\n            }\n            // Unreadable evidence remains a required root. Retained admission\n            // reports its exact missing bytes/uses instead of losing that diagnostic\n            // while trying to classify an unavailable rescue record.\n            roots.push(reference.clone());\n        }\n        Ok(roots)",
+        "        Ok(roots)"
       ]
     ],
-    "witness": "writer_host::c12_tests::rescue_cases::w13_trim_then_separate_omission_recomputes_closure",
-    "package": "kinewright-agent",
-    "kind": "--lib",
-    "target": "",
-    "features": "kinewright-project/test-util",
-    "production": true
+    "witness": "c5::w13_trim_then_separate_omission_recomputes_closure",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
+    "production": true,
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Drop the independently retained evidence roots while keeping rescue acknowledgements and branch roots."
+    }
   },
   {
     "name": "repeat-c5-active-b-new-unknown-uses-old-copy-status",
     "changes": [
       [
         "crates/kinewright-project/src/bundle_copy.rs",
-        "        if destination.unsettled\n            && destination.publication_state() == crate::bundle::PublicationState::Unknown\n        {\n            self.tag.clone_from(&destination.publication_tag);\n            self.status = CopyStatus::DurabilityUnknown;\n            self.source.mark_uncertain()?;\n        }\n",
+        "        if destination.unsettled\n            && destination.publication_state() == crate::bundle::PublicationState::Unknown\n        {\n            self.tag.clone_from(&destination.publication_tag);\n            self.status = CopyStatus::DurabilityUnknown;\n            self.source.mark_uncertain()?;\n        }",
         ""
       ]
     ],
-    "witness": "writer_host::c12_tests::rescue_cases::w13_recovery_on_active_rescue_copy_settles_the_new_attempt",
-    "package": "kinewright-agent",
-    "kind": "--lib",
-    "target": "",
-    "features": "kinewright-project/test-util",
-    "production": true
+    "witness": "c5::w13_recovery_on_active_rescue_copy_settles_the_new_attempt",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
+    "production": true,
+    "red_text": null,
+    "hx_retirement": {
+      "status": "retargeted",
+      "reason": "Do not update the retained copy to the destination's newer unknown attempt."
+    }
   },
   {
     "name": "repeat-c4-frozen-owner-install-core-witness",
-    "changes": [
-      [
-        "crates/kinewright-core/src/actor.rs",
-        "} else if attachment == AttachmentState::Frozen {\n                    Err(HistoryError::MutationRefused(CoreMutationRefusal::Frozen))\n                } else if manual.is_some() {",
-        "} else if manual.is_some() {"
-      ]
-    ],
+    "changes": [],
     "witness": "attachment::tests::w05_seal_checks_cut_and_all_mutation_paths",
     "package": "kinewright-core",
     "kind": "--lib",
     "target": "",
     "features": "",
-    "production": false
+    "production": false,
+    "superseded_by": "scripts/undo-retargeted-mutations.json:c4:frozen-owner-install-core-witness",
+    "hx_retirement": {
+      "status": "retired",
+      "reason": "Old raw restore mutation path removed with the actor. Native actor permit/frozen-cut regressions replace that API proof."
+    }
   },
   {
     "name": "s2h-app-host-disconnect-implicitly-closes-source",

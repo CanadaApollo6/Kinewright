@@ -1,11 +1,9 @@
 use super::Ja1EditingSession;
-use kinewright_core::{
-    Command, Core, Document, Event, HistoryTransition, Operation, Track, TrackId, TrackKind,
-};
+use kinewright_core::{Command, Document, Event, Operation, Track, TrackId, TrackKind};
 use kinewright_media::test_support::TempDirectory;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{BundleWriteAdmission, LoadedBundle, ProjectBundle},
-    bundle_commit::history_cost_probe,
     bundle_records::BranchId,
     bundle_switch::ProjectSelectionResult,
     io_observer,
@@ -41,25 +39,50 @@ fn source(profile: StorageLimits) -> (TempDirectory, Ja1EditingSession, Vec<Bran
             .collect(),
         ..Document::default()
     };
-    let core = Core::spawn(doc).unwrap();
+    let core = Core::for_test(doc).unwrap();
     grow(&core, 8);
-    let mut bundle = ProjectBundle::activate(&a, BundleWriteAdmission::new_document()).unwrap();
+    let mut bundle = ProjectBundle::activate(
+        &a,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let input = bundle.empty_inputs().unwrap().reference.clone();
     bundle.save(&core, &input).unwrap();
     let left = bundle.manual_branch_id().clone();
+    let attachment = bundle.attach_core(&core).unwrap();
+    let cut = attachment.freeze().unwrap();
+    attachment.retire(&cut).unwrap();
     let mut ids = vec![];
     for n in 0..24 {
         let id = bundle
-            .fork_branch(
-                &left,
-                kinewright_project::history_record::HistoryRole::Ordinary,
-            )
+            .fork_branch(&left, kinewright_project::operation_history::Role::Ordinary)
             .unwrap();
-        let other = Core::spawn((*bundle.branch_history(&id).unwrap().document).clone()).unwrap();
+        let checkpoint = bundle.checkpoint(&id).unwrap();
+        let other = Core::open(
+            checkpoint
+                .open(bundle.store(), bundle.history_pool())
+                .unwrap(),
+            id.clone(),
+            checkpoint.revision,
+        )
+        .unwrap();
         grow(&other, 24 + n);
         bundle.save_branch(&id, &other).unwrap();
+        let attachment = bundle.attach_core(&other).unwrap();
+        let cut = attachment.freeze().unwrap();
+        attachment.retire(&cut).unwrap();
         ids.push(id);
     }
+    let checkpoint = bundle.checkpoint(&left).unwrap();
+    let core = Core::open(
+        checkpoint
+            .open(bundle.store(), bundle.history_pool())
+            .unwrap(),
+        left.clone(),
+        checkpoint.revision,
+    )
+    .unwrap();
     let mut session = Ja1EditingSession::from_bundle(bundle, &core, input).unwrap();
     session.save_active().unwrap();
     edit(&core, true);
@@ -106,278 +129,72 @@ fn large_edit(core: &Core) {
 }
 #[test]
 pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_retry() {
-    let (model_temp, mut model, model_ids, _) = source(StorageLimits::default());
-    large_edit(model.core());
-    let candidate = model.core().export_history().unwrap();
-    let mut minimum = u64::MAX;
-    let mut minimum_retained = u64::MAX;
-    for cut in 0..=candidate.batches.len() {
-        let history = if cut == 0 {
-            candidate.clone()
-        } else {
-            let Ok(t) = HistoryTransition::floor(candidate.clone(), cut) else {
-                continue;
-            };
-            t.after().clone()
-        };
-        minimum = minimum.min(history_cost_probe(&history, &StorageLimits::default()).unwrap());
-        minimum_retained = minimum_retained
-            .min(kinewright_core::history_size::restored_history_live_bytes(&history).unwrap());
-    }
-    // Compare both cuts under the same replay window. The default branch cap
-    // otherwise reserves a larger cold-open overlap than this destination profile.
-    let before = LoadedBundle::read_with_limits_probe(
-        &model_temp.path("b.kinewright"),
-        StorageLimits {
-            branch_history_bytes: minimum,
-            ..StorageLimits::default()
-        },
-    )
-    .unwrap()
-    .usage_probe()
-    .unwrap()
-    .peak_live_history_bytes;
-    model
-        .restrict_limits_probe(StorageLimits {
-            branch_history_bytes: minimum,
-            ..StorageLimits::default()
-        })
-        .unwrap();
-    model.save_active().unwrap();
-    let candidate = model.core().export_history().unwrap();
-    let loaded = LoadedBundle::read(&model_temp.path("b.kinewright")).unwrap();
-    let root = loaded.root().unwrap();
-    let index=model.store().unwrap().read_record::<std::collections::BTreeMap<BranchId,kinewright_project::bundle_records::ObjectRef>>(&root.branch_index_ref).unwrap();
-    let mut costs = std::collections::BTreeMap::new();
-    for (id, r) in index.iter() {
-        if id == &root.manual_branch_id {
-            continue;
-        }
-        let cp = model
-            .store()
-            .unwrap()
-            .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(r)
-            .unwrap();
-        let h = model
-            .store()
-            .unwrap()
-            .resolve_history(&cp.history_ref)
-            .unwrap();
-        costs
-            .entry(cp.history_ref.sha256.clone())
-            .or_insert(kinewright_core::history_size::restored_history_live_bytes(&h).unwrap());
-    }
-    let manifest = model
-        .store()
-        .unwrap()
-        .read_record::<kinewright_project::store::StoreManifest>(&root.store_manifest_ref)
-        .unwrap();
-    assert!(!manifest.recovery.predecessors.is_empty());
-    assert!(manifest.objects.iter().any(|reference| {
-        reference.record_kind == kinewright_project::bundle_records::RecordKind::BranchCheckpoint
-            && !index.values().any(|current| current == reference)
-    }));
-    drop(manifest);
-    // Archived ordinary checkpoints replay after all current histories remain
-    // resident. Count those retained histories once and the shared replay
-    // window once; summing individual replay peaks would overstate this.
-    let irreducible = costs.values().sum::<u64>() + minimum_retained + minimum;
-    eprintln!(
-        "C5 fresh-open setup peak={before}, no-floor resident lower bound={irreducible}, minimum target={minimum}"
-    );
-    assert!(
-        irreducible > before,
-        "before={before} irreducible={irreducible}"
-    );
-    assert_eq!(model_ids.len(), 24);
-    drop(index);
-    drop(loaded);
-    // Calibrate and publish with this writer's actual branch identities. A new fixture's
-    // random BranchId order changes the reader's temporary overlap, even for equal histories.
-    for _ in 0..2 {
-        model.save_active().unwrap();
-    }
-    let calibrated = LoadedBundle::read_with_limits_probe(
-        &model_temp.path("b.kinewright"),
-        StorageLimits {
-            branch_history_bytes: minimum,
-            ..StorageLimits::default()
-        },
-    )
-    .unwrap();
-    let exact = calibrated.usage_probe().unwrap().peak_live_history_bytes;
-    drop(calibrated);
-    let exact_profile = StorageLimits {
-        live_history_bytes: exact,
-        branch_history_bytes: minimum,
-        ..StorageLimits::default()
-    };
-    model.restrict_limits_probe(exact_profile.clone()).unwrap();
-    let (saved, trace) = io_observer::observe(|| model.save_active());
-    saved.unwrap();
-    assert!(
-        !trace
-            .events
-            .iter()
-            .any(|e| e.operation == "bundle_reconcile")
-    );
-    assert_eq!(model.core().export_history().unwrap(), candidate);
-    let exact_open = LoadedBundle::read_with_limits_probe(
-        &model_temp.path("b.kinewright"),
-        exact_profile.clone(),
-    )
-    .unwrap();
+    use kinewright_project::operation_history::{HistoryPool, PoolLimits, Role};
+    let (temp, mut session, ids, _) = source(StorageLimits::default());
+    assert_eq!(ids.len(), 24);
+    large_edit(session.core());
+    let expected = session.core().snapshot_identity().unwrap();
+    let root = std::fs::read(temp.path("b.kinewright")).unwrap();
+    let pool = session.core().history_pool();
+    let first = session.core().export_history().unwrap();
+    let second = session.core().export_history().unwrap();
     assert_eq!(
-        exact_open.usage_probe().unwrap().peak_live_history_bytes,
-        exact
+        pool.lease_counts(Role::Ordinary).unwrap().0,
+        3,
+        "RESCUE_CAPACITY_FIXTURE_FILLS_THE_THREE_ORDINARY_HOLDERS"
     );
-    drop(exact_open);
-    let over_profile = StorageLimits {
-        live_history_bytes: exact - 1,
-        ..exact_profile
-    };
-    assert!(matches!(
-        LoadedBundle::read_with_limits_probe(&model_temp.path("b.kinewright"), over_profile),
-        Err(kinewright_project::bundle::BundleError::Capacity(
-            "live history bytes"
-        ))
-    ));
-    eprintln!("C5 same-writer exact fresh-open peak={exact}");
-    drop(model);
-    for (lane, limit) in [("over", irreducible - 1), ("existing", irreducible - 1)] {
-        let profile = StorageLimits {
-            live_history_bytes: limit,
-            branch_history_bytes: minimum,
-            ..StorageLimits::default()
-        };
-        let (temp, mut session, ids, left) = source(profile.clone());
-        large_edit(session.core());
-        let history = session.core().export_history().unwrap();
-        let previous = std::fs::read(temp.path("b.kinewright")).unwrap();
-        let (result, trace) = io_observer::observe(|| session.save_active());
-        assert!(
-            !trace
-                .events
-                .iter()
-                .any(|e| e.operation == "bundle_reconcile")
-        );
-        if result.is_ok() {
-            LoadedBundle::read_with_limits_probe(&temp.path("b.kinewright"), profile.clone())
-                .expect("published candidate cannot exceed independent fresh-open capacity");
-            panic!("one-byte-over candidate published");
-        }
-        assert!(
-            trace
-                .events
-                .iter()
-                .any(|e| e.operation == "publication_reopen_fit"),
-            "actual writer reservations masked the fresh-reader bound: {result:?}"
-        );
-        assert_eq!(std::fs::read(temp.path("b.kinewright")).unwrap(), previous);
-        assert_eq!(session.core().export_history().unwrap(), history);
-        let points = session.list_recovery_points().unwrap();
-        let target = if lane == "existing" {
-            kinewright_project::bundle_recovery::RecoverySelection::WorkingBranch(left.clone())
-        } else {
-            points[1].clone()
-        };
-        let loaded = LoadedBundle::read(&temp.path("b.kinewright")).unwrap();
-        let (index_ref, branch, root) = match &target {
-            kinewright_project::bundle_recovery::RecoverySelection::Checkpoint { root, branch } => {
-                let raw: serde_json::Value = serde_json::from_slice(
-                    &std::fs::read(temp.path(&format!(
-                        "b.kinewright-assets/studio/objects/{}",
-                        root.sha256
-                    )))
-                    .unwrap(),
-                )
-                .unwrap();
-                (
-                    serde_json::from_value(raw["studio"]["branch_index_ref"].clone()).unwrap(),
-                    branch.clone(),
-                    Some(root.clone()),
-                )
-            }
-            kinewright_project::bundle_recovery::RecoverySelection::WorkingBranch(branch) => (
-                loaded.root().unwrap().branch_index_ref.clone(),
-                branch.clone(),
-                None,
-            ),
-        };
-        let index = session.store().unwrap().read_record::<std::collections::BTreeMap<BranchId,kinewright_project::bundle_records::ObjectRef>>(&index_ref).unwrap();
-        let root = root.unwrap_or_else(|| index[&branch].clone());
-        let cp = session
-            .store()
-            .unwrap()
-            .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(&index[&branch])
-            .unwrap();
-        let target_oracle = (*session
-            .store()
-            .unwrap()
-            .resolve_history(&cp.history_ref)
-            .unwrap())
-        .clone();
-        drop(cp);
-        drop(index);
-        drop(loaded);
-        session.prepare_recovery(target.clone()).unwrap();
-        let original_target_pin = session
-            .store()
-            .unwrap()
-            .retention_probe()
-            .unwrap()
-            .1
-            .get(&root.sha256)
-            .copied()
-            .unwrap();
-        assert!(original_target_pin > 0);
-        let result = session.select_local();
-        assert!(
-            matches!(result, ProjectSelectionResult::Refused(_)),
-            "{result:?}"
-        );
-        if lane == "existing" {
-            assert!(!session.retirement_candidates().unwrap().contains(&left));
-            let before = session.root_sha256().unwrap();
-            assert!(session.retire_working_branch(&left, &before, true).is_err());
-            assert_eq!(session.root_sha256().unwrap(), before);
-        }
-        let mut activated = false;
-        for id in ids {
-            if !session.retirement_candidates().unwrap().contains(&id) {
-                continue;
-            }
-            let disclosure = session.retirement_disclosure(&id).unwrap();
-            assert!(disclosure.contains("Current-history residency relief"));
-            let expected = session.root_sha256().unwrap();
-            session.retire_working_branch(&id, &expected, true).unwrap();
-            let result = session.select_local();
-            if matches!(result, ProjectSelectionResult::Activated(_)) {
-                activated = true;
-                break;
-            }
-            assert!(
-                matches!(result, ProjectSelectionResult::Refused(_)),
-                "{result:?}"
-            );
-            assert!(session.store().unwrap().verify(&root).is_ok());
-        }
-        assert!(
-            activated,
-            "explicit unrelated branch retirement must make retry usable"
-        );
-        assert_eq!(session.core().export_history().unwrap(), target_oracle);
-        assert!(
-            !session.list_recovery_points().unwrap().contains(&target),
-            "real retirement/Save rotation must remove P1 from inventory"
-        );
-        let expected = session.core().export_history().unwrap();
-        drop(session);
-        std::fs::remove_dir_all(temp.path("hidden-a")).unwrap();
-        let loaded =
-            LoadedBundle::read_with_limits_probe(&temp.path("b.kinewright"), profile).unwrap();
-        let fresh = Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&fresh).unwrap();
-        assert_eq!(fresh.export_history().unwrap(), expected);
-    }
+    assert!(
+        session.save_active().is_err(),
+        "FULL_HISTORY_POOL_REFUSES_SAVE_BEFORE_PUBLICATION"
+    );
+    assert_eq!(
+        std::fs::read(temp.path("b.kinewright")).unwrap(),
+        root,
+        "POOL_REFUSAL_CANNOT_REPLACE_THE_ACKNOWLEDGED_ROOT"
+    );
+    assert_eq!(
+        session.core().snapshot_identity().unwrap(),
+        expected,
+        "POOL_REFUSAL_KEEPS_THE_ACCEPTED_UNSAVED_OWNER"
+    );
+    drop(first);
+    drop(second);
+    session.save_active().unwrap();
+    assert_eq!(
+        session.core().snapshot_identity().unwrap(),
+        expected,
+        "POOL_ROOM_RELEASE_MAKES_THE_SAME_SAVE_RETRYABLE"
+    );
+    let retired = session
+        .retirement_candidates()
+        .unwrap()
+        .into_iter()
+        .find(|id| ids.contains(id))
+        .expect("unrelated ordinary branches can be explicitly retired");
+    let root = session.root_sha256().unwrap();
+    session
+        .retire_working_branch(&retired, &root, true)
+        .unwrap();
+    assert_eq!(
+        session.core().snapshot_identity().unwrap(),
+        expected,
+        "RETIREMENT_NEVER_ALTERS_THE_ACTIVE_HISTORY"
+    );
+    drop(session);
+    let ordinary = Role::Ordinary.envelope().retained;
+    let mut limits = PoolLimits::default();
+    limits.retained[0] = 2 * ordinary;
+    limits.peak[0] = limits.retained[0] + limits.workspace;
+    let pool = HistoryPool::new(limits);
+    let mut loaded = LoadedBundle::read(&temp.path("b.kinewright"), &pool).unwrap();
+    let reopened = loaded.open_manual().unwrap();
+    assert_eq!(
+        reopened.snapshot_identity().unwrap(),
+        expected,
+        "SPARSE_RESCUE_GRAPH_COLD_OPENS_THE_EXACT_RETRIED_OWNER"
+    );
+    assert!(
+        pool.lease_counts(Role::Ordinary).unwrap().1 <= 2,
+        "ARCHIVED_RESCUE_BRANCHES_USE_ONE_SHARED_REPLAY_WINDOW"
+    );
 }

@@ -41,3 +41,12 @@ successor guards disabled. All three temporary source files are restored
 byte-for-byte before normal reader tests. Current archives, expected-red logs
 and restored SHA-256 values are under
 `target/history-capacity/fixture-generation-merged/`.
+
+H2b regenerates all four archives through native owner publication with the
+mandatory immutable creation-sizing descriptor and combined Core/owner identity.
+All three bad publications still fail their named successor assertions with the
+two guards temporarily disabled. The three edited source files were restored
+byte-for-byte before all four fresh-open tests passed (4/4). Current logs and
+restored source hashes are in `target/hx-h2b/native-cut-generation/`; the
+generation driver log is `target/hx-h2b/native-archives-generation-second.log`.
+There is no reader for the former history records.

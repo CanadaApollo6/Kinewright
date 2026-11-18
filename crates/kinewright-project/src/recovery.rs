@@ -17,34 +17,87 @@ use crate::project::canonical_project_identity;
 /// The recovery-journal magic, shared with the app's writer/inspector.
 pub const JOURNAL_MAGIC: &[u8] = b"KINEWRIGHT-JOURNAL\n";
 
-/// The recovery journal directory under the persistent application data root.
-/// # Errors
-/// Returns the typed data-directory error when no root is available or safe.
-pub fn default_recovery_directory() -> Result<PathBuf, kinewright_core::MediaError> {
-    let data_dir = kinewright_media::default_data_dir()?;
-    recovery_directory(&data_dir)
+/// Why no durable per-user directory can hold crash-recovery state.
+#[derive(Debug)]
+pub enum RecoveryDirectoryRefusal {
+    NoStateFolder,
+    Temporary(PathBuf),
+    InMemory(PathBuf),
+    NoExistingAncestor(PathBuf),
+    Inspect { path: PathBuf, error: io::Error },
 }
 
-/// Resolve recovery storage for an explicitly supplied application root.
+impl std::fmt::Display for RecoveryDirectoryRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoStateFolder => f.write_str(
+                "no per-user state folder is set (LOCALAPPDATA, XDG_STATE_HOME or HOME)",
+            ),
+            Self::Temporary(path) => write!(f, "{} is inside the temporary folder", path.display()),
+            Self::InMemory(path) => {
+                write!(f, "{} is in memory and is lost on restart", path.display())
+            }
+            Self::NoExistingAncestor(path) => {
+                write!(f, "no folder above {} exists", path.display())
+            }
+            Self::Inspect { path, error } => {
+                write!(f, "cannot inspect {}: {error}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for RecoveryDirectoryRefusal {}
+
+/// Resolve the persistent per-user crash-recovery folder without creating it.
+///
 /// # Errors
-/// Refuses unsafe directory components and filesystem failures.
-pub fn recovery_directory(data_dir: &Path) -> Result<PathBuf, kinewright_core::MediaError> {
-    kinewright_media::data_subdirectory(data_dir, Path::new("recovery"))
+/// Returns the reason a durable per-user folder could not be resolved.
+#[cfg(not(test))]
+pub fn default_recovery_directory() -> Result<PathBuf, RecoveryDirectoryRefusal> {
+    default_recovery_directory_with(|name| std::env::var_os(name), &std::env::temp_dir())
+}
+
+/// The unit-test build requires the explicit resolver seam.
+///
+/// # Errors
+/// The test guard panics before a resolution can return.
+///
+/// # Panics
+/// Always panics with the recovery test isolation rule.
+#[cfg(test)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "matches the shipping resolver signature"
+)]
+pub fn default_recovery_directory() -> Result<PathBuf, RecoveryDirectoryRefusal> {
+    panic!("recovery test rule: use the explicit recovery directory resolver with a fixture root");
+}
+
+/// Resolve a crash-recovery folder from an explicit environment.
+///
+/// # Errors
+/// Returns the same refusal as [`default_recovery_directory`].
+pub fn default_recovery_directory_with(
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+    temp: &Path,
+) -> Result<PathBuf, RecoveryDirectoryRefusal> {
+    let directory = state_directory_with(env, temp, "recovery")?;
+    refuse_volatile(&directory)?;
+    Ok(directory)
 }
 
 /// Where Studio feedback recovery state lives (S3 C3 fix 2): persistent
 /// per-user app state, never the temporary directory. `LOCALAPPDATA` wins
 /// when set (Windows, and the test harness); otherwise `XDG_STATE_HOME`, then
-/// `~/.local/state`. Without one of those, or when the result is under the
-/// temporary directory or on a RAM-backed file system, this refuses with a
-/// reason, and the caller must not promise that notes survive a restart.
+/// `~/.local/state`.
 ///
 /// # Errors
 /// The reason no persistent location is available.
 pub fn feedback_state_directory() -> Result<PathBuf, String> {
     let directory =
         feedback_state_directory_with(|name| std::env::var_os(name), &std::env::temp_dir())?;
-    refuse_volatile(&directory)?;
+    refuse_volatile(&directory).map_err(|error| error.to_string())?;
     Ok(directory)
 }
 
@@ -57,33 +110,36 @@ pub fn feedback_state_directory_with(
     env: impl Fn(&str) -> Option<std::ffi::OsString>,
     temp: &Path,
 ) -> Result<PathBuf, String> {
+    state_directory_with(env, temp, "feedback").map_err(|error| error.to_string())
+}
+
+fn state_directory_with(
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+    temp: &Path,
+    name: &str,
+) -> Result<PathBuf, RecoveryDirectoryRefusal> {
     let absolute = |name: &str| {
         env(name)
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
     };
     let directory = if let Some(base) = absolute("LOCALAPPDATA") {
-        base.join("Kinewright").join("feedback")
+        base.join("Kinewright").join(name)
     } else if let Some(base) = absolute("XDG_STATE_HOME") {
-        base.join("kinewright").join("feedback")
+        base.join("kinewright").join(name)
     } else if let Some(home) = absolute("HOME") {
         home.join(".local")
             .join("state")
             .join("kinewright")
-            .join("feedback")
+            .join(name)
     } else {
-        return Err(
-            "no per-user state folder is set (LOCALAPPDATA, XDG_STATE_HOME or HOME)".to_owned(),
-        );
+        return Err(RecoveryDirectoryRefusal::NoStateFolder);
     };
-    let temp = fs::canonicalize(temp).unwrap_or_else(|_| temp.to_path_buf());
-    if directory.starts_with(&temp)
-        || nearest_existing(&directory).is_some_and(|found| found.starts_with(&temp))
+    let resolved_temp = fs::canonicalize(temp).unwrap_or_else(|_| temp.to_path_buf());
+    if directory.starts_with(temp)
+        || nearest_existing(&directory).is_some_and(|found| found.starts_with(&resolved_temp))
     {
-        return Err(format!(
-            "{} is inside the temporary folder",
-            directory.display()
-        ));
+        return Err(RecoveryDirectoryRefusal::Temporary(directory));
     }
     Ok(directory)
 }
@@ -94,24 +150,26 @@ fn nearest_existing(path: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn refuse_volatile(directory: &Path) -> Result<(), String> {
+fn refuse_volatile(directory: &Path) -> Result<(), RecoveryDirectoryRefusal> {
     const TMPFS_MAGIC: u64 = 0x0102_1994;
     const RAMFS_MAGIC: u64 = 0x8584_58f6;
     let Some(existing) = nearest_existing(directory) else {
-        return Err(format!("no folder above {} exists", directory.display()));
+        return Err(RecoveryDirectoryRefusal::NoExistingAncestor(
+            directory.to_path_buf(),
+        ));
     };
-    let stat = rustix::fs::statfs(&existing)
-        .map_err(|error| format!("cannot inspect {}: {error}", existing.display()))?;
+    let stat =
+        rustix::fs::statfs(&existing).map_err(|error| RecoveryDirectoryRefusal::Inspect {
+            path: existing,
+            error: error.into(),
+        })?;
     #[allow(
         clippy::cast_sign_loss,
         reason = "f_type is a magic number, not a count"
     )]
     let kind = stat.f_type as u64;
     if kind == TMPFS_MAGIC || kind == RAMFS_MAGIC {
-        return Err(format!(
-            "{} is in memory and is lost on restart",
-            directory.display()
-        ));
+        return Err(RecoveryDirectoryRefusal::InMemory(directory.to_path_buf()));
     }
     Ok(())
 }
@@ -121,7 +179,7 @@ fn refuse_volatile(directory: &Path) -> Result<(), String> {
     clippy::unnecessary_wraps,
     reason = "matches the Linux signature, which can refuse"
 )]
-fn refuse_volatile(_directory: &Path) -> Result<(), String> {
+fn refuse_volatile(_directory: &Path) -> Result<(), RecoveryDirectoryRefusal> {
     Ok(())
 }
 
@@ -525,13 +583,18 @@ pub(crate) fn pending_journal_for_identity(
 /// Retire a base journal you own (F5): only data your session replayed
 /// and superseded. Headless never calls this.
 /// # Errors
-/// Any removal IO error other than absence.
+/// Any removal IO error other than absence or contention.
 pub fn retire_journal_for_project(recovery_dir: &Path, project_path: &Path) -> io::Result<bool> {
+    use crate::legacy_io::{LockedJournal, journal_removal_contended};
+
     let candidate = recovery_dir.join(journal_file_name(project_path));
-    match fs::remove_file(&candidate) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
+    match LockedJournal::open_for_removal(&candidate).and_then(|file| file.unlink(&candidate)) {
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound || journal_removal_contended(&error) =>
+        {
+            Ok(false)
+        }
+        result => result,
     }
 }
 
@@ -789,6 +852,17 @@ mod tests {
             Some(journal.clone()),
             "the stale journal pends"
         );
+        #[cfg(unix)]
+        {
+            let locked = crate::legacy_io::LockedJournal::lock(fs::File::open(&journal).unwrap())
+                .expect("the competing recorder locks its journal");
+            assert!(
+                !retire_journal_for_project(&recovery, &project)
+                    .expect("contention leaves the file"),
+            );
+            assert_eq!(fs::read(&journal).unwrap(), b"stale crash bytes");
+            drop(locked);
+        }
         assert!(
             retire_journal_for_project(&recovery, &project).expect("the retire lands"),
             "a present journal retires to true"
@@ -799,6 +873,71 @@ mod tests {
             None,
             "nothing pends after the retire"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "recovery test rule: use the explicit recovery directory resolver")]
+    fn default_recovery_directory_requires_an_explicit_test_override() {
+        let _ = default_recovery_directory();
+    }
+
+    #[test]
+    fn recovery_directory_uses_absolute_persistent_state_in_order() {
+        let root = TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "recovery-directory",
+        );
+        let temp = root.path("temp");
+        let local = root.path("local");
+        let xdg = root.path("xdg");
+        let home = root.path("home");
+        let resolve = |vars: &[(&str, &Path)]| {
+            default_recovery_directory_with(
+                |key| {
+                    vars.iter()
+                        .find(|(name, _)| *name == key)
+                        .map(|(_, path)| path.as_os_str().to_os_string())
+                },
+                &temp,
+            )
+        };
+        assert_eq!(
+            resolve(&[
+                ("LOCALAPPDATA", &local),
+                ("XDG_STATE_HOME", &xdg),
+                ("HOME", &home)
+            ])
+            .unwrap(),
+            local.join("Kinewright/recovery"),
+        );
+        assert_eq!(
+            resolve(&[("XDG_STATE_HOME", &xdg), ("HOME", &home)]).unwrap(),
+            xdg.join("kinewright/recovery"),
+        );
+        let home_recovery = home.join(".local/state/kinewright/recovery");
+        assert_eq!(resolve(&[("HOME", &home)]).unwrap(), home_recovery);
+
+        let relative = Path::new("relative");
+        assert_eq!(
+            resolve(&[
+                ("LOCALAPPDATA", relative),
+                ("XDG_STATE_HOME", relative),
+                ("HOME", &home)
+            ])
+            .unwrap(),
+            home_recovery,
+        );
+        for vars in [&[][..], &[("HOME", relative)][..]] {
+            assert!(matches!(
+                resolve(vars),
+                Err(RecoveryDirectoryRefusal::NoStateFolder)
+            ));
+        }
+        assert!(matches!(
+            resolve(&[("LOCALAPPDATA", &temp), ("HOME", &home)]),
+            Err(RecoveryDirectoryRefusal::Temporary(path)) if path == temp.join("Kinewright/recovery")
+        ));
+        assert!(fs::read_dir(root.root()).unwrap().next().is_none());
     }
 
     /// S3 C3 fix 2, invariant 1: with `LOCALAPPDATA` unset, feedback state

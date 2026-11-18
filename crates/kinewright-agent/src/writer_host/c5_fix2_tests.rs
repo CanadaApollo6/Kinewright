@@ -1,7 +1,7 @@
 // The second program deliberately uses only the public Project API. On the
 // mutation it must execute an accepted write, not merely compile differently.
 const C5_FIX2_PUBLIC_PROBE: &str = r#"
-use kinewright_core::{Core, Document};
+use kinewright_core::{ Document};
 use kinewright_project::{bundle::{BundleError, LoadedBundle}, bundle_records::{ObjectRef, RecordKind, SessionId}, namespace::ProjectNamespace, storage_budget::StorageLimits, store::ProjectStore};
 fn refused<T>(value: Result<T, BundleError>, api: &str) {
     match value {
@@ -14,27 +14,28 @@ fn main() {
     let args: Vec<_> = std::env::args_os().collect();
     let path = std::path::Path::new(&args[1]);
     let doc: Document = serde_json::from_slice(&std::fs::read(&args[2]).unwrap()).unwrap();
-    let core = Core::spawn(doc.clone()).unwrap();
-    let history = core.export_history().unwrap();
     let fresh = path.with_file_name(format!("fresh-{}.kinewright",std::process::id()));
     let mut control = ProjectStore::new(ProjectNamespace::acquire(&fresh).unwrap(),None,Some(SessionId::fresh().unwrap()),StorageLimits::default()).unwrap();
     control.admit_document(&doc).unwrap();
-    control.admit_history(&history).unwrap();
-    drop(control);
-    let loaded = LoadedBundle::read(path).unwrap();
-    let manual_core = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&manual_core).unwrap();
+    let mut loaded = LoadedBundle::read(path, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
+    let manual_core = loaded.open_manual().unwrap();
     let mut bundle = loaded.into_writer().unwrap();
+    let history = manual_core.export_history().unwrap();
+    history.persist(&mut control, |_| Ok(None)).unwrap();
+    drop(control);
     let used = bundle.store().usage().unwrap().objects;
     bundle.restrict_limits_probe(StorageLimits { objects: used + 256, ..Default::default() }).unwrap();
     // PUBLIC_GUARD
     let written = bundle.store_mut().unwrap().admit_document(&doc);
     if written.is_ok() { eprintln!("C5_FIX2_ACCEPTED_OBJECT_DELTA {}",bundle.store().usage().unwrap().objects-used); }
     refused(written, "admit_document");
-    refused(bundle.store_mut().unwrap().admit_history(&history), "admit_history");
+    match history.persist(bundle.store_mut().unwrap(), |_| Ok(None)) {
+        Err(kinewright_project::operation_history::Error::StoreRunLimit) => {},
+        Ok(_) => panic!("C5_FIX2_OWNER_PUBLICATION_ACCEPTED"),
+        Err(error) => panic!("C5_FIX2_WRONG_OWNER_PUBLICATION_REFUSAL {error}"),
+    }
     let inventory = bundle.store().manifest().unwrap();
     refused(bundle.store_mut().unwrap().admit_manifest_probe(&inventory), "admit_manifest_probe");
-    refused(bundle.store().reserve_history_shadow(1), "reserve_history_shadow");
     let object = ObjectRef { sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(), byte_length: 0, record_kind: RecordKind::OwnedEvidence };
     refused(bundle.store_mut().unwrap().admit_blob(&mut &b""[..],&object,&[]), "admit_blob");
     let (project_id,session_id) = bundle.store().input_owner();
@@ -53,12 +54,13 @@ fn main() {
     let usage = kinewright_project::studio_records::RunUsageRecord {version:1,run_id:kinewright_project::studio_records::RunId::fresh().unwrap(),event_id:"ordinary".into(),input_tokens:None,output_tokens:None,cache_read_tokens:None,cache_write_tokens:None,cost_microunits:None,coverage:"unavailable".into(),evidence_refs:vec![]};
     refused(bundle.admit_orchestration_record(&usage),"admit_orchestration_record");
     refused(bundle.save_branch(&branch,&manual_core),"save_branch");
-    refused(bundle.fork_branch(&branch, kinewright_project::history_record::HistoryRole::Ordinary),"fork_branch");
+    refused(bundle.fork_branch(&branch, kinewright_project::operation_history::Role::Ordinary),"fork_branch");
     assert!(bundle.store().usage().unwrap().objects <= used,"C5_FIX2_ORDINARY_WRITES_CONSUMED_RESERVE");
     // Person publishers may use the raw reserve; ordinary run writes remain refused.
     for (kind,bytes) in [(kinewright_project::studio_records::FeedbackEvidenceKind::Text,&b"text"[..]),(kinewright_project::studio_records::FeedbackEvidenceKind::Strokes,&b"[]"[..]),(kinewright_project::studio_records::FeedbackEvidenceKind::FrameProof,&b"{}"[..])] {
         bundle.admit_feedback_evidence(kind,bytes).unwrap();
     }
+    drop(history);
     bundle.save(&manual_core,&inputs).unwrap();
     refused(bundle.store_mut().unwrap().admit_document(&doc), "run write after person Save");
     drop(bundle);
@@ -262,8 +264,8 @@ struct C5Fix2History {
     parent: ExecutionIdentity,
     attempt: ExecutionIdentity,
     child: TaskId,
-    expected: kinewright_core::HistorySnapshot,
-    manual: kinewright_core::HistorySnapshot,
+    expected: kinewright_project::operation_history::OwnerSnapshot,
+    manual: kinewright_project::operation_history::OwnerSnapshot,
 }
 fn c5_fix2_editor(mut f: Fixture) -> C5Fix2History {
     {
@@ -359,7 +361,7 @@ fn s4b_c5_fix2_public_writes_cannot_spend_terminal_reserve() {
         manual,
         ..
     } = c5_fix2_editor(Fixture::new());
-    let mut doc = (*expected.document).clone();
+    let mut doc = (*expected.history().document).clone();
     if let kinewright_core::Operation::AddMarker { marker } = history_marker(999) {
         doc.markers.push(marker);
     }

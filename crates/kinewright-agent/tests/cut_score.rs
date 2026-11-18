@@ -157,6 +157,7 @@ fn cut_score_cli_scores_supported_studio_save_without_writing() {
     use kinewright_media::test_support::workspace_target_dir;
     use kinewright_project::{
         bundle::{BundleWriteAdmission, ProjectBundle},
+        operation_history::{HistoryPool, PoolLimits},
         owned_inputs::OwnedInputManifest,
     };
     fn snapshot(root: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
@@ -183,23 +184,11 @@ fn cut_score_cli_scores_supported_studio_save_without_writing() {
     }
     let temp = TempDirectory::new_in(&workspace_target_dir(), "dq4-studio");
     let path = temp.path("studio.kinewright");
-    let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let pool = HistoryPool::new(PoolLimits::default());
+    let mut bundle =
+        ProjectBundle::activate(&path, BundleWriteAdmission::new_document(), &pool).unwrap();
     // A real small WAV is admitted only while creating the Studio fixture.
-    let samples = [0_u8; 9_600];
-    let mut bytes = Vec::new();
-    bytes.extend(b"RIFF");
-    bytes.extend(9_636_u32.to_le_bytes());
-    bytes.extend(b"WAVEfmt ");
-    bytes.extend(16_u32.to_le_bytes());
-    bytes.extend(1_u16.to_le_bytes());
-    bytes.extend(1_u16.to_le_bytes());
-    bytes.extend(48_000_u32.to_le_bytes());
-    bytes.extend(96_000_u32.to_le_bytes());
-    bytes.extend(2_u16.to_le_bytes());
-    bytes.extend(16_u16.to_le_bytes());
-    bytes.extend(b"data");
-    bytes.extend(9_600_u32.to_le_bytes());
-    bytes.extend(samples);
+    let bytes = kinewright_media::test_support::wav_f32(&[0.0; 4_800], 48_000, 1);
     let (asset, entry, pins) = bundle
         .store_mut()
         .unwrap()
@@ -222,7 +211,7 @@ fn cut_score_cli_scores_supported_studio_save_without_writing() {
         entries: vec![entry],
     };
     let inputs = bundle.admit_inputs(&manifest).unwrap().reference;
-    let core = kinewright_core::Core::spawn(doc).unwrap();
+    let core = kinewright_project::operation_actor::Core::for_test(doc).unwrap();
     bundle.save(&core, &inputs).unwrap();
     drop(pins);
     drop(bundle);

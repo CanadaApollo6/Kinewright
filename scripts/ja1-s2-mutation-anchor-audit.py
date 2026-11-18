@@ -27,7 +27,9 @@ def audit():
                 continue
             changed = {}
             for name, before, after in value["changes"]:
-                source = changed.get(name, (ROOT / name).read_text())
+                source = changed.get(name)
+                if source is None:
+                    source = (ROOT / name).read_text() if (ROOT / name).is_file() else ""
                 count = source.count(before)
                 rows.append(dict(case=value["name"], path=name, matches=count))
                 if count == 1:

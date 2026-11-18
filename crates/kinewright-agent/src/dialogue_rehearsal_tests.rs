@@ -444,7 +444,7 @@ mod dialogue_rehearsal_tests {
         Arc<CachedDialogueMeasurements>,
         Arc<SessionMedia>,
     ) {
-        let core = Core::spawn(Arc::clone(&doc)).unwrap();
+        let core = Core::for_test(Arc::clone(&doc)).unwrap();
         let media = engine.legacy_media(
             MediaSourceOrigin::new_project().legacy_media().unwrap(),
             doc,

@@ -2,7 +2,7 @@
 fn dq_r4_overrule_cannot_erase_an_unrequested_word_start() {
     let (s, v) = fixture();
     let before = s.snapshot().unwrap();
-    let history = s.core.export_history_identified().unwrap();
+    let history = history_identity(&s);
     let mut removal = words(&v, 1);
     removal["overrule"] = json!([650_000, 2_050_000]);
     let result = cut(&s, args(vec![removal]), true);
@@ -18,7 +18,7 @@ fn dq_r4_overrule_cannot_erase_an_unrequested_word_start() {
     );
     assert_eq!(content(&result)["reason"]["word"], 2);
     assert_eq!(s.snapshot().unwrap(), before);
-    assert_eq!(s.core.export_history_identified().unwrap(), history);
+    assert_eq!(history_identity(&s), history);
 }
 
 #[test]

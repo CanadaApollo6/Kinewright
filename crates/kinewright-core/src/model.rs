@@ -1680,6 +1680,8 @@ impl Document {
     /// agent-authored write that keys past the end and make the
     /// `Audio{Bus,Master}KeyframeOutsideProject` raises unreachable.
     pub(crate) fn recompute_duration(&mut self) -> Result<(), OpError> {
+        #[cfg(feature = "history-metrics")]
+        crate::undo::metrics::duration();
         let previous = self.duration;
         let mut duration = TimeCode::ZERO;
         for clip in self.tracks.iter().flat_map(|track| &track.clips) {
@@ -1724,28 +1726,6 @@ pub fn clip_support_fields(
     static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
     let schema = SCHEMA.get_or_init(|| schemars::schema_for!(Clip).to_value());
     serialized_support_fields(raw, "clip", schema)
-}
-#[allow(clippy::too_many_lines)]
-/// Closed serialized history support, including every retained operation and document.
-/// # Errors
-/// Refuses fields or tags outside this build's compiled schema.
-pub fn history_support_fields(
-    raw: &serde_json::Value,
-) -> Result<std::collections::BTreeSet<String>, String> {
-    static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
-    let schema = SCHEMA.get_or_init(|| schemars::schema_for!(crate::HistorySnapshot).to_value());
-    serialized_support_fields(raw, "history", schema)
-}
-
-/// Validate the compact journal independently of its document transport.
-/// # Errors
-/// Refuses fields and variants outside this build's journal schema.
-pub fn history_journal_support_fields(
-    raw: &serde_json::Value,
-) -> Result<std::collections::BTreeSet<String>, String> {
-    static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
-    let schema = SCHEMA.get_or_init(|| schemars::schema_for!(crate::HistoryJournal).to_value());
-    serialized_support_fields(raw, "history.journal", schema)
 }
 
 fn serialized_support_fields(

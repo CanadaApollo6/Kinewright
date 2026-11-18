@@ -593,7 +593,18 @@ fn live_run(
             "C5 executing Director at Stop"
         );
         report.lock().unwrap()["active_at_stop"] = serde_json::json!(true);
-        Some(merged_histories(&owner, &final_state, &manual.document))
+        Some(merged_histories(
+            &owner,
+            &final_state,
+            &owner
+                .owner()
+                .unwrap()
+                .core()
+                .export_history()
+                .unwrap()
+                .history()
+                .document,
+        ))
     } else {
         None
     };
@@ -674,7 +685,18 @@ fn live_run(
         "C5 active Stop cancellation"
     );
     let before_stop = before_stop.expect("C5 active merge acknowledgment required");
-    let after_stop = merged_histories(&owner, &projection, &manual.document);
+    let after_stop = merged_histories(
+        &owner,
+        &projection,
+        &owner
+            .owner()
+            .unwrap()
+            .core()
+            .export_history()
+            .unwrap()
+            .history()
+            .document,
+    );
     assert_eq!(
         after_stop, before_stop,
         "C5 child and candidate full histories after Stop"
@@ -685,7 +707,13 @@ fn live_run(
     drop(owner);
     drop(owner_arc);
     drop(host);
-    let reopened = Ja1EditingSession::open(&path).unwrap();
+    let reopened = Ja1EditingSession::open(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     assert_eq!(
         reopened.published_manual_history().unwrap(),
         manual,
@@ -802,7 +830,7 @@ struct DirectorRun {
     temp: kinewright_media::test_support::TempDirectory,
     path: PathBuf,
     claim: PathBuf,
-    manual: kinewright_core::HistorySnapshot,
+    manual: kinewright_project::operation_actor::PortableHistory,
     stop_gate: Arc<super::qualification_gate::MergeStopGate>,
     host: WriterHost,
     _release: super::qualification_gate::ReleaseOnDrop,
@@ -819,7 +847,10 @@ fn start_director(
     project: &str,
     candidate: &'static crate::orchestration::adapters::ConnectorSpecification,
 ) -> DirectorRun {
-    let temp = kinewright_media::test_support::TempDirectory::new_in(&std::env::temp_dir(), "l5");
+    let temp = kinewright_media::test_support::TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "l5",
+    );
     let path = temp.path("project.kinewright");
     let mut document = Document::default();
     document.markers.push(kinewright_core::Marker {
@@ -828,8 +859,13 @@ fn start_director(
         label: "before".into(),
         color_token: 0,
     });
-    let core = Core::spawn(document).unwrap();
-    let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let core = Core::for_test(document).unwrap();
+    let mut bundle = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let inputs = bundle.empty_inputs().unwrap().reference.clone();
     bundle.save(&core, &inputs).unwrap();
     drop(bundle);
@@ -839,7 +875,13 @@ fn start_director(
         kinewright_media::test_support::wav_f32(&[0.0; 480], 48000, 1),
     )
     .unwrap();
-    let mut owner = Ja1EditingSession::open(&path).unwrap();
+    let mut owner = Ja1EditingSession::open(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     owner.import_owned_media(&source).unwrap();
     owner
         .core()
@@ -856,7 +898,15 @@ fn start_director(
         .unwrap();
     owner.save_active().unwrap();
     let manual = owner.published_manual_history().unwrap();
-    assert!(!manual.cursor.redo.is_empty());
+    assert!(
+        !owner
+            .core()
+            .export_history()
+            .unwrap()
+            .history()
+            .redo
+            .is_empty()
+    );
     drop(owner);
     let claim = temp.path("machine");
     let stop_gate = Arc::new(super::qualification_gate::MergeStopGate::default());
@@ -1437,19 +1487,20 @@ pub use network_witness::{run_installed_codex_network_witness, run_unpaid_policy
 fn branch_history(
     owner: &Ja1EditingSession,
     branch: &kinewright_project::bundle_records::BranchId,
-) -> kinewright_core::HistorySnapshot {
+) -> kinewright_project::operation_history::OwnerSnapshot {
     let binding = owner.candidate_binding(branch).unwrap();
     let checkpoint = owner
         .store()
         .unwrap()
         .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(&binding.checkpoint)
         .unwrap();
-    (*owner
-        .store()
+    checkpoint
+        .open(owner.store().unwrap(), owner.core().history_pool())
         .unwrap()
-        .resolve_history(&checkpoint.history_ref)
-        .unwrap())
-    .clone()
+        .into_reader()
+        .unwrap()
+        .into_capture()
+        .unwrap()
 }
 fn merged_histories(
     owner: &super::HostCommandOwner,
@@ -1457,9 +1508,9 @@ fn merged_histories(
     manual: &Document,
 ) -> (
     kinewright_project::bundle_records::BranchId,
-    kinewright_core::HistorySnapshot,
+    kinewright_project::operation_history::OwnerSnapshot,
     kinewright_project::bundle_records::BranchId,
-    kinewright_core::HistorySnapshot,
+    kinewright_project::operation_history::OwnerSnapshot,
 ) {
     assert_eq!(state.tasks.len(), 2, "C5 one specialist");
     let child = state
@@ -1489,12 +1540,12 @@ fn merged_histories(
     let mut expected = manual.clone();
     expected.markers[0].position = kinewright_core::TimeCode(2);
     assert_eq!(
-        child_history.document.as_ref(),
+        child_history.history().document.as_ref(),
         &expected,
         "C5 exact specialist document"
     );
     assert_eq!(
-        candidate_history.document.as_ref(),
+        candidate_history.history().document.as_ref(),
         &expected,
         "C5 exact candidate document"
     );

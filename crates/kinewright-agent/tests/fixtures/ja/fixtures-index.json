@@ -93,8 +93,8 @@
     {
       "fixture_id": "clip-id-reuse",
       "relative_file": "clip-id-reuse.json",
-      "sha256": "1a17ca380bdbb7a763dfafc0f0cfba17743d2e51d18abad9ec1345db53c63ca8",
-      "byte_length": 3494,
+      "sha256": "af9a60c686a7b5c51811e2802624c94387118b464175ead5ca4d99424af2756b",
+      "byte_length": 3502,
       "expected_baseline_process_exit": 0,
       "inputs": {
         "initial": {
@@ -641,8 +641,8 @@
     {
       "fixture_id": "s1-bundle-migration",
       "relative_file": "s1-bundle-migration.json",
-      "sha256": "c59548a6ff7b657b58571ee0bd310d5e0b7f4de635ca5c266b74a094bd908e8a",
-      "byte_length": 7004,
+      "sha256": "fb479a5f089a01c359ebb183c54972c7e6fbc7850e842ddcddf5c2d85b298fa2",
+      "byte_length": 6365,
       "expected_baseline_process_exit": 1,
       "inputs": {
         "legacy": {
@@ -665,62 +665,50 @@
         },
         "sample-root": {
           "relative_file": "s1-v3-bundle/studio.kinewright",
-          "sha256": "cd6a336987d68107e328e6203e1ef2eb14ab63d202f362d37708a8e661d99ba0",
+          "sha256": "82f5a857521cd88aa41b13accb3f620d4e23c08288ec02ace8f53a6a83555aa7",
           "byte_length": 1846,
           "kind": "v3-bundle-root"
         },
         "sample-object-1": {
-          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/0dde884becd2ca617697a199e1a802b8f59b8b64221a8be0bbcfe822ea12aef7",
-          "sha256": "0dde884becd2ca617697a199e1a802b8f59b8b64221a8be0bbcfe822ea12aef7",
-          "byte_length": 828,
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/recovery/inventory",
+          "sha256": "7e6f3199c78f317a8a38e758ad0d66ec92dca395162acf59b8f7c9f1f9c86ac2",
+          "byte_length": 230,
           "kind": "v3-bundle-object"
         },
         "sample-object-2": {
-          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/66b8262bd1584aa4c00ce5d2082b78dde67cb5ab96458aa9664282e03b3f3b45",
-          "sha256": "66b8262bd1584aa4c00ce5d2082b78dde67cb5ab96458aa9664282e03b3f3b45",
-          "byte_length": 147,
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/3870fa0dd50b3e810068b3767dbe69dac548447a0dcebf3e89a1b132d10e6b62",
+          "sha256": "3870fa0dd50b3e810068b3767dbe69dac548447a0dcebf3e89a1b132d10e6b62",
+          "byte_length": 959,
           "kind": "v3-bundle-object"
         },
         "sample-object-3": {
-          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/cef8b5290a8e9d9edb3994a5d2dc3732fe14b78e163f0c79b6fd3fea3c44c5f2",
-          "sha256": "cef8b5290a8e9d9edb3994a5d2dc3732fe14b78e163f0c79b6fd3fea3c44c5f2",
-          "byte_length": 115,
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/466a79024bbed1707b1b023ae5d24f8dc25a2245af7bb5cb75ba11255d267694",
+          "sha256": "466a79024bbed1707b1b023ae5d24f8dc25a2245af7bb5cb75ba11255d267694",
+          "byte_length": 3571,
           "kind": "v3-bundle-object"
         },
         "sample-object-4": {
-          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/d6482056edac617b6107651f48c38ecd5c62daf0157007230daa5e47090b1c70",
-          "sha256": "d6482056edac617b6107651f48c38ecd5c62daf0157007230daa5e47090b1c70",
-          "byte_length": 5446,
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/4cc13d028a16e8237f3333fc44507b208bbd12fc88d0de9892f0322a18d4a48b",
+          "sha256": "4cc13d028a16e8237f3333fc44507b208bbd12fc88d0de9892f0322a18d4a48b",
+          "byte_length": 166,
           "kind": "v3-bundle-object"
         },
         "sample-object-5": {
-          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/db706499829352e473755210aecb121b79bb667a3c7e73650585bfc06a89538a",
-          "sha256": "db706499829352e473755210aecb121b79bb667a3c7e73650585bfc06a89538a",
-          "byte_length": 167,
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/c686eb9312403ddf0e9936a7bf93b5698c1cf077d812592610abdebea4a6f425",
+          "sha256": "c686eb9312403ddf0e9936a7bf93b5698c1cf077d812592610abdebea4a6f425",
+          "byte_length": 115,
           "kind": "v3-bundle-object"
         },
         "sample-object-6": {
-          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/e1173be1e900f687221964ed163309d0571b7579e7f78e6d811cee590a99a59c",
-          "sha256": "e1173be1e900f687221964ed163309d0571b7579e7f78e6d811cee590a99a59c",
-          "byte_length": 765,
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/e0fc151a7cbd57094642f2fed346acde37037ec97aa455adb320df055d034db7",
+          "sha256": "e0fc151a7cbd57094642f2fed346acde37037ec97aa455adb320df055d034db7",
+          "byte_length": 748,
           "kind": "v3-bundle-object"
         },
         "sample-object-7": {
-          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/f8db7b57d54166b97ff29a01d0c4651bbe106139f306c64919f174c56682c0ad",
-          "sha256": "f8db7b57d54166b97ff29a01d0c4651bbe106139f306c64919f174c56682c0ad",
-          "byte_length": 730,
-          "kind": "v3-bundle-object"
-        },
-        "sample-object-8": {
-          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/f99a0a244ce93d1c8fbdec2e3b12c793add03f199ed7cebc120ae97a2d695649",
-          "sha256": "f99a0a244ce93d1c8fbdec2e3b12c793add03f199ed7cebc120ae97a2d695649",
-          "byte_length": 1489,
-          "kind": "v3-bundle-object"
-        },
-        "sample-object-9": {
-          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/recovery/inventory",
-          "sha256": "d6b4dcf2b8e7280bbf6be425aebab06ce4c5b232b4a52e2ee1c1e73c4cef02d6",
-          "byte_length": 230,
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/e1173be1e900f687221964ed163309d0571b7579e7f78e6d811cee590a99a59c",
+          "sha256": "e1173be1e900f687221964ed163309d0571b7579e7f78e6d811cee590a99a59c",
+          "byte_length": 765,
           "kind": "v3-bundle-object"
         }
       },
@@ -1149,52 +1137,6 @@
       }
     },
     {
-      "fixture_id": "s2-manual-recovery",
-      "relative_file": "s2-manual-recovery.json",
-      "sha256": "5f4c5f22fd4e92a8fa45e4dba4c20ed2e5d61c853edc7046fb64e97741806f0f",
-      "byte_length": 3062,
-      "expected_baseline_process_exit": 0,
-      "inputs": {
-        "control": {
-          "relative_file": "s2-manual-recovery-control.json",
-          "sha256": "18e9de3bb2c910c7b3fc3ce955a9acf44749867e36f27dd974a08982c1e89078",
-          "byte_length": 64,
-          "kind": "input"
-        }
-      },
-      "oracles": {
-        "true": {
-          "relative_file": "oracle-true.json",
-          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
-          "byte_length": 5,
-          "kind": "input"
-        }
-      }
-    },
-    {
-      "fixture_id": "s2-manual-floor",
-      "relative_file": "s2-manual-floor.json",
-      "sha256": "0fdbf6cbe0dcc2421617af3fb3c7f17cd5a21b3f6ac80c07162404bfd01acea7",
-      "byte_length": 3056,
-      "expected_baseline_process_exit": 0,
-      "inputs": {
-        "control": {
-          "relative_file": "s2-manual-floor-control.json",
-          "sha256": "06e9b46f3054c0f22b712821d8a650934cd61127af732b562a0358ec69deb393",
-          "byte_length": 61,
-          "kind": "input"
-        }
-      },
-      "oracles": {
-        "true": {
-          "relative_file": "oracle-true.json",
-          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
-          "byte_length": 5,
-          "kind": "input"
-        }
-      }
-    },
-    {
       "fixture_id": "s2-switch-reply-drop",
       "relative_file": "s2-switch-reply-drop.json",
       "sha256": "0dd9f3ef8168102b3a9093b79c7c8a10eb70c6a4f51ef839290d77cac96637da",
@@ -1228,6 +1170,52 @@
           "relative_file": "s2-switch-return-control.json",
           "sha256": "01317a5c259326fe9d22d24b625d5e355db792b1e0e59c6c0e1ddacf4111c3e5",
           "byte_length": 50,
+          "kind": "input"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "input"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-manual-recovery",
+      "relative_file": "s2-manual-recovery.json",
+      "sha256": "4884965a57e83cc65f11b21e6024b8470f4ae44f98f5d8908295c935775ceb42",
+      "byte_length": 3084,
+      "expected_baseline_process_exit": 0,
+      "inputs": {
+        "control": {
+          "relative_file": "s2-manual-recovery-control.json",
+          "sha256": "18e9de3bb2c910c7b3fc3ce955a9acf44749867e36f27dd974a08982c1e89078",
+          "byte_length": 64,
+          "kind": "input"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "input"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-manual-first-save",
+      "relative_file": "s2-manual-first-save.json",
+      "sha256": "015b4797be5dd8b5feccf82f8d85a31934c04d24aae02e331b0eae26c6836cff",
+      "byte_length": 3088,
+      "expected_baseline_process_exit": 0,
+      "inputs": {
+        "control": {
+          "relative_file": "s2-manual-first-save-control.json",
+          "sha256": "42a0fdf9d63af23750cd198e2cb39b93520b96c0697aa33bc631be9dba3cfbf9",
+          "byte_length": 66,
           "kind": "input"
         }
       },

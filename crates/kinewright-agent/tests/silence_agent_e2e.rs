@@ -8,14 +8,14 @@ use kinewright_agent::{
     ClaudeCodeDriver, McpServer, shrink_silence_span_for_cutting_with_transcript,
 };
 use kinewright_core::{
-    AgentDriver, AgentEvent, Analysis, Command as CoreCommand, Core, Document, Event, Playback,
-    Query, QueryResult, SessionConfig, SilenceSpan, SilenceStatus, TimeCode,
-    map_source_range_to_project,
+    AgentDriver, AgentEvent, Analysis, Command as CoreCommand, Document, Event, Playback, Query,
+    QueryResult, SessionConfig, SilenceSpan, SilenceStatus, TimeCode, map_source_range_to_project,
 };
 use kinewright_media::test_support::{
     SpeechClip, joined_words, normalized_words, single_clip_document, test_engine,
     wait_for_transcript,
 };
+use kinewright_project::operation_actor::Core;
 
 const TTS_SSML: &str = "<speak version='1.0' xml:lang='en-US'>Alpha.<break time='1400ms'/>Bravo.<break time='1400ms'/>Charlie.</speak>";
 
@@ -46,7 +46,7 @@ fn claude_removes_long_silences_with_one_atomic_plan() {
 
     let original = single_clip_document(asset);
     media.set_document(Arc::new(original.clone()));
-    let core = Core::spawn(original.clone()).expect("core should start");
+    let core = Core::for_test(original.clone()).expect("core should start");
     let server = McpServer::start(core.clone(), media.clone(), media.clone())
         .expect("MCP server should start");
     let confirmations = server.confirmations();

@@ -191,7 +191,7 @@ impl HostCommandOwner {
                 }
                 if let Some(envelope) = &history.merge_envelope
                     && !matches!(
-                        self.owner()?.manual_transition_receipt(envelope)?,
+                        self.owner()?.command_receipt(envelope)?,
                         ReceiptLookup::Committed(_) | ReceiptLookup::Retired(_)
                     )
                 {
@@ -289,12 +289,18 @@ impl HostCommandOwner {
             return Ok(Some(format!("{code}: {}{instruction}", work.disclosure)));
         }
         if state.outcome != RunOutcome::Pending {
-            return Ok(retained
-                .work
-                .iter()
-                .filter(|work| work.run == state.run)
-                .min_by_key(|work| (work.open_on_timeline, !work.frozen))
-                .map(|work| format!("retained_task_work: {}", work.disclosure)));
+            // A completed parent and its unmerged children can all retain work.
+            // Choosing one hides the others from Run details even though Status
+            // correctly offers every saved branch.
+            let mut message = String::new();
+            for work in retained.work.iter().filter(|work| work.run == state.run) {
+                if !message.is_empty() {
+                    message.push(' ');
+                }
+                message.push_str("retained_task_work: ");
+                message.push_str(&work.disclosure);
+            }
+            return Ok((!message.is_empty()).then_some(message));
         }
         let Some(block) = blocks.first() else {
             return Ok(waiting.then(|| {

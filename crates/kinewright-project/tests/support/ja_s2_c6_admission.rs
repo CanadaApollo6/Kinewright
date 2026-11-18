@@ -50,7 +50,7 @@ pub fn fixture(root: &Path, kind: &str, declaration: &str) -> std::path::PathBuf
         let mut record = serde_json::json!({
             "role":"rescue_copy_v1", "schema":1, "project_id":raw["studio"]["project_id"],
             "originating_session":"11111111111111111111111111111111", "full_capture_sha256":"a".repeat(64), "selected_capture_sha256":"b".repeat(64),
-            "old_floor":0,"new_floor":0,"removed_undo":0,"redo_preserved":true,"gesture_preserved":true,
+            "capture_checkpoints":[],"redo_preserved":true,"gesture_preserved":true,
             "acknowledged_root":null,"acknowledged_absence":"unsaved source", "recovery_origin":null,"omissions":[],"attempts":[],
             "summary":{"count":0,"count_overflow":false,"digest":"","unresolved":false}
         });
@@ -138,6 +138,10 @@ fn creation_observer_control() {
     assert!(!directory.exists());
     assert_eq!(tree(temp.root()), before);
 }
+#[allow(
+    clippy::too_many_lines,
+    reason = "one admission matrix checks every selected namespace fault without changing its controls"
+)]
 pub fn matrix(mut caller: impl FnMut(&Path) -> Result<(), BundleError>) {
     use kinewright_media::test_support::TempDirectory;
     #[cfg(target_os = "linux")]
@@ -164,11 +168,24 @@ pub fn matrix(mut caller: impl FnMut(&Path) -> Result<(), BundleError>) {
             let refused = kind != "ordinary" && mode != "supported";
             if !refused {
                 #[cfg(target_os = "linux")]
-                LoadedBundle::read(&path).unwrap();
+                LoadedBundle::read(
+                    &path,
+                    &kinewright_project::operation_history::HistoryPool::new(
+                        kinewright_project::operation_history::PoolLimits::default(),
+                    ),
+                )
+                .unwrap();
                 #[cfg(not(target_os = "linux"))]
                 {
-                    let (result, trace) =
-                        io_observer::observe(|| LoadedBundle::read(&path).map(|_| ()));
+                    let (result, trace) = io_observer::observe(|| {
+                        LoadedBundle::read(
+                            &path,
+                            &kinewright_project::operation_history::HistoryPool::new(
+                                kinewright_project::operation_history::PoolLimits::default(),
+                            ),
+                        )
+                        .map(|_| ())
+                    });
                     assert!(
                         matches!(result, Err(BundleError::DurabilityUnsupported)),
                         "{kind}/{mode}: {result:?}"
@@ -219,7 +236,13 @@ pub fn matrix(mut caller: impl FnMut(&Path) -> Result<(), BundleError>) {
                         "real save: {:?}",
                         trace.events
                     );
-                    LoadedBundle::read(&path).unwrap();
+                    LoadedBundle::read(
+                        &path,
+                        &kinewright_project::operation_history::HistoryPool::new(
+                            kinewright_project::operation_history::PoolLimits::default(),
+                        ),
+                    )
+                    .unwrap();
                 }
                 #[cfg(not(target_os = "linux"))]
                 {

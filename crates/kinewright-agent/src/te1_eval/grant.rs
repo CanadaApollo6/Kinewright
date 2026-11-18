@@ -736,6 +736,9 @@ mod tests {
         );
         assert!(
             super::super::run_case(
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
                 &folder.path("native-denied"),
                 5,
                 "codex",

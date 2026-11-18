@@ -1,0 +1,403 @@
+{
+  "metrics": {
+    "old": {
+      "edit_10000_ms": {
+        "median": 0.373863,
+        "min": 0.37099099999999996,
+        "max": 0.39353899999999997
+      },
+      "edit_1000_ms": {
+        "median": 0.204759,
+        "min": 0.20413399999999998,
+        "max": 0.20672200000000002
+      },
+      "fold_ms": {
+        "median": 0.228772,
+        "min": 0.21333999999999997,
+        "max": 0.338105
+      },
+      "gesture_apply_ms": {
+        "median": 28.170909,
+        "min": 27.731267,
+        "max": 28.550578
+      },
+      "gesture_redo_ms": {
+        "median": 0.001613,
+        "min": 0.001421,
+        "max": 0.0026910000000000002
+      },
+      "walk_p95_ms": {
+        "median": 0.002435,
+        "min": 0.001283,
+        "max": 0.002531
+      },
+      "walk_worst_ms": {
+        "median": 0.06566799999999999,
+        "min": 0.015427,
+        "max": 0.075578
+      }
+    },
+    "product": {
+      "cold_undo_ms": {
+        "median": 250.733804,
+        "min": 250.230695,
+        "max": 254.17581299999998
+      },
+      "edit_10000_ms": {
+        "median": 0.271006,
+        "min": 0.261374,
+        "max": 0.275515
+      },
+      "edit_1000_ms": {
+        "median": 0.25836400000000004,
+        "min": 0.257046,
+        "max": 0.265376
+      },
+      "fold_ms": {
+        "median": 1.410452,
+        "min": 1.407601,
+        "max": 1.419244
+      },
+      "gesture_apply_ms": {
+        "median": 30.401484999999997,
+        "min": 30.190903000000002,
+        "max": 30.919514
+      },
+      "gesture_redo_ms": {
+        "median": 16.118387000000002,
+        "min": 15.980624999999998,
+        "max": 16.226805
+      },
+      "open_ms": {
+        "median": 350.40817899999996,
+        "min": 347.39365100000003,
+        "max": 352.337745
+      },
+      "walk_p95_ms": {
+        "median": 5.650135,
+        "min": 5.644164999999999,
+        "max": 5.69784
+      },
+      "walk_worst_ms": {
+        "median": 250.123694,
+        "min": 249.75493,
+        "max": 254.258649
+      }
+    }
+  },
+  "pairs": {
+    "edit_1000_ms": {
+      "ratios": [
+        1.243438047232515,
+        1.263114197666525,
+        1.2898359125904035,
+        1.2656588319437236,
+        1.2610080120523182
+      ],
+      "within_1_5": 5
+    },
+    "edit_10000_ms": {
+      "ratios": [
+        0.6904982733604548,
+        0.6979409494970533,
+        0.7426460480173375,
+        0.7299018828897011,
+        0.7080454605029115
+      ],
+      "within_1_5": 5
+    },
+    "gesture_apply_ms": {
+      "ratios": [
+        1.06857412834164,
+        1.0886954065243395,
+        1.0953178673358155,
+        1.0725388023510352,
+        1.0925487814621098
+      ],
+      "within_1_5": 5
+    }
+  },
+  "rss_bytes": {
+    "old": 9296969728,
+    "product": 70746112
+  },
+  "fold": {
+    "samples": 160,
+    "under_2_ms": 160,
+    "worst_ms": 1.457968
+  },
+  "depth_ranges_overlap": [
+    true,
+    true,
+    true,
+    true,
+    true
+  ],
+  "phases": {
+    "edit_1000": {
+      "bytes_serialised": 6016,
+      "commands": 32,
+      "document_bytes_serialised": 0,
+      "document_copies": 32,
+      "exact_measurements": 0,
+      "kernel_duration_passes": 32,
+      "kernel_identity_passes": 64,
+      "kernel_validation_passes": 64,
+      "operation_reservations": 32,
+      "owner_document_scans": 0,
+      "owner_exact_measurements": 0,
+      "owner_folded_ancestry": 0,
+      "owner_folded_commands": 0,
+      "owner_folded_payload_references": 0,
+      "owner_folded_resource_ids": 0,
+      "owner_folded_seed_ids": 0,
+      "owner_ledger_entries": 0,
+      "owner_lineage_encodings": 0,
+      "owner_origin_lookups": 0,
+      "owner_owner_identity_bytes_serialised": 0,
+      "owner_owner_identity_hashes": 0,
+      "owner_payload_bytes_serialised": 8464,
+      "owner_payload_encodings": 32,
+      "owner_payload_operations": 32,
+      "owner_resource_document_scans": 0,
+      "owner_seed_capacity_scans": 0,
+      "owner_seed_map_copies": 0,
+      "owner_seed_prune_scans": 0,
+      "owner_seed_verify_scans": 0
+    },
+    "edit_10000": {
+      "bytes_serialised": 6016,
+      "commands": 32,
+      "document_bytes_serialised": 0,
+      "document_copies": 32,
+      "exact_measurements": 0,
+      "kernel_duration_passes": 32,
+      "kernel_identity_passes": 64,
+      "kernel_validation_passes": 64,
+      "operation_reservations": 32,
+      "owner_document_scans": 0,
+      "owner_exact_measurements": 0,
+      "owner_folded_ancestry": 0,
+      "owner_folded_commands": 0,
+      "owner_folded_payload_references": 0,
+      "owner_folded_resource_ids": 0,
+      "owner_folded_seed_ids": 0,
+      "owner_ledger_entries": 0,
+      "owner_lineage_encodings": 0,
+      "owner_origin_lookups": 0,
+      "owner_owner_identity_bytes_serialised": 0,
+      "owner_owner_identity_hashes": 0,
+      "owner_payload_bytes_serialised": 8464,
+      "owner_payload_encodings": 32,
+      "owner_payload_operations": 32,
+      "owner_resource_document_scans": 0,
+      "owner_seed_capacity_scans": 0,
+      "owner_seed_map_copies": 0,
+      "owner_seed_prune_scans": 0,
+      "owner_seed_verify_scans": 0
+    },
+    "fold": {
+      "bytes_serialised": 7853760,
+      "commands": 32,
+      "document_bytes_serialised": 7847744,
+      "document_copies": 64,
+      "exact_measurements": 32,
+      "kernel_duration_passes": 64,
+      "kernel_identity_passes": 128,
+      "kernel_validation_passes": 128,
+      "operation_reservations": 32,
+      "owner_document_scans": 0,
+      "owner_exact_measurements": 0,
+      "owner_folded_ancestry": 0,
+      "owner_folded_commands": 32,
+      "owner_folded_payload_references": 0,
+      "owner_folded_resource_ids": 0,
+      "owner_folded_seed_ids": 0,
+      "owner_ledger_entries": 0,
+      "owner_lineage_encodings": 0,
+      "owner_origin_lookups": 96,
+      "owner_owner_identity_bytes_serialised": 0,
+      "owner_owner_identity_hashes": 0,
+      "owner_payload_bytes_serialised": 8464,
+      "owner_payload_encodings": 32,
+      "owner_payload_operations": 32,
+      "owner_resource_document_scans": 0,
+      "owner_seed_capacity_scans": 0,
+      "owner_seed_map_copies": 0,
+      "owner_seed_prune_scans": 0,
+      "owner_seed_verify_scans": 0
+    },
+    "gesture_apply": {
+      "commands": 120,
+      "history": {
+        "bytes_serialised": 22576,
+        "document_bytes_serialised": 0,
+        "document_copies": 120,
+        "exact_measurements": 0,
+        "kernel_duration_passes": 120,
+        "kernel_identity_passes": 240,
+        "kernel_validation_passes": 240,
+        "operation_reservations": 120
+      },
+      "owner": {
+        "document_scans": 0,
+        "exact_measurements": 0,
+        "folded_ancestry": 0,
+        "folded_commands": 0,
+        "folded_payload_references": 0,
+        "folded_resource_ids": 0,
+        "folded_seed_ids": 0,
+        "ledger_entries": 0,
+        "lineage_encodings": 0,
+        "origin_lookups": 0,
+        "owner_identity_bytes_serialised": 0,
+        "owner_identity_hashes": 0,
+        "payload_bytes_serialised": 33660,
+        "payload_encodings": 240,
+        "payload_operations": 120,
+        "resource_document_scans": 0,
+        "seed_capacity_scans": 0,
+        "seed_map_copies": 0,
+        "seed_prune_scans": 0,
+        "seed_verify_scans": 0
+      }
+    },
+    "gesture_redo": {
+      "bytes_serialised": 0,
+      "commands": 1,
+      "document_bytes_serialised": 0,
+      "document_copies": 1,
+      "exact_measurements": 0,
+      "kernel_duration_passes": 120,
+      "kernel_identity_passes": 240,
+      "kernel_validation_passes": 240,
+      "operation_reservations": 0,
+      "owner_document_scans": 0,
+      "owner_exact_measurements": 0,
+      "owner_folded_ancestry": 0,
+      "owner_folded_commands": 0,
+      "owner_folded_payload_references": 0,
+      "owner_folded_resource_ids": 0,
+      "owner_folded_seed_ids": 0,
+      "owner_ledger_entries": 0,
+      "owner_lineage_encodings": 0,
+      "owner_origin_lookups": 0,
+      "owner_owner_identity_bytes_serialised": 0,
+      "owner_owner_identity_hashes": 0,
+      "owner_payload_bytes_serialised": 0,
+      "owner_payload_encodings": 0,
+      "owner_payload_operations": 0,
+      "owner_resource_document_scans": 0,
+      "owner_seed_capacity_scans": 0,
+      "owner_seed_map_copies": 0,
+      "owner_seed_prune_scans": 0,
+      "owner_seed_verify_scans": 0
+    },
+    "open": {
+      "cold_undo": {
+        "history": {
+          "bytes_serialised": 490466,
+          "document_bytes_serialised": 490466,
+          "document_copies": 3,
+          "exact_measurements": 2,
+          "kernel_duration_passes": 1999,
+          "kernel_identity_passes": 0,
+          "kernel_validation_passes": 3998,
+          "operation_reservations": 0
+        },
+        "owner": {
+          "document_scans": 0,
+          "exact_measurements": 0,
+          "folded_ancestry": 0,
+          "folded_commands": 0,
+          "folded_payload_references": 0,
+          "folded_resource_ids": 0,
+          "folded_seed_ids": 0,
+          "ledger_entries": 0,
+          "lineage_encodings": 0,
+          "origin_lookups": 0,
+          "owner_identity_bytes_serialised": 0,
+          "owner_identity_hashes": 0,
+          "payload_bytes_serialised": 0,
+          "payload_encodings": 0,
+          "payload_operations": 0,
+          "resource_document_scans": 0,
+          "seed_capacity_scans": 0,
+          "seed_map_copies": 0,
+          "seed_prune_scans": 0,
+          "seed_verify_scans": 0
+        }
+      },
+      "history": {
+        "bytes_serialised": 2317276,
+        "document_bytes_serialised": 980932,
+        "document_copies": 2,
+        "exact_measurements": 5,
+        "kernel_duration_passes": 2000,
+        "kernel_identity_passes": 4000,
+        "kernel_validation_passes": 4006,
+        "operation_reservations": 2000
+      },
+      "owner": {
+        "document_scans": 4,
+        "exact_measurements": 0,
+        "folded_ancestry": 0,
+        "folded_commands": 0,
+        "folded_payload_references": 0,
+        "folded_resource_ids": 0,
+        "folded_seed_ids": 0,
+        "ledger_entries": 5,
+        "lineage_encodings": 1,
+        "origin_lookups": 1,
+        "owner_identity_bytes_serialised": 617427,
+        "owner_identity_hashes": 1,
+        "payload_bytes_serialised": 583182,
+        "payload_encodings": 2400,
+        "payload_operations": 0,
+        "resource_document_scans": 2,
+        "seed_capacity_scans": 0,
+        "seed_map_copies": 0,
+        "seed_prune_scans": 0,
+        "seed_verify_scans": 2
+      }
+    },
+    "walk": {
+      "bytes_serialised": 321266480,
+      "commands": 2000,
+      "document_bytes_serialised": 321266480,
+      "document_copies": 1997,
+      "exact_measurements": 1310,
+      "kernel_duration_passes": 71464,
+      "kernel_identity_passes": 0,
+      "kernel_validation_passes": 142928,
+      "operation_reservations": 0,
+      "owner_document_scans": 0,
+      "owner_exact_measurements": 0,
+      "owner_folded_ancestry": 0,
+      "owner_folded_commands": 0,
+      "owner_folded_payload_references": 0,
+      "owner_folded_resource_ids": 0,
+      "owner_folded_seed_ids": 0,
+      "owner_ledger_entries": 0,
+      "owner_lineage_encodings": 0,
+      "owner_origin_lookups": 0,
+      "owner_owner_identity_bytes_serialised": 0,
+      "owner_owner_identity_hashes": 0,
+      "owner_payload_bytes_serialised": 0,
+      "owner_payload_encodings": 0,
+      "owner_payload_operations": 0,
+      "owner_resource_document_scans": 0,
+      "owner_seed_capacity_scans": 0,
+      "owner_seed_map_copies": 0,
+      "owner_seed_prune_scans": 0,
+      "owner_seed_verify_scans": 0
+    }
+  },
+  "phase_counts_identical": true,
+  "start": "2026-11-16T02:31:30.573801837Z",
+  "end": "2026-11-16T02:33:16.148299081Z",
+  "one_minute_load_range": [
+    0.84,
+    1.96
+  ]
+}

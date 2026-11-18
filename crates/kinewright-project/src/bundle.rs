@@ -4,6 +4,7 @@ use std::{fmt, io};
 
 #[derive(Debug)]
 pub enum BundleError {
+    Operation(crate::operation_actor::Error),
     RescueMissingOwnedBytes(Box<crate::bundle_rescue::RescueMissingOwnedBytes>),
     CoreMutationRefused(kinewright_core::CoreMutationRefusal),
     Io(io::Error),
@@ -27,6 +28,7 @@ pub enum BundleError {
 impl fmt::Display for BundleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Operation(error) => error.fmt(f),
             Self::RescueMissingOwnedBytes(e) => e.fmt(f),
             Self::CoreMutationRefused(reason) => reason.fmt(f),
             Self::Io(e) => e.fmt(f),
@@ -61,6 +63,7 @@ impl fmt::Display for BundleError {
 impl std::error::Error for BundleError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Operation(error) => Some(error),
             Self::Io(error) => Some(error),
             Self::RescueMissingOwnedBytes(error) => Some(error.as_ref()),
             _ => None,
@@ -379,7 +382,6 @@ impl BundleWriteAdmission {
                 limits,
                 0,
                 bytes.len() as u64,
-                0,
                 false,
                 u64::MAX,
             )?;
@@ -388,15 +390,26 @@ impl BundleWriteAdmission {
                 limits,
                 0,
                 limits.decoded_record_bytes,
-                0,
                 false,
                 u64::MAX,
             )?;
-            let decoded_charge = crate::store::preflight_record(&bytes, limits)?;
+            let decoded_charge = crate::store::preflight_document_value(&bytes, limits)?;
             drop(preflight);
             let value_charge =
-                StorageReservation::reserve(&usage, limits, 0, decoded_charge, 0, false, u64::MAX)?;
+                StorageReservation::reserve(&usage, limits, 0, decoded_charge, false, u64::MAX)?;
             vec![encoded, value_charge]
+        };
+        let _parser = if legacy {
+            None
+        } else {
+            Some(StorageReservation::reserve(
+                &usage,
+                limits,
+                0,
+                2 * bytes.len() as u64,
+                false,
+                u64::MAX,
+            )?)
         };
         let mut raw: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|e| BundleError::Corrupt(e.to_string()))?;
@@ -614,6 +627,7 @@ fn refuse_activation_journal(path: &Path) -> Result<(), ProjectSaveError> {
 }
 #[derive(Debug, Clone)]
 pub struct BundleSaveReport {
+    pub position: kinewright_core::undo::CommandKey,
     /// SHA of the exact committed branch history, after the ordinary floor selection.
     pub history_sha256: String,
     pub collection: crate::store::CollectionStatus,
@@ -625,21 +639,21 @@ pub struct BundleSaveReport {
     pub byte_length: u64,
 }
 
+use crate::operation_actor::Core;
 use crate::{
-    bundle_records::{BranchCheckpoint, LineageRecord, ProjectId},
+    bundle_records::{BranchCheckpoint, ProjectId},
     namespace::ProjectNamespace,
     store::{ProjectStore, RecoveryInventory, SealedObject, StoreManifest, StorePin},
 };
-use kinewright_core::{Core, HistorySnapshot};
 
 /// Fully verified, read-only graph. Claiming is a separate consuming operation.
 pub(crate) type LoadedBranch = (
     StorageReservation<BranchCheckpoint>,
-    Option<Arc<StorageReservation<HistorySnapshot>>>,
-    Option<Arc<StorageReservation<LineageRecord>>>,
+    Option<crate::operation_history::ValidatedOwnerSnapshot>,
 );
 
 pub struct LoadedBundle<N = ProjectNamespace> {
+    pub(crate) history_pool: crate::operation_history::HistoryPool,
     pub(crate) memo: crate::bundle_recovery::VerifiedIdentityMemo,
     pub(crate) limits: StorageLimits,
     pub(crate) admission: BundleWriteAdmission,
@@ -654,12 +668,19 @@ pub struct LoadedBundle<N = ProjectNamespace> {
     >,
 }
 impl LoadedBundle {
-    pub fn read(path: &Path) -> Result<Self, BundleError> {
-        crate::bundle_recovery::read(path)
+    pub fn read(
+        path: &Path,
+        pool: &crate::operation_history::HistoryPool,
+    ) -> Result<Self, BundleError> {
+        crate::bundle_recovery::read(path, pool)
     }
     #[cfg(any(test, feature = "test-util"))]
-    pub fn read_with_limits_probe(path: &Path, limits: StorageLimits) -> Result<Self, BundleError> {
-        crate::bundle_recovery::read_with_limits(path, limits)
+    pub fn read_with_limits_probe(
+        path: &Path,
+        limits: StorageLimits,
+        pool: &crate::operation_history::HistoryPool,
+    ) -> Result<Self, BundleError> {
+        crate::bundle_recovery::read_with_limits(path, limits, pool)
     }
 }
 impl<N> LoadedBundle<N> {
@@ -671,6 +692,10 @@ impl<N> LoadedBundle<N> {
             .lock()
             .map(|s| s.clone())
             .map_err(|_| BundleError::Capacity("usage poisoned"))
+    }
+    #[must_use]
+    pub fn history_pool(&self) -> &crate::operation_history::HistoryPool {
+        &self.history_pool
     }
     #[must_use]
     pub fn admission(&self) -> &BundleWriteAdmission {
@@ -690,17 +715,44 @@ impl<N> LoadedBundle<N> {
             .map(|b| &*b.0)
             .ok_or_else(|| BundleError::Corrupt("missing manual branch".into()))
     }
+    /// Consume the fully validated selected checkpoint without allocating a
+    /// second actor just to restore into it.
+    pub fn take_manual_snapshot(
+        &mut self,
+    ) -> Result<crate::operation_history::ValidatedOwnerSnapshot, BundleError> {
+        let branch = self.root()?.manual_branch_id.clone();
+        self.branches
+            .get_mut(&branch)
+            .and_then(|row| row.1.take())
+            .ok_or(BundleError::Unsettled)
+    }
+    /// Start the selected cold endpoint directly from the validated token.
+    /// This preserves its saved epoch/revision and admits no empty throwaway Core.
+    pub fn open_manual(&mut self) -> Result<Core, BundleError> {
+        let checkpoint = self.manual_checkpoint()?;
+        let branch = checkpoint.branch_id.clone();
+        let revision = checkpoint.revision;
+        Core::open(self.take_manual_snapshot()?, branch, revision).map_err(operation_error)
+    }
     /// Replays through Core only after the complete graph and support set were checked.
-    pub fn restore_manual(&self, core: &Core) -> Result<(), BundleError> {
+    pub fn restore_manual(&mut self, core: &Core) -> Result<(), BundleError> {
         reconcile_core_save(core)?;
-        let branch = self
+        if !core.history_pool().same_pool(&self.history_pool) {
+            return Err(crate::operation_history::Error::Reservation.into());
+        }
+        let branch_id = self.root()?.manual_branch_id.clone();
+        let snapshot = self
             .branches
-            .get(&self.root()?.manual_branch_id)
-            .ok_or_else(|| BundleError::Corrupt("missing manual branch".into()))?;
-        crate::history_save::ProjectAttachment::new(core)
-            .map_err(history_error)?
-            .restore_history((**branch.1.as_ref().ok_or(BundleError::Unsettled)?).clone())
-            .map_err(|e| BundleError::Corrupt(e.to_string()))
+            .get_mut(&branch_id)
+            .and_then(|branch| branch.1.take())
+            .ok_or(BundleError::Unsettled)?;
+        let owner = crate::history_save::ProjectAttachment::new(core).map_err(operation_error)?;
+        let cut = owner.freeze().map_err(operation_error)?;
+        owner
+            .install_snapshot(&cut, snapshot, None)
+            .map_err(operation_error)?;
+        let installed = owner.freeze().map_err(operation_error)?;
+        owner.resume(&installed).map_err(operation_error)
     }
 }
 impl LoadedBundle {
@@ -714,8 +766,13 @@ impl LoadedBundle {
         limits: StorageLimits,
     ) -> Result<ProjectBundle, BundleError> {
         let bytes = self.admission.raw_bytes().to_vec();
-        crate::bundle_recovery::read_graph(self.namespace, bytes, limits.clone())?
-            .claim_writer(limits)
+        crate::bundle_recovery::read_graph(
+            self.namespace,
+            bytes,
+            limits.clone(),
+            &self.history_pool,
+        )?
+        .claim_writer(limits)
     }
     fn claim_writer(mut self, limits: StorageLimits) -> Result<ProjectBundle, BundleError> {
         let root = self.root()?.clone();
@@ -736,22 +793,6 @@ impl LoadedBundle {
             limits,
         )?;
         store.replace_verified_memo(self.memo)?;
-        let history_cache = self
-            .branches
-            .iter()
-            .filter_map(|(id, branch)| {
-                branch.1.as_ref().map(|history| {
-                    (
-                        id.clone(),
-                        CachedHistory {
-                            reference: branch.0.history_ref.clone(),
-                            profile: branch.0.history_role.admission_profile(&self.limits),
-                            history: Arc::clone(history),
-                        },
-                    )
-                })
-            })
-            .collect();
         let branches = self
             .branches
             .into_iter()
@@ -765,7 +806,7 @@ impl LoadedBundle {
             manual_branch_id: root.manual_branch_id.clone(),
             generation: root.generation,
             branches,
-            history_cache,
+            history_pool: self.history_pool,
             root: Some(root),
             admission: self.admission,
             inventory: self.inventory,
@@ -791,7 +832,7 @@ impl LoadedBundle {
             copy_publication: None,
             voice_slots: std::sync::Mutex::default(),
             last_collection_error: None,
-            pending_save: None,
+            pending_publication: None,
             pending_copy_source: None,
             publication_tag: None,
             publication_state: PublicationState::NeverAttempted,
@@ -800,13 +841,6 @@ impl LoadedBundle {
         bundle.refresh_run_budget()?;
         Ok(bundle)
     }
-}
-
-/// A verified history bound to the immutable checkpoint object it came from.
-pub(crate) struct CachedHistory {
-    pub(crate) reference: ObjectRef,
-    pub(crate) profile: StorageLimits,
-    pub(crate) history: Arc<StorageReservation<HistorySnapshot>>,
 }
 
 /// Root publication phase, independent of temporary cleanup and Core settlement.
@@ -822,8 +856,8 @@ pub enum PublicationState {
 /// One synchronous named-bundle owner. It accepts frozen Core exports, never live snapshots assembled piecemeal.
 pub struct ProjectBundle {
     pub(crate) publication_state: PublicationState,
-    pub(crate) publication_tag: Option<kinewright_core::HistorySaveTag>,
-    pub(crate) pending_save: Option<PendingSave>,
+    pub(crate) publication_tag: Option<crate::history_save::PublicationTag>,
+    pub(crate) pending_publication: Option<PendingPublication>,
     pub(crate) pending_copy_source: Option<crate::bundle_copy::PendingCopySource>,
     pub(crate) last_collection_error: Option<String>,
     pub(crate) store: ProjectStore,
@@ -833,7 +867,7 @@ pub struct ProjectBundle {
     pub(crate) manual_branch_id: BranchId,
     pub(crate) generation: u64,
     pub(crate) branches: BTreeMap<BranchId, BranchCheckpoint>,
-    pub(crate) history_cache: BTreeMap<BranchId, CachedHistory>,
+    pub(crate) history_pool: crate::operation_history::HistoryPool,
     pub(crate) root: Option<StudioRoot>,
     pub(crate) admission: BundleWriteAdmission,
     pub(crate) inventory: SupportInventory,
@@ -854,24 +888,66 @@ pub struct ProjectBundle {
     pub(crate) copy_publication: Option<crate::copy_publication::CopyPublication>,
     pub(crate) voice_slots: crate::voice_store::VoiceSlots,
 }
-pub(crate) struct PendingSave {
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one pending publication owns its existing full update holder inline"
+)]
+pub(crate) enum PublicationOwner {
+    Update {
+        cut: crate::operation_actor::AcceptedCut,
+        update: crate::operation_actor::PreparedUpdate,
+        resume: bool,
+    },
+    Resume {
+        cut: crate::operation_actor::AcceptedCut,
+        resume: bool,
+    },
+    FailedUpdate,
+}
+pub(crate) struct PendingPublication {
     pub(crate) candidate_base: Option<(BranchId, ObjectRef)>,
     pub(crate) core: Core,
-    pub(crate) barrier: Option<crate::history_save::FloorBarrier>,
+    pub(crate) change: crate::operation_actor::ChangeId,
+    pub(crate) identity: crate::operation_history::SnapshotIdentity,
+    pub(crate) owner: Option<PublicationOwner>,
     pub(crate) root_sha256: Option<String>,
+    pub(crate) seals: Vec<SealedObject>,
 }
+
 impl ProjectBundle {
     /// Bind before exposing a project actor; the private proof gates every history install.
     pub fn attach_core(&self, core: &Core) -> Result<crate::ProjectAttachment, BundleError> {
-        crate::history_save::ProjectAttachment::new(core).map_err(history_error)
+        if !self.history_pool.same_pool(core.history_pool()) {
+            return Err(crate::operation_history::Error::Reservation.into());
+        }
+        crate::history_save::ProjectAttachment::new(core).map_err(operation_error)
     }
     #[must_use]
+    pub const fn history_pool(&self) -> &crate::operation_history::HistoryPool {
+        &self.history_pool
+    }
+
+    pub(crate) fn current_save_report(&self) -> Result<BundleSaveReport, BundleError> {
+        let checkpoint = self.checkpoint(self.manual_branch_id())?;
+        Ok(BundleSaveReport {
+            position: checkpoint.position,
+            history_sha256: checkpoint.identity.to_string(),
+            collection: self.store.collection_status()?,
+            path: self.store.resolved_root()?,
+            project_id: self.project_id.clone(),
+            generation: self.generation,
+            head_id: checkpoint.head_id.clone(),
+            root_sha256: kinewright_media::sha256_bytes(self.admission.raw_bytes()),
+            byte_length: self.admission.raw_bytes().len() as u64,
+        })
+    }
     pub fn pending_attempt(&self) -> Option<crate::AttemptBinding> {
-        self.pending_save
-            .as_ref()?
-            .barrier
-            .as_ref()
-            .map(crate::history_save::FloorBarrier::attempt)
+        let pending = self.pending_publication.as_ref()?;
+        Some(crate::AttemptBinding::new(
+            pending.change,
+            pending.identity,
+            self.publication_tag.as_ref()?.clone(),
+        ))
     }
     #[cfg(any(test, feature = "test-util"))]
     #[must_use]
@@ -891,7 +967,7 @@ impl ProjectBundle {
     #[cfg(any(test, feature = "test-util"))]
     #[must_use]
     pub fn cached_branch_count_probe(&self) -> usize {
-        self.history_cache.len()
+        0
     }
     #[must_use]
     pub const fn publication_state(&self) -> PublicationState {
@@ -906,15 +982,20 @@ impl ProjectBundle {
         clippy::too_many_lines,
         reason = "activation validates and protects the original under one authority"
     )]
-    pub fn activate(path: &Path, admission: BundleWriteAdmission) -> Result<Self, BundleError> {
-        Self::activate_checked(path, admission, None)
+    pub fn activate(
+        path: &Path,
+        admission: BundleWriteAdmission,
+        pool: &crate::operation_history::HistoryPool,
+    ) -> Result<Self, BundleError> {
+        Self::activate_checked(path, admission, None, pool)
     }
     pub(crate) fn activate_copy(
         path: &Path,
         admission: BundleWriteAdmission,
         prepared: &crate::namespace::PreparedDestination,
+        pool: &crate::operation_history::HistoryPool,
     ) -> Result<Self, BundleError> {
-        Self::activate_checked(path, admission, Some(prepared))
+        Self::activate_checked(path, admission, Some(prepared), pool)
     }
     #[allow(
         clippy::too_many_lines,
@@ -924,10 +1005,11 @@ impl ProjectBundle {
         path: &Path,
         admission: BundleWriteAdmission,
         prepared: Option<&crate::namespace::PreparedDestination>,
+        pool: &crate::operation_history::HistoryPool,
     ) -> Result<Self, BundleError> {
         admission.require_supported()?;
         if admission.is_studio() {
-            let mut loaded = LoadedBundle::read(path)?;
+            let mut loaded = LoadedBundle::read(path, pool)?;
             if loaded.admission.raw_bytes() != admission.raw_bytes() {
                 return Err(BundleError::Identity("activation source changed".into()));
             }
@@ -945,7 +1027,7 @@ impl ProjectBundle {
             Err(BundleError::DurabilityUnsupported)
         }
         #[cfg(target_os = "linux")]
-        Self::activate_linux(path, admission, prepared)
+        Self::activate_linux(path, admission, prepared, pool)
     }
 
     #[cfg(target_os = "linux")]
@@ -954,6 +1036,7 @@ impl ProjectBundle {
         path: &Path,
         admission: BundleWriteAdmission,
         prepared: Option<&crate::namespace::PreparedDestination>,
+        pool: &crate::operation_history::HistoryPool,
     ) -> Result<Self, BundleError> {
         {
             let mut namespace = ProjectNamespace::inspect(path)?;
@@ -1059,7 +1142,7 @@ impl ProjectBundle {
                 manual_branch_id,
                 generation: 0,
                 branches: BTreeMap::new(),
-                history_cache: BTreeMap::new(),
+                history_pool: pool.clone(),
                 root: None,
                 admission,
                 inventory: SupportInventory::default(),
@@ -1079,43 +1162,11 @@ impl ProjectBundle {
                 copy_publication: None,
                 voice_slots: std::sync::Mutex::default(),
                 last_collection_error: None,
-                pending_save: None,
+                pending_publication: None,
                 pending_copy_source: None,
                 publication_tag: None,
                 publication_state: PublicationState::NeverAttempted,
             })
-        }
-    }
-    pub(crate) fn cached_history(
-        &self,
-        branch: &BranchId,
-    ) -> Option<&Arc<StorageReservation<HistorySnapshot>>> {
-        let checkpoint = self.branches.get(branch)?;
-        let profile = checkpoint
-            .history_role
-            .admission_profile(self.store.limits());
-        self.history_cache
-            .get(branch)
-            .filter(|cached| {
-                cached.reference == checkpoint.history_ref && cached.profile == profile
-            })
-            .map(|cached| &cached.history)
-    }
-    pub(crate) fn verified_cached_history(
-        &self,
-        branch: &BranchId,
-    ) -> Result<Option<&Arc<StorageReservation<HistorySnapshot>>>, BundleError> {
-        let cached = self.cached_history(branch);
-        if let Some(history) = cached {
-            self.store
-                .verify_cached_history(self.checkpoint(branch)?, history)?;
-        }
-        Ok(cached)
-    }
-    #[cfg(any(test, feature = "test-util"))]
-    pub fn invalidate_history_cache_binding_probe(&mut self) {
-        if let Some(cached) = self.history_cache.get_mut(&self.manual_branch_id) {
-            cached.reference.sha256 = "0".repeat(64);
         }
     }
     #[must_use]
@@ -1214,7 +1265,7 @@ impl ProjectBundle {
     )]
     pub fn reconcile(&mut self) -> Result<Option<BundleSaveReport>, BundleError> {
         let original = self
-            .pending_save
+            .pending_publication
             .as_ref()
             .map(|pending| pending.core.clone());
         self.reconcile_destination(original.as_ref())
@@ -1279,7 +1330,11 @@ impl ProjectBundle {
             self.unsettled = false;
             return Ok(None);
         }
-        let loaded = crate::bundle_recovery::read_with_limits(&path, self.store.limits().clone())?;
+        let loaded = crate::bundle_recovery::read_with_limits(
+            &path,
+            self.store.limits().clone(),
+            &self.history_pool,
+        )?;
         let root = loaded.root()?.clone();
         if root.project_id != self.project_id {
             self.store
@@ -1308,26 +1363,10 @@ impl ProjectBundle {
             .as_ref()
             .map_or_else(BTreeMap::new, |v| (**v).clone());
         self.evidence = loaded.manifest.durable_pins.clone();
-        self.history_cache = loaded
-            .branches
-            .iter()
-            .filter_map(|(id, branch)| {
-                branch.1.as_ref().map(|history| {
-                    (
-                        id.clone(),
-                        CachedHistory {
-                            reference: branch.0.history_ref.clone(),
-                            profile: branch.0.history_role.admission_profile(&loaded.limits),
-                            history: Arc::clone(history),
-                        },
-                    )
-                })
-            })
-            .collect();
         self.branches = loaded
             .branches
             .iter()
-            .map(|(id, b)| (id.clone(), (*b.0).clone()))
+            .map(|(id, branch)| (id.clone(), (*branch.0).clone()))
             .collect();
         self.origin_project_ids.clone_from(&root.origin_project_ids);
         self.origin_session_ids.clone_from(&root.origin_session_ids);
@@ -1366,10 +1405,11 @@ impl ProjectBundle {
         self.publication_tag = None;
         self.unsettled = false;
         Ok(Some(BundleSaveReport {
+            position: self.checkpoint(&self.manual_branch_id)?.position,
             history_sha256: self
                 .checkpoint(&self.manual_branch_id)?
-                .history_digest
-                .clone(),
+                .identity
+                .to_string(),
             collection,
             path,
             project_id: self.project_id.clone(),
@@ -1450,42 +1490,62 @@ impl ProjectBundle {
         core: &Core,
         inputs: &ObjectRef,
     ) -> Result<BundleSaveReport, BundleError> {
-        if !self.unsettled {
-            self.publication_state = PublicationState::NeverAttempted;
-        }
         reconcile_core_save(core)?;
         crate::bundle_copy::settle_copy_source(&mut self.pending_copy_source)?;
         if self.unsettled {
             self.reconcile()?;
         }
-        self.publication_state = PublicationState::NeverAttempted;
-        if self.pending_command.is_some() {
+        if self.pending_command.is_some() || self.pending_publication.is_some() {
             return Err(BundleError::Unsettled);
         }
-        let before = core
-            .export_history()
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let id = self.manual_branch_id.clone();
-        self.publish_core(core, &before, inputs, &id)
+        let attachment = self.attach_core(core)?;
+        if core.creation_branch().map_err(operation_error)? != self.manual_branch_id {
+            let was_live = core.attachment_state().map_err(operation_error)?
+                == kinewright_core::AttachmentState::Live;
+            let cut = attachment.freeze().map_err(operation_error)?;
+            let cut = attachment
+                .retarget_selection(&cut, self.manual_branch_id.clone())
+                .map_err(operation_error)?;
+            if was_live {
+                attachment.resume(&cut).map_err(operation_error)?;
+            }
+        }
+        let capture = core.capture_state().map_err(operation_error)?;
+        let branch = self.manual_branch_id.clone();
+        self.publish_core_admitted(core, capture, inputs, &branch, None, None, None)
     }
-
     pub(crate) fn publish_core(
         &mut self,
         core: &Core,
-        selected: &HistorySnapshot,
+        capture: crate::operation_actor::CapturedHistory,
         inputs: &ObjectRef,
         branch: &BranchId,
     ) -> Result<BundleSaveReport, BundleError> {
         reconcile_core_save(core)?;
-        self.publish_core_admitted(core, selected, inputs, branch, None)
+        self.publish_core_admitted(core, capture, inputs, branch, None, None, None)
     }
-
-    /// Only the local lifecycle can save its exact frozen cut. Public saves still refuse Frozen.
+    pub(crate) fn save_handover(
+        &mut self,
+        core: &Core,
+        inputs: &ObjectRef,
+        cut: &crate::operation_actor::AcceptedCut,
+        source: crate::operation_history::SnapshotIdentity,
+    ) -> Result<BundleSaveReport, BundleError> {
+        if core.attachment_state().map_err(operation_error)?
+            != kinewright_core::AttachmentState::Frozen
+            || core.change_id().map_err(operation_error)? != cut.change()
+        {
+            return Err(BundleError::HistoryBarrierInvariant);
+        }
+        let capture = core.capture_state().map_err(operation_error)?;
+        let branch = self.manual_branch_id.clone();
+        self.publish_core_admitted(core, capture, inputs, &branch, None, None, Some(source))
+    }
     pub(crate) fn save_frozen(
         &mut self,
         core: &Core,
         inputs: &ObjectRef,
-        cut: &kinewright_core::AcceptedCut,
+        cut: &crate::operation_actor::AcceptedCut,
     ) -> Result<BundleSaveReport, BundleError> {
         let branch = self.manual_branch_id.clone();
         self.save_frozen_branch(core, inputs, cut, &branch)
@@ -1494,7 +1554,7 @@ impl ProjectBundle {
         &mut self,
         core: &Core,
         inputs: &ObjectRef,
-        cut: &kinewright_core::AcceptedCut,
+        cut: &crate::operation_actor::AcceptedCut,
         branch: &BranchId,
     ) -> Result<BundleSaveReport, BundleError> {
         self.save_frozen_branch_with_base(core, inputs, cut, branch, None)
@@ -1503,274 +1563,261 @@ impl ProjectBundle {
         &mut self,
         core: &Core,
         inputs: &ObjectRef,
-        cut: &kinewright_core::AcceptedCut,
+        cut: &crate::operation_actor::AcceptedCut,
         branch: &BranchId,
         base: Option<&ObjectRef>,
     ) -> Result<BundleSaveReport, BundleError> {
-        let owner = self.attach_core(core)?;
-        if core.attachment_state().map_err(history_error)?
+        if core.attachment_state().map_err(operation_error)?
             != kinewright_core::AttachmentState::Frozen
-            || owner.capture().map_err(history_error)? != *cut
+            || core.change_id().map_err(operation_error)? != cut.change()
             || self.unsettled
             || self.pending_command.is_some()
-            || core
-                .pending_history_save()
-                .map_err(history_error)?
-                .is_some()
+            || self.pending_publication.is_some()
         {
             return Err(BundleError::HistoryBarrierInvariant);
         }
         crate::bundle_copy::settle_copy_source(&mut self.pending_copy_source)?;
-        self.publish_core_admitted(core, cut.history(), inputs, branch, base)
+        let capture = core.capture_state().map_err(operation_error)?;
+        if capture.change != cut.change() {
+            return Err(BundleError::HistoryChanged);
+        }
+        self.publish_core_admitted(core, capture, inputs, branch, base, None, None)
     }
-
+    pub(crate) fn publish_manual_base(
+        &mut self,
+        core: &Core,
+        capture: crate::operation_actor::CapturedHistory,
+        inputs: &ObjectRef,
+        stream: crate::operation_protocol::StreamState,
+    ) -> Result<BundleSaveReport, BundleError> {
+        let branch = self.manual_branch_id.clone();
+        self.publish_core_admitted(core, capture, inputs, &branch, None, Some(stream), None)
+    }
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "publication owns and releases its independent capture lease after synchronous IO"
+    )]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one publication records the exact actor cut, source base, accepted stream or proven continuity source"
+    )]
     fn publish_core_admitted(
         &mut self,
         core: &Core,
-        selected: &HistorySnapshot,
+        capture: crate::operation_actor::CapturedHistory,
         inputs: &ObjectRef,
         branch: &BranchId,
         base: Option<&ObjectRef>,
+        stream: Option<crate::operation_protocol::StreamState>,
+        continuity: Option<crate::operation_history::SnapshotIdentity>,
     ) -> Result<BundleSaveReport, BundleError> {
-        if self.unsettled {
+        if self.unsettled
+            || self.pending_publication.is_some()
+            || capture.change.actor != core.actor_identity()
+        {
             return Err(BundleError::Unsettled);
         }
-        let mut aligned = selected.clone();
-        if let Some(prior) = self.branches.get(branch) {
-            let durable = if let Some(cached) = self.cached_history(branch) {
-                Arc::clone(cached)
-            } else {
-                Arc::new(self.store.resolve_history(&prior.history_ref)?)
-            };
-            if aligned.floor_offset < durable.floor_offset {
-                aligned = kinewright_core::HistoryTransition::floor(
-                    selected.clone(),
-                    usize::try_from(durable.floor_offset - selected.floor_offset)
-                        .map_err(|_| BundleError::Capacity("floor offset"))?,
-                )
-                .map_err(history_error)?
-                .after()
-                .clone();
-            }
-        }
-        let aligned_floor = aligned.floor_offset;
-        let unchanged = self
-            .verified_cached_history(branch)?
-            .is_some_and(|cached| ***cached == aligned);
-        let bounded = if unchanged {
-            // A metadata publication keeps the same fully verified cut. Reuse
-            // its identity- and policy-bound proof while retaining a prepared
-            // target; another replay would reserve the same window twice.
-            crate::bundle_commit::BoundedHistory {
-                history: aligned,
-                floor: None,
-            }
-        } else {
-            self.store.with_history_admission(
-                crate::history_record::HistoryRole::Ordinary,
-                self.store.limits(),
-                || crate::bundle_commit::select_history(&aligned, self.store.limits()),
-            )?
-        };
-        let transition = if aligned_floor == selected.floor_offset {
-            bounded.floor
-        } else if bounded.history.floor_offset > selected.floor_offset {
-            Some(
-                kinewright_core::HistoryTransition::floor(
-                    selected.clone(),
-                    usize::try_from(bounded.history.floor_offset - selected.floor_offset)
-                        .map_err(|_| BundleError::Capacity("floor offset"))?,
-                )
-                .map_err(history_error)?,
-            )
-        } else {
-            None
-        };
-        #[cfg(any(test, feature = "test-util"))]
-        crate::test_hook("history_selected");
-        let barrier = pending_floor(core, transition)?;
-        self.pending_save = Some(PendingSave {
+        let identity = capture.snapshot.identity()?;
+        self.publication_state = PublicationState::NeverAttempted;
+        self.pending_publication = Some(PendingPublication {
+            candidate_base: base.map(|base| (branch.clone(), base.clone())),
             core: core.clone(),
-            barrier,
+            change: capture.change,
+            identity,
+            owner: None,
             root_sha256: None,
-            candidate_base: base.map(|reference| (branch.clone(), reference.clone())),
+            seals: Vec::new(),
         });
-        self.publish_pending(selected, &bounded.history, inputs, branch)
-    }
-
-    pub(crate) fn publish_pending(
-        &mut self,
-        history: &HistorySnapshot,
-        selected: &HistorySnapshot,
-        inputs: &ObjectRef,
-        branch: &BranchId,
-    ) -> Result<BundleSaveReport, BundleError> {
-        let result = crate::bundle_commit::BundleCommit::publish_branch_selected(
-            self,
-            history,
-            inputs,
-            branch,
-            None,
-            Some(selected),
-        );
+        // The local immutable holder remains live through every synchronous IO.
+        // Once IO returns, sealed objects plus the fixed tag preserve the exact
+        // attempted root. Settlement never needs another in-memory capture.
+        let result = match (continuity, stream) {
+            (Some(source), None) => crate::bundle_commit::BundleCommit::publish_continuity_capture(
+                self, &capture, inputs, branch, source,
+            ),
+            (Some(_), Some(_)) => Err(BundleError::HistoryBarrierInvariant),
+            (None, Some(stream)) => {
+                crate::bundle_commit::BundleCommit::publish_capture_with_stream(
+                    self,
+                    &capture,
+                    inputs,
+                    branch,
+                    Some(stream),
+                )
+            }
+            (None, None) => {
+                crate::bundle_commit::BundleCommit::publish_capture(self, &capture, inputs, branch)
+            }
+        };
         match result {
             Ok(report) => {
-                self.settle_pending_save(true)?;
+                self.pending_publication = None;
                 Ok(report)
             }
             Err(error) => {
-                if self
-                    .pending_save
-                    .as_ref()
-                    .is_some_and(|p| p.root_sha256.is_some())
-                    && self.unsettled
-                {
+                if matches!(
+                    self.publication_state,
+                    PublicationState::Unknown | PublicationState::Committed
+                ) {
                     self.unsettled = true;
-                    if let Some(barrier) =
-                        self.pending_save.as_mut().and_then(|p| p.barrier.as_mut())
-                    {
-                        barrier.retain_until_reconcile().map_err(history_error)?;
-                    }
                 } else {
-                    self.settle_pending_save(false)?;
-                }
-                if self.store.with_namespace(|n| Ok(n.is_uncertain()))?
-                    || self.store.has_unsettled_objects()?
-                {
-                    self.unsettled = true;
+                    self.pending_publication = None;
+                    if matches!(error, BundleError::CleanupPending(_)) {
+                        // The root was not published, but its staged control
+                        // bytes remain charged to this owner until cleanup.
+                        self.unsettled = true;
+                    }
                 }
                 Err(error)
             }
         }
     }
-
     pub(crate) fn settle_destination_ticket(
         &mut self,
         live: Option<&Core>,
     ) -> Result<(), BundleError> {
-        let Some(attempt) = self.pending_attempt() else {
-            self.pending_save = None;
+        if let Some(pending) = &self.pending_publication
+            && live.is_some_and(|core| core.actor_identity() != pending.change.actor)
+        {
+            return Err(BundleError::HistoryBarrierInvariant);
+        }
+        let commit = self.pending_publication.as_ref().is_some_and(|pending| {
+            pending.root_sha256.as_ref().is_some_and(|hash| {
+                *hash == kinewright_media::sha256_bytes(self.admission.raw_bytes())
+            })
+        });
+        self.settle_pending_publication(commit)
+    }
+    pub(crate) fn settle_pending_publication(&mut self, commit: bool) -> Result<(), BundleError> {
+        #[cfg(any(test, feature = "test-util"))]
+        if commit
+            && self.pending_publication.as_ref().is_some_and(|pending| {
+                pending
+                    .core
+                    .creation_branch()
+                    .is_ok_and(|branch| branch != self.manual_branch_id)
+            })
+        {
+            crate::io_observer::check_failure(
+                "candidate_settlement",
+                &self.store.resolved_root()?,
+            )?;
+        }
+        let Some(mut pending) = self.pending_publication.take() else {
             return Ok(());
         };
-        if let Some(live) = live {
-            let attachment = self.attach_core(live)?;
-            if attachment.settle_attempt(&attempt)?
-                || (live.actor_identity() == attempt.actor()
-                    && live
-                        .pending_history_save()
-                        .map_err(history_error)?
-                        .is_none())
-            {
-                self.pending_save = None;
-            }
+        if pending.owner.is_none() {
+            return Ok(());
         }
-        Ok(())
-    }
-
-    pub(crate) fn settle_pending_save(&mut self, commit: bool) -> Result<(), BundleError> {
-        if let Some(pending) = &mut self.pending_save
-            && let Some(barrier) = &mut pending.barrier
+        if pending.core.attachment_state().map_err(operation_error)?
+            == kinewright_core::AttachmentState::Sealed
         {
-            #[cfg(any(test, feature = "test-util"))]
-            if commit {
-                crate::test_hook("before_floor_commit");
-            }
-            let result = if commit {
-                barrier.commit()
-            } else {
-                barrier.release()
-            };
-            if let Err(error) = result {
-                self.unsettled = true;
-                self.pending_save = None;
-                return Err(history_error(error));
-            }
+            // This exact namespace outcome is settled, but the person already
+            // selected another saved line. Its old actor must never be resumed
+            // or acknowledged; the committed root/receipt owns the result.
+            return Ok(());
         }
-        self.pending_save = None;
-        Ok(())
+        let owner = match crate::history_save::ProjectAttachment::new(&pending.core) {
+            Ok(owner) => owner,
+            Err(error) => {
+                self.pending_publication = Some(pending);
+                return Err(operation_error(error));
+            }
+        };
+        let result = (|| {
+            if let Some(PublicationOwner::Update { .. }) = &pending.owner {
+                let Some(PublicationOwner::Update {
+                    cut,
+                    update,
+                    resume,
+                }) = pending.owner.replace(PublicationOwner::FailedUpdate)
+                else {
+                    return Err(BundleError::HistoryBarrierInvariant);
+                };
+                let installed = if commit {
+                    owner
+                        .commit_prepared(&cut, update, pending.identity)
+                        .map_err(operation_error)?
+                } else {
+                    drop(update);
+                    cut
+                };
+                pending.owner = Some(PublicationOwner::Resume {
+                    cut: installed,
+                    resume,
+                });
+            }
+            match &pending.owner {
+                Some(PublicationOwner::Resume { cut, resume: true }) => {
+                    owner.resume(cut).map_err(operation_error)?;
+                }
+                Some(PublicationOwner::FailedUpdate) => return Err(BundleError::Unsettled),
+                _ => {}
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.pending_publication = Some(pending);
+        }
+        result
     }
-}
-
-/// Install the revocable barrier before destination IO starts.
-pub(crate) fn pending_floor(
-    core: &Core,
-    transition: Option<kinewright_core::HistoryTransition>,
-) -> Result<Option<crate::history_save::FloorBarrier>, BundleError> {
-    transition
-        .map(|floor| crate::history_save::begin(core, floor))
-        .transpose()
-        .map_err(history_error)
 }
 
 pub(crate) fn encoding_error(error: serde_json::Error) -> BundleError {
     BundleError::Io(io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-pub(crate) fn history_error(error: kinewright_core::HistoryError) -> BundleError {
+pub(crate) fn operation_error(error: crate::operation_actor::Error) -> BundleError {
     match error {
-        kinewright_core::HistoryError::MutationRefused(reason) => {
+        crate::operation_actor::Error::History(error) => error.into(),
+        crate::operation_actor::Error::MutationRefused(reason) => {
             BundleError::CoreMutationRefused(reason)
         }
-        kinewright_core::HistoryError::CaptureChanged
-        | kinewright_core::HistoryError::StaleExpectation => BundleError::HistoryChanged,
-        kinewright_core::HistoryError::BarrierInvariant => BundleError::HistoryBarrierInvariant,
-        kinewright_core::HistoryError::SaveInProgress => BundleError::SaveInProgress,
-        kinewright_core::HistoryError::CommitInvariant => BundleError::HistoryCommitInvariant,
-        kinewright_core::HistoryError::Capacity => BundleError::Capacity("history memory"),
-        failure @ kinewright_core::HistoryError::Encoding => {
-            BundleError::Io(io::Error::new(io::ErrorKind::InvalidData, failure))
-        }
-        kinewright_core::HistoryError::Corrupt => {
-            BundleError::Corrupt(kinewright_core::HistoryError::Corrupt.to_string())
-        }
-        failure @ kinewright_core::HistoryError::Disconnected => {
-            BundleError::Io(io::Error::new(io::ErrorKind::BrokenPipe, failure))
+        other => BundleError::Operation(other),
+    }
+}
+pub(crate) fn operation_refusal(refusal: crate::operation_actor::Refusal) -> BundleError {
+    operation_error(refusal.error)
+}
+impl From<crate::operation_actor::Refusal> for BundleError {
+    fn from(refusal: crate::operation_actor::Refusal) -> Self {
+        operation_refusal(refusal)
+    }
+}
+impl From<crate::operation_history::Error> for BundleError {
+    fn from(error: crate::operation_history::Error) -> Self {
+        use crate::operation_history::Error;
+        match error {
+            Error::StoreCapacity(reason) => Self::Capacity(reason),
+            Error::StoreCorrupt(reason) => Self::Corrupt(reason),
+            Error::StoreUnsettled => Self::Unsettled,
+            Error::StoreRunLimit => Self::RunLimit,
+            other => Self::Operation(other.into()),
         }
     }
 }
 
 /// Reconcile an orphan independently of the old store's object reservation ledger.
 pub(crate) fn reconcile_core_save(core: &Core) -> Result<(), BundleError> {
-    crate::history_save::bind(core).map_err(history_error)?;
-    match core.attachment_state().map_err(history_error)? {
-        kinewright_core::AttachmentState::Live => {}
-        kinewright_core::AttachmentState::Frozen => {
-            return Err(history_error(
-                kinewright_core::HistoryError::MutationRefused(
-                    kinewright_core::CoreMutationRefusal::Frozen,
-                ),
-            ));
-        }
-        kinewright_core::AttachmentState::Sealed => {
-            return Err(history_error(
-                kinewright_core::HistoryError::MutationRefused(
-                    kinewright_core::CoreMutationRefusal::Sealed,
-                ),
-            ));
-        }
-    }
-    let Some(pending) = core.pending_history_save().map_err(history_error)? else {
-        return Ok(());
+    crate::history_save::bind(core).map_err(operation_error)?;
+    let reason = match core.attachment_state().map_err(operation_error)? {
+        kinewright_core::AttachmentState::Live => return Ok(()),
+        kinewright_core::AttachmentState::Frozen => kinewright_core::CoreMutationRefusal::Frozen,
+        kinewright_core::AttachmentState::Sealed => kinewright_core::CoreMutationRefusal::Sealed,
     };
-    if !pending.ready {
-        return Err(BundleError::SaveInProgress);
-    }
-    let tag = pending
-        .tag
-        .as_ref()
-        .ok_or(BundleError::HistoryBarrierInvariant)?;
-    let commit = reconcile_save_tag(tag)?;
-    crate::history_save::settle(core, &pending, commit).map_err(history_error)
+    Err(BundleError::CoreMutationRefused(reason))
 }
 
 pub(crate) fn reconcile_save_tag(
-    tag: &kinewright_core::HistorySaveTag,
+    tag: &crate::history_save::PublicationTag,
+    pool: &crate::operation_history::HistoryPool,
 ) -> Result<bool, BundleError> {
-    reconcile_save_tag_policy(tag, false)
+    reconcile_save_tag_policy(tag, false, pool)
 }
 fn reconcile_save_tag_policy(
-    tag: &kinewright_core::HistorySaveTag,
+    tag: &crate::history_save::PublicationTag,
     continuous: bool,
+    pool: &crate::operation_history::HistoryPool,
 ) -> Result<bool, BundleError> {
     let read = || -> Result<bool, BundleError> {
         let namespace = ProjectNamespace::inspect(&tag.destination)?;
@@ -1797,7 +1844,7 @@ fn reconcile_save_tag_policy(
                 .as_ref()
                 .is_some_and(|bytes| kinewright_media::sha256_bytes(bytes) == tag.root_sha256);
         if own {
-            let loaded = LoadedBundle::read(&tag.destination)?;
+            let loaded = LoadedBundle::read(&tag.destination, pool)?;
             if loaded.namespace.identity() != identity
                 || Some(loaded.admission.raw_bytes()) != bytes.as_deref()
             {
@@ -1818,7 +1865,8 @@ fn reconcile_save_tag_policy(
 
 /// Retained attempt release requires continuity; a changed parent is still unknown.
 pub(crate) fn reconcile_save_tag_continuous(
-    tag: &kinewright_core::HistorySaveTag,
+    tag: &crate::history_save::PublicationTag,
+    pool: &crate::operation_history::HistoryPool,
 ) -> Result<bool, BundleError> {
-    reconcile_save_tag_policy(tag, true)
+    reconcile_save_tag_policy(tag, true, pool)
 }

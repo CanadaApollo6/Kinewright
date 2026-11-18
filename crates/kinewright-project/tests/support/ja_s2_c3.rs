@@ -1,9 +1,10 @@
 use super::{Ja1EditingSession, apply, document, edit};
-use kinewright_core::{Command, Core, HistorySaveTag, Operation, TrackId};
+use kinewright_core::{Command, Operation, TrackId};
 use kinewright_media::test_support::TempDirectory;
+use kinewright_project::PublicationTag;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{BundleError, BundleWriteAdmission, LoadedBundle, ProjectBundle},
-    bundle_commit::bound_history_probe,
     bundle_copy::{CopyStatus, SessionStore},
     bundle_records::{ObjectRef, RecordKind},
     bundle_rescue::{MissingOwnedUse, ReconcilePhase, RescueCause, RescueEligibility},
@@ -26,9 +27,11 @@ fn temp(label: &str) -> TempDirectory {
 }
 fn limits() -> StorageLimits {
     StorageLimits {
-        branch_history_bytes: 1 << 20,
         ..StorageLimits::default()
     }
+}
+fn full_owner_value(core: &Core) -> serde_json::Value {
+    serde_json::to_value(core.export_history().unwrap()).unwrap()
 }
 fn grow(core: &Core) {
     for n in 0..40 {
@@ -60,7 +63,7 @@ fn blob(store: &mut ProjectStore, bytes: &[u8]) -> ObjectRef {
         .clone()
 }
 fn unknown(root: &Path, path: &Path, landed: bool) -> Ja1EditingSession {
-    let core = Core::spawn(document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
     grow(&core);
     let mut session = Ja1EditingSession::new(root, &core, StorageLimits::default()).unwrap();
     let status = io_observer::fail_once(
@@ -101,7 +104,7 @@ fn adopt_current(session: &mut Ja1EditingSession, path: &Path, target: &Path) {
 fn w01_retained_source_and_a_writer_control() {
     let temp = temp("c3-writer");
     let path = temp.path("new/parents/a.kinewright");
-    let core = Core::spawn(document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
     let mut session = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
     let source = session.source_mut().unwrap();
     let owned = blob(source.store_mut(), b"actual source bytes");
@@ -139,7 +142,10 @@ fn w01_retained_source_and_a_writer_control() {
     ));
     adopt_current(&mut session, &path, &temp.path("b.kinewright"));
     session.reconcile_active().unwrap();
-    assert!(session.dirty().unwrap());
+    assert!(
+        !session.dirty().unwrap(),
+        "ACKNOWLEDGED_FIRST_SAVE_INSTALLS_ITS_EXACT_SAVED_PREFIX"
+    );
     assert!(kinewright_project::namespace::ProjectNamespace::acquire(&path).is_err());
     edit(&core, true);
     session.save_active().unwrap();
@@ -161,13 +167,21 @@ fn w01_retained_source_and_a_writer_control() {
     drop(session);
     assert!(!root.parent().unwrap().exists());
     assert!(!usage().unwrap().damaged_accounting);
-    let _writer = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
+    let _writer = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
 }
 
 #[test]
 fn w01_ordinary_handoff_retires_only_unadopted_source() {
     let temp = temp("c3-ordinary-retire");
-    let core = Core::spawn(document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
     let mut session = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
     let source = session.source().unwrap().store().resolved_root().unwrap();
     let usage = session.source().unwrap().store().usage_handle();
@@ -449,7 +463,7 @@ fn w03_native_probe_causes_keep_phase_operation_and_errno() {
         let temp = self::temp("c3-native-probe");
         let path = temp.path("a.kinewright");
         let mut session = unknown(temp.root(), &path, true);
-        let ticket = session.core().pending_history_save().unwrap();
+        let ticket = session.pending_publication_cut().unwrap();
         let probe = io_observer::fail_native_once("directory_sync_native", errno, || {
             session.probe_active()
         })
@@ -470,7 +484,7 @@ fn w03_native_probe_causes_keep_phase_operation_and_errno() {
         assert!(
             matches!(probe.error, BundleError::Io(ref error) if error.raw_os_error() == Some(errno))
         );
-        assert_eq!(session.core().pending_history_save().unwrap(), ticket);
+        assert_eq!(session.pending_publication_cut().unwrap(), ticket);
         assert_eq!(session.rescue_slots(), 0);
         session.reconcile_active().unwrap();
     }
@@ -550,8 +564,13 @@ fn w03_native_probe_causes_keep_phase_operation_and_errno() {
     // The exact-ticket proof also preserves native IO errors after reopening its own root.
     let temp = self::temp("c3-ticket-native");
     let path = temp.path("a.kinewright");
-    let core = Core::spawn(document()).unwrap();
-    let mut owner = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
+    let mut owner = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     owner.restrict_limits_probe(limits()).unwrap();
     let inputs = owner.empty_inputs().unwrap().reference.clone();
     owner.save(&core, &inputs).unwrap();
@@ -567,10 +586,7 @@ fn w03_native_probe_causes_keep_phase_operation_and_errno() {
     assert!(
         matches!(result, Err(BundleError::Io(ref error)) if error.raw_os_error() == Some(rustix::io::Errno::INTR.raw_os_error()))
     );
-    assert_eq!(
-        core.pending_history_save().unwrap(),
-        Some(attempt.ticket().clone())
-    );
+    assert_eq!(owner.pending_attempt(), Some(attempt.clone()));
     owner.reconcile_destination(Some(&core)).unwrap();
 }
 
@@ -649,13 +665,16 @@ fn w03_changed_capture_invalidates_consent() {
     session.reconcile_active().unwrap();
     // Without a floor ticket, the tag itself must still invalidate a stale offer.
     let path = temp.path("plain/a.kinewright");
-    let core = Core::spawn(document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
     let mut plain = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
     io_observer::fail_once("root_parent_sync", || {
         plain.first_save(&path, StorageLimits::default())
     })
     .unwrap();
-    assert!(core.pending_history_save().unwrap().is_none());
+    assert!(
+        plain.pending_publication_cut().unwrap().is_none(),
+        "FIRST_SAVE_HAS_NO_NATIVE_COMMAND_TICKET"
+    );
     let hidden = hide_parent(&path);
     let offer = plain.probe_active().unwrap().unwrap();
     restore_parent(&path, &hidden);
@@ -665,7 +684,10 @@ fn w03_changed_capture_invalidates_consent() {
         io_observer::fail_once("root_parent_sync", || plain.save_active()),
         Err(BundleError::DurabilityUnknown)
     ));
-    assert!(core.pending_history_save().unwrap().is_none());
+    assert!(
+        plain.pending_publication_cut().unwrap().is_some(),
+        "UNCERTAIN_SAVE_HAS_AN_EXACT_PUBLICATION_CUT"
+    );
     let hidden = hide_parent(&path);
     assert!(matches!(
         plain.prepare_rescue(&offer),
@@ -740,8 +762,8 @@ fn w06_native_path_identity_and_missing_mount_separation() {
     );
 }
 
-fn tag(path: &Path, n: u64) -> HistorySaveTag {
-    HistorySaveTag {
+fn tag(path: &Path, n: u64) -> PublicationTag {
+    PublicationTag {
         destination: path.to_path_buf(),
         parent_device: 1,
         parent_inode: 1,
@@ -776,7 +798,7 @@ fn w07_mutation_boundary_and_four_attempt_slots() {
     assert_eq!(slots.consumed(), 4);
     assert!(slots.begin(tag(&temp.path("d.kinewright"), 5)).is_err());
     // The ordinary-save API has no dependency on this full accounting ledger.
-    let core = Core::spawn(document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
     let mut session = Ja1EditingSession::activate(
         &temp.path("ordinary.kinewright"),
         BundleWriteAdmission::new_document(),
@@ -797,7 +819,7 @@ fn w07_mutation_boundary_and_four_attempt_slots() {
 fn w07_no_ticket_attempt_keeps_actual_namespace_owner() {
     let temp = temp("c3-no-ticket-owner");
     let path = temp.path("parent/a.kinewright");
-    let core = Core::spawn(document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
     let mut session = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
     assert!(matches!(
         io_observer::fail_once("root_parent_sync", || session
@@ -805,14 +827,19 @@ fn w07_no_ticket_attempt_keeps_actual_namespace_owner() {
         .unwrap(),
         CopyStatus::DurabilityUnknown
     ));
-    assert!(core.pending_history_save().unwrap().is_none());
-    let before = core.export_history().unwrap();
+    assert!(session.pending_publication_cut().unwrap().is_none());
+    let mut before = full_owner_value(&core);
     adopt_current(&mut session, &path, &temp.path("b.kinewright"));
     adopt_current(&mut session, &path, &temp.path("b2.kinewright"));
     assert_eq!(session.retained_attempts().len(), 1);
     assert!(session.retained_attempts()[0].ticket().is_none());
     session.reconcile_active().unwrap();
-    assert_eq!(core.export_history().unwrap(), before);
+    let after = full_owner_value(&core);
+    before["history"]["epoch"] = serde_json::json!(after["history"]["epoch"].as_u64().unwrap());
+    assert_eq!(
+        after, before,
+        "FIRST_SAVE_RECONCILIATION_PRESERVES_ALL_COMMANDS"
+    );
     assert_eq!(session.rescue_slots(), 1);
     assert!(kinewright_project::namespace::ProjectNamespace::acquire(&path).is_err());
     session.save_active().unwrap();
@@ -837,10 +864,14 @@ fn w07_repeated_source_attempts_do_not_deduplicate_by_destination() {
     let mut session = unknown(temp.root(), &path, true);
     let mut tags = vec![];
     let mut charges = vec![];
-    for attempt in 1..=3 {
+    for attempt in 1..=2 {
         let hidden = hide_parent(&path);
         let offer = session.probe_active().unwrap().unwrap();
-        assert!(offer.ticket.is_some());
+        assert_eq!(
+            offer.ticket.is_some(),
+            attempt > 1,
+            "LATER_SAVE_RETAINS_ITS_EXACT_PUBLICATION_CUT"
+        );
         tags.push(offer.tag.clone());
         let capture = session.prepare_rescue(&offer).unwrap().unwrap();
         let consent = capture.consent();
@@ -854,22 +885,44 @@ fn w07_repeated_source_attempts_do_not_deduplicate_by_destination() {
         assert_eq!(session.retained_attempts().len(), attempt);
         charges.push(
             session
-                .source()
+                .core()
+                .history_pool()
+                .usage(kinewright_project::operation_history::Role::Ordinary)
                 .unwrap()
-                .store()
-                .usage()
-                .unwrap()
-                .reserved_copy_bytes,
+                .0,
         );
         restore_parent(&path, &hidden);
         session.resume_probe().unwrap();
+        if attempt == 2 {
+            let before = session.core().snapshot_identity().unwrap();
+            assert!(
+                matches!(
+                    session.reconcile_active(),
+                    Err(BundleError::Operation(
+                        kinewright_project::operation_actor::Error::History(
+                            kinewright_project::operation_history::Error::PoolFull(
+                                kinewright_project::operation_history::Role::Ordinary
+                            )
+                        )
+                    ))
+                ),
+                "TWO_UNARCHIVED_PROBE_CAPTURES_REFUSE_A_FOURTH_READER"
+            );
+            assert_eq!(
+                session.core().snapshot_identity().unwrap(),
+                before,
+                "RECONCILIATION_CAPACITY_REFUSAL_PRESERVES_THE_LIVE_OWNER"
+            );
+            assert_eq!(session.rescue_slots(), 2);
+            break;
+        }
         session.reconcile_active().unwrap();
         assert_eq!(session.rescue_slots(), attempt);
         assert_eq!(
             session.retained_attempts()[attempt - 1].publication_state(),
             kinewright_project::bundle::PublicationState::Committed
         );
-        if attempt < 3 {
+        if attempt < 2 {
             grow(session.core());
             assert!(matches!(
                 io_observer::fail_once("root_parent_sync", || session.save_active()),
@@ -878,7 +931,12 @@ fn w07_repeated_source_attempts_do_not_deduplicate_by_destination() {
         }
     }
     assert!(tags.windows(2).all(|pair| pair[0] != pair[1]));
-    assert!(charges.windows(2).all(|pair| pair[1] > pair[0]));
+    assert!(
+        charges
+            .windows(2)
+            .all(|pair| pair[1] == pair[0] + (104 << 20)),
+        "DISTINCT_UNARCHIVED_CAPTURES_EACH_OWN_A_FULL_LEASE"
+    );
     for (attempt, expected) in session.retained_attempts().iter().zip(tags) {
         assert_eq!(attempt.tag(), &expected);
         for object in attempt.reads().objects() {
@@ -983,7 +1041,15 @@ fn w08_actual_owners_survive_drop_settlement_and_reader_retirement() {
     assert!(!source_usage().unwrap().damaged_accounting);
     let mut claim = kinewright_project::namespace::ProjectNamespace::acquire(&claim).unwrap();
     claim.release().unwrap();
-    let _next_writer = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
+    let _next_writer = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
 }
 
 #[test]
@@ -992,13 +1058,13 @@ fn w09_lifecycle_continuity_refuses_changed_parent_and_foreign_root() {
     fs::create_dir(temp.path("parent")).unwrap();
     let path = temp.path("parent/a.kinewright");
     let mut session = unknown(temp.root(), &path, true);
-    let ticket = session.core().pending_history_save().unwrap();
+    let ticket = session.pending_publication_cut().unwrap();
     let history = session.core().export_history().unwrap();
     let hidden = hide_parent(&path);
     fs::create_dir(path.parent().unwrap()).unwrap();
     fs::copy(hidden.join("a.kinewright"), &path).unwrap();
     assert!(session.reconcile_active().is_err());
-    assert_eq!(session.core().pending_history_save().unwrap(), ticket);
+    assert_eq!(session.pending_publication_cut().unwrap(), ticket);
     assert_eq!(session.core().export_history().unwrap(), history);
     fs::remove_file(&path).unwrap();
     fs::remove_dir(path.parent().unwrap()).unwrap();
@@ -1006,10 +1072,10 @@ fn w09_lifecycle_continuity_refuses_changed_parent_and_foreign_root() {
     let own = fs::read(&path).unwrap();
     fs::write(&path, b"foreign bytes").unwrap();
     assert!(session.reconcile_active().is_err());
-    assert_eq!(session.core().pending_history_save().unwrap(), ticket);
+    assert_eq!(session.pending_publication_cut().unwrap(), ticket);
     fs::write(&path, own).unwrap();
     session.reconcile_active().unwrap();
-    assert!(session.core().pending_history_save().unwrap().is_none());
+    assert!(session.pending_publication_cut().unwrap().is_none());
 }
 
 #[test]
@@ -1018,16 +1084,20 @@ fn w10_lifecycle_no_ticket_destination_settlement_keeps_live_history() {
         for sealed in [false, true] {
             let temp = temp("c3-no-ticket");
             let path = temp.path("a.kinewright");
-            let core = Core::spawn(document()).unwrap();
-            let mut bundle =
-                ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+            let core = Core::for_test(document()).unwrap();
+            let mut bundle = ProjectBundle::activate(
+                &path,
+                BundleWriteAdmission::new_document(),
+                core.history_pool(),
+            )
+            .unwrap();
             let inputs = bundle.empty_inputs().unwrap().reference.clone();
             bundle.save(&core, &inputs).unwrap();
             let issuer = bundle.issue_issuer(&core, &inputs, 1).unwrap();
             let attachment = bundle.attach_core(&core).unwrap();
             let command = CommandEnvelope {
                 switch: None,
-                manual: None,
+                context: None,
                 version: 1,
                 action: "edit".into(),
                 id: CommandId {
@@ -1039,7 +1109,7 @@ fn w10_lifecycle_no_ticket_destination_settlement_keeps_live_history() {
                 owner_epoch: bundle.store().owner_epoch(),
                 lease: None,
                 expected_head: bundle.manual_head().cloned(),
-                expected_revision: attachment.capture().unwrap().revision(),
+                expected_revision: attachment.capture().unwrap().change().revision,
                 command: Some(kinewright_core::JournalCommand::Do(
                     Operation::SetTrackSyncLock {
                         track: TrackId(1),
@@ -1049,7 +1119,6 @@ fn w10_lifecycle_no_ticket_destination_settlement_keeps_live_history() {
                 comment_text: None,
                 comment_strokes: None,
                 evidence: vec![],
-                transition: None,
             };
             assert!(matches!(
                 io_observer::fail_once(
@@ -1062,24 +1131,53 @@ fn w10_lifecycle_no_ticket_destination_settlement_keeps_live_history() {
                 ),
                 Err(BundleError::DurabilityUnknown)
             ));
-            assert!(core.pending_history_save().unwrap().is_none());
-            edit(&core, true);
-            edit(&core, false);
-            apply(&core, Command::Undo);
+            assert!(bundle.pending_attempt().is_some());
+            let before = full_owner_value(&core);
+            assert!(
+                matches!(
+                    core.request(Command::Do(Operation::SetTrackSyncLock {
+                        track: TrackId(1),
+                        locked: true,
+                    })),
+                    Err(kinewright_project::operation_actor::Refusal {
+                        error: kinewright_project::operation_actor::Error::MutationRefused(_),
+                        ..
+                    })
+                ),
+                "UNACKNOWLEDGED_NATIVE_COMMAND_FENCES_OTHER_WRITERS"
+            );
+            let mut session = Ja1EditingSession::from_bundle(bundle, &core, inputs).unwrap();
+            session.reconcile_active().unwrap();
+            let after = full_owner_value(&core);
+            if landed {
+                assert!(
+                    !after["history"]["document"]["tracks"][0]["sync_lock"]
+                        .as_bool()
+                        .unwrap(),
+                    "COMMITTED_NATIVE_COMMAND_SETTLES_ITS_PRIVATE_STATE"
+                );
+            } else {
+                assert_eq!(
+                    after, before,
+                    "DEFINITELY_UNPUBLISHED_NATIVE_COMMAND_PRESERVES_THE_SOURCE"
+                );
+            }
             if sealed {
                 let cut = attachment.freeze().unwrap();
                 attachment.seal(&cut).unwrap();
             }
-            let before = core.export_history().unwrap();
-            let mut session = Ja1EditingSession::from_bundle(bundle, &core, inputs).unwrap();
-            assert!(session.probe_active().unwrap().is_none());
-            session.reconcile_active().unwrap();
-            assert_eq!(core.export_history().unwrap(), before);
             assert_eq!(session.rescue_slots(), 0);
             assert!(session.retained_attempts().is_empty());
-            assert!(session.dirty().unwrap());
             drop(session);
-            let bundle = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
+            let bundle = LoadedBundle::read(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap()
+            .into_writer()
+            .unwrap();
             assert!(if landed {
                 matches!(
                     bundle.receipt_lookup(&command).unwrap(),
@@ -1104,8 +1202,6 @@ fn w16_first_save_a_writer_and_later_floor_continue() {
             let mut session = unknown(temp.root(), &path, landed);
             adopt_current(&mut session, &path, &temp.path("b.kinewright"));
             let core = session.core().clone();
-            let selected = bound_history_probe(&core.export_history().unwrap(), &limits()).unwrap();
-            assert!(selected.floor_offset > 0);
             edit(&core, true);
             edit(&core, false);
             if gesture {
@@ -1122,26 +1218,16 @@ fn w16_first_save_a_writer_and_later_floor_continue() {
             } else {
                 apply(&core, Command::Undo);
             }
-            let before = core.export_history().unwrap();
+            let before = full_owner_value(&core);
             let saved = session
                 .association()
                 .unwrap()
                 .saved_digest()
                 .map(str::to_owned);
             assert!(session.probe_active().unwrap().is_none());
-            let expected = if landed {
-                kinewright_core::HistoryTransition::floor(
-                    before.clone(),
-                    usize::try_from(selected.floor_offset).unwrap(),
-                )
-                .unwrap()
-                .after()
-                .clone()
-            } else {
-                before
-            };
-            assert_eq!(core.export_history().unwrap(), expected);
-            assert!(core.pending_history_save().unwrap().is_none());
+            let expected = before;
+            assert_eq!(full_owner_value(&core), expected);
+            assert!(session.pending_publication_cut().unwrap().is_none());
             assert_eq!(
                 session.association().unwrap().saved_digest(),
                 saved.as_deref()
@@ -1151,10 +1237,20 @@ fn w16_first_save_a_writer_and_later_floor_continue() {
             session.save_active().unwrap();
             assert!(!session.dirty().unwrap());
             let after = core.export_history().unwrap();
-            assert!(after.floor_offset > expected.floor_offset);
+            assert_eq!(
+                after.history().undo.len(),
+                expected["history"]["undo"].as_array().unwrap().len() + 40,
+                "SAVE_NEVER_CUTS_THE_LIVE_TAIL"
+            );
             assert_eq!(session.rescue_slots(), 1);
             drop(session);
-            let reopened = Ja1EditingSession::open(&path).unwrap();
+            let reopened = Ja1EditingSession::open(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap();
             assert_eq!(reopened.core().export_history().unwrap(), after);
         }
     }
@@ -1165,8 +1261,13 @@ fn w16_first_save_older_root_writer_reuses_retained_namespace() {
     let temp = temp("c3-older-root-writer");
     fs::create_dir(temp.path("parent")).unwrap();
     let path = temp.path("parent/a.kinewright");
-    let prior = Core::spawn(document()).unwrap();
-    let mut old = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let prior = Core::for_test(document()).unwrap();
+    let mut old = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        prior.history_pool(),
+    )
+    .unwrap();
     let inputs = old.empty_inputs().unwrap().reference.clone();
     old.save(&prior, &inputs).unwrap();
     let old_bytes = fs::read(&path).unwrap();
@@ -1175,20 +1276,32 @@ fn w16_first_save_older_root_writer_reuses_retained_namespace() {
     let core = session.core().clone();
     edit(&core, true);
     apply(&core, Command::Undo);
-    let before = core.export_history().unwrap();
+    let before = full_owner_value(&core);
     adopt_current(&mut session, &path, &temp.path("b.kinewright"));
     session.reconcile_active().unwrap();
     assert_eq!(fs::read(&path).unwrap(), old_bytes);
-    assert_eq!(core.export_history().unwrap(), before);
-    assert!(core.pending_history_save().unwrap().is_none());
+    assert_eq!(full_owner_value(&core), before);
+    assert!(session.pending_publication_cut().unwrap().is_none());
     assert!(session.dirty().unwrap());
     grow(&core);
     session.save_active().unwrap();
     assert!(session.source().is_some());
     assert!(!session.dirty().unwrap());
     let after = core.export_history().unwrap();
-    assert!(after.floor_offset > before.floor_offset);
+    assert_eq!(
+        after.fold_frontier().map_or(0, |key| key.position + 1),
+        before["fold_frontier"]
+            .as_object()
+            .map_or(0, |key| key["position"].as_u64().unwrap() + 1),
+        "SAVE_NEVER_ADVANCES_THE_EXECUTORS_FOLD_FRONTIER"
+    );
     drop(session);
-    let reopened = Ja1EditingSession::open(&path).unwrap();
+    let reopened = Ja1EditingSession::open(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     assert_eq!(reopened.core().export_history().unwrap(), after);
 }

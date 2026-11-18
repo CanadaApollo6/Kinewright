@@ -20,7 +20,7 @@ use crate::{
 use eframe::egui;
 use kinewright_agent::writer_host::{FeedbackMapping, HostCommand, MapTarget, SessionRoots};
 use kinewright_core::{
-    Command, Core, Document, Event, Operation, Playback, TimeCode, Track, TrackId, TrackKind,
+    Command, Document, Event, Operation, Playback, TimeCode, Track, TrackId, TrackKind,
 };
 use kinewright_media::test_support::{SpeechClip, normalized_words, run_ffmpeg};
 use kinewright_project::{
@@ -50,9 +50,14 @@ fn two_versions() -> (Fixtures, Ja1EditingSession, SnapshotKey, SnapshotKey) {
             .join(&red.media.entry.object.sha256),
     )
     .unwrap();
-    let loaded = LoadedBundle::read(&red.path).unwrap();
-    let core = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&core).unwrap();
+    let mut loaded = LoadedBundle::read(
+        &red.path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let core = loaded.open_manual().unwrap();
     let inputs = loaded
         .manual_checkpoint()
         .unwrap()
@@ -61,7 +66,7 @@ fn two_versions() -> (Fixtures, Ja1EditingSession, SnapshotKey, SnapshotKey) {
     let mut bundle = loaded.into_writer().unwrap();
     let alias = root.path("legacy-locator.mkv");
     std::fs::write(&alias, &media).unwrap();
-    let asset = core.export_history().unwrap().document.media_pool[0].clone();
+    let asset = core.export_history().unwrap().history().document.media_pool[0].clone();
     let apply = |operation| {
         assert!(matches!(
             core.request(Command::Do(operation)).unwrap(),
@@ -76,6 +81,7 @@ fn two_versions() -> (Fixtures, Ja1EditingSession, SnapshotKey, SnapshotKey) {
     let clip = core
         .export_history()
         .unwrap()
+        .history()
         .document
         .tracks
         .iter()
@@ -773,7 +779,12 @@ fn end_to_end(live: bool) {
     close_host(&mut app, &ctx);
     assert!(
         matches!(
-            Ja1EditingSession::open(&path),
+            Ja1EditingSession::open(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            ),
             Err(BundleError::Contention(_))
         ),
         "E2E_LIVE_ELSEWHERE"
@@ -793,7 +804,13 @@ fn end_to_end(live: bool) {
     drop(context_b);
     app.frames = engine.controls().frames();
     app.media_events = engine.controls().events();
-    let owner = Ja1EditingSession::open(&path).unwrap();
+    let owner = Ja1EditingSession::open(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     install(
         &mut app,
         &fixture,
@@ -880,11 +897,16 @@ fn end_to_end(live: bool) {
     end_host(host);
     in1_shutdown(&mut app);
     drop(app);
-    let runs = Ja1EditingSession::open(&path)
-        .unwrap()
-        .orchestration_runs()
-        .unwrap()
-        .len();
+    let runs = Ja1EditingSession::open(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .orchestration_runs()
+    .unwrap()
+    .len();
     assert_eq!(runs, 1, "E2E_ONE_RUN");
     println!(
         "S3_E2E {}",

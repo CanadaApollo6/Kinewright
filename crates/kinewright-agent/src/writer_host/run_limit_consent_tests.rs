@@ -30,7 +30,10 @@ mod tests {
     }
     fn cut(
         b: &B21,
-    ) -> Result<Result<kinewright_core::Event, kinewright_core::CoreDisconnected>, HostError> {
+    ) -> Result<
+        Result<kinewright_core::Event, kinewright_project::operation_actor::Refusal>,
+        HostError,
+    > {
         cut_operations(
             b,
             &[
@@ -46,7 +49,10 @@ mod tests {
     fn cut_operations(
         b: &B21,
         operations: &[kinewright_core::Operation],
-    ) -> Result<Result<kinewright_core::Event, kinewright_core::CoreDisconnected>, HostError> {
+    ) -> Result<
+        Result<kinewright_core::Event, kinewright_project::operation_actor::Refusal>,
+        HostError,
+    > {
         let kinewright_core::Event::QueryResult(kinewright_core::QueryResult::Snapshot {
             revision,
             document,
@@ -83,7 +89,7 @@ mod tests {
         let mut readers = Vec::new();
         while occupied > 0 {
             let chunk = occupied.min(64 << 20);
-            readers.push(store.reserve_probe(chunk, 0).unwrap());
+            readers.push(store.reserve_probe(chunk).unwrap());
             occupied -= chunk;
         }
         readers
@@ -397,7 +403,7 @@ mod tests {
         ok(
             b.f.editor
                 .request(HostCommand::Save {
-                    snapshot: HostSnapshot::from_history(manual.clone()).unwrap(),
+                    snapshot: host_snapshot_for_test(&b.f.host),
                 })
                 .unwrap(),
             "C4_PERSON_SAVE_WITH_HELD_APPLICATION",
@@ -451,7 +457,7 @@ mod tests {
         // current state, preserving the person's newer save and releasing it.
         let host = owner.lock().unwrap();
         assert_eq!(
-            host.owner().unwrap().core().export_history().unwrap(),
+            host.owner().unwrap().core().portable_history().unwrap(),
             manual,
             "C4_STALE_ROOT_NEVER_OVERWRITES_PERSON_SAVE"
         );
@@ -494,7 +500,7 @@ mod tests {
             "C4_EXISTING_PENDING_MARKER_STATE"
         );
         assert_eq!(
-            b.core.export_history().unwrap().document.tracks[0]
+            b.core.export_history().unwrap().history().document.tracks[0]
                 .clips
                 .len(),
             1
@@ -520,7 +526,7 @@ mod tests {
         std::fs::write(
             handoff,
             serde_json::to_vec(&serde_json::json!({
-                "root":b.f.temp.root(),"run":b.run,"task":b.child,"kept":kept,
+                "root":b.f.temp.root(),"run":b.run,"task":b.child,"kept":kept.into_transport().unwrap(),
             }))
             .unwrap(),
         )
@@ -567,10 +573,13 @@ mod tests {
         let root: std::path::PathBuf = serde_json::from_value(handoff["root"].take()).unwrap();
         let run: RunId = serde_json::from_value(handoff["run"].take()).unwrap();
         let task: TaskId = serde_json::from_value(handoff["task"].take()).unwrap();
-        let kept: kinewright_core::HistorySnapshot =
-            serde_json::from_value(handoff["kept"].take()).unwrap();
+        let kept: kinewright_project::operation_history::OwnerSnapshot =
+            decode_owner_fixture(handoff["kept"].take());
         let mut reopened = kinewright_project::editing_session::Ja1EditingSession::open(
             &root.join("project.kinewright"),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
         )
         .unwrap();
         let state = reopened.orchestration_projection(&run).unwrap().unwrap();
@@ -595,10 +604,19 @@ mod tests {
                 &binding.checkpoint,
             )
             .unwrap();
-        let history = store
-            .resolve_history(&checkpoint.history_ref)
+        let history = checkpoint
+            .open(
+                store,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap()
+            .into_reader()
+            .unwrap()
+            .into_capture()
             .unwrap();
-        assert_eq!(&*history, &kept, "C4_REOPEN_EXACT_PREVIOUS_CHECKPOINT");
+        assert_eq!(&history, &kept, "C4_REOPEN_EXACT_PREVIOUS_CHECKPOINT");
         drop(history);
         drop(checkpoint);
         let usage = reopened.store().unwrap().usage().unwrap();

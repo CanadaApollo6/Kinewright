@@ -5,13 +5,14 @@ use std::{
 
 use kinewright_agent::{ClaudeCodeDriver, McpServer};
 use kinewright_core::{
-    AgentDriver, AgentEvent, Analysis, Command as CoreCommand, Core, Document, Event, Playback,
-    Query, QueryResult, SessionConfig,
+    AgentDriver, AgentEvent, Analysis, Command as CoreCommand, Document, Event, Playback, Query,
+    QueryResult, SessionConfig,
 };
 use kinewright_media::test_support::{
     SpeechClip, joined_words, normalized_words, single_clip_document, test_engine,
     wait_for_transcript,
 };
+use kinewright_project::operation_actor::Core;
 
 const TTS_TEXT: &str = "Hello, um, this is an Kinewright transcript test.";
 
@@ -36,7 +37,7 @@ fn one_agent_message_removes_the_transcribed_filler_word() {
 
     let original = single_clip_document(asset);
     media.set_document(Arc::new(original.clone()));
-    let core = Core::spawn(original).expect("core should start");
+    let core = Core::for_test(original).expect("core should start");
     let server = McpServer::start(core.clone(), media.clone(), media.clone())
         .expect("MCP server should start");
     let confirmations = server.confirmations();

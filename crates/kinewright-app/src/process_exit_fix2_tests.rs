@@ -60,6 +60,10 @@ fn kept_note(path: &Path) -> bool {
         })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one exit lifecycle preserves local text before joining pending ownership work"
+)]
 fn incomplete_quit(studio: bool) {
     let directory = TempDirectory::new_in(&workspace_target_dir(), "exit-fix2-pending");
     let (mut app, _) = in1_tests::in1_harness(Document::default());
@@ -76,6 +80,7 @@ fn incomplete_quit(studio: bool) {
     let reader = service
         .open_borrowed_source(&descriptor, &transfer.inputs)
         .unwrap();
+    drop(transfer.history);
     app.projects[0].ja1 = Some(pending);
     app.new_project();
     let healthy_id = app.projects[1].id;
@@ -112,7 +117,7 @@ fn incomplete_quit(studio: bool) {
         .ja1
         .as_ref()
         .and_then(crate::ja1_attachment::Ja1Attachment::host_client);
-    let expected = app.projects[1].core.export_history().unwrap();
+    let expected = serde_json::to_value(app.projects[1].core.export_history().unwrap()).unwrap();
     let bytes = std::fs::read(&path).unwrap();
     let identity = app.projects[1].ja1.as_ref().map_or_else(
         || ProjectId::fresh().unwrap(),
@@ -142,16 +147,22 @@ fn incomplete_quit(studio: bool) {
                 .is_err(),
             "EXIT_FIX2_COMPLETED_HOST_RETIRED"
         );
-        let reopened = Ja1EditingSession::open(&path).unwrap();
+        let reopened = Ja1EditingSession::open(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         assert_eq!(
-            reopened.core().export_history().unwrap(),
+            serde_json::to_value(reopened.core().export_history().unwrap()).unwrap(),
             expected,
             "EXIT_FIX2_REOPEN_EXACT_STUDIO"
         );
     } else {
         assert_eq!(
-            kinewright_project::load_document(&path).unwrap().0,
-            *expected.document,
+            serde_json::to_value(kinewright_project::load_document(&path).unwrap().0).unwrap(),
+            expected["history"]["document"],
             "EXIT_FIX2_REOPEN_EXACT_LEGACY"
         );
     }

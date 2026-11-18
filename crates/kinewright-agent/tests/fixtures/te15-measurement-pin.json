@@ -16,13 +16,13 @@
   },
   "arm": "candidate",
   "arm_bridge_sha256": {
-    "host": "bade6d523f0d31ab91a7436ce483d2c5e659c8fca8c97882e0beb15bc6eebe38",
-    "mcp_observation": "4aeab9af20625614c58baebfba74257247a20556c58489cfc5ae8dc848e5e458",
-    "native_child_publication": "2c2d01a86104177309ed89cc55e3b235ca90b65a97b51b9d761d0206b3b1d7e3",
+    "host": "e7ea137fde9975d174da776cca534f5b445634e65c04369bf7525a45d15bc5f5",
+    "mcp_observation": "dbbcb11278f5456eee137654f689ee95dfe7d33159aa5a41bca819169cf8d24d",
+    "native_child_publication": "ad45bd29e1722852eb91cc4750d56db5c1e91dacd5479c6904b32bbcb28ffcde",
     "runtime": "4b763192ee2ccc1082f15e66caf2ce09fe07dbbf7d88662c4db4cc54fc332df0",
-    "studio": "df7e3ab04c9e7745a53257bc6d653933908589275cd7fc624e8526073ca9542d",
+    "studio": "6b3f60e4b4e5f2da6726fd19193a82c9c97b4fb52f598b46a183a6369b62a7c6",
     "surface": "e684e91c1bf89f5e49e523cc6a2bcf36ec005beb1846ac427afc47c91449d6ca",
-    "task_observation": "1cc99cf1bd0a5f6cd4a230554b9b050c56ed73f2ecd4ecf25b485f48b63eb904"
+    "task_observation": "db36033d9e316c392ad1f24d63b676ff28949ec66af603ba923eba63e2e1326b"
   },
   "cache_protocol": {
     "hidden_provider_cache": "unobserved; record reported cache categories without inferring cache hits",
@@ -44,10 +44,10 @@
     "render": "production preview compared with oracle at frames 0,20,49,50,51,52,89,90,99"
   },
   "driver_sources_sha256": {
-    "te1_eval.rs": "14afd20b44d0e1a866930e1ed4c21e910234b713e0efe4caadab0e3f6f94f7e6",
+    "te1_eval.rs": "d3a2bc8efc410f47911222f82ede2dfece1c100b7776c4a7610babda1843c143",
     "te1_eval/analysis.rs": "95d082a0484f8e08757a3c444dd54d6ab25d7e4c06a1bf4f9e30971242fe39a0",
-    "te1_eval/checks.rs": "05a40f096cb8907608b0540b51bc7b5fd44ff77ec67f9b0fc0a33cf32f50d304",
-    "te1_eval/grant.rs": "b51fde0406ac45e56d8d1f86b65462a5c77e12f560638c71d866da03c6e5f449",
+    "te1_eval/checks.rs": "19e87dd71373214c5a34afbd92f409cc44e47b68f7a8e6bba62c83e29c0deed7",
+    "te1_eval/grant.rs": "6d81be8832e94357e0054fa5703f4666b8a9e53763fd1c2aad5026be902078c7",
     "te1_eval/observe.rs": "f7413c1af67c463f8d581498bdc6ef53868249c03a96ae664368a58bfca89bb9",
     "te1_eval/pin.rs": "96d963d1375f5224a9fde78ddf300f8655a4ca3b25fc6fae7721091185cd48d4",
     "te1_eval/recipe.rs": "de09e30617dea2a2c0ddb3ac9cad41980f0f11bc02839c8b112ab3fc28aeef85"
@@ -204,7 +204,7 @@
     }
   },
   "owned_presentation": "Lossless 100-frame FFV1 picture and a 25-fps raw-BGRA MOV carrier for the original PCM, packetized at 320 samples (8-kHz mono) per source frame; production range PCM matches the original WAV (audio-only probing otherwise assigns 30 fps). Source locator/fingerprint and carrier kind/raster/colour are explicit fixture admission changes, used by the candidate. Every preview/PCM check still compares against the original legacy oracle.",
-  "paid_entry_sha256": "54f35461aa01e1440da3a51e2aee70ea8987d138614dec17cfef8a650c55a876",
+  "paid_entry_sha256": "8ba7457685eab3361a4be62ee24396c7ebf7a8a97eafe9caa419d6219a484e9e",
   "paid_runs": 6,
   "pre_send_size": {
     "change": "never raise limit mid-sample; any limit or prompt change requires reviewed pin refresh and unpaid candidate checks",

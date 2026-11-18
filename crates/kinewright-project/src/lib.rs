@@ -14,10 +14,15 @@ pub mod edit_audit;
 pub mod editing_session;
 // JA-1 S3 C4
 pub mod feedback_mapping;
-pub mod history_record;
 mod history_save;
-mod history_size;
-mod lineage_journal;
+pub use history_save::PublicationTag;
+pub mod operation_actor;
+pub mod operation_checkpoint;
+pub mod operation_history;
+pub mod operation_inputs;
+pub mod operation_protocol;
+mod operation_publication;
+mod operation_wire;
 pub mod rescue_record;
 pub use history_save::{AttemptBinding, ProjectAttachment};
 #[cfg(feature = "test-util")]
@@ -70,10 +75,10 @@ pub use project::{
     serialize_project_document, write_file_atomic, write_project_bytes, write_project_document,
 };
 pub use recovery::{
-    FeedbackStateLock, FeedbackStateRefusal, JOURNAL_MAGIC, allocate_journal_path,
-    default_recovery_directory, feedback_state_directory, feedback_state_directory_with, fnv1a_64,
-    journal_file_name, lock_feedback_state, pending_journal_for_project, restore_status,
-    retire_journal_for_project,
+    FeedbackStateLock, FeedbackStateRefusal, JOURNAL_MAGIC, RecoveryDirectoryRefusal,
+    allocate_journal_path, default_recovery_directory, default_recovery_directory_with,
+    feedback_state_directory, feedback_state_directory_with, fnv1a_64, journal_file_name,
+    lock_feedback_state, pending_journal_for_project, restore_status, retire_journal_for_project,
 };
 pub use session::{
     IncidentLogHandle, LoadedSidecarSession, SidecarRollback, SidecarSession,
@@ -109,8 +114,6 @@ pub(crate) fn test_hook(point: &str) {
     }
 }
 
-pub mod manual_history;
-
 mod copy_publication;
 mod task_checkpoint;
 
@@ -123,11 +126,7 @@ pub mod run_admission;
 #[cfg(all(test, target_os = "linux"))]
 mod person_admission_tests;
 
-#[cfg(all(test, feature = "test-util"))]
-mod cleanup_measurement_tests;
-
 pub mod cleanup_admission;
-pub mod task_history_admission;
 
 #[cfg(all(test, target_os = "linux"))]
 mod cleanup_quota_tests;

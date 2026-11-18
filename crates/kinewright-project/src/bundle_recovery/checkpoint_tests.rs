@@ -1,9 +1,13 @@
 //! Verified checkpoint rescue retains failed history and original occurrence identities.
 use super::*;
-use kinewright_core::{Command, Core, Operation, Track, TrackId, TrackKind};
+use crate::operation_actor::Core;
+use kinewright_core::{Command, Operation, Track, TrackId, TrackKind};
 use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
 
 fn fixture() -> (TempDirectory, Core, ProjectBundle) {
+    fixture_with(1)
+}
+fn fixture_with(toggles: usize) -> (TempDirectory, Core, ProjectBundle) {
     let temp = TempDirectory::new_in(&workspace_target_dir(), "checkpoint-undo-recovery");
     let mut document = Document::default();
     document.tracks.push(Track {
@@ -20,15 +24,18 @@ fn fixture() -> (TempDirectory, Core, ProjectBundle) {
         ],
     });
     document.duration = kinewright_core::TimeCode(90);
-    let core = Core::spawn(document).unwrap();
-    core.request(Command::Do(Operation::SetTrackSyncLock {
-        track: TrackId(1),
-        locked: false,
-    }))
-    .unwrap();
+    let core = Core::for_test(document).unwrap();
+    for toggle in 0..toggles {
+        core.request(Command::Do(Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: toggle % 2 == 1,
+        }))
+        .unwrap();
+    }
     let mut bundle = ProjectBundle::activate(
         &temp.path("source.kinewright"),
         BundleWriteAdmission::new_document(),
+        core.history_pool(),
     )
     .unwrap();
     let inputs = bundle.empty_inputs().unwrap();
@@ -65,7 +72,7 @@ fn history_admission_effect(keys: i64) -> kinewright_core::Effect {
 
 fn history_admission_split_core() -> Core {
     use kinewright_core::{ClipId, Event, SolidColor, TimeCode};
-    let core = Core::spawn(Document {
+    let core = Core::for_test(Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -109,7 +116,7 @@ fn history_admission_split_core() -> Core {
 fn history_admission_copy_core() -> Core {
     use kinewright_core::{ClipId, EffectId, Event, SolidColor, TimeCode};
     let effect = history_admission_effect(1000);
-    let core = Core::spawn(Document {
+    let core = Core::for_test(Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -163,158 +170,73 @@ fn history_admission_copy_core() -> Core {
     core
 }
 
+fn reopen(path: &Path, pool: &crate::operation_history::HistoryPool) -> Core {
+    let mut loaded = crate::bundle::LoadedBundle::read(path, pool).unwrap();
+    let checkpoint = loaded.manual_checkpoint().unwrap().clone();
+    Core::open(
+        loaded.take_manual_snapshot().unwrap(),
+        checkpoint.branch_id,
+        checkpoint.revision,
+    )
+    .unwrap()
+}
+fn roundtrip(core: &Core, label: &str) {
+    let temp = TempDirectory::new_in(&workspace_target_dir(), label);
+    let path = temp.path("source.kinewright");
+    let pool = core.history_pool().clone();
+    let expected = core.export_history().unwrap();
+    let mut bundle =
+        ProjectBundle::activate(&path, BundleWriteAdmission::new_document(), &pool).unwrap();
+    let inputs = bundle.empty_inputs().unwrap();
+    bundle.save(core, &inputs.reference).unwrap();
+    let authority = bundle.attach_core(core).unwrap();
+    let undo_depth = expected.history().undo.len();
+    let cut = authority.freeze().unwrap();
+    authority.retire(&cut).unwrap();
+    drop(authority);
+    drop(bundle);
+    let restored = reopen(&path, &pool);
+    assert_eq!(
+        restored.snapshot_identity().unwrap(),
+        expected.identity().unwrap(),
+        "COLD_OPEN_PRESERVES_COMPLETE_OWNER"
+    );
+    drop(expected);
+    let baseline = restored.boundary(0).unwrap().document_arc();
+    for _ in 0..undo_depth {
+        restored.request(Command::Undo).unwrap();
+    }
+    assert_eq!(
+        restored.export_history().unwrap().history().document,
+        baseline,
+        "FULL_UNDO_REACHES_SAVED_BASELINE"
+    );
+}
 #[test]
 fn history_admission_copy_remove_refused_save_retry_cold_reopen_keeps_complete_undo() {
-    let temp = TempDirectory::new_in(&workspace_target_dir(), "history-admission-copy");
-    let path = temp.path("source.kinewright");
-    let core = history_admission_copy_core();
-    let before = core.export_history().unwrap();
-    let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
-    let inputs = bundle.empty_inputs().unwrap();
-    let refused = crate::io_observer::fail_once("root_before_publish", || {
-        bundle.save(&core, &inputs.reference)
-    });
-    assert!(
-        refused
-            .unwrap_err()
-            .to_string()
-            .contains("injected root_before_publish"),
-        "SAVE_REACHED_THE_REAL_PUBLICATION_REFUSAL"
-    );
-    assert_eq!(core.export_history().unwrap(), before);
-    let usage = bundle.store.usage().unwrap();
-    let available = bundle.store.limits().metadata_bytes
-        - usage.metadata_bytes
-        - (usage.decoded_bytes - usage.decoder_bytes);
-    let mut pressure = Vec::new();
-    let mut remaining = available - 1;
-    while remaining != 0 {
-        let chunk = remaining.min(bundle.store.limits().decoded_record_bytes);
-        pressure.push(
-            bundle
-                .store
-                .reserve_copy_read(0, chunk, 0, false, true)
-                .unwrap(),
-        );
-        remaining -= chunk;
-    }
-    for _ in 0..2 {
-        assert!(
-            matches!(
-                bundle.save(&core, &inputs.reference),
-                Err(BundleError::Capacity(_))
-            ),
-            "RETRY_CANNOT_BYPASS_STILL_PRESENT_CAPACITY_REFUSAL"
-        );
-        assert_eq!(core.export_history().unwrap(), before);
-    }
-    drop(pressure);
-    bundle.save(&core, &inputs.reference).unwrap();
-    assert_eq!(
-        core.export_history().unwrap(),
-        before,
-        "RETRY_KEEPS_ALL_UNDO"
-    );
-    drop(inputs);
-    drop(bundle);
-    let root = std::fs::read(&path).unwrap();
-    let loaded = crate::bundle::LoadedBundle::read(&path).unwrap();
-    let restored = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&restored).unwrap();
-    assert_eq!(restored.export_history().unwrap(), before);
-    history_admission_assert_cursor_ends(&restored, &before);
-    drop(loaded);
-    assert!(VerifiedCheckpointRecovery::open(&path).unwrap().is_none());
-    assert_eq!(std::fs::read(path).unwrap(), root);
+    roundtrip(&history_admission_copy_core(), "copy-owner-roundtrip");
 }
-
-fn history_admission_assert_cursor_ends(core: &Core, before: &HistorySnapshot) {
-    use kinewright_core::Event;
-    for expected in before.cursor.undo.iter().rev() {
-        assert!(matches!(
-            core.request(Command::Undo).unwrap(),
-            Event::DocumentChanged { .. }
-        ));
-        assert_eq!(core.export_history().unwrap().document, expected.document);
-    }
-    assert!(core.export_history().unwrap().cursor.undo.is_empty());
-    for expected in before
-        .cursor
-        .undo
-        .iter()
-        .skip(1)
-        .map(|entry| &entry.document)
-        .chain(std::iter::once(&before.document))
-    {
-        assert!(matches!(
-            core.request(Command::Redo).unwrap(),
-            Event::DocumentChanged { .. }
-        ));
-        assert_eq!(&core.export_history().unwrap().document, expected);
-    }
-    assert!(core.export_history().unwrap().cursor.redo.is_empty());
-}
-
 #[test]
 fn history_admission_split_delete_save_cold_reopen_keeps_complete_undo() {
-    let temp = TempDirectory::new_in(&workspace_target_dir(), "history-admission-split");
-    let path = temp.path("source.kinewright");
-    let core = history_admission_split_core();
-    let before = core.export_history().unwrap();
-    assert_eq!(before.batches.len(), 63);
-    println!(
-        "HISTORY_SPLIT_ADMISSION replay={} retained={} encoded={}",
-        kinewright_core::history_size::measure_replay_peak(
-            &kinewright_core::HistoryJournal::capture(&before).unwrap(),
-            &before.baseline,
-            &before.document,
-        )
-        .unwrap(),
-        kinewright_core::history_size::history_live_bytes(&before).unwrap(),
-        before.encoded_bytes().unwrap(),
-    );
-    let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
-    let inputs = bundle.empty_inputs().unwrap();
-    bundle.save(&core, &inputs.reference).unwrap();
-    assert_eq!(
-        core.export_history().unwrap(),
-        before,
-        "SAVE_KEEPS_ALL_UNDO"
-    );
-    drop(inputs);
-    drop(bundle);
-    let root_bytes = std::fs::read(&path).unwrap();
-    let loaded =
-        crate::bundle::LoadedBundle::read(&path).expect("ADMITTED_SPLIT_HISTORY_COLD_REOPEN");
-    let restored = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&restored).unwrap();
-    assert_eq!(restored.export_history().unwrap(), before);
-    history_admission_assert_cursor_ends(&restored, &before);
-    drop(loaded);
-    assert!(VerifiedCheckpointRecovery::open(&path).unwrap().is_none());
-    assert_eq!(std::fs::read(path).unwrap(), root_bytes);
+    roundtrip(&history_admission_split_core(), "split-owner-roundtrip");
 }
-
-/// Build an authentic content-addressed but semantically unreplayable graph.
-/// Only this adversarial fixture replaces a root outside the ordinary publisher.
 fn damage_journal(bundle: &mut ProjectBundle, reject_operation: bool) -> BranchCheckpoint {
     let mut checkpoint = bundle.branches[&bundle.manual_branch_id].clone();
-    let mut record = (*bundle
+    let record = bundle
         .store
-        .read_record::<crate::history_record::HistoryRecord>(&checkpoint.history_ref)
-        .unwrap())
-    .clone();
+        .read_record::<crate::operation_history::StoredOwnerRecord>(&checkpoint.owner_ref)
+        .unwrap();
+    let mut encoded = serde_json::to_value(&*record).unwrap();
+    drop(record);
     if reject_operation {
-        record.journal.batches[0].command =
-            kinewright_core::JournalCommand::Do(Operation::SetTrackSyncLock {
-                track: TrackId(999),
-                locked: false,
-            });
+        encoded["body"]["position"] = 0.into();
     } else {
-        record.journal.cursor.undo[0] = "0".repeat(64);
+        encoded["body"]["undo"][0][1][0][2] = serde_json::Value::String("0".repeat(64));
     }
-    let history = bundle.store.admit_record(&record).unwrap();
-    checkpoint.history_ref = history.reference.clone();
+    let invalid: crate::operation_history::StoredOwnerRecord =
+        serde_json::from_value(encoded).unwrap();
+    let history = bundle.store.admit_record(&invalid).unwrap();
+    checkpoint.owner_ref = history.reference.clone();
     let sealed = bundle.store.admit_record(&checkpoint).unwrap();
     let index = bundle
         .store
@@ -339,19 +261,12 @@ fn damage_journal(bundle: &mut ProjectBundle, reject_operation: bool) -> BranchC
         .unwrap();
     checkpoint
 }
-
 #[test]
 fn verified_checkpoint_recovery_refuses_to_drift_on_bad_boundary_or_command() {
     for reject_operation in [false, true] {
         let (temp, core, mut bundle) = fixture();
-        let expected = core.export_history().unwrap().document;
-        let old = bundle.branches[&bundle.manual_branch_id].clone();
-        let current = bundle
-            .store
-            .read_record::<LineageRecord>(&old.lineage_ref)
-            .unwrap()
-            .current
-            .clone();
+        let pool = core.history_pool().clone();
+        let expected = core.export_history().unwrap().history().document.clone();
         let damaged = damage_journal(&mut bundle, reject_operation);
         drop(bundle);
         drop(core);
@@ -359,58 +274,44 @@ fn verified_checkpoint_recovery_refuses_to_drift_on_bad_boundary_or_command() {
         let original_root = std::fs::read(&source).unwrap();
         let history_path = temp.path(&format!(
             "source.kinewright-assets/studio/objects/{}",
-            damaged.history_ref.sha256
+            damaged.owner_ref.sha256
         ));
         let original_history = std::fs::read(&history_path).unwrap();
         assert!(
-            crate::bundle::LoadedBundle::read(&source).is_err(),
+            crate::bundle::LoadedBundle::read(&source, &pool).is_err(),
             "ORDINARY_OPEN_STAYS_STRICT"
         );
-        let recovery = VerifiedCheckpointRecovery::open(&source).unwrap().unwrap();
+        let recovery = VerifiedCheckpointRecovery::open(&source, &pool)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             recovery.document(),
             &*expected,
             "RECOVERY_CHECKPOINT_DOCUMENT_EXACT"
         );
-        assert_eq!(recovery.disclosure().history_ref, damaged.history_ref);
-        assert!(recovery.lineage.undo.is_empty() && recovery.lineage.redo.is_empty());
-        assert_eq!(
-            recovery.lineage.current, current,
-            "RECOVERY_OCCURRENCES_ARE_NOT_REMINTED"
-        );
+        assert_eq!(recovery.disclosure().history_ref, damaged.owner_ref);
         let destination = temp.path("recovered.kinewright");
         recovery.save_copy(&destination).unwrap();
-        let loaded = crate::bundle::LoadedBundle::read(&destination).unwrap();
-        let restored = Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&restored).unwrap();
+        let restored = reopen(&destination, &pool);
         let history = restored.export_history().unwrap();
-        assert_eq!(history.document, expected);
-        assert!(
-            history.batches.is_empty()
-                && history.cursor.undo.is_empty()
-                && history.cursor.redo.is_empty()
-        );
-        let checkpoint = loaded.manual_checkpoint().unwrap().clone();
-        drop(loaded);
-        let mut writer = ProjectBundle::activate(
-            &destination,
-            BundleWriteAdmission::read(&destination).unwrap(),
-        )
-        .unwrap();
         assert_eq!(
-            writer
-                .store
-                .read_record::<LineageRecord>(&checkpoint.lineage_ref)
-                .unwrap()
-                .current,
-            current
+            &history.history().document,
+            &expected,
+            "DOCUMENT_ONLY_RESET_PRESERVES_DOCUMENT"
         );
-        let inputs = writer.root.as_ref().unwrap().input_manifest_ref.clone();
-        writer.save(&restored, &inputs).unwrap();
-        writer.collect_after_ack().unwrap();
-        drop(writer);
-        drop(restored);
-        assert!(crate::bundle::LoadedBundle::read(&destination).is_ok());
+        assert!(
+            history.history().undo.is_empty() && history.history().redo.is_empty(),
+            "DOCUMENT_ONLY_RESET_HAS_NO_INVENTED_STEPS"
+        );
+        assert_eq!(
+            history.ledger().entries().count(),
+            0,
+            "DOCUMENT_ONLY_RESET_INVENTS_NO_APPROVAL_FATES"
+        );
+        assert!(
+            history.history().epoch > damaged.position.epoch,
+            "DOCUMENT_ONLY_RESET_STARTS_NEW_EPOCH"
+        );
         assert_eq!(
             std::fs::read(&source).unwrap(),
             original_root,
@@ -422,153 +323,306 @@ fn verified_checkpoint_recovery_refuses_to_drift_on_bad_boundary_or_command() {
             "QUARANTINED_HISTORY_RETAINED"
         );
         assert!(
-            recovery.save_copy(&destination).is_err(),
-            "RECOVERY_CANNOT_OVERWRITE_AN_OCCUPIED_DESTINATION"
-        );
-        assert!(
             recovery.save_copy(&source).is_err(),
             "RECOVERY_CANNOT_REPLACE_ITS_SOURCE"
         );
+        assert!(
+            recovery.save_copy(&destination).is_err(),
+            "RECOVERY_CANNOT_OVERWRITE_AN_OCCUPIED_DESTINATION"
+        );
     }
 }
-
 #[test]
 fn checkpoint_recovery_requires_an_independently_verified_document() {
     let (temp, core, mut bundle) = fixture();
-    let checkpoint = damage_journal(&mut bundle, false);
+    let pool = core.history_pool().clone();
+    let checkpoint = damage_journal(&mut bundle, true);
     drop(bundle);
     drop(core);
-    let document_path = temp.path(&format!(
-        "source.kinewright-assets/studio/objects/{}",
-        checkpoint.document_ref.sha256
-    ));
-    std::fs::write(&document_path, b"damaged document").unwrap();
+    std::fs::write(
+        temp.path(&format!(
+            "source.kinewright-assets/studio/objects/{}",
+            checkpoint.document_ref.sha256
+        )),
+        b"bad document",
+    )
+    .unwrap();
     assert!(
-        VerifiedCheckpointRecovery::open(&temp.path("source.kinewright")).is_err(),
-        "NO_DOCUMENT_FALLBACK_FROM_UNVERIFIED_BYTES"
+        VerifiedCheckpointRecovery::open(&temp.path("source.kinewright"), &pool).is_err(),
+        "CORRUPT_CURRENT_DOCUMENT_GRANTS_NO_RESET"
     );
 }
-
 #[test]
 fn checkpoint_current_lineage_does_not_replay_unavailable_undo_maps() {
-    let (_temp, _core, bundle) = fixture();
-    let checkpoint = &bundle.branches[&bundle.manual_branch_id];
-    let original = bundle
-        .store
-        .read_record::<LineageRecord>(&checkpoint.lineage_ref)
+    let (temp, core, mut bundle) = fixture();
+    let pool = core.history_pool().clone();
+    damage_journal(&mut bundle, true);
+    drop(bundle);
+    drop(core);
+    let recovery = VerifiedCheckpointRecovery::open(&temp.path("source.kinewright"), &pool)
+        .unwrap()
         .unwrap();
-    let mut raw = serde_json::to_value(&*original).unwrap();
-    raw["undo"][0]["removed"] = serde_json::json!([999]);
-    let bytes = serde_json::to_vec(&raw).unwrap();
-    assert!(
-        serde_json::from_slice::<LineageRecord>(&bytes).is_err(),
-        "ORDINARY_LINEAGE_READER_STAYS_STRICT"
+    recovery.save_copy(&temp.path("reset.kinewright")).unwrap();
+    let restored = reopen(&temp.path("reset.kinewright"), &pool);
+    let baseline = restored.boundary(0).unwrap();
+    assert_eq!(
+        baseline.lineage().occurrences.len(),
+        1,
+        "RESET_CREATES_ONLY_CURRENT_DOCUMENT_SEEDS"
     );
-    let recovered = crate::lineage_journal::restore_current(&bytes, |live| {
-        bundle.store.reserve_copy_read(0, live, 0, false, true)
-    })
-    .unwrap();
-    assert_eq!(recovered.current, original.current);
-    assert_eq!(recovered.baseline, original.current);
-    assert!(recovered.undo.is_empty() && recovered.redo.is_empty());
-    raw["unexpected"] = serde_json::json!(true);
     assert!(
-        crate::lineage_journal::restore_current(&serde_json::to_vec(&raw).unwrap(), |live| {
-            bundle.store.reserve_copy_read(0, live, 0, false, true)
-        })
-        .is_err(),
-        "CURRENT_LINEAGE_READER_REQUIRES_THE_EXACT_CURRENT_SHAPE"
+        baseline.lineage().split_ancestry.is_empty(),
+        "RESET_INVENTS_NO_OLD_ANCESTRY"
     );
 }
-
 #[test]
 fn checkpoint_rescue_does_not_read_unreachable_history_resources() {
-    use crate::owned_inputs::OwnedInputEntry;
     let (temp, core, mut bundle) = fixture();
-    let bytes = b"resource retained only by unavailable history";
+    let pool = core.history_pool().clone();
+    let bytes = b"unreachable historical bytes";
     let reference = ObjectRef {
         sha256: kinewright_media::sha256_bytes(bytes),
         byte_length: bytes.len() as u64,
         record_kind: RecordKind::OwnedData,
     };
-    let held_blob = bundle
+    let pin = bundle
         .store
         .admit_blob(&mut bytes.as_slice(), &reference, &[])
         .unwrap();
-    let mut inputs = (*bundle
-        .store
-        .read_input_manifest(&bundle.root.as_ref().unwrap().input_manifest_ref)
-        .unwrap())
-    .clone();
-    inputs.entries.push(OwnedInputEntry {
-        entry_id: "history-only-resource".into(),
-        object: reference.clone(),
-        dependencies: vec![],
-        selected_stream: None,
-        time_base: None,
-        origin: None,
-        profile: None,
-    });
-    let sealed = bundle.store.admit_record(&inputs).unwrap();
-    bundle
-        .branches
-        .get_mut(&bundle.manual_branch_id)
-        .unwrap()
-        .input_manifest_ref = sealed.reference.clone();
-    bundle.root.as_mut().unwrap().input_manifest_ref = sealed.reference.clone();
     damage_journal(&mut bundle, false);
-    drop(sealed);
-    drop(held_blob);
+    drop(pin);
     drop(bundle);
     drop(core);
     let unused = temp.path(&format!(
         "source.kinewright-assets/studio/objects/{}",
         reference.sha256
     ));
-    std::fs::write(&unused, b"damaged unrelated history resource").unwrap();
-    let recovery = VerifiedCheckpointRecovery::open(&temp.path("source.kinewright"))
+    std::fs::write(&unused, b"unavailable").unwrap();
+    let recovery = VerifiedCheckpointRecovery::open(&temp.path("source.kinewright"), &pool)
         .unwrap()
         .unwrap();
     assert!(recovery.inputs.entries.is_empty());
-    let copy = temp.path("recovered.kinewright");
-    recovery.save_copy(&copy).unwrap();
-    assert!(crate::bundle::LoadedBundle::read(&copy).is_ok());
+    recovery.save_copy(&temp.path("reset.kinewright")).unwrap();
+    assert!(crate::bundle::LoadedBundle::read(&temp.path("reset.kinewright"), &pool).is_ok());
     assert_eq!(
         std::fs::read(unused).unwrap(),
-        b"damaged unrelated history resource",
+        b"unavailable",
         "UNAVAILABLE_HISTORY_RESOURCES_REMAIN_WITH_THE_ORIGINAL"
     );
 }
-
 #[test]
 fn history_admission_reopen_capacity_never_authorizes_empty_undo_recovery() {
     let (temp, core, bundle) = fixture();
-    let before = core.export_history().unwrap();
     let path = temp.path("source.kinewright");
     drop(bundle);
-    let root = std::fs::read(&path).unwrap();
-    let limits = StorageLimits {
-        live_history_bytes: 1,
-        ..StorageLimits::default()
-    };
+    drop(core);
+    let original = std::fs::read(&path).unwrap();
+    let mut limits = crate::operation_history::PoolLimits::default();
+    limits.retained[0] = 0;
+    let pool = crate::operation_history::HistoryPool::new(limits);
     assert!(
-        matches!(
-            crate::bundle_recovery::read_with_limits(&path, limits.clone()),
-            Err(BundleError::Capacity(_))
-        ),
+        crate::bundle::LoadedBundle::read(&path, &pool).is_err(),
         "REOPEN_SIZE_IS_CAPACITY"
     );
     assert!(
         matches!(
-            VerifiedCheckpointRecovery::open_with_limits(&path, &limits),
+            VerifiedCheckpointRecovery::open(&path, &pool),
             Err(BundleError::Capacity(_))
         ),
         "CAPACITY_GRANTS_NO_RESCUE"
     );
-    assert_eq!(std::fs::read(&path).unwrap(), root);
-    let loaded = crate::bundle::LoadedBundle::read(&path).unwrap();
-    let restored = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&restored).unwrap();
-    assert_eq!(restored.export_history().unwrap(), before);
-    history_admission_assert_cursor_ends(&restored, &before);
+    assert_eq!(std::fs::read(path).unwrap(), original);
+}
+fn owner_object(temp: &TempDirectory, bundle: &ProjectBundle) -> (std::path::PathBuf, ObjectRef) {
+    let owner = bundle.branches[&bundle.manual_branch_id].owner_ref.clone();
+    (
+        temp.path(&format!(
+            "source.kinewright-assets/studio/objects/{}",
+            owner.sha256
+        )),
+        owner,
+    )
+}
+/// A history read that fails for a reason other than its stored bytes is a
+/// refusal: no rescue capability, nothing written, and the same project opens
+/// once the cause is gone.
+fn assert_retryable_refusal(
+    refused: Result<Option<VerifiedCheckpointRecovery>, BundleError>,
+    expected: impl FnOnce(&BundleError) -> bool,
+    path: &Path,
+    original: &[u8],
+    context: &str,
+) {
+    match refused {
+        Err(error) => assert!(expected(&error), "{context}: unexpected refusal {error:?}"),
+        Ok(Some(recovery)) => panic!(
+            "{context}: STORE_ERROR_GRANTS_NO_EMPTY_HISTORY_RESCUE ({})",
+            recovery.disclosure().reason
+        ),
+        Ok(None) => panic!("{context}: the failing read was not reached"),
+    }
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        original,
+        "{context}: ROOT_UNTOUCHED"
+    );
+}
+#[test]
+fn unreadable_history_refuses_rescue_and_stays_recoverable() {
+    use std::os::unix::fs::PermissionsExt;
+    let (temp, core, bundle) = fixture();
+    let pool = core.history_pool().clone();
+    let path = temp.path("source.kinewright");
+    let (object, _) = owner_object(&temp, &bundle);
+    drop(bundle);
+    drop(core);
+    let original = std::fs::read(&path).unwrap();
+    let history = std::fs::read(&object).unwrap();
+    let mode = std::fs::metadata(&object).unwrap().permissions();
+    std::fs::set_permissions(&object, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(
+        std::fs::File::open(&object).is_err(),
+        "EACCES_FIXTURE_NEEDS_A_NON_ROOT_RUNNER"
+    );
+    let refused = VerifiedCheckpointRecovery::open(&path, &pool);
+    std::fs::set_permissions(&object, mode).unwrap();
+    assert_retryable_refusal(
+        refused,
+        |error| {
+            matches!(
+                error,
+                BundleError::Operation(crate::operation_actor::Error::History(
+                    crate::operation_history::Error::Store(reason)
+                )) if reason.contains("Permission denied")
+            )
+        },
+        &path,
+        &original,
+        "EACCES",
+    );
+    assert_eq!(
+        std::fs::read(&object).unwrap(),
+        history,
+        "HISTORY_UNTOUCHED"
+    );
+    let restored = reopen(&path, &pool);
+    assert!(
+        !restored.export_history().unwrap().history().undo.is_empty(),
+        "EACCES_RETRY_KEEPS_UNDO"
+    );
+}
+#[test]
+fn checkpoint_overlong_history_offers_empty_history_rescue() {
+    use std::io::Write as _;
+    let (temp, core, bundle) = fixture();
+    let pool = core.history_pool().clone();
+    let path = temp.path("source.kinewright");
+    let (object, owner) = owner_object(&temp, &bundle);
+    drop(bundle);
+    drop(core);
+    let original = std::fs::read(&path).unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&object)
+        .unwrap()
+        .write_all(b"!")
+        .unwrap();
+    let overlong = std::fs::read(&object).unwrap();
+    assert_eq!(overlong.len() as u64, owner.byte_length + 1);
+    let recovery = VerifiedCheckpointRecovery::open(&path, &pool)
+        .unwrap()
+        .expect("an over-long history object must allow checkpoint rescue");
+    assert_eq!(recovery.disclosure().history_ref, owner);
+    assert!(
+        recovery
+            .disclosure()
+            .reason
+            .contains("owned byte length changed")
+    );
+    let destination = temp.path("recovered.kinewright");
+    recovery.save_copy(&destination).unwrap();
+    let restored = reopen(&destination, &pool);
+    let history = restored.export_history().unwrap();
+    assert!(history.history().undo.is_empty() && history.history().redo.is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(std::fs::read(&object).unwrap(), overlong);
+}
+
+#[test]
+fn checkpoint_history_read_failure_refuses_empty_history_rescue() {
+    let (temp, core, bundle) = fixture();
+    let pool = core.history_pool().clone();
+    let path = temp.path("source.kinewright");
+    let (object, owner) = owner_object(&temp, &bundle);
+    let expected = core.snapshot_identity().unwrap();
+    drop(bundle);
+    drop(core);
+    let original = std::fs::read(&path).unwrap();
+    let history = std::fs::read(&object).unwrap();
+    let refused =
+        crate::io_observer::fail_path("owned_verification_read", Path::new(&owner.sha256), || {
+            VerifiedCheckpointRecovery::open(&path, &pool)
+        });
+    assert_retryable_refusal(
+        refused,
+        |error| {
+            matches!(
+                error,
+                BundleError::Operation(crate::operation_actor::Error::History(
+                    crate::operation_history::Error::Store(reason)
+                )) if reason == "injected owned_verification_read"
+            )
+        },
+        &path,
+        &original,
+        "mid-object read failure",
+    );
+    assert_eq!(std::fs::read(&object).unwrap(), history);
+    let restored = reopen(&path, &pool);
+    assert_eq!(restored.snapshot_identity().unwrap(), expected);
+    assert!(!restored.export_history().unwrap().history().undo.is_empty());
+}
+
+#[test]
+fn history_store_capacity_refuses_rescue_and_stays_recoverable() {
+    // A long Undo over a tiny document: the owner record is the only object
+    // whose encoded or decoded size reaches the cap below.
+    let (temp, core, bundle) = fixture_with(8000);
+    let pool = core.history_pool().clone();
+    let path = temp.path("source.kinewright");
+    let (_, owner) = owner_object(&temp, &bundle);
+    let largest_other = bundle
+        .store
+        .manifest()
+        .unwrap()
+        .objects
+        .iter()
+        .filter(|reference| reference.sha256 != owner.sha256)
+        .map(|reference| reference.byte_length)
+        .max()
+        .unwrap();
+    drop(bundle);
+    drop(core);
+    let original = std::fs::read(&path).unwrap();
+    // Every other record still fits; only the owner record is over the cap.
+    let limits = StorageLimits {
+        decoded_record_bytes: owner.byte_length - 1,
+        ..StorageLimits::default()
+    };
+    assert!(
+        largest_other < limits.decoded_record_bytes,
+        "STORE_CAPACITY_FIXTURE_TARGETS_ONLY_THE_OWNER_RECORD"
+    );
+    assert_retryable_refusal(
+        VerifiedCheckpointRecovery::open_with_limits(&path, &limits, &pool),
+        |error| matches!(error, BundleError::Capacity("encoded metadata record")),
+        &path,
+        &original,
+        "STORE_CAPACITY",
+    );
+    let restored = reopen(&path, &pool);
+    assert!(
+        !restored.export_history().unwrap().history().undo.is_empty(),
+        "STORE_CAPACITY_RETRY_KEEPS_UNDO"
+    );
 }

@@ -1,4 +1,8 @@
-fn cleanup_history(f: &Fixture, run: &RunId, child: &TaskId) -> kinewright_core::HistorySnapshot {
+fn cleanup_history(
+    f: &Fixture,
+    run: &RunId,
+    child: &TaskId,
+) -> kinewright_project::operation_history::OwnerSnapshot {
     let host = f.host.owner.upgrade().unwrap();
     let owner = host.lock().unwrap();
     let state = owner
@@ -17,14 +21,43 @@ fn cleanup_history(f: &Fixture, run: &RunId, child: &TaskId) -> kinewright_core:
             &history.source.checkpoint,
         )
         .unwrap();
-    let stored = owner
-        .owner()
+    checkpoint
+        .open(
+            owner.owner().unwrap().store().unwrap(),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
         .unwrap()
-        .store()
+        .into_reader()
         .unwrap()
-        .resolve_history(&checkpoint.history_ref)
-        .unwrap();
-    (*stored).clone()
+        .into_capture()
+        .unwrap()
+}
+
+fn cleanup_accounting(
+    f: &Fixture,
+    state: &crate::orchestration::orchestration_records::RunProjection,
+) -> (
+    kinewright_project::bundle_records::ObjectRef,
+    kinewright_project::orchestration_accounting::AccountingRecord,
+) {
+    let host = f.host.owner.upgrade().unwrap();
+    let owner = host.lock().unwrap();
+    let store = owner.owner().unwrap().store().unwrap();
+    let mut selected = None;
+    for reference in &state.usage {
+        let record = store.read_run_record(reference).unwrap();
+        if let OrchestrationPayload::Accounting(accounting) = &record.payload {
+            assert!(
+                selected.is_none(),
+                "C3_HAS_ONE_CUMULATIVE_ACCOUNTING_RECORD"
+            );
+            // Keep an independent oracle across cumulative publication and GC.
+            selected = Some((reference.clone(), (**accounting).clone()));
+        }
+    }
+    selected.expect("C3_HAS_NATIVE_ACCOUNTING")
 }
 
 #[test]
@@ -54,7 +87,7 @@ fn run_limit_cleanup_dirty_stop_reopens_and_releases_every_latch() {
                 .core()
                 .export_history()
                 .unwrap();
-            assert!(!expected.cursor.redo.is_empty(), "C3_DIRTY_REDO");
+            assert!(!expected.history().redo.is_empty(), "C3_DIRTY_REDO");
             assert_ne!(
                 cleanup_history(&f, &run, &child),
                 expected,
@@ -83,7 +116,7 @@ fn run_limit_cleanup_dirty_stop_reopens_and_releases_every_latch() {
                 ok(
                     f.editor
                         .request(HostCommand::Save {
-                            snapshot: HostSnapshot::from_history(saved.clone()).unwrap(),
+                            snapshot: locked_host_snapshot_for_test(&host),
                         })
                         .unwrap(),
                     "C3_PERSON_SAVE_OVERLAP",
@@ -157,8 +190,13 @@ fn run_limit_cleanup_dirty_stop_reopens_and_releases_every_latch() {
                 !budget.active && budget.terminal > 0 && budget.terminal <= 32,
                 "C3_TERMINAL_CUT_BOUND {budget:?}"
             );
-            let replay = Core::spawn(std::sync::Arc::clone(&expected.baseline)).unwrap();
-            replay.restore_history(expected.clone()).unwrap();
+            let replay = Core::open(
+                expected.validate().unwrap(),
+                identity(),
+                kinewright_core::TimelineRevision(0),
+            )
+            .unwrap();
+            let expected = replay.export_history().unwrap();
             assert_eq!(
                 replay.export_history().unwrap(),
                 expected,
@@ -172,6 +210,7 @@ fn run_limit_cleanup_dirty_stop_reopens_and_releases_every_latch() {
                 replay
                     .export_history()
                     .unwrap()
+                    .history()
                     .document
                     .markers
                     .iter()
@@ -201,7 +240,7 @@ fn run_limit_cleanup_dirty_stop_reopens_and_releases_every_latch() {
                 );
                 if let Some(manual) = &manual {
                     assert_eq!(
-                        &owner.core().export_history().unwrap(),
+                        &owner.core().portable_history().unwrap(),
                         manual,
                         "C3_MANUAL_SAVE_EXACT"
                     );
@@ -228,7 +267,7 @@ fn run_limit_cleanup_dirty_stop_reopens_and_releases_every_latch() {
                 "C3_REVIEW_LEASE",
             );
             let review = f.editor.with_manual_editor(review_client.clone());
-            let (source, snapshot) = {
+            let (source, source_checkpoint, snapshot) = {
                 let host = f.host.owner.upgrade().unwrap();
                 let owner = host.lock().unwrap();
                 let state = owner
@@ -237,14 +276,15 @@ fn run_limit_cleanup_dirty_stop_reopens_and_releases_every_latch() {
                     .orchestration_projection(&run)
                     .unwrap()
                     .unwrap();
+                let binding = owner
+                    .saved_task_history(&state, &child)
+                    .unwrap()
+                    .unwrap()
+                    .source;
                 (
-                    owner
-                        .saved_task_history(&state, &child)
-                        .unwrap()
-                        .unwrap()
-                        .source
-                        .branch,
-                    HostSnapshot::capture(owner.core()).unwrap(),
+                    binding.branch,
+                    binding.checkpoint,
+                    received_snapshot_for_test(owner.core()).unwrap(),
                 )
             };
             let prepared = ok(
@@ -281,10 +321,42 @@ fn run_limit_cleanup_dirty_stop_reopens_and_releases_every_latch() {
             {
                 let host = f.host.owner.upgrade().unwrap();
                 let mut owner = host.lock().unwrap();
+                assert_recovered_task_owner(
+                    owner.core(),
+                    serde_json::to_value(&expected).unwrap(),
+                    "C3_REVIEW_EXACT_HISTORY_AND_REDO",
+                );
+                // Selecting work as the person's live project changes only its
+                // future policy. The original authenticated task checkpoint is
+                // still durable, exact and NeverFold after that selection.
+                let store = owner.owner().unwrap().store().unwrap();
+                let saved = store
+                    .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(
+                        &source_checkpoint,
+                    )
+                    .unwrap();
                 assert_eq!(
-                    owner.core().export_history().unwrap(),
-                    expected,
-                    "C3_REVIEW_EXACT_HISTORY_AND_REDO"
+                    saved.role,
+                    kinewright_project::operation_history::Role::Task,
+                    "C3_REVIEW_SOURCE_RETAINS_TASK_ROLE"
+                );
+                let retained = saved
+                    .open(
+                        store,
+                        &kinewright_project::operation_history::HistoryPool::new(
+                            kinewright_project::operation_history::PoolLimits::default(),
+                        ),
+                    )
+                    .unwrap()
+                    .into_reader()
+                    .unwrap()
+                    .into_capture()
+                    .unwrap();
+                assert_eq!(retained, expected, "C3_REVIEW_SOURCE_TASK_REOPENS_EXACTLY");
+                assert_eq!(
+                    retained.history().policy,
+                    kinewright_core::undo::RetentionPolicy::NeverFold,
+                    "C3_REVIEW_SOURCE_NEVER_FOLDS"
                 );
                 let owner = owner.owner_mut().unwrap();
                 let mut candidate = owner
@@ -295,19 +367,16 @@ fn run_limit_cleanup_dirty_stop_reopens_and_releases_every_latch() {
                     .unwrap();
                 owner.persist_durable_branch(&mut candidate).unwrap();
                 let binding = owner.candidate_binding(candidate.branch_id()).unwrap();
-                f.brief.scope =
-                    crate::orchestration::policy::director_scope(&expected.document, binding)
-                        .unwrap();
+                f.brief.scope = crate::orchestration::policy::director_scope(
+                    &expected.history().document,
+                    binding,
+                )
+                .unwrap();
                 f.brief.inputs = owner.current_inputs_ref().clone();
                 println!(
-                    "C3_CLEANUP_CASE latch={latch:?} staged_manual_overlap={overlap} terminal_cuts={} peak_history={} objects={}",
+                    "C3_CLEANUP_CASE latch={latch:?} staged_manual_overlap={overlap} terminal_cuts={} peak_decoded={} objects={}",
                     budget.terminal,
-                    owner
-                        .store()
-                        .unwrap()
-                        .usage()
-                        .unwrap()
-                        .peak_live_history_bytes,
+                    owner.store().unwrap().usage().unwrap().peak_decoded_bytes,
                     owner.store().unwrap().usage().unwrap().objects
                 );
             }
@@ -358,54 +427,47 @@ fn run_limit_cleanup_history_bound_refuses_before_any_live_mutation() {
     let (execution, client, endpoint, core) = c4_reserve_task(&f, &run, &child);
     history_turn(&f, &execution, &client, &endpoint, 1, true);
     let mcp = C4Mcp::new(&f, &run, &child);
-    // Build a fixture at the new role boundary. The former 120-clip seed alone
-    // exhausted document-bearing persistence; compact history must admit it now.
-    let prefix = |edits| {
-        let private = Core::spawn(document.clone()).unwrap();
-        for edit in 0..edits {
-            assert!(matches!(
-                private
-                    .request(kinewright_core::Command::DoBatch(vec![
-                        kinewright_core::Operation::SetTrackSyncLock {
-                            track: kinewright_core::TrackId(1),
-                            locked: edit % 2 == 0,
-                        },
-                    ]))
-                    .unwrap(),
-                kinewright_core::Event::DocumentChanged { .. }
-            ));
+    // Seed through the actual NeverFold executor until its fixed room is full.
+    let mut admitted = 0;
+    loop {
+        let command = kinewright_core::Command::Do(kinewright_core::Operation::SetTrackSyncLock {
+            track: kinewright_core::TrackId(1),
+            locked: admitted % 2 == 0,
+        });
+        match core.request(command) {
+            Ok(kinewright_core::Event::DocumentChanged { .. }) => admitted += 1,
+            Err(kinewright_project::operation_actor::Refusal {
+                error:
+                    kinewright_project::operation_actor::Error::History(
+                        kinewright_project::operation_history::Error::History(
+                            kinewright_core::undo::Error::HistoryFull,
+                        ),
+                    ),
+                ..
+            }) => break,
+            other => panic!("C3_ACTUAL_TASK_BOUNDARY {admitted}: {other:?}"),
         }
-        private.export_history().unwrap()
-    };
-    let (mut low, mut high) = (0_usize, 1024_usize);
-    while low < high {
-        let middle = (low + high).div_ceil(2);
-        if endpoint.check_history(&prefix(middle)).is_ok() {
-            low = middle;
-        } else {
-            high = middle - 1;
-        }
+        assert!(admitted <= kinewright_core::undo::RoleBounds::TASK.step_cap);
     }
-    assert!(low > 0 && low < 1024, "C3_ROLE_BOUND_FOUND {low}");
-    let admitted = prefix(low);
-    endpoint.check_history(&admitted).unwrap();
-    for batch in &admitted.batches {
-        assert!(matches!(
-            core.request(batch.command.clone().into()).unwrap(),
-            kinewright_core::Event::DocumentChanged { .. }
-        ));
-    }
-    assert_eq!(core.export_history().unwrap(), admitted);
+    assert!(admitted > 0, "C3_ROLE_BOUND_FOUND");
     let before = core.export_history().unwrap();
-    let mut changed_floor = before.clone();
-    changed_floor.floor_offset += 1;
-    assert!(endpoint.check_history(&changed_floor).is_err());
-    assert_eq!(core.export_history().unwrap(), before);
-    assert!(f.projection(&run).edit_approvals.is_empty());
-    for operation in [
+    let mut projection = f.projection(&run);
+    let (mut accounting_ref, mut accounting) = cleanup_accounting(&f, &projection);
+    for (call, operation) in [
         serde_json::json!({"op":"set_track_sync_lock","track":1,"locked":false}),
         serde_json::json!({"op":"delete_clip","clip":101}),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Capture the independent MCP observer before the reply is measured.
+        // Accounting records the previous completed replies on this call.
+        let mut observed = {
+            let host = f.host.owner.upgrade().unwrap();
+            let owner = host.lock().unwrap();
+            let measurements = owner.hooks.runs[&run].measurements[&child].lock().unwrap();
+            measurements.clone()
+        };
         let refused = mcp.raw(
             "prepare_edit_plan",
             serde_json::json!({
@@ -415,7 +477,7 @@ fn run_limit_cleanup_history_bound_refuses_before_any_live_mutation() {
         assert_eq!(refused.is_error, Some(true), "C3_BOUND_REFUSED {refused:?}");
         assert!(
             format!("{refused:?}")
-                .contains(kinewright_project::task_history_admission::LIMIT_REASON),
+                .contains(kinewright_project::operation_history::TASK_LIMIT_REASON),
             "C3_ACTIONABLE_REFUSAL {refused:?}"
         );
         assert_eq!(
@@ -423,10 +485,50 @@ fn run_limit_cleanup_history_bound_refuses_before_any_live_mutation() {
             before,
             "C3_REFUSAL_PRECEDES_MUTATION"
         );
-        assert!(
-            f.projection(&run).edit_approvals.is_empty(),
-            "C3_REFUSAL_PRECEDES_APPROVAL"
+        let after = f.projection(&run);
+        let (current_ref, current) = cleanup_accounting(&f, &after);
+        current
+            .validate_successor(&accounting)
+            .expect("C3_REFUSAL_PRESERVES_PRIOR_ACCOUNTING");
+        let mut expected = accounting.successor().unwrap();
+        if !expected.tasks.iter().any(|task| task.task == child.0) {
+            expected.add_task(child.0.clone(), None).unwrap();
+        }
+        let task = expected.task_mut(&child.0).unwrap();
+        if let Some(previous) = &task.measurements {
+            observed.sends.clone_from(&previous.sends);
+        }
+        task.measurements = Some(observed);
+        task.refuse_tool(
+            "prepare_edit_plan",
+            kinewright_project::orchestration_accounting::ToolRefusalCode::Other,
+        )
+        .unwrap();
+        // The accounting publication also observes the owner's clock and the
+        // independently captured completed replies; no other spending may move.
+        expected.last_unix_ms = current.last_unix_ms;
+        expected.elapsed_ms = current.elapsed_ms;
+        expected.clock_uncertain = current.clock_uncertain;
+        assert_eq!(
+            current, expected,
+            "C3_REFUSAL_RECORDS_ONLY_THE_ACTUAL_REFUSED_TOOL_AND_CLOCK: call {call}"
         );
+        let mut replaced = 0;
+        for reference in &mut projection.usage {
+            if *reference == accounting_ref {
+                reference.clone_from(&current_ref);
+                replaced += 1;
+            }
+        }
+        assert_eq!(
+            replaced, 1,
+            "C3_REFUSAL_REPLACES_ONE_CUMULATIVE_ACCOUNTING_RECORD"
+        );
+        accounting = current;
+        accounting_ref = current_ref;
+        // Every non-accounting reference, approval, task, result and control
+        // field must still be exactly the original projection.
+        assert_eq!(after, projection, "C3_REFUSAL_PRECEDES_APPROVAL");
     }
     let finished = mcp.invoke(
         "finish_task",
@@ -458,88 +560,70 @@ fn run_limit_cleanup_history_bound_refuses_before_any_live_mutation() {
 
 #[test]
 fn run_limit_cleanup_undo_and_redo_are_bounded_before_mutation() {
-    fn history_at(size: usize, redo: bool) -> Core {
-        let core = Core::spawn(Document::default()).unwrap();
-        let mut operation = history_marker(1);
-        let kinewright_core::Operation::AddMarker { marker } = &mut operation else {
-            unreachable!()
-        };
-        marker.label = "x".repeat(size);
-        assert!(matches!(
-            core.request(kinewright_core::Command::Do(operation))
-                .unwrap(),
-            kinewright_core::Event::DocumentChanged { .. }
-        ));
-        if redo {
-            assert!(matches!(
+    let pool = kinewright_project::operation_history::HistoryPool::new(
+        kinewright_project::operation_history::PoolLimits::default(),
+    );
+    let core = Core::spawn(
+        &pool,
+        kinewright_project::operation_history::Role::Task,
+        kinewright_project::operation_history::CreationOrigin {
+            branch: identity(),
+            batch: identity(),
+        },
+        kinewright_core::Document {
+            tracks: vec![kinewright_core::Track {
+                id: kinewright_core::TrackId(1),
+                kind: kinewright_core::TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut count = 0;
+    loop {
+        match core.request(kinewright_core::Command::Do(
+            kinewright_core::Operation::SetTrackSyncLock {
+                track: kinewright_core::TrackId(1),
+                locked: count % 2 == 0,
+            },
+        )) {
+            Ok(kinewright_core::Event::DocumentChanged { .. }) => count += 1,
+            Err(kinewright_project::operation_actor::Refusal {
+                error:
+                    kinewright_project::operation_actor::Error::History(
+                        kinewright_project::operation_history::Error::History(
+                            kinewright_core::undo::Error::HistoryFull,
+                        ),
+                    ),
+                ..
+            }) => break,
+            other => panic!("C3_FIXED_TASK_BOUND {count}: {other:?}"),
+        }
+    }
+    let before = core.export_history().unwrap();
+    for _ in 0..count {
+        assert!(
+            matches!(
                 core.request(kinewright_core::Command::Undo).unwrap(),
                 kinewright_core::Event::DocumentChanged { .. }
-            ));
-        }
-        core
-    }
-    let cost = |core: &Core| {
-        kinewright_project::task_history_admission::decoded_history_bytes_for_fixture(
-            &core.export_history().unwrap(),
-        )
-        .unwrap()
-    };
-    for redo in [false, true] {
-        let (mut low, mut high) = (0_usize, 600_000_usize);
-        while low < high {
-            let middle = (low + high).div_ceil(2);
-            if cost(&history_at(middle, redo)) <= kinewright_project::run_admission::HISTORY_BYTES {
-                low = middle;
-            } else {
-                high = middle - 1;
-            }
-        }
-        let core = history_at(low, redo);
-        let before = core.export_history().unwrap();
-        let binding = BranchBinding {
-            branch: identity(),
-            head: identity(),
-            document_hash: "0".repeat(64),
-            checkpoint: ObjectRef {
-                sha256: "0".repeat(64),
-                byte_length: 0,
-                record_kind: kinewright_project::bundle_records::RecordKind::BranchCheckpoint,
-            },
-        };
-        let mut scope =
-            crate::orchestration::policy::director_scope(&before.document, binding).unwrap();
-        scope.objects.insert("marker:1".into());
-        let endpoint = crate::orchestration::tasks::TaskEndpoint::for_fixture(
-            crate::orchestration::policy::TaskPolicy {
-                role: Role::Editor,
-                scope,
-            },
-            crate::orchestration::tasks::RuntimeTaskAuthority {
-                project: identity(),
-                run: identity(),
-                task: identity(),
-                attempt: identity(),
-                endpoint: identity(),
-                owner_epoch: 1,
-                expires_at: Instant::now() + Duration::from_secs(60),
-            },
-            &core,
+            ),
+            "C3_UNDO_NEVER_REFUSES_HISTORY_CAPACITY"
         );
-        let refused = endpoint
-            .history_step(&core, grant_test_revision(&core), redo)
-            .unwrap_err();
+    }
+    for _ in 0..count {
         assert!(
-            refused.contains(kinewright_project::task_history_admission::LIMIT_REASON),
-            "C3_HISTORY_STEP_REFUSAL {redo} {refused}"
-        );
-        assert_eq!(
-            core.export_history().unwrap(),
-            before,
-            "C3_HISTORY_STEP_PREMUTATION {redo}"
-        );
-        println!(
-            "C3_HISTORY_STEP_BOUND redo={redo} decoded={} label_bytes={low}",
-            cost(&core)
+            matches!(
+                core.request(kinewright_core::Command::Redo).unwrap(),
+                kinewright_core::Event::DocumentChanged { .. }
+            ),
+            "C3_REDO_NEVER_REFUSES_HISTORY_CAPACITY"
         );
     }
+    let after = core.export_history().unwrap();
+    assert_eq!(after.history().undo, before.history().undo);
+    assert_eq!(after.history().redo, before.history().redo);
+    assert_eq!(after.history().document, before.history().document);
+    assert_eq!(after.resources(), before.resources());
 }

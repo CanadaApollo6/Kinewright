@@ -100,6 +100,10 @@ mod tests {
                 &SidecarMode::None,
                 None,
                 None,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+                #[cfg(test)]
                 &app.data_dir,
             )
             .unwrap(),

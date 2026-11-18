@@ -1,111 +1,106 @@
+//! A task's immutable base uses one version slot, independent of its tail.
+use crate::operation_actor::Core;
 use crate::{
-    bundle::{BundleError, BundleWriteAdmission, LoadedBundle, ProjectBundle},
-    bundle_records::RecordKind,
-    editing_session::Ja1EditingSession,
-    run_admission::SPECIALIST_BASES,
+    bundle::BundleError,
+    editing_session::{DurableBranchRole, Ja1EditingSession},
     storage_budget::StorageLimits,
 };
-use kinewright_core::{Command, Core, Document, Event, Operation, Track, TrackId, TrackKind};
+use kinewright_core::{Command, Document, Operation, Track, TrackId, TrackKind};
 
 #[test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "valid branch history reaches both ordinary and raw specialist-version boundaries, including an identical retry"
-)]
 fn run_limit_cleanup_reserves_specialist_versions_and_reuses_a_full_raw_slot() {
     let temp = kinewright_media::test_support::TempDirectory::new_in(
         &kinewright_media::test_support::workspace_target_dir(),
-        "cleanup-specialist-slots",
+        "fixed-base-version-room",
     );
-    let path = temp.path("project.kinewright");
-    let initial = Core::spawn(Document {
+    let core = Core::for_test(Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
             sync_lock: false,
             clips: vec![],
         }],
-        ..Default::default()
+        ..Document::default()
     })
     .unwrap();
-    let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
-    let inputs = bundle.empty_inputs().unwrap().reference.clone();
-    bundle.save(&initial, &inputs).unwrap();
-    let history = initial.export_history().unwrap();
-    drop(bundle);
-    drop(initial);
-    let limits = StorageLimits {
-        versions: SPECIALIST_BASES + 4,
-        ..Default::default()
-    };
-    let raw_versions = limits.versions;
-    let bundle = LoadedBundle::read(&path)
-        .unwrap()
-        .into_writer_with_limits_probe(limits)
-        .unwrap();
-    let core = Core::spawn(std::sync::Arc::clone(&history.baseline)).unwrap();
-    core.restore_history(history).unwrap();
-    let mut owner = Ja1EditingSession::from_bundle(bundle, &core, inputs).unwrap();
-    owner.save_active().unwrap();
-    let mut branch = owner
-        .fork_durable_branch(
-            "quota witness",
-            crate::editing_session::DurableBranchRole::Session,
-        )
-        .unwrap();
-    owner.persist_durable_branch(&mut branch).unwrap();
-    let count = |owner: &Ja1EditingSession| {
-        owner
-            .active_bundle()
-            .unwrap()
-            .evidence
-            .iter()
-            .filter(|reference| reference.record_kind == RecordKind::SpecialistBase)
-            .count() as u64
-    };
-    let edit = |core: &Core| {
-        let locked = core.export_history().unwrap().document.tracks[0].sync_lock;
-        assert!(matches!(
-            core.request(Command::Do(Operation::SetTrackSyncLock {
-                track: TrackId(1),
-                locked: !locked
-            }))
-            .unwrap(),
-            Event::DocumentChanged { .. }
-        ));
-    };
-    while count(&owner) < raw_versions - SPECIALIST_BASES {
-        edit(branch.core());
-        owner.persist_durable_branch(&mut branch).unwrap();
-    }
-    // Unit-only control: no H1 run is forged. The agent witness exercises the
-    // actual proof-bearing cleanup scope; here the quota itself is isolated.
-    owner.store().unwrap().set_run_budget(true);
-    edit(branch.core());
-    let dirty = branch.core().export_history().unwrap();
-    assert!(matches!(
-        owner.persist_durable_branch(&mut branch),
-        Err(BundleError::RunLimit)
-    ));
-    assert!(owner.store().unwrap().run_limit_reached());
-    assert_eq!(branch.core().export_history().unwrap(), dirty);
-    assert_eq!(count(&owner), raw_versions - SPECIALIST_BASES);
-    owner.store().unwrap().set_run_budget(false);
-    owner.persist_durable_branch(&mut branch).unwrap();
-    while count(&owner) < raw_versions {
-        edit(branch.core());
-        owner.persist_durable_branch(&mut branch).unwrap();
-    }
-    let full = branch.core().export_history().unwrap();
+    let mut owner = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
     owner
-        .persist_durable_branch(&mut branch)
-        .expect("C3_FULL_RAW_IDENTICAL_RETRY");
-    assert_eq!(branch.core().export_history().unwrap(), full);
-    assert_eq!(count(&owner), raw_versions);
-    edit(branch.core());
-    assert!(matches!(
-        owner.persist_durable_branch(&mut branch),
-        Err(BundleError::Capacity("retained specialist versions"))
-    ));
-    assert_eq!(count(&owner), raw_versions);
+        .first_save(&temp.path("p.kinewright"), StorageLimits::default())
+        .unwrap();
+    owner
+        .restrict_limits_probe(StorageLimits {
+            versions: 1,
+            ..StorageLimits::default()
+        })
+        .unwrap();
+    let mut branch = owner
+        .fork_durable_branch("quota witness", DurableBranchRole::Session)
+        .unwrap();
+    let base = owner.persist_durable_branch(&mut branch).unwrap();
+    let bytes = owner
+        .store()
+        .unwrap()
+        .read_record::<crate::bundle_records::SpecialistBaseRecord>(&base)
+        .unwrap();
+    let original = serde_json::to_vec(&*bytes).unwrap();
+    drop(bytes);
+    for edit in 0_u32..32 {
+        branch
+            .core()
+            .request(Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: edit.is_multiple_of(2),
+            }))
+            .unwrap();
+        assert_eq!(
+            owner.persist_durable_branch(&mut branch).unwrap(),
+            base,
+            "FULL_VERSION_SLOT_REUSES_THE_IMMUTABLE_BASE"
+        );
+    }
+    assert_eq!(
+        branch.core().export_history().unwrap().history().undo.len(),
+        32,
+        "IMMUTABLE_BASE_NEVER_TRIMS_THE_TASK_TAIL"
+    );
+    let current = owner
+        .store()
+        .unwrap()
+        .read_record::<crate::bundle_records::SpecialistBaseRecord>(&base)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&*current).unwrap(),
+        original,
+        "BASE_CONTAINS_NO_DUPLICATED_GROWING_DELTA"
+    );
+    drop(current);
+    core.request(Command::Do(Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: true,
+    }))
+    .unwrap();
+    owner.save_active().unwrap();
+    let root = owner.root_sha256().unwrap();
+    let before = core.change_id().unwrap();
+    assert!(
+        matches!(
+            owner.fork_durable_branch("different base", DurableBranchRole::Session),
+            Err(BundleError::Capacity(_) | BundleError::RunLimit)
+        ),
+        "A_DIFFERENT_BASE_CANNOT_BYPASS_THE_VERSION_CAP"
+    );
+    assert_eq!(
+        owner.root_sha256().unwrap(),
+        root,
+        "BASE_CAPACITY_REFUSAL_PUBLISHES_NOTHING"
+    );
+    assert_eq!(
+        core.change_id().unwrap(),
+        before,
+        "BASE_CAPACITY_REFUSAL_KEEPS_SOURCE_WORK"
+    );
+    assert_eq!(
+        branch.core().export_history().unwrap().history().undo.len(),
+        32
+    );
 }

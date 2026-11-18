@@ -60,10 +60,9 @@ pub struct RescueCopyV1 {
     pub project_id: ProjectId,
     pub originating_session: SessionId,
     pub full_capture_sha256: String,
+    pub capture_checkpoints: Vec<ObjectRef>,
     pub selected_capture_sha256: String,
-    pub old_floor: u64,
-    pub new_floor: u64,
-    pub removed_undo: u64,
+
     pub redo_preserved: bool,
     pub gesture_preserved: bool,
     pub acknowledged_root: Option<ObjectRef>,
@@ -144,7 +143,11 @@ impl crate::store::record_sealed::Sealed for RescueCopyV1 {}
 impl BundleRecord for RescueCopyV1 {
     const KIND: RecordKind = RecordKind::OwnedEvidence;
     fn dependencies(&self) -> Vec<ObjectRef> {
-        self.acknowledged_root.iter().cloned().collect()
+        self.acknowledged_root
+            .iter()
+            .chain(&self.capture_checkpoints)
+            .cloned()
+            .collect()
     }
     fn validate(&self, _: &StorageLimits) -> Result<(), BundleError> {
         if self.role != RESCUE_ROLE || self.schema != 1 {
@@ -152,7 +155,6 @@ impl BundleRecord for RescueCopyV1 {
         }
         if !hash(&self.full_capture_sha256)
             || !hash(&self.selected_capture_sha256)
-            || self.new_floor < self.old_floor
             || !self.redo_preserved
             || !self.gesture_preserved
             || self.acknowledged_root.is_some() == self.acknowledged_absence.is_some()
@@ -169,6 +171,17 @@ impl BundleRecord for RescueCopyV1 {
             || (self.summary.count_overflow && self.summary.count != u64::MAX)
         {
             return Err(BundleError::Corrupt("rescue capture/provenance".into()));
+        }
+        if self.capture_checkpoints.len() > 4 {
+            return Err(BundleError::Capacity("rescue captures"));
+        }
+        for reference in &self.capture_checkpoints {
+            reference.validate()?;
+            if reference.record_kind != RecordKind::BranchCheckpoint {
+                return Err(BundleError::Corrupt(
+                    "rescue capture checkpoint kind".into(),
+                ));
+            }
         }
         for root in self
             .acknowledged_root

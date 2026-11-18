@@ -18,8 +18,9 @@ use kinewright_agent::{
     SessionCounters, SessionFlow, SessionLimits, SessionObserver, SessionStop, SharedCounters,
     claude_models, codex_models, pump_session,
 };
-use kinewright_core::{AgentDriver, AgentEvent, Core, Document, SessionConfig};
+use kinewright_core::{AgentDriver, AgentEvent, Document, SessionConfig};
 use kinewright_media::FfmpegMediaEngine;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle_records::{ObjectRef, RecordKind},
     receipts,
@@ -316,7 +317,7 @@ impl SessionObserver for Observer<'_> {
     }
 }
 fn drive(owner: &mut ContractOwner, steps: Vec<Step>) {
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core, Arc::clone(&media) as _, media as _).unwrap();
     let script = (0..steps.len())

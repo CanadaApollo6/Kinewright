@@ -201,8 +201,9 @@ impl ProjectBundle {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    use crate::operation_actor::Core;
     use crate::{bundle::BundleWriteAdmission, studio_records::RunIndex};
-    use kinewright_core::{Core, Document};
+    use kinewright_core::Document;
 
     #[test]
     fn plain_copy_invariant_checks_the_whole_map_and_run_index() {
@@ -211,15 +212,19 @@ mod tests {
             "plain-copy-invariant",
         );
         let path = temp.path("project.kinewright");
-        let mut bundle =
-            ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
+        let mut bundle = ProjectBundle::activate(
+            &path,
+            BundleWriteAdmission::new_document(),
+            core.history_pool(),
+        )
+        .unwrap();
         let inputs = bundle.empty_inputs().unwrap().reference.clone();
         bundle.save(&core, &inputs).unwrap();
         let branch = bundle
             .fork_branch(
                 &bundle.manual_branch_id.clone(),
-                crate::history_record::HistoryRole::Ordinary,
+                crate::operation_history::Role::Ordinary,
             )
             .unwrap();
         let checkpoint = bundle.checkpoint_reference(&branch).unwrap();

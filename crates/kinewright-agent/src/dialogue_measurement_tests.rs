@@ -22,15 +22,27 @@ mod dialogue_measurement_tests {
     fn dq_native_host_without_admitted_audio_returns_not_measured() {
         let (core, playback, analysis) = super::fixture();
         let server = McpServer::start_host_isolated(
-            core, playback, analysis, "no admitted audio",
-            crate::writer_host::SessionRoots { read: vec![], write: vec![] },
-            kinewright_project::manual_history::OrdinaryHistoryLimits::default(),
-        ).unwrap();
+            core,
+            playback,
+            analysis,
+            "no admitted audio",
+            crate::writer_host::SessionRoots {
+                read: vec![],
+                write: vec![],
+            },
+        )
+        .unwrap();
         let slot = server.dialogue_measurements.read().unwrap();
         let provider = slot.as_ref().expect("native host installs measurements");
-        let identity = MediaIdentity { sha256: "a".repeat(64), byte_length: 1 };
+        let identity = MediaIdentity {
+            sha256: "a".repeat(64),
+            byte_length: 1,
+        };
         assert_eq!(provider.audio_stream(&identity), Err(Refusal::NotMeasured));
-        assert!(matches!(provider.get(&identity, 0), Err(Refusal::NotMeasured)));
+        assert!(matches!(
+            provider.get(&identity, 0),
+            Err(Refusal::NotMeasured)
+        ));
     }
     #[allow(
         clippy::cast_precision_loss,
@@ -79,7 +91,7 @@ mod dialogue_measurement_tests {
                 clips: vec![serde_json::from_value(json!({"id":1,"asset":1,"source_range":{"start":0,"end":400},"timeline_start":0,"effects":[],"transition_in":null})).unwrap()] }],
             ..Document::default()
         });
-        let core = Core::spawn(Arc::clone(&doc)).unwrap();
+        let core = Core::for_test(Arc::clone(&doc)).unwrap();
         let gpu = FfmpegMediaEngine::test_gpu_context().unwrap();
         let engine =
             Arc::new(FfmpegMediaEngine::new_with_paced_test_audio(gpu, root.path("data")).unwrap());

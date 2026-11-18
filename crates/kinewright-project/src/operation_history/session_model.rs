@@ -1,0 +1,1039 @@
+//! Executable session specification. Both replicas use the new executor and
+//! owner; both stores use the production compact codec and semantic validator.
+//! The native manual lane exercises the real producer and publisher alongside
+//! the portable authority, selection and resource grammar.
+use super::*;
+use crate::operation_history::{
+    Approval, ApprovalAnswer, CreationOrigin, Direction, OwnerHistory, PoolLimits, Resources,
+    tests::{document, origin},
+};
+use kinewright_core::{
+    LutAsset, LutAssetId, LutAssetKind, LutAssetSource, Marker, MarkerId, Operation, TimeCode,
+    TrackId,
+    undo::{CommandKey, Effects, RoleBounds},
+};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+#[path = "session_model_store.rs"]
+mod storage;
+use storage::{MemoryStore, ModelStore, owned_resource};
+
+#[cfg(target_os = "linux")]
+#[path = "session_model_product.rs"]
+mod product;
+
+fn bounds() -> RoleBounds {
+    RoleBounds {
+        step_cap: 3,
+        operation_bytes: 4096,
+        ..Role::Ordinary.bounds()
+    }
+}
+fn fresh(pool: &HistoryPool) -> OwnerHistory {
+    OwnerHistory::measured(
+        pool,
+        Role::Ordinary,
+        RetentionPolicy::Fold,
+        &origin(1),
+        bounds(),
+        || Ok(document()),
+    )
+    .unwrap()
+}
+
+use crate::operation_actor::CommandContext;
+use crate::operation_protocol::{Action, FoldedBatch, Receipt, Seed, StreamState, foldable};
+#[derive(Clone, Serialize, Deserialize)]
+struct Message {
+    id: u64,
+    action: Action,
+    creation: CreationOrigin,
+    approval: Option<Approval>,
+    transition: Option<super::super::TransitionApproval>,
+}
+impl Message {
+    fn context(&self) -> CommandContext {
+        CommandContext {
+            creation: self.creation.clone(),
+            inputs: vec![],
+            approval: self.approval.clone(),
+            transition: self.transition.clone(),
+        }
+    }
+    fn apply(&self, owner: &mut OwnerHistory) -> Result<Effects, Error> {
+        self.action.apply(&self.context(), owner)
+    }
+    fn into_wire(
+        self,
+        stream: &StreamState,
+        accepted: CommandKey,
+    ) -> crate::operation_protocol::Message {
+        let id = crate::receipts::CommandId {
+            issuer: crate::receipts::IssuerId(format!("{:032x}", 1)),
+            sequence: self.id + 1,
+        };
+        let context = self.context();
+        stream.message(id, accepted, self.action, context).unwrap()
+    }
+}
+fn message_id(message: &crate::operation_protocol::Message) -> u64 {
+    message.id.sequence - 1
+}
+struct Pending {
+    message: crate::operation_protocol::Message,
+    logical_ids: Vec<u64>,
+    sent: bool,
+    authority: u64,
+    resources: BTreeSet<Resource>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Root {
+    snapshot: ObjectRef,
+    stream: StreamState,
+    authority: u64,
+}
+#[derive(Default)]
+struct Coverage {
+    #[cfg(target_os = "linux")]
+    manual: product::Counts,
+    edits: usize,
+    folds: usize,
+    outbox_folds: usize,
+    undos: usize,
+    redos: usize,
+    closes: usize,
+    approvals: usize,
+    transitions: usize,
+    restarts: usize,
+    lost_acks: usize,
+    before_publish: usize,
+    after_publish: usize,
+    group_refusals: usize,
+    largest_group: usize,
+    handoffs: usize,
+    saves: usize,
+    save_as: usize,
+    rescues: usize,
+    opens: usize,
+    collections: usize,
+    baseline_lineage: usize,
+    split_ancestry: usize,
+    redo_payloads: usize,
+    ordinary_lease_peak: usize,
+}
+impl Coverage {
+    fn accumulate(&mut self, other: &Self) {
+        #[cfg(target_os = "linux")]
+        self.manual.accumulate(&other.manual);
+        self.edits += other.edits;
+        self.folds += other.folds;
+        self.outbox_folds += other.outbox_folds;
+        self.undos += other.undos;
+        self.redos += other.redos;
+        self.closes += other.closes;
+        self.approvals += other.approvals;
+        self.transitions += other.transitions;
+        self.restarts += other.restarts;
+        self.lost_acks += other.lost_acks;
+        self.before_publish += other.before_publish;
+        self.after_publish += other.after_publish;
+        self.group_refusals += other.group_refusals;
+        self.largest_group = self.largest_group.max(other.largest_group);
+        self.handoffs += other.handoffs;
+        self.saves += other.saves;
+        self.save_as += other.save_as;
+        self.rescues += other.rescues;
+        self.opens += other.opens;
+        self.collections += other.collections;
+        self.baseline_lineage += other.baseline_lineage;
+        self.split_ancestry += other.split_ancestry;
+        self.redo_payloads += other.redo_payloads;
+        self.ordinary_lease_peak = self.ordinary_lease_peak.max(other.ordinary_lease_peak);
+    }
+}
+#[derive(Clone, Copy)]
+enum GroupFault {
+    None,
+    RefuseAt(usize),
+    #[cfg(target_os = "linux")]
+    IssuerAt(usize),
+    #[cfg(target_os = "linux")]
+    RefuseFoldedAt(usize),
+    StopBeforeRoot(usize),
+    StopAfterRoot,
+    LoseAcknowledgement,
+}
+struct Session<S> {
+    gui_pool: HistoryPool,
+    writer_pool: HistoryPool,
+    gui: OwnerHistory,
+    writer: OwnerHistory,
+    store: S,
+    pending: VecDeque<Pending>,
+    authority: u64,
+    gui_stream: StreamState,
+    acknowledged: BTreeMap<u64, Receipt>,
+    // Oracle-only archive of receipts observed in an actually published root.
+    // The product root keeps only the bounded unacknowledged-message window.
+    published_receipts: BTreeMap<u64, Receipt>,
+    accepted: BTreeMap<u64, Effects>,
+    checkpoints: Vec<Root>,
+    coverage: Coverage,
+}
+impl<S: ModelStore> Session<S> {
+    fn new(mut store: S) -> Self {
+        let gui_pool = HistoryPool::new(PoolLimits::default());
+        let writer_pool = HistoryPool::new(PoolLimits::default());
+        let gui = fresh(&gui_pool);
+        let writer = fresh(&writer_pool);
+        let snapshot = store.save(&writer.capture().unwrap());
+        let stream = StreamState::installed(Seed {
+            project: crate::bundle_records::ProjectId::fresh().unwrap(),
+            branch: origin(1).branch,
+            attachment_epoch: 1,
+            installed: writer.identity().unwrap(),
+        })
+        .unwrap();
+        store.publish(&Root {
+            snapshot,
+            stream: stream.clone(),
+            authority: 1,
+        });
+        Self {
+            gui_pool,
+            writer_pool,
+            gui,
+            writer,
+            store,
+            pending: VecDeque::new(),
+            authority: 1,
+            gui_stream: stream,
+            acknowledged: BTreeMap::new(),
+            published_receipts: BTreeMap::new(),
+            accepted: BTreeMap::new(),
+            checkpoints: vec![],
+            coverage: Coverage::default(),
+        }
+    }
+    fn send(&mut self, message: Message) {
+        let folded = self.fold_tail(&message);
+        if folded.is_none() && self.pending.len() == crate::operation_protocol::PENDING_COMMANDS {
+            return;
+        }
+        let before = self.gui.identity().unwrap();
+        match message.apply(&mut self.gui) {
+            Ok(effects) => {
+                if !effects.folded.is_empty() {
+                    self.gui.fold.as_ref().unwrap().assert_matches(
+                        &self.gui.seeds,
+                        self.gui.history().baseline(),
+                        &self.gui.resources.baseline,
+                    );
+                }
+                self.coverage.folds += effects.folded.len();
+                self.coverage.approvals += usize::from(message.approval.is_some());
+                self.coverage.transitions += usize::from(message.transition.is_some());
+                match &message.action {
+                    Action::Do { .. } => self.coverage.edits += 1,
+                    Action::Undo => self.coverage.undos += 1,
+                    Action::Redo => self.coverage.redos += 1,
+                    Action::Close => self.coverage.closes += 1,
+                }
+                let id = message.id;
+                let resources = match &message.action {
+                    Action::Do { operations, .. } => Resources::payload(
+                        operations,
+                        &effects
+                            .applied
+                            .iter()
+                            .find(|command| command.key == effects.accepted)
+                            .unwrap()
+                            .identities,
+                    ),
+                    Action::Undo | Action::Redo | Action::Close => BTreeSet::new(),
+                };
+                let accepted = effects.accepted;
+                self.accepted.insert(id, effects);
+                if let Some(wire) = folded {
+                    let receipt = StreamState::new_receipt(&wire, wire.accepted).unwrap();
+                    self.gui_stream.replace_tail_receipt(receipt);
+                    let tail = self.pending.back_mut().unwrap();
+                    tail.message = wire;
+                    tail.logical_ids.push(id);
+                    tail.resources.extend(resources);
+                    self.coverage.outbox_folds += 1;
+                } else {
+                    let wire = message.into_wire(&self.gui_stream, accepted);
+                    assert!(
+                        serde_json::to_vec(&wire).unwrap().len() as u64
+                            <= crate::operation_protocol::PENDING_BYTES,
+                        "GENERATED_COMMAND_FITS_PRODUCER_WINDOW"
+                    );
+                    self.gui_stream = self.gui_stream.advanced(&wire, accepted).unwrap().0;
+                    self.pending.push_back(Pending {
+                        message: wire,
+                        logical_ids: vec![id],
+                        sent: false,
+                        authority: self.authority,
+                        resources,
+                    });
+                }
+            }
+            Err(_) => assert_eq!(
+                self.gui.identity().unwrap(),
+                before,
+                "SESSION_REFUSAL_IS_ATOMIC"
+            ),
+        }
+    }
+    fn fold_tail(&self, message: &Message) -> Option<crate::operation_protocol::Message> {
+        let Action::Do {
+            gesture: Some(key),
+            operations,
+        } = &message.action
+        else {
+            return None;
+        };
+        let tail = self.pending.back().filter(|tail| !tail.sent)?;
+        let Action::Do {
+            gesture: Some(previous_key),
+            operations: previous,
+        } = &tail.message.action
+        else {
+            return None;
+        };
+        if self
+            .gui
+            .history()
+            .undo()
+            .back()
+            .and_then(kinewright_core::undo::Step::coalesce_key)
+            != Some(key)
+            || previous_key != key
+            || tail.message.context.creation.branch != message.creation.branch
+            || !foldable(&tail.message.context, previous)
+            || !foldable(&message.context(), operations)
+        {
+            return None;
+        }
+        let mut packet = tail.message.clone();
+        packet.folded.push(FoldedBatch {
+            creation: message.creation.clone(),
+            operations: operations.clone(),
+        });
+        packet.tip = packet.chained().unwrap();
+        (serde_json::to_vec(&packet).unwrap().len() as u64
+            <= crate::operation_protocol::PENDING_BYTES)
+            .then_some(packet)
+    }
+
+    fn apply_packet(
+        writer: &mut OwnerHistory,
+        accepted: &BTreeMap<u64, Effects>,
+        pending: &Pending,
+    ) {
+        for ((action, context), id) in pending
+            .message
+            .clone()
+            .into_parts()
+            .zip(&pending.logical_ids)
+        {
+            let effects = action
+                .apply(&context, writer)
+                .expect("SHADOW_ACCEPTS_GUI_TRANSITION");
+            if !effects.folded.is_empty() {
+                writer.fold.as_ref().unwrap().assert_matches(
+                    &writer.seeds,
+                    writer.history().baseline(),
+                    &writer.resources.baseline,
+                );
+            }
+            assert_eq!(
+                &effects, &accepted[id],
+                "SHADOW_ACCOUNTS_FOR_EACH_GUI_TRANSITION"
+            );
+        }
+    }
+
+    fn drain(&mut self) {
+        while !self.pending.is_empty() {
+            self.group(
+                crate::operation_protocol::PENDING_COMMANDS,
+                GroupFault::None,
+            );
+        }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one modeled group checks every admission and publication boundary"
+    )]
+    fn group(&mut self, limit: usize, fault: GroupFault) {
+        use crate::operation_protocol::Conflict;
+        let attempted = self.pending.len().min(limit);
+        if attempted == 0 {
+            return;
+        }
+        self.coverage.largest_group = self.coverage.largest_group.max(attempted);
+        let before = self.store.root();
+        let mut root = before.clone();
+        root.stream
+            .validate()
+            .expect("OPENED_STREAM_HAS_A_VALID_BOUNDED_RECEIPT_WINDOW");
+        for pending in self.pending.iter_mut().take(attempted) {
+            pending.sent = true;
+        }
+        let mut prefix = Vec::with_capacity(attempted);
+        for (index, pending) in self.pending.iter().take(attempted).enumerate() {
+            let message = &pending.message;
+            let id = message_id(message);
+            if matches!(fault, GroupFault::RefuseAt(at) if at % attempted == index) {
+                let mut refused = message.clone();
+                refused.tip[0] ^= 1;
+                assert!(matches!(
+                    root.stream.lookup(&refused),
+                    Err(Conflict::Chain | Conflict::CommandIdentity)
+                ));
+                self.coverage.group_refusals += 1;
+                break;
+            }
+            if root
+                .stream
+                .lookup(message)
+                .expect("SHADOW_SEQUENCE_AND_CHAIN_MATCH")
+                .is_none()
+            {
+                assert_eq!(
+                    pending.authority, root.authority,
+                    "ABSENT_SUFFIX_REQUIRES_EXPLICIT_CURRENT_AUTHORITY_REBIND"
+                );
+                assert_eq!(
+                    message.sequence,
+                    root.stream.sequence() + 1,
+                    "SHADOW_ACCEPTS_ONLY_THE_NEXT_SEQUENCE"
+                );
+                assert_eq!(
+                    message.predecessor,
+                    root.stream.tip(),
+                    "SHADOW_ACCEPTS_ONLY_THE_CURRENT_CHAIN_TIP"
+                );
+                assert_eq!(
+                    message.accepted,
+                    self.writer.history().position(),
+                    "SHADOW_CHECKS_ACCEPTED_KEY_BEFORE_APPLYING"
+                );
+                Self::apply_packet(&mut self.writer, &self.accepted, pending);
+                root.stream = root.stream.advanced(message, message.accepted).unwrap().0;
+            }
+            prefix.push((id, root.stream.lookup(message).unwrap().unwrap().clone()));
+            if matches!(fault, GroupFault::StopBeforeRoot(at) if at % attempted == index) {
+                break;
+            }
+        }
+        if root.stream.sequence() != before.stream.sequence() {
+            root.snapshot = self.store.save(&self.writer.capture().unwrap());
+        }
+        if matches!(fault, GroupFault::StopBeforeRoot(_)) {
+            self.coverage.before_publish += 1;
+            assert_eq!(
+                self.store.cold_root(),
+                before,
+                "STOP_BEFORE_ROOT_EXPOSES_NONE"
+            );
+            self.cold_open(&before.snapshot);
+            self.assert_acknowledged();
+            return;
+        }
+        if root != before {
+            self.store.publish(&root);
+        }
+        let committed = self.store.root();
+        assert_eq!(committed, root, "NO_INTERMEDIATE_GROUP_ROOT");
+        for observed in committed.stream.receipts() {
+            let observed_id = observed.id.sequence - 1;
+            if let Some(previous) = self
+                .published_receipts
+                .insert(observed_id, observed.clone())
+            {
+                assert_eq!(
+                    previous, *observed,
+                    "RESTART_NEVER_REAPPLIES_A_RECEIPTED_MESSAGE"
+                );
+            }
+        }
+        if matches!(fault, GroupFault::StopAfterRoot) {
+            self.coverage.after_publish += 1;
+            assert_eq!(
+                self.store.cold_root(),
+                root,
+                "STOP_AFTER_ROOT_EXPOSES_WHOLE_PREFIX"
+            );
+            self.cold_open(&root.snapshot);
+        }
+        if matches!(
+            fault,
+            GroupFault::LoseAcknowledgement | GroupFault::StopAfterRoot
+        ) {
+            self.coverage.lost_acks += 1;
+        } else {
+            for (id, receipt) in prefix {
+                let pending = self.pending.pop_front().unwrap();
+                assert_eq!(id, message_id(&pending.message));
+                assert_eq!(
+                    committed.stream.lookup(&pending.message).unwrap(),
+                    Some(&receipt),
+                    "ACK_FOLLOWS_ATOMIC_ROOT_AND_RECEIPT_PUBLICATION"
+                );
+                self.acknowledged.insert(id, receipt);
+            }
+        }
+        self.assert_acknowledged();
+        if self.pending.is_empty() {
+            assert_eq!(
+                (committed.stream.sequence(), committed.stream.tip()),
+                (self.gui_stream.sequence(), self.gui_stream.tip()),
+                "DRAINED_REPLICAS_HAVE_THE_SAME_SEQUENCE_AND_CHAIN"
+            );
+            self.assert_equal();
+        }
+    }
+    fn assert_acknowledged(&self) {
+        let root = self.store.root();
+        root.stream
+            .validate()
+            .expect("DURABLE_RECEIPT_WINDOW_STAYS_BOUNDED_AND_ORDERED");
+        for (id, receipt) in &self.acknowledged {
+            assert_eq!(
+                self.published_receipts.get(id),
+                Some(receipt),
+                "EVERY_ACKNOWLEDGED_TRANSITION_HAS_A_DURABLE_RECEIPT"
+            );
+        }
+        let ids: BTreeSet<_> = root.stream.receipts().map(|receipt| &receipt.id).collect();
+        assert_eq!(
+            ids.len(),
+            root.stream.receipts().count(),
+            "RESTART_NEVER_REAPPLIES_A_RECEIPTED_MESSAGE"
+        );
+    }
+    fn assert_equal(&mut self) {
+        let root = self.store.root();
+        let verification_pool = HistoryPool::new(PoolLimits::default());
+        let opened = self
+            .store
+            .load(&root.snapshot, &verification_pool)
+            .open()
+            .unwrap();
+        {
+            let baseline = opened.boundary(0).unwrap();
+            self.coverage.baseline_lineage +=
+                usize::from(!baseline.lineage().occurrences.is_empty());
+            self.coverage.split_ancestry +=
+                usize::from(!baseline.lineage().split_ancestry.is_empty());
+        }
+        for owner in [&self.gui, &self.writer] {
+            assert_same_values(owner, &opened);
+        }
+        self.assert_acknowledged();
+        for pool in [&self.gui_pool, &self.writer_pool, &verification_pool] {
+            let peak = pool.lease_counts(Role::Ordinary).unwrap().1;
+            self.coverage.ordinary_lease_peak = self.coverage.ordinary_lease_peak.max(peak);
+            assert!(peak <= 2, "SESSION_ORDINARY_LEASE_PEAK_AT_MOST_TWO");
+        }
+    }
+    fn cold_open(&mut self, reference: &ObjectRef) {
+        let validated = self.store.load(reference, &self.writer_pool);
+        let before_save = validated.identity().digest();
+        // Replacing the actor releases its old lease before taking a new capture.
+        self.writer = validated.open().unwrap();
+        assert_eq!(
+            self.writer.capture().unwrap().snapshot_identity().unwrap(),
+            before_save,
+            "SESSION_IDENTITY_AFTER_OPEN_EQUALS_BEFORE_SAVE"
+        );
+    }
+    fn restart(&mut self, handoff: bool) {
+        let mut root = self.store.cold_root();
+        // Reopening committed history preserves the epoch. Authority rotates
+        // independently: replay is only the suffix with no committed receipt.
+        self.cold_open(&root.snapshot);
+        self.authority += 1;
+        root.authority = self.authority;
+        self.store.publish(&root);
+        for pending in &mut self.pending {
+            if !root
+                .stream
+                .receipts()
+                .any(|receipt| receipt.id == pending.message.id)
+            {
+                pending.authority = self.authority;
+            }
+        }
+        self.coverage.restarts += 1;
+        self.coverage.handoffs += usize::from(handoff);
+        self.drain();
+    }
+    fn save(&mut self, save_as: bool) {
+        self.drain();
+        if save_as {
+            self.copy_destination();
+            self.install(&self.store.root().snapshot);
+        }
+        self.checkpoints.push(self.store.root());
+        if self.checkpoints.len() > 2 {
+            self.checkpoints.remove(0);
+        }
+        self.coverage.saves += 1;
+        self.coverage.save_as += usize::from(save_as);
+    }
+    fn install_checkpoint(&mut self, selected: usize) {
+        self.drain();
+        if self.checkpoints.is_empty() {
+            self.save(false);
+        }
+        let snapshot = self.checkpoints[selected % self.checkpoints.len()]
+            .snapshot
+            .clone();
+        self.copy_destination();
+        self.install(&snapshot);
+        self.coverage.rescues += 1;
+    }
+    fn copy_destination(&mut self) {
+        let mut roots: Vec<_> = self
+            .checkpoints
+            .iter()
+            .map(|r| r.snapshot.clone())
+            .collect();
+        roots.push(self.store.root().snapshot);
+        // The source is retired here. A shallow alias cannot pass the next
+        // cold read or resource-collection check.
+        self.store = self.store.copy_to_new(&roots);
+        self.assert_equal();
+    }
+    fn install(&mut self, snapshot: &ObjectRef) {
+        self.gui
+            .install_snapshot(self.store.load(snapshot, &self.gui_pool))
+            .unwrap();
+        self.writer
+            .install_snapshot(self.store.load(snapshot, &self.writer_pool))
+            .unwrap();
+        assert!(
+            self.gui
+                .ledger()
+                .entries()
+                .all(|e| e.answer() != ApprovalAnswer::Uncertain),
+            "SAME_LINE_SESSION_INSTALL_NEVER_MAKES_DO_UNCERTAIN"
+        );
+        let mut root = self.store.root();
+        root.snapshot = self.store.save(&self.writer.capture().unwrap());
+        let mut seed = root.stream.seed().clone();
+        seed.installed = self.writer.identity().unwrap();
+        seed.attachment_epoch += 1;
+        let previous_tip = root.stream.tip();
+        root.stream = StreamState::installed(seed).unwrap();
+        self.gui_stream = root.stream.clone();
+        self.store.publish(&root);
+        assert_ne!(
+            self.store.root().stream.tip(),
+            previous_tip,
+            "INSTALL_RESETS_THE_PREVIOUS_EPOCH_CHAIN"
+        );
+        self.store
+            .root()
+            .stream
+            .verify_installed_snapshot(self.gui.identity().unwrap())
+            .expect("INSTALL_STATE_EQUALITY_USES_COMBINED_OWNER_IDENTITY");
+        self.assert_equal();
+    }
+    fn collect(&mut self) {
+        let mut roots: Vec<_> = self
+            .checkpoints
+            .iter()
+            .map(|r| r.snapshot.clone())
+            .collect();
+        roots.push(self.store.root().snapshot);
+        let mut references = self
+            .gui
+            .resources()
+            .values()
+            .filter(|resource| owned_resource(resource))
+            .map(|r| self.store.resource(r))
+            .collect::<Vec<_>>();
+        references.extend(self.pending.iter().filter_map(|p| {
+            p.message
+                .context
+                .approval
+                .as_ref()
+                .map(|a| a.reference.clone())
+        }));
+        references.extend(
+            self.pending
+                .iter()
+                .filter_map(|p| p.message.context.transition.as_ref().map(|a| a.id.clone())),
+        );
+        references.extend(
+            self.pending
+                .iter()
+                .flat_map(|pending| &pending.resources)
+                .filter(|resource| owned_resource(resource))
+                .map(|resource| self.store.resource(resource)),
+        );
+        roots.extend(references);
+        self.store.collect(&roots);
+        for owner in [&self.gui, &self.writer] {
+            let current = Resources::document(owner.history().document());
+            for command in owner.history().redo().iter().flat_map(Step::commands) {
+                self.coverage.redo_payloads += owner
+                    .origins
+                    .get(&command.id)
+                    .unwrap()
+                    .resources
+                    .iter()
+                    .filter(|resource| owned_resource(resource))
+                    .filter(|r| !current.contains(r))
+                    .count();
+            }
+            for depth in 0..=owner.history().undo().len() + owner.history().redo().len() {
+                let boundary = owner.boundary(depth).unwrap();
+                for resource in &Resources::document(boundary.document()) {
+                    if owned_resource(resource) {
+                        self.store.assert_exists(&self.store.resource(resource));
+                    }
+                }
+            }
+            // A payload can be reachable only by Redo, without appearing in
+            // any current document. The union and all roots must survive GC.
+            for resource in owner.resources().values() {
+                if owned_resource(resource) {
+                    self.store.assert_exists(&self.store.resource(resource));
+                }
+            }
+        }
+        for checkpoint in &self.checkpoints {
+            let _ = self.store.load(&checkpoint.snapshot, &self.writer_pool);
+        }
+        self.coverage.collections += 1;
+    }
+}
+
+fn assert_same_values(left: &OwnerHistory, right: &OwnerHistory) {
+    let a = left.history();
+    let b = right.history();
+    assert_eq!(a.document(), b.document(), "SESSION_REOPEN_DOCUMENT");
+    assert_eq!(a.baseline(), b.baseline(), "SESSION_REOPEN_BASELINE");
+    assert_eq!(
+        a.position(),
+        b.position(),
+        "SESSION_REOPEN_EPOCH_AND_COUNTER"
+    );
+    assert_eq!(a.policy(), b.policy(), "SESSION_REOPEN_POLICY");
+    assert_eq!(a.undo().len(), b.undo().len(), "SESSION_REOPEN_UNDO_DEPTH");
+    assert_eq!(a.redo().len(), b.redo().len(), "SESSION_REOPEN_REDO_DEPTH");
+    for (original, reopened) in a
+        .undo()
+        .iter()
+        .chain(a.redo())
+        .zip(b.undo().iter().chain(b.redo()))
+    {
+        assert_eq!(
+            original.commands(),
+            reopened.commands(),
+            "SESSION_REOPEN_COMMAND_BOUNDARIES_KEYS_DIGESTS_AND_PAYLOADS"
+        );
+        assert_eq!(
+            original.coalesce_key(),
+            reopened.coalesce_key(),
+            "SESSION_REOPEN_GESTURE_KEYS"
+        );
+    }
+    assert_eq!(
+        left.reservation.role(),
+        right.reservation.role(),
+        "SESSION_REOPEN_OWNER_ROLE"
+    );
+    assert_eq!(
+        left.seeds(),
+        right.seeds(),
+        "SESSION_REOPEN_BASELINE_LINEAGE"
+    );
+    assert!(
+        left.origins
+            .0
+            .iter()
+            .map(|o| &o.origin)
+            .eq(right.origins.0.iter().map(|o| &o.origin)),
+        "SESSION_REOPEN_COMMAND_ORIGINS_AND_INPUTS"
+    );
+    assert_eq!(
+        left.resources(),
+        right.resources(),
+        "SESSION_REOPEN_REACHABLE_RESOURCES"
+    );
+    assert_eq!(
+        left.ledger(),
+        right.ledger(),
+        "SESSION_REOPEN_APPROVAL_ENTRIES_AND_FATES"
+    );
+    assert_eq!(
+        left.fold_frontier, right.fold_frontier,
+        "SESSION_REOPEN_FOLD_FRONTIER"
+    );
+    assert_eq!(
+        left.terminal_facts, right.terminal_facts,
+        "SESSION_REOPEN_TRANSITION_PROVENANCE"
+    );
+    assert_eq!(
+        left.folded_approvals, right.folded_approvals,
+        "SESSION_REOPEN_FOLDED_COMMAND_PROVENANCE"
+    );
+}
+
+fn marker(id: u64) -> Operation {
+    Operation::AddMarker {
+        marker: Marker {
+            id: MarkerId(id),
+            position: TimeCode(0),
+            label: format!("marker {id}"),
+            color_token: 0,
+        },
+    }
+}
+fn lut(reference: &ObjectRef, id: u64) -> Operation {
+    Operation::AddLutAsset {
+        asset: LutAsset {
+            id: LutAssetId(id),
+            sha256: reference.sha256.clone(),
+            title: format!("LUT {id}"),
+            kind: LutAssetKind::Cube3d,
+            size: 2,
+            byte_len: reference.byte_length,
+            domain_min_millionths: [0; 3],
+            domain_max_millionths: [1_000_000; 3],
+            source: LutAssetSource::Imported {
+                source_path: format!("lut-{id}.cube"),
+            },
+        },
+    }
+}
+
+#[path = "session_model_stream.rs"]
+mod stream;
+
+#[test]
+fn generated_sessions_preserve_acknowledgements_and_reachable_states() {
+    stream::run::<MemoryStore>(8, 160);
+}
+#[test]
+#[cfg(target_os = "linux")]
+fn generated_manual_session_checks_native_protocol_faults() {
+    stream::run_manual_smoke();
+}
+#[test]
+fn generated_implicit_title_split_sessions_keep_font_through_collection_and_cold_open() {
+    stream::implicit_title_streams::<MemoryStore>();
+}
+#[test]
+#[cfg(target_os = "linux")]
+fn durable_implicit_title_split_sessions_keep_font_through_collection_and_cold_open() {
+    stream::implicit_title_streams::<storage::NativeStore>();
+}
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_01_04() {
+    stream::run_range::<MemoryStore>(1, 4, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_05_08() {
+    stream::run_range::<MemoryStore>(5, 8, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_09_12() {
+    stream::run_range::<MemoryStore>(9, 12, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_13_16() {
+    stream::run_range::<MemoryStore>(13, 16, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_17_20() {
+    stream::run_range::<MemoryStore>(17, 20, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_21_24() {
+    stream::run_range::<MemoryStore>(21, 24, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_25_28() {
+    stream::run_range::<MemoryStore>(25, 28, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_29_32() {
+    stream::run_range::<MemoryStore>(29, 32, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_33_36() {
+    stream::run_range::<MemoryStore>(33, 36, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_37_40() {
+    stream::run_range::<MemoryStore>(37, 40, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_41_44() {
+    stream::run_range::<MemoryStore>(41, 44, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_45_48() {
+    stream::run_range::<MemoryStore>(45, 48, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_49_52() {
+    stream::run_range::<MemoryStore>(49, 52, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_53_56() {
+    stream::run_range::<MemoryStore>(53, 56, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_57_60() {
+    stream::run_range::<MemoryStore>(57, 60, 1024);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn long_generated_sessions_seeds_61_64() {
+    stream::run_range::<MemoryStore>(61, 64, 1024);
+}
+#[test]
+#[cfg(target_os = "linux")]
+fn durable_sessions_use_the_same_codec_and_transition_stream() {
+    stream::run::<storage::NativeStore>(2, 80);
+}
+
+fn queued_payload_after_gui_fold<S: ModelStore>() {
+    let mut session = Session::new(S::default());
+    let resource = session
+        .store
+        .blob(b"queued owned LUT", RecordKind::OwnedLut);
+    for (index, operation) in [
+        lut(&resource, 1),
+        Operation::RemoveLutAsset {
+            lut_asset: LutAssetId(1),
+        },
+        marker(10),
+        marker(11),
+        marker(12),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        session.send(Message {
+            id: index as u64,
+            action: Action::Do {
+                operations: vec![operation],
+                gesture: None,
+            },
+            creation: origin(index as u64 + 2),
+            approval: None,
+            transition: None,
+        });
+    }
+    assert!(
+        session.gui.resources().values().next().is_none(),
+        "GUI_HAS_FOLDED_PAST_THE_QUEUED_RESOURCE"
+    );
+    assert!(
+        session.store.root().stream.receipts().next().is_none(),
+        "WRITER_HAS_NOT_SEEN_THE_PAYLOAD_YET"
+    );
+    session.collect();
+    session.store.assert_exists(&resource);
+    session.drain();
+    session.collect();
+    session.store.assert_absent(&resource);
+}
+#[test]
+fn queued_payload_survives_collection_after_the_gui_folds_it_out() {
+    queued_payload_after_gui_fold::<MemoryStore>();
+}
+#[test]
+#[cfg(target_os = "linux")]
+fn durable_queued_payload_survives_collection_after_the_gui_folds_it_out() {
+    queued_payload_after_gui_fold::<storage::NativeStore>();
+}

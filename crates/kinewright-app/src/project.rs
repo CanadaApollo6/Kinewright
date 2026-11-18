@@ -8,14 +8,14 @@ use std::{
 };
 
 use kinewright_core::{
-    Analysis, AssetId, AudioChain, ClipId, Core, Document, Event, IncidentId, IncidentLog,
-    IncidentState, IncidentSubject, LutAssetId, LutAvailabilityKind, LutAvailabilityStatus,
-    MarkerId, MediaKind, Operation, RunningInvestigation, TimeCode, TimelineRevision, TrackId,
-    TrackKind,
+    Analysis, AssetId, AudioChain, ClipId, Document, IncidentId, IncidentLog, IncidentState,
+    IncidentSubject, LutAssetId, LutAvailabilityKind, LutAvailabilityStatus, MarkerId, MediaKind,
+    Operation, RunningInvestigation, TimeCode, TimelineRevision, TrackId, TrackKind,
 };
 #[cfg(test)]
 use kinewright_core::{Export, Playback};
 use kinewright_media::{LutLibrary, LutStore};
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     FlushOutcome, RefuseRename, SidecarMode, SidecarSession, SidecarWriter, derive_lut_store,
     sidecar_write_failed_observation,
@@ -119,7 +119,8 @@ pub(crate) struct ProjectSession {
     pub(crate) id: u64,
     pub(crate) name: String,
     pub(crate) core: Core,
-    pub(crate) core_events: crossbeam_channel::Receiver<Event>,
+    pub(crate) core_events:
+        crossbeam_channel::Receiver<kinewright_project::operation_actor::Notification>,
     pub(crate) document: Arc<Document>,
     pub(crate) revision: TimelineRevision,
     pub(crate) project_path: Option<PathBuf>,
@@ -356,10 +357,22 @@ impl ProjectSession {
         sidecar_mode: &SidecarMode,
         sidecar_writer: Option<Arc<SidecarWriter>>,
         refuse_rename: Option<&RefuseRename>,
-        data_dir: &Path,
+        pool: &kinewright_project::operation_history::HistoryPool,
+        #[cfg(test)] data_dir: &Path,
     ) -> Result<Self, String> {
         let name = name.into();
-        let core = Core::spawn(document.clone()).map_err(|error| error.to_string())?;
+        let core = Core::spawn(
+            pool,
+            kinewright_project::operation_history::Role::Ordinary,
+            kinewright_project::operation_history::CreationOrigin {
+                branch: kinewright_project::bundle_records::BranchId::fresh()
+                    .map_err(|e| e.to_string())?,
+                batch: kinewright_project::bundle_records::BatchId::fresh()
+                    .map_err(|e| e.to_string())?,
+            },
+            document.clone(),
+        )
+        .map_err(|error| error.to_string())?;
         let core_events = core.subscribe().map_err(|error| error.to_string())?;
         let chat = vec![ChatEntry::Text(
             "Drop a clip anywhere (or /import), then describe your edit.".to_owned(),
@@ -375,12 +388,19 @@ impl ProjectSession {
         // Open already resolved the source once. Claim and journal that identity,
         // even if the original caller alias was repointed before session creation.
         let io_project_path = source_admission.source().or(project_path.as_deref());
-        let recovery = if !writable {
-            Recovery::read_only()
-        } else if id == 1 {
-            Recovery::start(data_dir, &core, io_project_path).map_err(|e| e.to_string())?
+        let recovery = if writable {
+            let start = || {
+                if id == 1 {
+                    Recovery::start(&core, io_project_path)
+                } else {
+                    Recovery::start_attached(&core, io_project_path)
+                }
+            };
+            #[cfg(test)]
+            let start = || crate::recovery::with_test_directory(start);
+            start()
         } else {
-            Recovery::start_attached(data_dir, &core, io_project_path).map_err(|e| e.to_string())?
+            Recovery::read_only()
         };
         let studio = crate::studio::Studio::default();
         #[cfg(test)]
@@ -507,6 +527,7 @@ impl ProjectSession {
         };
         let ports = session.media();
         session.threads.push(AgentThread::new(
+            &session.core,
             "Thread 1",
             agent_harness,
             chat,
@@ -1000,7 +1021,30 @@ impl ProjectSession {
         }
         self.recovery.close();
         self.sidecar.authority = None;
-        prepared == ClosePreparation::Ready
+        if prepared != ClosePreparation::Ready {
+            return false;
+        }
+        // The reaper owns worker/namespace teardown, but not this lease. Its
+        // stopped MCP servers may still hold actor handles when Open runs in
+        // the very next frame. Retire before acknowledging Close, after the
+        // journal and incident flushes, so those handles cannot hold the room.
+        if let Some(attachment) = &self.ja1 {
+            attachment.retire_closed_history().is_ok()
+        } else {
+            struct ClosedProject;
+            (|| {
+                if matches!(
+                    self.core.change_id(),
+                    Err(kinewright_project::operation_actor::Error::Retired)
+                ) {
+                    return Ok(());
+                }
+                let attachment = self.core.attach(&ClosedProject)?;
+                let cut = attachment.freeze(&ClosedProject)?;
+                attachment.retire(&ClosedProject, cut)
+            })()
+            .is_ok()
+        }
     }
 
     /// Terminal phase only: persistence and every project's stop signal precede this.
@@ -1722,7 +1766,9 @@ mod tests {
         let exporter: Arc<dyn Export> = Arc::new(StubMedia);
         let incidents: IncidentLogHandle =
             std::sync::Arc::new(std::sync::RwLock::new(IncidentLog::default()));
+        let live = Core::for_test(Arc::clone(&document)).unwrap();
         let thread = AgentThread::new(
+            &live,
             "Thread 1",
             AgentHarnessChoice::Codex,
             Vec::new(),
@@ -1794,7 +1840,9 @@ mod tests {
         let playback: Arc<dyn Playback> = Arc::new(StubMedia);
         let analysis: Arc<dyn Analysis> = Arc::new(StubMedia);
         let exporter: Arc<dyn Export> = Arc::new(StubMedia);
+        let live = Core::for_test(Arc::clone(&document)).unwrap();
         let thread = AgentThread::new(
+            &live,
             "Thread 1",
             AgentHarnessChoice::Codex,
             Vec::new(),
@@ -2169,6 +2217,10 @@ mod tests {
             &SidecarMode::None,
             None,
             None,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+            #[cfg(test)]
             data_root.root(),
         )
         .expect("the dirty-test session builds");
@@ -2388,6 +2440,10 @@ mod tests {
             },
             None,
             None,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+            #[cfg(test)]
             data_root.root(),
         )
         .expect("the sidecar-test session builds");
@@ -2796,6 +2852,10 @@ mod tests {
             },
             None,
             Some(&failing),
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+            #[cfg(test)]
             data_root.root(),
         )
         .expect("the session builds");

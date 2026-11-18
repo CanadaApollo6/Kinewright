@@ -216,7 +216,7 @@ fn te13_fix5_publisher(step: CompletionStep, issue: bool, save: bool) {
             .f
             .editor
             .request(HostCommand::Save {
-                snapshot: HostSnapshot::from_history(history.clone()).unwrap(),
+                snapshot: locked_host_snapshot_for_test(&host),
             })
             .unwrap();
         assert!(reply.error.is_none(), "TE13_FIX5_MANUAL_SAVE {reply:?}");
@@ -409,7 +409,7 @@ fn te13_fix6_durable_stop_inside_real_switch() {
             .request(kinewright_core::Command::Do(history_marker(106)))
             .unwrap();
         project.persist_durable_branch(&mut branch).unwrap();
-        let expected = branch.core().export_history().unwrap();
+        let expected = serde_json::to_value(branch.core().export_history().unwrap()).unwrap();
         let id = branch.branch_id().clone();
         project.close_durable_branch(&branch).unwrap();
         let mut reply = HostReply::default();
@@ -450,11 +450,7 @@ fn te13_fix6_durable_stop_inside_real_switch() {
         !owner.switch_frozen,
         "TE13_FIX6_SWITCH_CONFIRMED_AFTER_STOP"
     );
-    assert_eq!(
-        owner.core().export_history().unwrap(),
-        expected,
-        "TE13_FIX6_SWITCH_SELECTED_WORK"
-    );
+    assert_recovered_task_owner(owner.core(), expected, "TE13_FIX6_SWITCH_SELECTED_WORK");
     drop(owner);
     let state = p.run.f.projection(&p.run.run);
     assert_eq!(state.results.len(), 0, "TE13_FIX6_STOP_PUBLISHED_NOTHING");
@@ -557,7 +553,7 @@ fn te13_fix5_real_switch_then_exact_finish() {
             .request(kinewright_core::Command::Do(history_marker(101)))
             .unwrap();
         project.persist_durable_branch(&mut branch).unwrap();
-        let expected = branch.core().export_history().unwrap();
+        let expected = serde_json::to_value(branch.core().export_history().unwrap()).unwrap();
         let id = branch.branch_id().clone();
         project.close_durable_branch(&branch).unwrap();
         let mut reply = HostReply::default();
@@ -567,7 +563,7 @@ fn te13_fix5_real_switch_then_exact_finish() {
         (reply.switch_envelope.unwrap(), expected)
     };
     Fixture::issue(&p.run.f.editor);
-    {
+    let selected_identity = {
         let mut owner = host.lock().unwrap();
         let mut reply = HostReply::default();
         owner.publish_switch(&envelope, &mut reply).unwrap();
@@ -576,11 +572,12 @@ fn te13_fix5_real_switch_then_exact_finish() {
             .confirm_switch(client.clone(), &installed, &mut HostReply::default())
             .unwrap();
         assert!(!owner.switch_frozen, "TE13_FIX5_SWITCH_CONFIRMED");
-        assert_eq!(owner.core().export_history().unwrap(), expected);
+        assert_recovered_task_owner(owner.core(), expected, "TE13_FIX5_SWITCH_EXACT_OWNER");
         owner
             .confirm_switch(client, &installed, &mut HostReply::default())
             .unwrap();
-    }
+        owner.core().snapshot_identity().unwrap()
+    };
     te13_fix4_replay(&p);
     let state = p.run.f.projection(&p.run.run);
     assert_eq!(
@@ -588,11 +585,7 @@ fn te13_fix5_real_switch_then_exact_finish() {
         (1, 1),
         "TE13_FIX5_SWITCH_FINISH_EXACTLY_ONCE"
     );
-    assert_eq!(
-        host.lock().unwrap().core().export_history().unwrap(),
-        expected,
-        "TE13_FIX5_SWITCH_EDIT_INTACT"
-    );
+    assert_eq!(host.lock().unwrap().core().snapshot_identity().unwrap(), selected_identity, "TE13_FIX5_SWITCH_EDIT_INTACT");
 }
 
 #[test]

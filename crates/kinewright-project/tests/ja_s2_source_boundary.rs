@@ -22,10 +22,11 @@ fn source_owner_unsupported_profile_has_no_mutation() {
 #[cfg(target_os = "linux")]
 mod linux {
     use kinewright_core::{
-        AttachmentState, Command, Core, Document, Event, HistorySnapshot, Operation, Track,
-        TrackId, TrackKind,
+        AttachmentState, Command, Document, Event, Operation, Track, TrackId, TrackKind,
     };
     use kinewright_media::test_support::TempDirectory;
+    use kinewright_project::operation_actor::{Core, PortableHistory};
+    use kinewright_project::operation_history::{HistoryPool, PoolLimits};
     use kinewright_project::{
         bundle::{BundleError, LoadedBundle},
         bundle_copy::{BundleCopy, CopyStatus, SessionStore},
@@ -92,14 +93,29 @@ mod linux {
         drop(blob);
         (owner, inputs, object)
     }
-    fn history() -> HistorySnapshot {
-        Core::spawn(Document::default())
+    fn history() -> PortableHistory {
+        Core::for_test(Document::default())
             .unwrap()
-            .export_history()
+            .portable_history()
             .unwrap()
     }
-    fn digest(history: &HistorySnapshot) -> String {
-        kinewright_media::sha256_bytes(&serde_json::to_vec(history).unwrap())
+    fn digest(history: &PortableHistory) -> String {
+        history.identity().to_string()
+    }
+    fn received(history: PortableHistory) -> PortableHistory {
+        let wire = serde_json::to_string(&history).unwrap();
+        drop(history);
+        serde_json::from_str(&wire).unwrap()
+    }
+    fn contents(core: &Core) -> serde_json::Value {
+        let mut state = serde_json::to_value(core.export_history().unwrap()).unwrap();
+        state["history"].as_object_mut().unwrap().remove("epoch");
+        for stack in ["undo", "redo"] {
+            for step in state["history"][stack].as_array_mut().unwrap() {
+                step.as_object_mut().unwrap().remove("charge");
+            }
+        }
+        state
     }
     fn add_track(core: &Core, id: u64) {
         assert!(matches!(
@@ -149,6 +165,7 @@ mod linux {
                 &history,
                 &inputs,
                 StorageLimits::default(),
+                &HistoryPool::new(PoolLimits::default()),
             )
             .unwrap();
             assert!(matches!(copy.status(), CopyStatus::Committed(_)));
@@ -174,11 +191,9 @@ mod linux {
                 .read_to_end(&mut actual)
                 .unwrap();
             assert_eq!(actual, bytes());
-            let loaded = LoadedBundle::read(&target).unwrap();
-            assert_eq!(
-                loaded.manual_checkpoint().unwrap().history_digest,
-                digest(&history)
-            );
+            let loaded =
+                LoadedBundle::read(&target, &HistoryPool::new(PoolLimits::default())).unwrap();
+            assert_eq!(loaded.manual_checkpoint().unwrap().position.epoch, 1);
             let rebound = loaded.root().unwrap().input_manifest_ref.clone();
             let bundle = loaded.into_writer().unwrap();
             let manifest = bundle.store().read_input_manifest(&rebound).unwrap();
@@ -316,6 +331,7 @@ mod linux {
                 &history,
                 &inputs,
                 StorageLimits::default(),
+                &HistoryPool::new(PoolLimits::default()),
             )
         });
         assert!(matches!(result, Err(BundleError::Identity(_))));
@@ -337,6 +353,7 @@ mod linux {
             &history,
             &inputs,
             StorageLimits::default(),
+            &HistoryPool::new(PoolLimits::default()),
         )
         .unwrap();
         assert!(matches!(copy.status(), CopyStatus::Committed(_)));
@@ -415,7 +432,8 @@ mod linux {
                 &mut CorruptReader(service),
                 &history,
                 &inputs,
-                StorageLimits::default()
+                StorageLimits::default(),
+                &HistoryPool::new(PoolLimits::default()),
             )
             .is_err()
         );
@@ -426,7 +444,7 @@ mod linux {
     #[test]
     fn gui_split_keeps_actor_and_source_and_host_loss_refuses_fresh_save() {
         let temp = temp("c8-gui-split");
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         add_track(&core, 1);
         let mut owner =
             Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
@@ -438,7 +456,7 @@ mod linux {
         owner.complete_host_cut(&cut, None, None).unwrap();
         assert_eq!(core.attachment_state().unwrap(), AttachmentState::Live);
         owner.host_lost().unwrap();
-        assert_eq!(core.export_history().unwrap(), prepared.history);
+        assert_eq!(core.portable_history().unwrap(), prepared.history);
         assert_eq!(core.attachment_state().unwrap(), AttachmentState::Frozen);
         assert!(owner.freeze_host_cut().is_err());
         assert!(
@@ -468,15 +486,15 @@ mod linux {
     #[test]
     fn remote_activation_prepares_fresh_actor_before_exact_old_seal() {
         let temp = temp("c8-gui-activate");
-        let original = Core::spawn(Document::default()).unwrap();
+        let original = Core::for_test(Document::default()).unwrap();
         add_track(&original, 1);
         let mut owner =
             Ja1EditingSession::new(temp.root(), &original, StorageLimits::default()).unwrap();
         let prepared = owner.prepare_host_attachment().unwrap();
         let cut = owner.freeze_host_cut().unwrap();
-        let candidate = Core::spawn(Document::default()).unwrap();
+        let candidate = Core::for_test(Document::default()).unwrap();
         add_track(&candidate, 2);
-        let history = candidate.export_history().unwrap();
+        let history = candidate.portable_history().unwrap();
         let mut failed_view_actor = None;
         assert!(
             owner
@@ -500,7 +518,7 @@ mod linux {
             original.attachment_state().unwrap(),
             AttachmentState::Frozen
         );
-        assert_eq!(original.export_history().unwrap(), prepared.history);
+        assert_eq!(original.portable_history().unwrap(), prepared.history);
         let fresh = owner
             .activate_host_cut(
                 &cut,
@@ -522,7 +540,7 @@ mod linux {
             original.attachment_state().unwrap(),
             AttachmentState::Sealed
         );
-        assert_eq!(fresh.export_history().unwrap(), history);
+        assert_eq!(fresh.portable_history().unwrap(), history);
         assert_eq!(owner.retained_host_actor_count(), 1);
         let next_cut = owner.freeze_host_cut().unwrap();
         let restored = owner
@@ -556,7 +574,7 @@ mod linux {
     #[test]
     fn failed_old_cut_seal_retires_escaped_prepared_actor_and_keeps_gui_source() {
         let temp = temp("c8-activation-old-cut-race");
-        let original = Core::spawn(Document::default()).unwrap();
+        let original = Core::for_test(Document::default()).unwrap();
         add_track(&original, 1);
         let mut owner =
             Ja1EditingSession::new(temp.root(), &original, StorageLimits::default()).unwrap();
@@ -583,15 +601,20 @@ mod linux {
         let escaped = escaped.unwrap();
         assert_eq!(escaped.attachment_state().unwrap(), AttachmentState::Sealed);
         assert!(matches!(
-            escaped.request(Command::Undo).unwrap(),
-            Event::MutationRefused { .. }
+            escaped.request(Command::Undo),
+            Err(kinewright_project::operation_actor::Refusal {
+                error: kinewright_project::operation_actor::Error::MutationRefused(
+                    kinewright_core::CoreMutationRefusal::Sealed
+                ),
+                ..
+            })
         ));
         assert_eq!(owner.core().actor_identity(), original.actor_identity());
         assert_eq!(
             original.attachment_state().unwrap(),
             AttachmentState::Frozen
         );
-        assert_ne!(original.export_history().unwrap(), prepared.history);
+        assert_ne!(original.portable_history().unwrap(), prepared.history);
         assert!(owner.freeze_host_cut().is_err());
         assert_eq!(owner.retained_host_actor_count(), 0);
         assert!(root.parent().unwrap().exists());
@@ -610,22 +633,22 @@ mod linux {
     #[test]
     fn publisher_history_matches_exact_report_and_ignores_later_actor_edits() {
         let temp = temp("c8-published-history");
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         add_track(&core, 1);
         let mut owner =
             Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
-        let history = core.export_history().unwrap();
         let status = owner
             .first_save(&temp.path("published.kinewright"), StorageLimits::default())
             .unwrap();
         let CopyStatus::Committed(report) = status else {
             panic!("actual publisher must commit");
         };
+        let history = received(core.portable_history().unwrap());
         add_track(&core, 2);
-        assert_ne!(core.export_history().unwrap(), history);
+        assert_ne!(core.portable_history().unwrap(), history);
         assert_eq!(owner.published_history(&report).unwrap(), history);
         let mut wrong = report.clone();
-        wrong.history_sha256 = digest(&core.export_history().unwrap());
+        wrong.history_sha256 = digest(&core.portable_history().unwrap());
         assert!(owner.published_history(&wrong).is_err());
         wrong = report.clone();
         wrong.head_id = kinewright_project::bundle_records::HeadId::fresh().unwrap();
@@ -637,7 +660,7 @@ mod linux {
         wrong.byte_length += 1;
         assert!(owner.published_history(&wrong).is_err());
         let next = owner.save_active().unwrap();
-        let published = core.export_history().unwrap();
+        let published = received(core.portable_history().unwrap());
         add_track(&core, 3);
         assert_eq!(owner.published_history(&next).unwrap(), published);
         assert!(owner.published_history(&report).is_err());
@@ -659,8 +682,8 @@ mod linux {
         let copy_cap = limits.copy_overlap_bytes + limits.metadata_bytes;
         let record_cap = limits.decoded_record_bytes;
         let (mut owner, inputs, _) = source_with_limits(&temp, limits);
-        let core = Core::spawn(Document::default()).unwrap();
-        let initial = core.export_history().unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
+        let initial = received(core.portable_history().unwrap());
         let descriptor = owner
             .retain_borrowed_source(
                 std::slice::from_ref(&inputs),
@@ -672,7 +695,8 @@ mod linux {
         for id in 1..=12 {
             add_track(&core, id);
         }
-        let larger = core.export_history().unwrap();
+        let larger = received(core.portable_history().unwrap());
+        let larger_contents = contents(&core);
         let growth = larger.encoded_bytes().unwrap() - initial_binding.encoded_bytes;
         assert!(growth > 0);
         let held_before = owner.store().retention_probe().unwrap();
@@ -701,7 +725,7 @@ mod linux {
         );
         service.prove_snapshot(&descriptor, &binding).unwrap();
         add_track(&core, 13);
-        let over = core.export_history().unwrap();
+        let over = received(core.portable_history().unwrap());
         let refused_before = owner.store().usage().unwrap();
         assert!(matches!(
             service.ensure_snapshot(&descriptor, &over),
@@ -719,6 +743,7 @@ mod linux {
                 &initial,
                 &inputs,
                 StorageLimits::default(),
+                &HistoryPool::new(PoolLimits::default()),
             )
         });
         assert!(stale.is_err());
@@ -732,12 +757,20 @@ mod linux {
             &larger,
             &inputs,
             StorageLimits::default(),
+            &HistoryPool::new(PoolLimits::default()),
         )
         .unwrap();
         let CopyStatus::Committed(report) = copy.status() else {
             panic!("larger admitted copy must commit");
         };
-        assert_eq!(report.history_sha256, binding.history_sha256);
+        assert_ne!(
+            report.history_sha256,
+            binding.identity.to_string(),
+            "FIRST_SAVE_INSTALLS_A_FRESH_EPOCH"
+        );
+        let mut loaded =
+            LoadedBundle::read(&target, &HistoryPool::new(PoolLimits::default())).unwrap();
+        assert_eq!(contents(&loaded.open_manual().unwrap()), larger_contents);
         assert_eq!(owner.store().usage().unwrap().reserved_copy_bytes, copy_cap);
         assert_eq!(owner.store().retention_probe().unwrap(), held_before);
         drop(copy);
@@ -756,11 +789,11 @@ mod linux {
         let scratch = (
             owner
                 .store()
-                .reserve_probe(padding.min(record_cap), 0)
+                .reserve_probe(padding.min(record_cap))
                 .unwrap(),
             owner
                 .store()
-                .reserve_probe(padding.saturating_sub(record_cap), 0)
+                .reserve_probe(padding.saturating_sub(record_cap))
                 .unwrap(),
         );
         let refused_before = owner.store().usage().unwrap();
@@ -789,12 +822,12 @@ mod linux {
     #[test]
     fn gui_foreground_cut_grows_its_existing_source_admission_before_first_save() {
         let temp = temp("c8-gui-snapshot-growth");
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         let mut owner =
             Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
         let prepared = owner.prepare_host_attachment().unwrap();
         let first_cut = owner.freeze_host_cut().unwrap();
-        let initial_bytes = first_cut.history().encoded_bytes().unwrap();
+        let initial_bytes = core.portable_history().unwrap().encoded_bytes().unwrap();
         let before = owner.source().unwrap().store().usage().unwrap();
         let holds = owner.source().unwrap().store().retention_probe().unwrap();
         owner.complete_host_cut(&first_cut, None, None).unwrap();
@@ -802,14 +835,15 @@ mod linux {
             add_track(&core, id);
         }
         let cut = owner.freeze_host_cut().unwrap();
-        let binding = BorrowedSnapshotBinding::from_history(cut.history()).unwrap();
+        let frozen_history = core.portable_history().unwrap();
+        let binding = BorrowedSnapshotBinding::from_history(&frozen_history).unwrap();
         prepared
             .source_service
             .as_ref()
             .unwrap()
             .prove_snapshot(prepared.source.as_ref().unwrap(), &binding)
             .expect("freeze must admit the larger snapshot before any explicit ensure call");
-        assert_eq!(binding.history_sha256, digest(cut.history()));
+        assert_eq!(binding.identity.to_string(), digest(&frozen_history));
         let after = owner.source().unwrap().store().usage().unwrap();
         assert_eq!(
             after.reserved_copy_bytes - before.reserved_copy_bytes,
@@ -830,20 +864,21 @@ mod linux {
             &temp.path("foreground.kinewright"),
             source,
             &mut service,
-            cut.history(),
+            &frozen_history,
             &prepared.inputs,
             StorageLimits::default(),
+            &HistoryPool::new(PoolLimits::default()),
         )
         .unwrap();
         assert!(matches!(copy.status(), CopyStatus::Committed(_)));
     }
 
     #[test]
-    fn pinned_save_as_preserves_dirty_source_floor_and_external_nested_copy() {
+    fn pinned_save_as_preserves_dirty_source_history_and_external_nested_copy() {
         let temp = temp("c8-admitted-save-as");
         let path = temp.path("original/a.kinewright");
         let target = temp.path("external/nested/b.kinewright");
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         add_track(&core, 1);
         let mut owner =
             Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
@@ -851,43 +886,39 @@ mod linux {
         for id in 2..=20 {
             add_track(&core, id);
         }
-        let candidate = core.export_history().unwrap();
-        let floor = kinewright_core::HistoryTransition::floor(candidate.clone(), 10).unwrap();
-        let limits = StorageLimits {
-            branch_history_bytes: kinewright_project::bundle_commit::history_cost_probe(
-                floor.after(),
-                &StorageLimits::default(),
-            )
-            .unwrap(),
-            ..StorageLimits::default()
-        };
-        let expected =
-            kinewright_project::bundle_commit::bound_history_probe(&candidate, &limits).unwrap();
-        assert!(expected.floor_offset > candidate.floor_offset);
-        owner.restrict_limits_probe(limits.clone()).unwrap();
+        let source_identity = core.snapshot_identity().unwrap();
+        let limits = StorageLimits::default();
+        let expected_document = core.export_history().unwrap().history().document.clone();
         let inspection = owner.inspect_rescue_destination(&target).unwrap();
         let status = owner.save_as_admitted(&inspection, limits).unwrap();
         let CopyStatus::Committed(report) = status else {
             panic!("admitted external Save As must commit");
         };
+        let expected = owner.published_history(&report).unwrap();
         assert_eq!(report.history_sha256, digest(&expected));
-        assert_eq!(core.export_history().unwrap(), expected);
-        assert!(!owner.dirty().unwrap());
-        assert_eq!(owner.published_history(&report).unwrap(), expected);
+        assert_eq!(core.portable_history().unwrap(), expected);
         assert_eq!(
-            LoadedBundle::read(&path)
+            core.export_history().unwrap().history().document,
+            expected_document
+        );
+        assert!(!owner.dirty().unwrap());
+        assert_eq!(
+            LoadedBundle::read(&path, &HistoryPool::new(PoolLimits::default()))
                 .unwrap()
                 .manual_checkpoint()
                 .unwrap()
-                .history_digest,
-            report.history_sha256
+                .identity
+                .to_string(),
+            source_identity.to_string(),
+            "SOURCE_SAVE_KEEPS_ITS_EPOCH_WHILE_SAVE_AS_INSTALLS_A_NEW_ONE"
         );
         assert_eq!(
-            LoadedBundle::read(&target)
+            LoadedBundle::read(&target, &HistoryPool::new(PoolLimits::default()))
                 .unwrap()
                 .manual_checkpoint()
                 .unwrap()
-                .history_digest,
+                .identity
+                .to_string(),
             report.history_sha256
         );
         let alias = temp.path("external/nested/alias.kinewright");
@@ -903,14 +934,17 @@ mod linux {
             panic!("same-project alias must ordinary Save");
         };
         assert_eq!(same.project_id, report.project_id);
-        assert_eq!(same.history_sha256, digest(&core.export_history().unwrap()));
+        assert_eq!(
+            same.history_sha256,
+            digest(&core.portable_history().unwrap())
+        );
         assert_eq!(owner.core().actor_identity(), core.actor_identity());
     }
 
     #[test]
     fn pinned_save_as_rejects_replaced_inspected_parent_before_target_mutation() {
         let temp = temp("c8-admitted-save-as-parent");
-        let core = Core::spawn(Document::default()).unwrap();
+        let core = Core::for_test(Document::default()).unwrap();
         add_track(&core, 1);
         let mut owner =
             Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
@@ -924,21 +958,21 @@ mod linux {
         let original = temp.path("original-admitted");
         std::fs::rename(&parent, &original).unwrap();
         std::fs::create_dir(&parent).unwrap();
-        let before = core.export_history().unwrap();
+        let before = core.portable_history().unwrap();
         assert!(matches!(
             owner.save_as_admitted(&inspection, StorageLimits::default()),
             Err(BundleError::Identity(_))
         ));
         assert_eq!(std::fs::read_dir(&parent).unwrap().count(), 0);
         assert_eq!(std::fs::read_dir(&original).unwrap().count(), 0);
-        assert_eq!(core.export_history().unwrap(), before);
+        assert_eq!(core.portable_history().unwrap(), before);
         assert!(!owner.dirty().unwrap());
     }
 
     fn dirty_selection(
         temp: &TempDirectory,
-    ) -> (Ja1EditingSession, HistorySnapshot, RecoverySelection) {
-        let core = Core::spawn(Document::default()).unwrap();
+    ) -> (Ja1EditingSession, PortableHistory, RecoverySelection) {
+        let core = Core::for_test(Document::default()).unwrap();
         add_track(&core, 1);
         let mut owner =
             Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
@@ -951,20 +985,7 @@ mod linux {
         for id in 3..=20 {
             add_track(&core, id);
         }
-        let candidate = core.export_history().unwrap();
-        let floor = kinewright_core::HistoryTransition::floor(candidate.clone(), 10).unwrap();
-        let limits = StorageLimits {
-            branch_history_bytes: kinewright_project::bundle_commit::history_cost_probe(
-                floor.after(),
-                &StorageLimits::default(),
-            )
-            .unwrap(),
-            ..StorageLimits::default()
-        };
-        let expected =
-            kinewright_project::bundle_commit::bound_history_probe(&candidate, &limits).unwrap();
-        assert!(expected.floor_offset > candidate.floor_offset);
-        owner.restrict_limits_probe(limits).unwrap();
+        let expected = received(core.portable_history().unwrap());
         owner.prepare_recovery(target.clone()).unwrap();
         (owner, expected, target)
     }
@@ -990,17 +1011,22 @@ mod linux {
                 .expect("the actual preceding L Save must be delivered");
             assert!(owner.take_preliminary_save_report().is_none());
             assert_eq!(report.history_sha256, digest(&expected));
-            assert_eq!(owner.published_history(&report).unwrap(), expected);
+            assert_eq!(
+                owner
+                    .published_history(&report)
+                    .unwrap_or_else(|e| panic!("HX_PRELIM {fault:?}: {e}")),
+                expected
+            );
             let mut wrong = report.clone();
             wrong.root_sha256 = "00".repeat(32);
             assert!(owner.published_history(&wrong).is_err());
             if let ProjectSelectionResult::Activated(selected) = result {
                 assert!(report.generation < selected.generation);
                 assert_ne!(report.head_id, selected.head_id);
-                assert_ne!(owner.core().export_history().unwrap(), expected);
+                assert_ne!(owner.core().portable_history().unwrap(), expected);
                 assert_eq!(
                     owner.published_history(&selected).unwrap(),
-                    owner.core().export_history().unwrap()
+                    owner.core().portable_history().unwrap()
                 );
                 assert_eq!(owner.published_history(&report).unwrap(), expected);
             }
@@ -1027,6 +1053,6 @@ mod linux {
         assert!(owner.take_preliminary_save_report().is_none());
         assert_eq!(report.history_sha256, digest(&expected));
         assert_eq!(owner.published_history(&report).unwrap(), expected);
-        assert_ne!(owner.core().export_history().unwrap(), expected);
+        assert_ne!(owner.core().portable_history().unwrap(), expected);
     }
 }

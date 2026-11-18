@@ -341,7 +341,7 @@ fn s4b_c2_lost_charge_ack_reopens_one_charge_without_replacement() {
     let Fixture { temp, host, .. } = f;
     let path = temp.path("project.kinewright");
     drop(host);
-    let reopened = Ja1EditingSession::open(&path).unwrap();
+    let reopened = Ja1EditingSession::open(&path, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
     let projection = reopened.orchestration_projection(&run).unwrap().unwrap();
     assert!(
         crate::orchestration::outbox::next_effect(&projection, &projection.effects[0].lane)
@@ -425,7 +425,7 @@ fn s4b_c2_lost_commit_ack_reopens_one_charge_and_one_execution() {
     );
     let Fixture { host, temp, .. } = f;
     drop(host);
-    let reopened = Ja1EditingSession::open(&temp.path("project.kinewright")).unwrap();
+    let reopened = Ja1EditingSession::open(&temp.path("project.kinewright"), &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
     let projection = reopened.orchestration_projection(&run).unwrap().unwrap();
     assert!(
         crate::orchestration::outbox::next_effect(&projection, &projection.effects[0].lane)

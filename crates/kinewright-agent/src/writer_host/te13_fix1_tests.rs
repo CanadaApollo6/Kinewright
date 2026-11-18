@@ -413,16 +413,13 @@ fn te13_fix1_crash_stop_recovery_preserves_both_histories_and_original_merge() {
                 &saved.source.checkpoint,
             )
             .unwrap();
-        let expected = (*owner
+        let expected = checkpoint.open(owner
             .lock()
             .unwrap()
             .owner()
             .unwrap()
             .store()
-            .unwrap()
-            .resolve_history(&checkpoint.history_ref)
-            .unwrap())
-        .clone();
+            .unwrap(), &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap().into_reader().unwrap().into_capture().unwrap();
         if phase != "merge" {
             assert_eq!(
                 serde_json::to_value(&expected).unwrap(),
@@ -430,7 +427,7 @@ fn te13_fix1_crash_stop_recovery_preserves_both_histories_and_original_merge() {
                 "TE13_FIX1_CRASH_LATEST_HISTORY"
             );
         }
-        assert!(!expected.cursor.redo.is_empty(), "TE13_FIX1_REAL_REDO");
+        assert!(!expected.history().redo.is_empty(), "TE13_FIX1_REAL_REDO");
         // Public production endpoint creation, with no test-only new reservation.
         let director = state
             .tasks
@@ -501,7 +498,7 @@ fn te13_fix1_crash_stop_recovery_preserves_both_histories_and_original_merge() {
         drop(owner);
         drop(host);
         let path = root.join("project.kinewright");
-        let mut owner = Ja1EditingSession::open(&path).unwrap();
+        let mut owner = Ja1EditingSession::open(&path, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
         let work = owner.retained_task_work().unwrap();
         assert!(
             work.iter()
@@ -520,7 +517,7 @@ fn te13_fix1_crash_stop_recovery_preserves_both_histories_and_original_merge() {
             .core()
             .request(kinewright_core::Command::Undo)
             .unwrap();
-        let manual = owner.core().export_history().unwrap();
+        let manual = owner.core().snapshot_identity().unwrap();
         let manual_branch = owner.current_switch_identity().unwrap().current.branch;
         let target = kinewright_project::bundle_recovery::RecoverySelection::WorkingBranch(
             saved.source.branch.clone(),
@@ -540,11 +537,7 @@ fn te13_fix1_crash_stop_recovery_preserves_both_histories_and_original_merge() {
             ),
             "TE13_FIX1_RECOVERY_ACTIVATED"
         );
-        assert_eq!(
-            owner.core().export_history().unwrap(),
-            expected,
-            "TE13_FIX1_RECOVER_EXACT_TASK"
-        );
+        assert_recovered_task_owner(owner.core(), serde_json::to_value(&expected).unwrap(), "TE13_FIX1_RECOVER_EXACT_TASK");
         assert_ne!(
             owner.current_switch_identity().unwrap().current.branch,
             saved.source.branch,
@@ -591,7 +584,7 @@ fn te13_fix1_crash_stop_recovery_preserves_both_histories_and_original_merge() {
         );
         if let Some(envelope) = &saved.merge_envelope {
             assert_eq!(
-                owner.manual_transition_receipt(envelope).unwrap(),
+                owner.command_receipt(envelope).unwrap(),
                 kinewright_project::receipts::ReceiptLookup::Absent,
                 "TE13_FIX1_NO_RETIRED_MERGE"
             );
@@ -608,15 +601,11 @@ fn te13_fix1_crash_stop_recovery_preserves_both_histories_and_original_merge() {
                     retry.is_err(),
                     "TE13_FIX1_ORIGINAL_MERGE_AFTER_ACTION_REFUSED"
                 );
-                assert_eq!(
-                    host.core().export_history().unwrap(),
-                    expected,
-                    "TE13_FIX1_RETIRED_RETRY_NO_SECOND_MERGE"
-                );
+                assert_recovered_task_owner(host.core(), serde_json::to_value(&expected).unwrap(), "TE13_FIX1_RETIRED_RETRY_NO_SECOND_MERGE");
                 assert_eq!(
                     host.owner()
                         .unwrap()
-                        .manual_transition_receipt(envelope)
+                        .command_receipt(envelope)
                         .unwrap(),
                     kinewright_project::receipts::ReceiptLookup::Absent,
                     "TE13_FIX1_RETIRED_RETRY_NO_RECEIPT"
@@ -625,14 +614,10 @@ fn te13_fix1_crash_stop_recovery_preserves_both_histories_and_original_merge() {
             drop(retained);
             drop(replay_host);
         }
-        let owner = Ja1EditingSession::open(&path).unwrap();
-        assert_eq!(
-            owner.core().export_history().unwrap(),
-            expected,
-            "TE13_FIX1_SECOND_REOPEN_TASK"
-        );
+        let owner = Ja1EditingSession::open(&path, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
+        assert_recovered_task_owner(owner.core(), serde_json::to_value(&expected).unwrap(), "TE13_FIX1_SECOND_REOPEN_TASK");
         drop(owner);
-        let loaded = kinewright_project::bundle::LoadedBundle::read(&path)
+        let loaded = kinewright_project::bundle::LoadedBundle::read(&path, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default()))
             .unwrap()
             .into_writer()
             .unwrap();
@@ -641,11 +626,9 @@ fn te13_fix1_crash_stop_recovery_preserves_both_histories_and_original_merge() {
             "TE13_FIX1_PERSON_BRANCH_RETAINED"
         );
         let manual_checkpoint = loaded.branches_probe().get(&manual_branch).unwrap();
-        let retained = loaded
-            .store()
-            .resolve_history(&manual_checkpoint.history_ref)
-            .unwrap();
-        assert_eq!(*retained, manual, "TE13_FIX1_PERSON_HISTORY_SAVED");
+        let retained = manual_checkpoint.open(loaded
+            .store(), &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap().into_reader().unwrap().into_capture().unwrap();
+        assert_eq!(retained.identity().unwrap(), manual, "TE13_FIX1_PERSON_HISTORY_SAVED");
         drop(retained);
         drop(loaded);
         std::fs::remove_dir_all(root).unwrap();

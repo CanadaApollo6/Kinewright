@@ -287,16 +287,16 @@ mod tests {
             "B21_NO_CONFIRMATION_WAIT"
         );
         let after = b.core.export_history().unwrap();
-        assert_eq!(after.document.tracks[0].clips.len(), 1, "B21_CUT_APPLIED");
-        assert_eq!(after.document.tracks[0].clips[0].timeline_start.0, 10);
+        assert_eq!(after.history().document.tracks[0].clips.len(), 1, "B21_CUT_APPLIED");
+        assert_eq!(after.history().document.tracks[0].clips[0].timeline_start.0, 10);
         b.core.request(kinewright_core::Command::Undo).unwrap();
         assert_eq!(
-            b.core.export_history().unwrap().document,
-            initial.document,
+            b.core.export_history().unwrap().history().document,
+            initial.history().document,
             "B21_REVERSIBLE"
         );
         b.core.request(kinewright_core::Command::Redo).unwrap();
-        assert_eq!(b.core.export_history().unwrap().document, after.document);
+        assert_eq!(b.core.export_history().unwrap().history().document, after.history().document);
         assert_eq!(
             b.f.host
                 .owner
@@ -343,7 +343,7 @@ mod tests {
     fn b21_assert_refused_unchanged(
         b: &B21,
         reply: &rmcp::model::CallToolResult,
-        before: &kinewright_core::HistorySnapshot,
+        before: &kinewright_project::operation_history::OwnerSnapshot,
     ) {
         assert_eq!(reply.is_error, Some(true), "B21_REFUSED {reply:?}");
         assert_eq!(
@@ -652,14 +652,14 @@ mod tests {
         let b = b21_start();
         let prepared = b21_prepare(&b);
         assert_eq!(prepared.is_error, Some(false));
-        let before = b.core.export_history().unwrap();
+        let before = b.core.snapshot_identity().unwrap();
         let grant = b.f.projection(&b.run).edit_consent.clone();
         let B21 {
             _pump: pump,
             mcp,
             core,
             run,
-            child: _,
+            child,
             f,
         } = b;
         let Fixture {
@@ -686,7 +686,7 @@ mod tests {
                 "B21_RESTART_PENDING_REFUSED {reply:?}"
             );
         });
-        assert_eq!(core.export_history().unwrap(), before);
+        assert!(matches!(core.export_history(), Err(kinewright_project::operation_actor::Error::Retired)), "RESTART_RELEASES_THE_UNACKNOWLEDGED_TASK_ACTOR");
         assert_eq!(
             mcp.server.confirmations().pending_task_count(),
             0,
@@ -729,6 +729,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(state.edit_consent, grant, "B21_GRANT_SURVIVES_RESTART");
+        let host_owner = owner.lock().unwrap();
+        let saved = host_owner.saved_task_history(&state, &child).unwrap().unwrap();
+        let checkpoint = host_owner.owner().unwrap().store().unwrap().read_record::<kinewright_project::bundle_records::BranchCheckpoint>(&saved.source.checkpoint).unwrap();
+        assert_eq!(checkpoint.identity, before, "RESTART_KEEPS_THE_EXACT_PRE_APPROVAL_TASK_CUT");
+        drop(checkpoint);
+        drop(host_owner);
         assert!(
             state.edit_approvals.is_empty(),
             "B21_RESTART_NO_OLD_APPROVAL"
@@ -756,11 +762,11 @@ mod tests {
             Some(false),
             "B21_TRIM_TRACK_APPLIED {committed:?}"
         );
-        assert!(b.core.export_history().unwrap().document.tracks.is_empty());
+        assert!(b.core.export_history().unwrap().history().document.tracks.is_empty());
         b.core.request(kinewright_core::Command::Undo).unwrap();
         assert_eq!(
-            b.core.export_history().unwrap().document,
-            before.document,
+            b.core.export_history().unwrap().history().document,
+            before.history().document,
             "B21_TRACK_REMOVAL_UNDO"
         );
         assert_eq!(b201_page(&b.f, &b.run).edit_approvals.len(), 1);

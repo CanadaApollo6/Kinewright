@@ -8,10 +8,10 @@ use crate::{
         policy::{TaskPolicy, operation_name},
     },
 };
-use kinewright_core::{
-    Command, Core, Document, Event, HistorySnapshot, Operation, TimelineRevision,
-};
+use kinewright_core::{Command, Document, Event, Operation, TimelineRevision};
 use kinewright_project::bundle_records::{BranchId, ProjectId};
+use kinewright_project::operation_actor::Core;
+use kinewright_project::operation_history::OwnerSnapshot;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -276,36 +276,26 @@ impl HostCommandOwner {
                 if !runtime.had_approved_edit() {
                     continue;
                 }
-                let Ok(identity) = runtime.core().history_change_id() else {
+                let Ok(identity) = runtime.core().change_id() else {
                     continue;
                 };
-                let Some(position) = identity.position() else {
-                    continue;
-                };
-                // Core already shares this immutable document. Keep its exact
-                // snapshot with a stable history identity, rather than copying it.
-                let Ok(Event::QueryResult(kinewright_core::QueryResult::Snapshot {
-                    revision,
-                    document,
-                })) = runtime
-                    .core()
-                    .request(Command::Query(kinewright_core::Query::Snapshot))
-                else {
-                    continue;
-                };
-                if revision != identity.revision()
-                    || runtime.core().history_change_id().ok() != Some(identity)
-                {
+                let mut answers = std::collections::BTreeMap::new();
+                for reference in &state.edit_approvals {
+                    if let Ok(Some(answer)) = runtime.core().approval_answer(reference.clone()) {
+                        answers.insert(reference.clone(), answer);
+                    }
+                }
+                if runtime.core().change_id().ok() != Some(identity) {
                     continue;
                 }
                 live.push(kinewright_project::edit_audit::LiveEditCut {
                     task: task.clone(),
                     cut: kinewright_project::edit_audit::KeptHistoryCut {
                         epoch: runtime.history_epoch().clone(),
-                        revision: identity.revision(),
-                        position,
+                        revision: identity.revision,
+                        position: identity.position.position,
                     },
-                    document,
+                    answers,
                 });
             }
         }
@@ -336,8 +326,8 @@ impl HostCommandOwner {
 enum ConsentEdit<'a> {
     Batch(&'a [Operation]),
     History {
-        before: Box<HistorySnapshot>,
-        after: Box<HistorySnapshot>,
+        before: Box<OwnerSnapshot>,
+        after: Box<OwnerSnapshot>,
         operations: Vec<Operation>,
         redo: bool,
     },
@@ -356,7 +346,7 @@ impl ConsentEdit<'_> {
                 kinewright_core::apply_batch(&mut doc, ops).map_err(|e| policy(e.to_string()))?;
                 Ok(doc)
             }
-            Self::History { after, .. } => Ok((*after.document).clone()),
+            Self::History { after, .. } => Ok((*after.history().document).clone()),
         }
     }
     fn classes(&self, before: &Document) -> Result<BTreeSet<&'static str>, HostError> {
@@ -385,16 +375,21 @@ impl ConsentEdit<'_> {
         endpoint: &crate::orchestration::tasks::TaskEndpoint,
         core: &Core,
         revision: TimelineRevision,
+        approval: Option<kinewright_project::operation_history::Approval>,
     ) -> Result<EditOutcome, HostError> {
         match self {
             Self::Batch(ops) => {
                 endpoint.check_batch_history(core, ops).map_err(policy)?;
-                Ok(EditOutcome::Batch(Box::new(core.request(
-                    Command::DoBatchIfRevision {
-                        expected: revision,
-                        operations: ops.to_vec(),
-                    },
-                ))))
+                let command = Command::DoBatchIfRevision {
+                    expected: revision,
+                    operations: (*ops).to_owned(),
+                };
+                let event = if let Some(approval) = approval {
+                    core.request_with_context(command, consent_context(core, Some(approval), None)?)
+                } else {
+                    core.request(command)
+                };
+                Ok(EditOutcome::Batch(Box::new(event)))
             }
             Self::History {
                 before,
@@ -405,10 +400,34 @@ impl ConsentEdit<'_> {
                 if core.export_history().map_err(|e| policy(e.to_string()))? != **before {
                     return Err(stale());
                 }
-                let actual = endpoint
-                    .history_step(core, revision, *redo)
-                    .map_err(policy)?;
-                if actual != **after {
+                let actual = if let Some(id) = approval {
+                    let step = if *redo {
+                        before.history().redo.last()
+                    } else {
+                        before.history().undo.back()
+                    }
+                    .ok_or_else(stale)?;
+                    let transition = kinewright_project::operation_history::TransitionApproval {
+                        id: id.reference,
+                        direction: if *redo {
+                            kinewright_project::operation_history::Direction::Redo
+                        } else {
+                            kinewright_project::operation_history::Direction::Undo
+                        },
+                        target: step.evidence().ok_or_else(stale)?,
+                    };
+                    core.request_with_context(
+                        if *redo { Command::Redo } else { Command::Undo },
+                        consent_context(core, None, Some(transition))?,
+                    )
+                    .map_err(|error| policy(error.to_string()))?;
+                    core.export_history().map_err(|e| policy(e.to_string()))?
+                } else {
+                    endpoint
+                        .history_step(core, revision, *redo)
+                        .map_err(policy)?
+                };
+                if actual.history() != after.history() {
                     return Err(policy("History differs from the approved transition"));
                 }
                 Ok(EditOutcome::History(actual))
@@ -416,9 +435,28 @@ impl ConsentEdit<'_> {
         }
     }
 }
+fn consent_context(
+    core: &Core,
+    approval: Option<kinewright_project::operation_history::Approval>,
+    transition: Option<kinewright_project::operation_history::TransitionApproval>,
+) -> Result<kinewright_project::operation_actor::CommandContext, HostError> {
+    Ok(kinewright_project::operation_actor::CommandContext {
+        creation: kinewright_project::operation_history::CreationOrigin {
+            branch: core.creation_branch().map_err(|e| policy(e.to_string()))?,
+            batch: kinewright_project::bundle_records::BatchId::fresh()?,
+        },
+        inputs: vec![],
+        approval,
+        transition,
+    })
+}
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one consent outcome owns the bounded history capture until its decision is published"
+)]
 enum EditOutcome {
-    Batch(Box<Result<Event, kinewright_core::CoreDisconnected>>),
-    History(HistorySnapshot),
+    Batch(Box<Result<Event, kinewright_project::operation_actor::Refusal>>),
+    History(OwnerSnapshot),
 }
 impl EditOutcome {
     fn applied(&self) -> bool {
@@ -480,12 +518,12 @@ impl TaskMcp {
             return Err(scope("The task actor changed"));
         }
         let history = core
-            .history_change_id()
+            .change_id()
             .map_err(|e| problem("consent_authority", e.to_string()))?;
-        if history.revision() != revision {
+        if history.revision != revision {
             return Err(stale());
         }
-        let history_position = history.position().ok_or_else(stale)?;
+        let history_position = history.position.position;
         let history_epoch = host
             .hooks
             .runs
@@ -613,15 +651,15 @@ impl TaskMcp {
                 task_policy
                     .validate_batch(
                         if *redo {
-                            &before.document
+                            &before.history().document
                         } else {
-                            &after.document
+                            &after.history().document
                         },
                         operations,
                     )
                     .map_err(policy)?;
                 task_policy
-                    .validate_history_change(&before.document, &after.document)
+                    .validate_history_change(&before.history().document, &after.history().document)
                     .map_err(policy)?;
             }
         }
@@ -640,7 +678,7 @@ impl TaskMcp {
         before: &Document,
         operations: &[Operation],
         description: Option<&str>,
-    ) -> Result<Result<Event, kinewright_core::CoreDisconnected>, HostError> {
+    ) -> Result<Result<Event, kinewright_project::operation_actor::Refusal>, HostError> {
         match self.authorize_edit(
             broker,
             core,
@@ -658,7 +696,7 @@ impl TaskMcp {
         core: &Core,
         revision: TimelineRevision,
         redo: bool,
-    ) -> Result<HistorySnapshot, HostError> {
+    ) -> Result<OwnerSnapshot, HostError> {
         {
             let owner = self.consent_host()?;
             let host = lock_host(&owner, &self.endpoint)?;
@@ -674,10 +712,10 @@ impl TaskMcp {
             .endpoint
             .preview_history_step(core, revision, redo)
             .map_err(policy)?;
-        let (clips, tracks) = removed(&before.document, &after.document);
+        let (clips, tracks) = removed(&before.history().document, &after.history().document);
         let description = (clips > 0 || tracks > 0)
             .then(|| format!("History removes {clips} clips and {tracks} tracks"));
-        let document = before.document.clone();
+        let document = before.history().document.clone();
         let edit = ConsentEdit::History {
             before: Box::new(before),
             after: Box::new(after),
@@ -714,9 +752,7 @@ impl TaskMcp {
                 .endpoint
                 .check_batch_history(core, operations)
                 .map_err(policy)?,
-            ConsentEdit::History { after, .. } => {
-                self.endpoint.check_history(after).map_err(policy)?;
-            }
+            ConsentEdit::History { .. } => {}
         }
         let counts = removed(before, &edit.after(before)?);
         let actual_description = (counts.0 > 0 || counts.1 > 0)
@@ -733,7 +769,7 @@ impl TaskMcp {
                 "Reversible private-branch edit",
             )?;
             self.validate_consent(&host, &state, &binding, core, before, edit)?;
-            return edit.apply(&self.endpoint, core, revision);
+            return edit.apply(&self.endpoint, core, revision, None);
         }
         let description = description.ok_or_else(refused)?;
         let binding = {
@@ -844,7 +880,7 @@ impl TaskMcp {
             .clone();
         let marker = serde_json::to_vec(&AppliedRecord {
             kind: "studio_edit_applied_v1".into(),
-            approval: reference,
+            approval: reference.clone(),
             revision: TimelineRevision(revision.0.checked_add(1).ok_or_else(stale)?),
         })?;
         let marker_reference = evidence_reference(&marker);
@@ -909,7 +945,26 @@ impl TaskMcp {
             if let Some(hook) = host.hooks.consent_apply_hook.take() {
                 hook(core);
             }
-            let outcome = edit.apply(&self.endpoint, core, revision)?;
+            let outcome = edit.apply(
+                &self.endpoint,
+                core,
+                revision,
+                Some(kinewright_project::operation_history::Approval {
+                    reference: reference.clone(),
+                    targets: record
+                        .targets
+                        .iter()
+                        .map(|target| match target {
+                            RemovedObject::Clip { clip, .. } => {
+                                kinewright_project::operation_history::RemovedTarget::Clip(*clip)
+                            }
+                            RemovedObject::Track { track } => {
+                                kinewright_project::operation_history::RemovedTarget::Track(*track)
+                            }
+                        })
+                        .collect(),
+                }),
+            )?;
             if outcome.applied() {
                 if let Some(runtime) = host
                     .hooks

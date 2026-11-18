@@ -3,9 +3,9 @@
 #![allow(clippy::too_many_lines)]
 use kinewright_core::*;
 use kinewright_media::test_support::TempDirectory;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{BundleWriteAdmission, ProjectBundle},
-    bundle_commit::bound_history_probe,
     bundle_copy::{CopyStatus, SaveAsOutcome, SessionStore},
     bundle_records::ObjectRef,
     io_observer,
@@ -18,12 +18,11 @@ fn temp(label: &str) -> TempDirectory {
 }
 fn limits() -> StorageLimits {
     StorageLimits {
-        branch_history_bytes: 1 << 20,
         ..StorageLimits::default()
     }
 }
 fn core() -> Core {
-    Core::spawn(Document {
+    Core::for_test(Document {
         tracks: (1..=200)
             .map(|id| Track {
                 id: TrackId(id),
@@ -65,25 +64,45 @@ fn inputs(session: &mut SessionStore) -> ObjectRef {
         .reference
         .clone()
 }
-fn every_entry(core: &Core, before: &HistorySnapshot) {
-    for entry in before.cursor.undo.iter().rev() {
+fn every_entry(core: &Core, before: &kinewright_project::operation_history::OwnerSnapshot) {
+    // Independent operation replay, including the saved Redo tail.
+    let mut document = before.history().baseline.as_ref().clone();
+    let mut boundaries = vec![document.clone()];
+    for step in before
+        .history()
+        .undo
+        .iter()
+        .chain(before.history().redo.iter().rev())
+    {
+        for command in step.commands() {
+            for operation in &command.operations {
+                operation.apply(&mut document).unwrap();
+            }
+        }
+        boundaries.push(document.clone());
+    }
+    let depth = before.history().undo.len();
+    for at in (0..depth).rev() {
         apply(core, Command::Undo);
         assert_eq!(
-            core.export_history().unwrap().document,
-            entry.document,
-            "original Undo target unavailable"
+            core.export_history().unwrap().history().document.as_ref(),
+            &boundaries[at],
+            "ORIGINAL_UNDO_TARGET_SURVIVES_PUBLICATION_FAILURE"
         );
     }
-    for _ in &before.cursor.undo {
+    for _ in 0..depth {
         apply(core, Command::Redo);
     }
-    assert_eq!(core.export_history().unwrap().document, before.document);
-    for entry in before.cursor.redo.iter().rev() {
+    assert_eq!(
+        core.export_history().unwrap().history().document,
+        before.history().document
+    );
+    for document in &boundaries[depth + 1..] {
         apply(core, Command::Redo);
         assert_eq!(
-            core.export_history().unwrap().document,
-            entry.document,
-            "original Redo target unavailable"
+            core.export_history().unwrap().history().document.as_ref(),
+            document,
+            "ORIGINAL_REDO_TARGET_SURVIVES_PUBLICATION_FAILURE"
         );
     }
 }
@@ -103,12 +122,8 @@ fn root_staging_and_cleanup_failure_releases_first_save_to_another_destination()
         apply(&core, Command::Undo);
     }
     let before = core.export_history().unwrap();
-    assert!(
-        bound_history_probe(&before, &limits())
-            .unwrap()
-            .floor_offset
-            > 0
-    );
+    assert_eq!(before.history().undo.len(), 37);
+    assert_eq!(before.history().redo.len(), 3);
     let mut session = SessionStore::create(temp.root(), StorageLimits::default()).unwrap();
     let input = inputs(&mut session);
     let (copy, trace) = io_observer::observe(|| {
@@ -149,7 +164,7 @@ fn root_staging_and_cleanup_failure_releases_first_save_to_another_destination()
         "unresolved staging lost its charge"
     );
     assert!(
-        core.pending_history_save().unwrap().is_none(),
+        core.attachment_state().unwrap() == AttachmentState::Live,
         "prepublication staging cleanup retained Core's ticket"
     );
     assert_eq!(core.export_history().unwrap(), before);
@@ -186,7 +201,7 @@ fn reconciled_first_copy_does_not_gate_the_session_on_its_old_destination() {
     .unwrap();
     assert!(matches!(copy.status(), CopyStatus::DurabilityUnknown));
     assert!(copy.reconcile().unwrap().is_some());
-    assert!(core.pending_history_save().unwrap().is_none());
+    assert_eq!(core.attachment_state().unwrap(), AttachmentState::Live);
     fs::rename(&a, temp.path("gone")).unwrap();
     let next = session
         .first_save_with_limits(&temp.path("b.kinewright"), &core, &input, limits())
@@ -197,8 +212,13 @@ fn reconciled_first_copy_does_not_gate_the_session_on_its_old_destination() {
 fn reconciled_save_as_does_not_gate_the_source_owners_next_save() {
     let temp = temp("r6-named-copy");
     let path = temp.path("source.kinewright");
-    let mut source = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
     let core = core();
+    let mut source = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     grow(&core);
     let input = source.empty_inputs().unwrap().reference.clone();
     source.save(&core, &input).unwrap();
@@ -225,18 +245,23 @@ fn durable_floor_uses_only_the_current_checkpoint_history_cache() {
     let path = temp.path("cached.kinewright");
     let core = core();
     grow(&core);
-    let mut owner = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let mut owner = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let input = owner.empty_inputs().unwrap().reference.clone();
     owner.save(&core, &input).unwrap();
-    for expected_reads in [0, 0, 1, 0] {
-        if expected_reads == 1 {
-            owner.invalidate_history_cache_binding_probe();
+    for clear_memo in [false, false, true, false] {
+        if clear_memo {
+            owner.store().clear_verified_memo_probe().unwrap();
         }
         apply(
             &core,
             Command::Do(Operation::SetTrackSyncLock {
                 track: TrackId(1),
-                locked: expected_reads == 1,
+                locked: clear_memo,
             }),
         );
         let count = io_observer::history_decode_count();
@@ -245,7 +270,7 @@ fn durable_floor_uses_only_the_current_checkpoint_history_cache() {
             move || {
                 assert_eq!(
                     io_observer::history_decode_count() - count,
-                    expected_reads,
+                    0,
                     "durable-floor cache must match the current immutable checkpoint reference"
                 );
             },
@@ -254,7 +279,10 @@ fn durable_floor_uses_only_the_current_checkpoint_history_cache() {
         .unwrap();
     }
     drop(owner);
-    let mut owner = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
+    let mut owner = LoadedBundle::read(&path, core.history_pool())
+        .unwrap()
+        .into_writer()
+        .unwrap();
     let input = owner
         .checkpoint(owner.manual_branch_id())
         .unwrap()
@@ -275,7 +303,11 @@ fn durable_floor_uses_only_the_current_checkpoint_history_cache() {
     .unwrap();
     assert_eq!(
         core.export_history().unwrap(),
-        *owner.branch_history(owner.manual_branch_id()).unwrap()
+        owner
+            .branch_history(owner.manual_branch_id())
+            .unwrap()
+            .into_capture()
+            .unwrap()
     );
 }
 

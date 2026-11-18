@@ -1,15 +1,32 @@
-//! Shared manual recovery. Runtime plans have only ordinary receipt/history durability.
+//! Recovery replays only the absent original suffix and publishes one fresh
+//! install epoch. Acknowledgements and that epoch survive a writer restart.
 use super::{HostCommandOwner, HostError, HostRefusal, HostReply, HostSnapshot, RecoveryBarrier};
-use kinewright_core::{AcceptedHistory, HistoryTransition};
-use kinewright_project::receipts::{HistoryRequest, ReceiptLookup};
+use kinewright_project::bundle::BundleError;
+use kinewright_project::operation_protocol::EncodedMessage;
+
+fn confirmation_digest(barrier: &RecoveryBarrier) -> Result<[u8; 32], HostError> {
+    struct Writer(kinewright_hash::Sha256);
+    impl std::io::Write for Writer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = Writer(kinewright_hash::Sha256::new());
+    writer.0.update(b"kinewright/recovery-confirmation/v1\0");
+    serde_json::to_writer(&mut writer, barrier)?;
+    Ok(writer.0.finalize())
+}
 
 impl HostCommandOwner {
     pub(super) fn begin_recovery(
         &mut self,
         client: String,
         frozen: Option<&HostSnapshot>,
-        pending: &[AcceptedHistory],
-        discard: Option<usize>,
+        pending: &[EncodedMessage],
         reply: &mut HostReply,
     ) -> Result<(), HostError> {
         if !(32..=128).contains(&client.len())
@@ -21,9 +38,8 @@ impl HostCommandOwner {
                 HostRefusal::new("manual_client", "private attachment identity required").into(),
             );
         }
-        let request = kinewright_media::sha256_bytes(&serde_json::to_vec(&(
-            &client, frozen, pending, discard,
-        ))?);
+        let request =
+            kinewright_media::sha256_bytes(&serde_json::to_vec(&(&client, frozen, pending))?);
         if let Some(barrier) = &self.recovery {
             if self.recovery_request.as_ref() == Some(&request) {
                 reply.recovery = Some(barrier.clone());
@@ -31,118 +47,103 @@ impl HostCommandOwner {
             }
             return Err(HostRefusal::new(
                 "recovery_pending",
-                "resolve the original barrier before starting another",
+                "resolve the original install before starting another",
             )
             .into());
         }
-        self.recovery_request = Some(request);
-        self.recovery_handoff = None;
-        self.confirmed_recovery = None;
-        // Fence first, including every error path. Submitted GUI sends are in its frozen cut.
         self.recovering = true;
         self.manual = None;
-        if pending.len() > kinewright_core::MANUAL_COMMANDS
-            || serde_json::to_vec(pending)?.len() > kinewright_core::MANUAL_BYTES + 128
+        // Starting the next recovery revokes the preceding confirmation's
+        // lease. Neither replay cache may retain or return that old grant.
+        self.confirmed_recovery = None;
+        self.foreground_reply = None;
+        if pending.len() > kinewright_project::operation_protocol::PENDING_COMMANDS
+            || pending
+                .iter()
+                .try_fold(0_u64, |n, message| n.checked_add(message.byte_len()))
+                .is_none_or(|n| n > kinewright_project::operation_protocol::PENDING_BYTES)
             || (frozen.is_none() && !pending.is_empty())
         {
             return Err(HostRefusal::new("manual_capacity", "invalid frozen pending chain").into());
         }
-        if let Some(snapshot) = &frozen {
-            snapshot.verify()?;
+        for message in pending {
+            self.owner()?.validate_manual_message_publisher(message)?;
         }
-        self.owner_mut()?
-            .reconcile_manual_chain(&client, pending, frozen.map(|s| &s.history))?;
-        let published = HostSnapshot::from_history(self.owner()?.published_manual_history()?)?;
-        if let Some(before) = frozen
-            && before != &published
-        {
-            let cut = published
-                .history
-                .floor_offset
-                .checked_sub(before.history.floor_offset)
-                .and_then(|n| usize::try_from(n).ok())
-                .filter(|n| *n > 0)
-                .ok_or_else(|| {
-                    HostRefusal::new(
-                        "history_changed",
-                        "reconciled history differs from the accepted cut",
-                    )
-                })?;
-            let floor = HistoryTransition::floor(before.history.clone(), cut)
+        let before = match frozen {
+            Some(snapshot) => {
+                snapshot.verify()?;
+                snapshot.clone()
+            }
+            None => HostSnapshot::capture(self.core())?,
+        };
+        let source = before.history.identity();
+        let acknowledged =
+            if let Some(receipts) = self.owner()?.installed_manual_receipts(source)? {
+                // The prior attempt published this same install, even if its reply
+                // was lost and this is a different writer process. Never replay it.
+                let mut acknowledged = Vec::with_capacity(pending.len());
+                for encoded in pending {
+                    let message = encoded
+                        .decode()
+                        .map_err(|error| HostError::Protocol(error.to_string()))?;
+                    let receipt = receipts
+                        .iter()
+                        .find(|receipt| receipt.id == message.id)
+                        .ok_or_else(|| {
+                            HostRefusal::new(
+                                "recovery_unresolved",
+                                "original command has no durable receipt",
+                            )
+                        })?;
+                    acknowledged.push(receipt.clone());
+                }
+                acknowledged
+            } else {
+                self.owner_mut()?
+                    .reconcile_manual_chain(&client, pending, Some(source))?;
+                let mut receipts = Vec::with_capacity(pending.len());
+                for message in pending {
+                    receipts.push(self.owner()?.manual_receipt(message)?.ok_or_else(|| {
+                        HostRefusal::new(
+                            "recovery_unresolved",
+                            "original command has no durable receipt",
+                        )
+                    })?);
+                }
+                receipts
+            };
+        // Check each original acknowledgement, rather than trusting an install
+        // question to grant fresh authority to an unrelated issuer or payload.
+        for message in pending {
+            let decoded = message
+                .decode()
                 .map_err(|e| HostError::Protocol(e.to_string()))?;
-            if floor.after() != &published.history {
+            if !acknowledged.iter().any(|receipt| {
+                receipt.id == decoded.id
+                    && receipt.sequence == decoded.sequence
+                    && receipt.accepted == decoded.accepted
+                    && receipt.additional_batches == decoded.folded.len() as u64
+                    && receipt.tip == decoded.tip
+                    && decoded.digest().ok() == Some(receipt.command)
+            }) {
                 return Err(HostRefusal::new(
-                    "history_changed",
-                    "shared floor differs from the frozen cut",
+                    "recovery_unresolved",
+                    "original payload differs from its saved receipt",
                 )
                 .into());
             }
-            let original = kinewright_project::manual_history::AcceptedManualCommand::decode(
-                pending.last().ok_or_else(|| {
-                    HostRefusal::new(
-                        "history_changed",
-                        "a pending cut is required for its automatic floor",
-                    )
-                })?,
-            )?
-            .envelope;
-            let (reference, _) = self.owner()?.manual_checkpoint()?;
-            let shadow = self.owner()?.freeze_manual_barrier()?;
-            self.owner_mut()?
-                .install_manual_barrier(&shadow, published.history.clone(), vec![])?;
-            let removed = before
-                .history
-                .cursor
-                .undo
-                .len()
-                .saturating_sub(published.history.cursor.undo.len());
-            self.floor_disclosure = format!(
-                "Older Undo history removed by the shared floor: {removed} entries. Current edits, Redo and the gesture are kept."
-            );
-            let barrier = RecoveryBarrier {
-                client,
-                switch_generation: self.owner()?.manual_switch_generation()?,
-                envelope: original,
-                checkpoint_ref: reference,
-                before: before.clone(),
-                after: published,
-            };
-            self.recovery = Some(barrier.clone());
-            reply.recovery = Some(barrier);
-            return Ok(());
         }
-        if HostSnapshot::capture(self.core())? != published {
-            return Err(
-                HostRefusal::new("history_changed", "shadow differs from the durable cut").into(),
-            );
-        }
-        self.prepare_barrier(client, discard, reply)
-    }
-
-    fn prepare_barrier(
-        &mut self,
-        client: String,
-        discard: Option<usize>,
-        reply: &mut HostReply,
-    ) -> Result<(), HostError> {
-        let envelope = self.owner_mut()?.prepare_manual_transition(discard)?;
-        let (checkpoint_ref, _) = self.owner()?.manual_checkpoint()?;
-        let before = HostSnapshot::capture(self.core())?;
-        let transition = match discard {
-            Some(count) => HistoryTransition::floor(before.history.clone(), count),
-            None => HistoryTransition::recovery_close(before.history.clone(), &before.history),
-        }
-        .map_err(|e| HostError::Protocol(e.to_string()))?;
-        let after = HostSnapshot::from_history(transition.after().clone())?;
-        self.owner()?.freeze_manual_barrier()?;
+        let checkpoint_ref = self.owner_mut()?.rotate_manual_epoch(source)?;
+        let after = HostSnapshot::from_history(self.owner()?.published_manual_history()?)?;
         let barrier = RecoveryBarrier {
-            switch_generation: self.owner()?.manual_switch_generation()?,
             client,
-            envelope,
+            switch_generation: self.owner()?.manual_switch_generation()?,
             checkpoint_ref,
+            acknowledged,
             before,
             after,
         };
+        self.recovery_request = Some(request);
         self.recovery = Some(barrier.clone());
         reply.recovery = Some(barrier);
         Ok(())
@@ -150,198 +151,213 @@ impl HostCommandOwner {
 
     pub(super) fn publish_barrier(
         &mut self,
-        barrier: RecoveryBarrier,
+        barrier: &RecoveryBarrier,
         reply: &mut HostReply,
     ) -> Result<(), HostError> {
         self.recovering = true;
         self.manual = None;
-        if self.owner()?.manual_switch_generation()? != barrier.switch_generation {
-            return Err(
-                HostRefusal::new("history_changed", "barrier switch generation differs").into(),
-            );
-        }
         barrier.before.verify()?;
         barrier.after.verify()?;
-        if self
+        if self.recovery.is_none() {
+            self.recovery = Some(self.reopen_durable_barrier(barrier)?);
+        }
+        let selected = self
             .recovery
             .as_ref()
-            .is_some_and(|current| current != &barrier)
+            .ok_or_else(|| HostRefusal::new("history_changed", "no selected recovery"))?;
+        if !barrier
+            .before
+            .history
+            .snapshot
+            .same_encoded_state(&selected.before.history.snapshot)
+            || !barrier
+                .after
+                .history
+                .snapshot
+                .same_encoded_state(&selected.after.history.snapshot)
+            || self.owner()?.manual_switch_generation()? != barrier.switch_generation
+            || self.recovery.as_ref() != Some(barrier)
+            || self.owner()?.manual_checkpoint()?.0 != barrier.checkpoint_ref
+            || self.owner()?.manual_checkpoint()?.1.identity != barrier.after.history.identity()
         {
             return Err(HostRefusal::new(
                 "history_changed",
-                "retry must preserve the original barrier",
+                "recovery install no longer matches its durable checkpoint",
             )
             .into());
         }
-        if barrier.envelope.manual.is_some() {
-            let manual = barrier
-                .envelope
-                .manual
-                .as_ref()
-                .ok_or_else(|| HostError::Protocol("manual floor identity".into()))?;
-            let checkpoint = self.owner()?.manual_barrier_result(&barrier.envelope)?;
-            let discard = barrier
-                .after
-                .history
-                .floor_offset
-                .checked_sub(barrier.before.history.floor_offset)
-                .and_then(|n| usize::try_from(n).ok())
-                .filter(|n| *n > 0)
-                .ok_or_else(|| HostRefusal::new("history_changed", "manual floor cut"))?;
-            let floor = HistoryTransition::floor(barrier.before.history.clone(), discard)
-                .map_err(|e| HostError::Protocol(e.to_string()))?;
-            if manual.binding.parent_identity != Some(self.owner()?.manual_parent_identity()?)
-                || manual.binding.namespace_name.as_deref()
-                    != Some(self.owner()?.manual_namespace_name()?.as_str())
-                || manual.after_sha256 != barrier.before.history_sha256
-                || floor.after() != &barrier.after.history
-                || checkpoint.history_digest != barrier.after.history_sha256
-            {
-                return Err(
-                    HostRefusal::new("history_changed", "recorded manual floor differs").into(),
-                );
-            }
-            let cut = self.owner()?.freeze_manual_barrier()?;
-            self.owner_mut()?.install_manual_barrier(
-                &cut,
-                barrier.after.history.clone(),
-                vec![],
-            )?;
-            self.recovery = Some(barrier.clone());
-            reply.history = Some(barrier.after.history.clone());
-            reply.barrier_checkpoint = Some(checkpoint);
-            reply.recovery = Some(barrier);
-            return Ok(());
-        }
-        self.owner()?
-            .verify_manual_predecessor(&barrier.checkpoint_ref, &barrier.before.history)?;
-        let expected = match &barrier.envelope.transition {
-            Some(HistoryRequest::Floor {
-                discard_batches, ..
-            }) => HistoryTransition::floor(barrier.before.history.clone(), *discard_batches),
-            Some(HistoryRequest::RecoveryClose { .. }) => HistoryTransition::recovery_close(
-                barrier.before.history.clone(),
-                &barrier.before.history,
-            ),
-            None => {
-                return Err(
-                    HostRefusal::new("history_changed", "barrier transition required").into(),
-                );
-            }
-        }
-        .map_err(|e| HostError::Protocol(e.to_string()))?;
-        if expected.after() != &barrier.after.history {
-            return Err(HostRefusal::new("history_changed", "barrier result differs").into());
-        }
-        let cut = self.owner()?.freeze_manual_barrier()?;
-        let lookup = self.owner()?.manual_transition_receipt(&barrier.envelope)?;
-        if lookup == ReceiptLookup::Absent {
-            if cut.history() != &barrier.before.history {
-                return Err(
-                    HostRefusal::new("history_changed", "barrier predecessor differs").into(),
-                );
-            }
-            self.owner_mut()?
-                .publish_manual_transition(&barrier.envelope)?;
-        }
-        let checkpoint = self.owner()?.manual_barrier_result(&barrier.envelope)?;
-        if checkpoint.history_digest != barrier.after.history_sha256 {
-            return Err(HostRefusal::new(
-                "recovery_unresolved",
-                "barrier has no exact durable result",
-            )
-            .into());
-        }
-        self.owner_mut()?
-            .install_manual_barrier(&cut, barrier.after.history.clone(), vec![])?;
-        self.recovery = Some(barrier.clone());
-        reply.history = Some(barrier.after.history.clone());
-        reply.barrier_checkpoint = Some(checkpoint);
-        reply.recovery = Some(barrier);
+        reply.history = Some(selected.after.history.clone());
+        reply.manual_ack.clone_from(&selected.acknowledged);
+        reply.recovery = Some(selected.clone());
         Ok(())
+    }
+
+    fn reopen_durable_barrier(
+        &self,
+        barrier: &RecoveryBarrier,
+    ) -> Result<RecoveryBarrier, HostError> {
+        let owner = self.owner()?;
+        let (reference, checkpoint) = owner.manual_checkpoint()?;
+        let install = checkpoint
+            .install
+            .as_ref()
+            .ok_or_else(|| HostRefusal::new("history_changed", "no durable recovery install"))?;
+        owner.validate_manual_publisher(install.publisher)?;
+        let cut = owner.freeze_manual_barrier()?;
+        let before = barrier
+            .before
+            .history
+            .clone()
+            .validate(self.core().history_pool())
+            .map_err(BundleError::from)?;
+        if reference != barrier.checkpoint_ref
+            || cut.identity() != checkpoint.identity
+            || cut.change().position != checkpoint.position
+            || cut.change().revision != checkpoint.revision
+            || owner.manual_switch_generation()? != barrier.switch_generation
+            || before.identity() != install.source
+            || before.position() != install.source_position
+            || barrier.before.history.branch != checkpoint.branch_id
+            || barrier.before.history.revision.0.checked_add(1) != Some(checkpoint.revision.0)
+            || barrier.after.history.identity() != checkpoint.identity
+            || barrier.after.history.branch != checkpoint.branch_id
+            || barrier.after.history.revision != checkpoint.revision
+            || barrier.acknowledged.iter().any(|receipt| {
+                install
+                    .stream
+                    .as_ref()
+                    .is_none_or(|stream| !stream.receipts().any(|saved| saved == receipt))
+            })
+        {
+            return Err(HostRefusal::new(
+                "history_changed",
+                "recovery evidence differs from its durable install",
+            )
+            .into());
+        }
+        drop(before);
+        let after = HostSnapshot::from_history(owner.published_manual_history()?)?;
+        if !after
+            .history
+            .snapshot
+            .same_encoded_state(&barrier.after.history.snapshot)
+        {
+            return Err(HostRefusal::new(
+                "history_changed",
+                "recovery payload differs from its durable install",
+            )
+            .into());
+        }
+        Ok(RecoveryBarrier {
+            client: barrier.client.clone(),
+            before: barrier.before.clone(),
+            after,
+            acknowledged: barrier.acknowledged.clone(),
+            checkpoint_ref: reference,
+            switch_generation: barrier.switch_generation,
+        })
     }
 
     pub(super) fn confirm_barrier(
         &mut self,
-        barrier: RecoveryBarrier,
-        installed: HostSnapshot,
+        barrier: &RecoveryBarrier,
+        installed: &HostSnapshot,
         reply: &mut HostReply,
     ) -> Result<(), HostError> {
         installed.verify()?;
-        if let Some((original, next)) = &self.recovery_handoff
-            && original == &barrier
-            && installed == barrier.after
-            && self.recovery.as_ref() == Some(next)
-        {
-            reply.recovery = Some(next.clone());
-            return Ok(());
-        }
+        let key = confirmation_digest(barrier)?;
         if let Some((original, confirmed)) = &self.confirmed_recovery
-            && original == &barrier
-            && installed == barrier.after
-            && self.manual == confirmed.manual_lease
+            && original == &key
+            && installed == &barrier.after
+            && confirmed.history.as_ref().is_some_and(|selected| {
+                installed
+                    .history
+                    .snapshot
+                    .same_encoded_state(&selected.snapshot)
+            })
+            && self
+                .manual
+                .as_ref()
+                .map(kinewright_project::editing_session::ManualAuthority::lease)
+                == confirmed.manual_lease.as_ref()
             && !self.recovering
-            && !self.owner()?.has_unresolved_publication()
-            && self.owner()?.manual_switch_generation()? == barrier.switch_generation
-            && HostSnapshot::capture(self.core())? == installed
         {
-            reply.manual_lease = confirmed.manual_lease.clone();
-            reply.manual_inputs = confirmed.manual_inputs.clone();
-            reply.history = confirmed.history.clone();
+            reply.manual_lease.clone_from(&confirmed.manual_lease);
+            reply.manual_inputs.clone_from(&confirmed.manual_inputs);
+            reply.history.clone_from(&confirmed.history);
             return Ok(());
         }
-        let checkpoint = self.owner()?.manual_barrier_result(&barrier.envelope)?;
-        if self.owner()?.manual_switch_generation()? != barrier.switch_generation
-            || self.recovery.as_ref() != Some(&barrier)
-            || installed != barrier.after
-            || HostSnapshot::capture(self.core())? != installed
-            || checkpoint.history_digest != installed.history_sha256
+        let trusted = self.recovery.as_ref();
+        if trusted != Some(barrier)
+            || trusted.is_none_or(|saved| {
+                !installed
+                    .history
+                    .snapshot
+                    .same_encoded_state(&saved.after.history.snapshot)
+                    || !barrier
+                        .before
+                        .history
+                        .snapshot
+                        .same_encoded_state(&saved.before.history.snapshot)
+                    || !barrier
+                        .after
+                        .history
+                        .snapshot
+                        .same_encoded_state(&saved.after.history.snapshot)
+            })
+            || self.owner()?.manual_switch_generation()? != barrier.switch_generation
+            || installed != &barrier.after
+            || self.owner()?.manual_checkpoint()?.1.identity != installed.history.identity()
+            || self
+                .core()
+                .snapshot_identity()
+                .map_err(|e| HostError::Protocol(e.to_string()))?
+                != installed.history.identity()
+            || self
+                .core()
+                .creation_branch()
+                .map_err(|e| HostError::Protocol(e.to_string()))?
+                != installed.history.branch
+            || self
+                .core()
+                .change_id()
+                .map_err(|e| HostError::Protocol(e.to_string()))?
+                .revision
+                != installed.history.revision
         {
             return Err(HostRefusal::new(
                 "recovery_unconfirmed",
-                "both Cores must install the same durable barrier result",
+                "both Cores must install the same durable snapshot",
             )
             .into());
         }
-        if barrier.envelope.manual.is_some()
-            || matches!(
-                barrier.envelope.transition,
-                Some(HistoryRequest::Floor { .. })
-            )
-        {
-            self.recovery = None;
-            self.prepare_barrier(barrier.client.clone(), None, reply)?;
-            self.recovery_handoff = Some((
-                barrier,
-                reply
-                    .recovery
-                    .clone()
-                    .ok_or_else(|| HostError::Protocol("recovery close plan".into()))?,
-            ));
-        } else {
-            let cut = self.owner()?.freeze_manual_barrier()?;
-            self.owner_mut()?.resume_manual_barrier(&cut)?;
-            self.recovering = false;
-            let acquisition: Result<_, HostError> = (|| {
-                let lease = self.acquire_manual(barrier.client.clone())?;
-                let inputs = self.owner()?.manual_input_context()?;
-                Ok((lease, inputs))
-            })();
-            let (lease, inputs) = match acquisition {
-                Ok(grant) => grant,
-                Err(error) => {
-                    self.manual = None;
-                    self.recovering = true;
-                    self.owner()?.freeze_manual_barrier()?;
-                    return Err(error);
-                }
-            };
-            self.recovery = None;
-            reply.manual_lease = Some(lease);
-            reply.manual_inputs = Some(inputs);
-            reply.history = Some(installed.history);
-            self.confirmed_recovery = Some((barrier, reply.clone()));
-        }
+        let cut = self.owner()?.freeze_manual_barrier()?;
+        self.owner_mut()?.resume_manual_barrier(&cut)?;
+        self.recovering = false;
+        let acquisition: Result<_, HostError> = (|| {
+            let lease = self.acquire_manual(barrier.client.clone())?;
+            Ok((lease, self.owner()?.manual_input_context()?))
+        })();
+        let (lease, inputs) = match acquisition {
+            Ok(grant) => grant,
+            Err(error) => {
+                self.manual = None;
+                self.recovering = true;
+                self.owner()?.freeze_manual_barrier()?;
+                return Err(error);
+            }
+        };
+        let selected = self
+            .recovery
+            .take()
+            .ok_or_else(|| HostError::Protocol("confirmed recovery disappeared".into()))?;
+        reply.manual_lease = Some(lease);
+        reply.manual_inputs = Some(inputs);
+        // The exact reply keeps the trusted selected capture's charged buffer.
+        // Its fixed confirmation digest replaces the no-longer-needed original
+        // source capture; duplicate confirmation never needs that full holder.
+        reply.history = Some(selected.after.history);
+        self.confirmed_recovery = Some((key, reply.clone()));
         Ok(())
     }
 }

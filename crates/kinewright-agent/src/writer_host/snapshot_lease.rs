@@ -6,6 +6,8 @@ use super::{
 };
 use kinewright_project::{storage_budget::StorageReservation, store::StorePin};
 
+const LEASE_REQUEST_BYTES: usize = 16 << 10;
+
 pub(super) struct LeasePin {
     payload_sha256: String,
     owner_epoch: u64,
@@ -258,14 +260,29 @@ impl HostClient {
         id: &str,
         digest: &str,
     ) -> Result<SnapshotLeaseRemote, HostError> {
-        let request = |command| HostRequest {
-            editor: None,
-            operation: None,
-            protocol: HOST_PROTOCOL,
-            project: self.endpoint().project.clone(),
-            roots: self.bootstrap.roots.clone(),
-            command,
+        let encode = |command| -> Result<Vec<u8>, HostError> {
+            let request = HostRequest {
+                editor: None,
+                operation: None,
+                protocol: HOST_PROTOCOL,
+                project: self.endpoint().project.clone(),
+                roots: self.bootstrap.roots.clone(),
+                command,
+            };
+            let body = serde_json::to_vec(&request)?;
+            request
+                .command
+                .check_request_capacity(body.len(), LEASE_REQUEST_BYTES)?;
+            Ok(body)
         };
+        let status = encode(HostCommand::SnapshotLeaseStatus {
+            id: id.into(),
+            payload_sha256: digest.into(),
+        })?;
+        let release = encode(HostCommand::ReleaseSnapshot {
+            id: id.into(),
+            payload_sha256: digest.into(),
+        })?;
         Ok(SnapshotLeaseRemote {
             cache: Arc::new(std::sync::Mutex::new(LeaseCache {
                 fresh_until: std::time::Instant::now(),
@@ -281,14 +298,8 @@ impl HostClient {
             url: format!("http://{}/snapshot-lease", self.endpoint().address),
             auth: self.bootstrap.auth.bearer(),
             project: self.endpoint().project.clone(),
-            status: serde_json::to_vec(&request(HostCommand::SnapshotLeaseStatus {
-                id: id.into(),
-                payload_sha256: digest.into(),
-            }))?,
-            release: serde_json::to_vec(&request(HostCommand::ReleaseSnapshot {
-                id: id.into(),
-                payload_sha256: digest.into(),
-            }))?,
+            status,
+            release,
         })
     }
 }
@@ -305,7 +316,7 @@ pub(super) async fn lease_request(
     };
     let bytes = match tokio::time::timeout(
         Duration::from_secs(15),
-        to_bytes(request.into_body(), 16 << 10),
+        to_bytes(request.into_body(), LEASE_REQUEST_BYTES),
     )
     .await
     {

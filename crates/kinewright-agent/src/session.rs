@@ -771,8 +771,9 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::thread;
 
-    use kinewright_core::{AgentDriver, AgentError, Core, Document, IncidentId, SessionConfig};
+    use kinewright_core::{AgentDriver, AgentError, Document, IncidentId, SessionConfig};
     use kinewright_media::FfmpegMediaEngine;
+    use kinewright_project::operation_actor::Core;
 
     use super::*;
     use crate::{McpServer, ScriptedCall, ScriptedCost, ScriptedDriver, ScriptedTurn};
@@ -780,7 +781,7 @@ mod tests {
     /// A live `McpServer` on an empty project, so every scripted tool call in
     /// these tests is a real call answered by the real dispatcher.
     fn live_server() -> McpServer {
-        let core = Core::spawn(Document::default()).expect("the fixture core starts");
+        let core = Core::for_test(Document::default()).expect("the fixture core starts");
         let media = Arc::new(FfmpegMediaEngine::legacy_fixture().expect("the media engine starts"));
         McpServer::start(core, Arc::clone(&media) as _, media as _).expect("the MCP server starts")
     }

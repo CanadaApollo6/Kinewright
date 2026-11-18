@@ -118,14 +118,17 @@ impl HostSession {
         )
         .map(Self::wrap)
     }
-    fn open(path: &Path) -> Result<Self, BundleError> {
-        kinewright_project::editing_session::Ja1EditingSession::open(path).map(Self::wrap)
+    fn open(
+        path: &Path,
+        pool: &kinewright_project::operation_history::HistoryPool,
+    ) -> Result<Self, BundleError> {
+        kinewright_project::editing_session::Ja1EditingSession::open(path, pool).map(Self::wrap)
     }
     fn run(&mut self, command: HostCommand) -> HostReply {
-        self.0.execute(command, self.0.config.roots.clone())
+        received_reply_for_test(self.0.execute(command, self.0.config.roots.clone()))
     }
     fn save_active(&mut self) -> Result<(), BundleError> {
-        let snapshot = HostSnapshot::capture(self.core()).unwrap();
+        let snapshot = received_snapshot_for_test(self.core()).unwrap();
         refusal(self.run(HostCommand::Save { snapshot })).map(|_| ())
     }
     fn reconcile_retained_destination(
@@ -149,8 +152,8 @@ impl HostSession {
     ) -> Result<RescueOutcome, BundleError> {
         // The same frozen preparation and exact explicit consent enter the real
         // dispatcher. This observation never supplies an outcome or a receipt.
-        let choices = selection.consent_choices_probe(consent);
-        let (trim, omission) = choices.as_ref().copied().unwrap_or((false, false));
+        let choices = selection.omission_consent_probe(consent);
+        let omission = choices.as_ref().copied().unwrap_or(false);
         let supplied = if choices.is_ok() {
             selection.consent()
         } else {
@@ -159,12 +162,8 @@ impl HostSession {
         self.0.choice = Some(Choice::Rescue {
             selection: Box::new(selection),
             consent: supplied,
-            trim: false,
             omission: false,
         });
-        if trim {
-            refusal(self.run(HostCommand::ConsentTrim))?;
-        }
         if omission {
             refusal(self.run(HostCommand::ConsentOmission))?;
         }
@@ -191,12 +190,12 @@ impl HostSession {
 mod rescue_cases;
 
 #[test]
-fn n2_committed_capture_never_acknowledges_sealed_a() {
+fn n2_mutated_activation_view_never_acknowledges_or_seals_a() {
     use kinewright_project::io_observer;
     let root =
         kinewright_media::test_support::TempDirectory::new_in(durable_test_root(), "c12-n2-host");
     let path = root.path("drive/a.kinewright");
-    let core = Core::spawn(document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
     let mut host = HostSession::new(root.root(), &core, StorageLimits::default()).unwrap();
     host.first_save(&path, StorageLimits::default()).unwrap();
     edit(&core, false);
@@ -213,6 +212,7 @@ fn n2_committed_capture_never_acknowledges_sealed_a() {
     let binder = ProjectBundle::activate(
         &root.path("authority.kinewright"),
         BundleWriteAdmission::new_document(),
+        core.history_pool(),
     )
     .unwrap();
     let outcome = host
@@ -231,10 +231,17 @@ fn n2_committed_capture_never_acknowledges_sealed_a() {
         .unwrap();
     assert!(reply.saved.is_none());
     assert!(reply.activation.is_none());
-    assert!(host.0.message.contains("A is sealed"));
+    assert!(host.0.message.contains("A remains intact"));
     assert!(host.0.message.contains(&b.display().to_string()));
-    assert_eq!(core.attachment_state().unwrap(), AttachmentState::Sealed);
-    assert!(host.is_capture_destination(&b));
+    assert_eq!(
+        core.attachment_state().unwrap(),
+        AttachmentState::Live,
+        "RESCUE_ACTIVATION_REFUSAL_PRESERVES_THE_SOURCE_ACTOR"
+    );
+    assert!(
+        host.is_capture_destination(&b),
+        "FAILED_PRIVATE_VIEW_IS_RETIRED_WHILE_THE_UNCHANGED_DURABLE_B_CUT_REMAINS_OWNED"
+    );
 }
 
 fn evidence_fixture(
@@ -248,8 +255,13 @@ fn evidence_fixture(
     let root = kinewright_media::test_support::TempDirectory::new_in(durable_test_root(), label);
     let path = root.path("drive/a.kinewright");
     std::fs::create_dir(root.path("drive")).unwrap();
-    let core = Core::spawn(document()).unwrap();
-    let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let core = Core::for_test(document()).unwrap();
+    let mut bundle = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let inputs = bundle.empty_inputs().unwrap().reference.clone();
     let bytes = b"C12 independent evidence stays exact across remote rescue and compaction";
     let reference = ObjectRef {
@@ -284,7 +296,7 @@ fn w02_host_missing_required_evidence_refuses_without_destination_mutation() {
     let before = host.core().export_history().unwrap();
     let (reply, trace) = io_observer::observe(|| {
         host.run(HostCommand::PreviewRescue {
-            snapshot: HostSnapshot::from_history(before.clone()).unwrap(),
+            snapshot: received_snapshot_for_test(host.core()).unwrap(),
         })
     });
     let error = reply.error.unwrap();
@@ -297,13 +309,17 @@ fn w02_host_missing_required_evidence_refuses_without_destination_mutation() {
     assert!(
         trace.events.iter().all(|event| matches!(
             event.operation,
-            "rescue_separation_inspect" | "studio_dirty_history_hash" | "rescue_probe"
+            "rescue_separation_inspect"
+                | "studio_dirty_history_hash"
+                | "rescue_probe"
+                | "publication_memo_reset"
         )),
         "{trace:?}"
     );
     assert_eq!(host.rescue_slots(), 0);
     assert_eq!(host.core().export_history().unwrap(), before);
     assert!(!root.path("b.kinewright").exists());
+    drop(before);
     std::fs::write(
         root.path("hidden/a.kinewright-assets/studio/objects")
             .join(&reference.sha256),
@@ -311,7 +327,7 @@ fn w02_host_missing_required_evidence_refuses_without_destination_mutation() {
     )
     .unwrap();
     refusal(host.run(HostCommand::PreviewRescue {
-        snapshot: HostSnapshot::from_history(before).unwrap(),
+        snapshot: received_snapshot_for_test(host.core()).unwrap(),
     }))
     .unwrap();
     let reply = refusal(host.run(HostCommand::RescueTo {
@@ -333,26 +349,54 @@ fn w11_host_recopy_compacts_provenance_and_keeps_independent_bytes() {
         assert!(io_observer::fail_once("root_parent_sync", || host.save_active()).is_err());
         let hidden = root.path(&format!("hidden-{round}"));
         std::fs::rename(path.parent().unwrap(), &hidden).unwrap();
-        let history = HostSnapshot::capture(host.core()).unwrap();
+        let history = received_snapshot_for_test(host.core()).unwrap();
         let preview = refusal(host.run(HostCommand::PreviewRescue {
             snapshot: history.clone(),
         }))
         .unwrap();
-        assert!(!preview.status.rescue_trim_required && !preview.status.rescue_omission_required);
+        assert!(!preview.status.rescue_omission_required);
         let next = root.path(&format!("round-{round}/a.kinewright"));
         let rescued = refusal(host.run(HostCommand::RescueTo {
             destination: next.clone(),
         }))
         .unwrap();
         assert!(rescued.activation.is_some());
-        assert_eq!(rescued.history.as_ref(), Some(&history.history));
+        let pool = kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        );
+        let expected = history
+            .history
+            .validate(&pool)
+            .unwrap()
+            .into_reader()
+            .unwrap();
+        let installed = rescued
+            .history
+            .as_ref()
+            .unwrap()
+            .clone()
+            .validate(&pool)
+            .unwrap()
+            .into_reader()
+            .unwrap();
+        let mut before = serde_json::to_value(expected.into_capture().unwrap()).unwrap();
+        let after = serde_json::to_value(installed.into_capture().unwrap()).unwrap();
+        before["history"]["epoch"] = serde_json::json!(after["history"]["epoch"].as_u64().unwrap());
+        assert_eq!(before, after, "RECOPY_INSTALL_PRESERVES_THE_SELECTED_OWNER");
+
         std::fs::rename(hidden, path.parent().unwrap()).unwrap();
         refusal(host.run(HostCommand::Reconcile {
             destination: path.clone(),
         }))
         .unwrap();
         drop(host);
-        let loaded = LoadedBundle::read(&next).unwrap();
+        let loaded = LoadedBundle::read(
+            &next,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         let writer = loaded.into_writer().unwrap();
         let records = writer.rescue_records().unwrap();
         assert_eq!(records.len(), 1);
@@ -368,7 +412,13 @@ fn w11_host_recopy_compacts_provenance_and_keeps_independent_bytes() {
             b"C12 independent evidence stays exact across remote rescue and compaction"
         );
         drop(writer);
-        host = HostSession::open(&next).unwrap();
+        host = HostSession::open(
+            &next,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         path = next;
     }
 }
@@ -378,7 +428,7 @@ fn w12_host_cleanup_only_fresh_copy_keeps_exact_charge_and_history() {
     use kinewright_project::{bundle::LoadedBundle, io_observer};
     let (root, mut host, _) = evidence_fixture("c12-cleanup-host");
     let path = root.path("drive/a.kinewright");
-    let expected = host.core().export_history().unwrap();
+    let mut expected = serde_json::to_value(host.core().export_history().unwrap()).unwrap();
     let usage = host.store().unwrap().usage_handle();
     let result = io_observer::fail_once("root_file_sync", || {
         io_observer::fail_path("root_cleanup_unlink", &path, || host.save_active())
@@ -391,19 +441,35 @@ fn w12_host_cleanup_only_fresh_copy_keeps_exact_charge_and_history() {
     let b = root.path("b.kinewright");
     let copied = refusal(host.run(HostCommand::SaveAs {
         destination: b.clone(),
-        snapshot: HostSnapshot::from_history(expected.clone()).unwrap(),
+        snapshot: received_snapshot_for_test(host.core()).unwrap(),
     }))
     .unwrap();
     assert!(copied.saved.is_some());
     assert_eq!(host.rescue_slots(), 0);
-    assert_eq!(host.core().export_history().unwrap(), expected);
+    let after = serde_json::to_value(host.core().export_history().unwrap()).unwrap();
+    assert!(
+        after["history"]["epoch"].as_u64().unwrap()
+            > expected["history"]["epoch"].as_u64().unwrap(),
+        "SAVE_AS_STARTS_A_NEW_INSTALL_EPOCH"
+    );
+    expected["history"]["epoch"] = serde_json::json!(after["history"]["epoch"].as_u64().unwrap());
+    assert_eq!(
+        after, expected,
+        "CLEANUP_ONLY_SAVE_AS_PRESERVES_THE_COMPLETE_SELECTED_OWNER"
+    );
+    let installed = host.core().snapshot_identity().unwrap();
     assert!(usage().unwrap().reserved_bytes >= pending);
     assert!(!usage().unwrap().damaged_accounting);
     drop(host);
-    let loaded = LoadedBundle::read(&b).unwrap();
-    let fresh = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&fresh).unwrap();
-    assert_eq!(fresh.export_history().unwrap(), expected);
+    let mut loaded = LoadedBundle::read(
+        &b,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let fresh = loaded.open_manual().unwrap();
+    assert_eq!(fresh.snapshot_identity().unwrap(), installed);
 }
 /// S3 C11: a rescue moves the playback scope. The old current-edit lease ends
 /// with the old owner, and a lease on the new scope plays from the rescue copy.
@@ -453,7 +519,7 @@ fn c11_rescue_moves_the_scope_and_the_new_lease_plays() {
     assert!(io_observer::fail_once("root_parent_sync", || host.save_active()).is_err());
     std::fs::rename(root.path("drive"), root.path("hidden")).unwrap();
     refusal(host.run(HostCommand::PreviewRescue {
-        snapshot: HostSnapshot::capture(host.core()).unwrap(),
+        snapshot: received_snapshot_for_test(host.core()).unwrap(),
     }))
     .unwrap();
     let destination = root.path("rescued/a.kinewright");
@@ -479,7 +545,7 @@ fn c11_rescue_moves_the_scope_and_the_new_lease_plays() {
         .unwrap()
         .open_current(&destination, &renewed, authority)
         .unwrap();
-    let document = host.core().export_history().unwrap().document;
+    let document = document_for_test(host.core());
     reader.playback_inputs(document).expect("C11_RESCUE_PLAYS");
 }
 #[path = "../../../kinewright-project/tests/support/ja_s2_c3.rs"]

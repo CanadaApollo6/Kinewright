@@ -13,6 +13,8 @@ repository.workspace = true
 # shipping path reads them: every user is a test, a fixture module or the
 # `kinewright-eval` harness binary.
 test-util = []
+slow-tests = []
+history-metrics = []
 
 [dependencies]
 ab_glyph.workspace = true
@@ -33,3 +35,11 @@ kinewright-core = { path = ".", features = ["test-util"] }
 [lints]
 workspace = true
 
+
+[[example]]
+name = "undo_bench"
+required-features = ["history-metrics"]
+
+[[example]]
+name = "undo_clip_probe"
+required-features = ["history-metrics"]

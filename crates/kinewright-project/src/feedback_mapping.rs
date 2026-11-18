@@ -3,7 +3,7 @@
 
 use crate::{
     bundle::{BundleError, ProjectBundle},
-    bundle_records::{BranchCheckpoint, LineageRecord, ObjectRef, OccurrenceId},
+    bundle_records::{BranchCheckpoint, ObjectRef, OccurrenceId},
     studio_records::{
         CommentResolution, FeedbackRevision, ResolveFeedback, SpatialStatus, TemporalStatus,
     },
@@ -66,12 +66,62 @@ impl ProjectBundle {
         let candidate = self
             .store()
             .read_record::<Document>(&checkpoint.document_ref)?;
-        let old_lineage = self
+        let original_checkpoint = self
             .store()
-            .read_record::<LineageRecord>(&snapshot.descriptor.lineage_ref)?;
-        let new_lineage = self
-            .store()
-            .read_record::<LineageRecord>(&checkpoint.lineage_ref)?;
+            .read_record::<BranchCheckpoint>(&snapshot.descriptor.checkpoint_ref)?;
+        let old_reader = original_checkpoint
+            .open(self.store(), self.history_pool())?
+            .into_reader()?;
+        let depth = old_reader.history().undo().len();
+        let old_boundary = old_reader.into_boundary(depth)?;
+        let old_lineage = old_boundary.lineage();
+        let old_matches = revision.anchor.target.as_ref().is_some_and(|target| {
+            old_lineage.occurrences.get(&target.local_clip_id) == target.occurrence_id.as_ref()
+                && target.occurrence_id.is_some()
+        });
+        // Mapping needs only the target's ancestor identities from the old
+        // checkpoint, not its whole document/history while the new one opens.
+        // Each copied identity has two validated 32-byte IDs. 512 bytes per
+        // slot covers its typed value, owned strings and allocation slack.
+        let slots = old_lineage.split_ancestry.len() + 1;
+        let bytes = u64::try_from(slots)
+            .ok()
+            .and_then(|n| n.checked_mul(512))
+            .ok_or(BundleError::Capacity("feedback ancestor proof"))?;
+        let charge = self.store().reserve_read(0, bytes, false)?;
+        let mut ancestors = Vec::with_capacity(slots);
+        if let Some(mut next) = revision
+            .anchor
+            .target
+            .as_ref()
+            .and_then(|t| t.occurrence_id.as_ref())
+        {
+            for _ in 0..slots {
+                ancestors.push(next.clone());
+                let Some((_, parent, _)) = old_lineage
+                    .split_ancestry
+                    .iter()
+                    .find(|(child, _, _)| child == next)
+                else {
+                    break;
+                };
+                next = parent;
+            }
+        }
+        let old_ancestors = charge.hold(ancestors);
+        drop(old_boundary);
+        let new_reader = checkpoint
+            .open(self.store(), self.history_pool())?
+            .into_reader()?;
+        let future = revision
+            .anchor
+            .target
+            .as_ref()
+            .and_then(|target| target.occurrence_id.as_ref())
+            .is_some_and(|occurrence| new_reader.occurrence_in_redo(occurrence));
+        let depth = new_reader.history().undo().len();
+        let new_boundary = new_reader.into_boundary(depth)?;
+        let new_lineage = new_boundary.lineage();
         let mut result = MappedFeedback {
             resolution: CommentResolution {
                 original_ref: request.comment_revision_ref.clone(),
@@ -96,7 +146,7 @@ impl ProjectBundle {
         let Some(occurrence) = &target.occurrence_id else {
             return Ok(result);
         };
-        if old_lineage.current.get(&target.local_clip_id) != Some(occurrence)
+        if !old_matches
             || revision.anchor.snapshot.document_hash != snapshot.descriptor.document_ref.sha256
             || revision.anchor.fps.numerator != origin.fps.numerator()
             || revision.anchor.fps.denominator != origin.fps.denominator()
@@ -144,15 +194,15 @@ impl ProjectBundle {
             return Ok(result);
         }
         // Undo can leave the occurrence only in redo; absent ancestry cannot prove removal.
-        let mut removal_proven = !is_future_occurrence(occurrence, &new_lineage);
+        let mut removal_proven = !future;
         for track in &candidate.tracks {
             for clip in &track.clips {
-                let Some(current) = new_lineage.current.get(&clip.id) else {
+                let Some(current) = new_lineage.occurrences.get(&clip.id) else {
                     removal_proven = false;
                     continue;
                 };
-                if !descends_from(current, occurrence, &new_lineage)
-                    && !descends_from(occurrence, current, &old_lineage)
+                if !descends_from(current, occurrence, new_lineage)
+                    && !old_ancestors.iter().any(|ancestor| ancestor == current)
                 {
                     continue;
                 }
@@ -279,7 +329,11 @@ fn drawn_points(bytes: &[u8]) -> Result<Vec<[f64; 2]>, BundleError> {
     }
 }
 
-fn descends_from(current: &OccurrenceId, origin: &OccurrenceId, lineage: &LineageRecord) -> bool {
+fn descends_from(
+    current: &OccurrenceId,
+    origin: &OccurrenceId,
+    lineage: &crate::operation_history::Lineage,
+) -> bool {
     let mut next = current;
     // The persisted, bounded ancestry owns the edges. The bound also refuses cycles.
     for _ in 0..=lineage.split_ancestry.len() {
@@ -296,14 +350,6 @@ fn descends_from(current: &OccurrenceId, origin: &OccurrenceId, lineage: &Lineag
         next = parent;
     }
     false
-}
-
-fn is_future_occurrence(occurrence: &OccurrenceId, lineage: &LineageRecord) -> bool {
-    lineage
-        .redo
-        .iter()
-        .flat_map(|map| map.values())
-        .any(|known| known == occurrence)
 }
 
 #[cfg(test)]
@@ -323,28 +369,5 @@ mod tests {
             "C10_STUDIO_STROKES"
         );
         assert!(drawn_points(b"[0.25]").is_err(), "C10_NOT_POINTS");
-    }
-    #[test]
-    fn s3_incomplete_split_ancestry_cannot_prove_removal() {
-        let branch = crate::bundle_records::BranchId::fresh().unwrap();
-        let child = OccurrenceId {
-            branch_origin: branch.clone(),
-            creation_batch_id: crate::bundle_records::BatchId::fresh().unwrap(),
-            result_ordinal: 1,
-        };
-        let mut lineage = LineageRecord {
-            branch_origin: branch,
-            baseline: std::collections::BTreeMap::default(),
-            current: std::collections::BTreeMap::default(),
-            undo: vec![],
-            redo: vec![[(ClipId(2), child.clone())].into()],
-            split_ancestry: vec![],
-        };
-        assert!(
-            is_future_occurrence(&child, &lineage),
-            "S3_UNPROVEN_ANCESTRY_IS_NOT_REMOVAL"
-        );
-        lineage.redo.clear();
-        assert!(!is_future_occurrence(&child, &lineage));
     }
 }

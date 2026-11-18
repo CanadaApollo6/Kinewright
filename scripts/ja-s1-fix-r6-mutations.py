@@ -12,50 +12,22 @@ assert os.getpriority(os.PRIO_PROCESS,0) == 19
 out = Path(sys.argv[1]).resolve()
 out.mkdir(parents=True,exist_ok=True)
 P='crates/kinewright-project/src/'
-C='crates/kinewright-core/src/'
 R='round_six::'
-cases = {
- 'root-boundary': (P+'bundle_commit.rs','project',R+'root_staging_and_cleanup_failure_releases_first_save_to_another_destination'),
- 'root-cleanup-retry': (P+'namespace/linux.rs','project',R+'root_staging_and_cleanup_failure_releases_first_save_to_another_destination'),
- 'first-copy-source': (P+'store.rs','project',R+'reconciled_first_copy_does_not_gate_the_session_on_its_old_destination'),
- 'named-copy-source': (P+'store.rs','project',R+'reconciled_save_as_does_not_gate_the_source_owners_next_save'),
- 'active-copy-source': (P+'bundle_copy.rs','project',R+'pending_copy_source_reconciles_before_the_next_first_save'),
- 'failed-commit-release': (C+'actor.rs','core','failed_commit_releases_the_ticket_with_a_typed_internal_error'),
- 'typed-restore': (C+'actor.rs','core','restore_during_a_save_returns_typed_contention_and_keeps_entries'),
- 'proof-binding': (C+'actor.rs','core','another_proof_type_cannot_take_over_a_history_save_owner'),
- 'untagged-retention': (C+'actor.rs','core','another_proof_type_cannot_take_over_a_history_save_owner'),
- 'raw-api-visibility': (C+'actor.rs','doc','history_transition::HistorySaveOwner'),
- 'floor-cache-read': (P+'bundle.rs','project',R+'durable_floor_uses_only_the_current_checkpoint_history_cache'),
- 'floor-cache-binding': (P+'bundle.rs','project',R+'durable_floor_uses_only_the_current_checkpoint_history_cache'),
-}
+cases = {'root-boundary': (P + 'bundle_commit.rs', 'project', R + 'root_staging_and_cleanup_failure_releases_first_save_to_another_destination'), 'root-cleanup-retry': (P + 'namespace/linux.rs', 'project', R + 'root_staging_and_cleanup_failure_releases_first_save_to_another_destination'), 'first-copy-source': (P + 'store.rs', 'project', R + 'reconciled_first_copy_does_not_gate_the_session_on_its_old_destination'), 'named-copy-source': (P + 'store.rs', 'project', R + 'reconciled_save_as_does_not_gate_the_source_owners_next_save'), 'active-copy-source': (P + 'bundle_copy.rs', 'project', R + 'pending_copy_source_reconciles_before_the_next_first_save')}
 def replace(s,a,b):
     assert s.count(a)==1,(a,s.count(a))
     return s.replace(a,b)
-def mutate(s,name):
-    if name=='root-boundary':
-        return replace(s,'if failure.boundary == crate::namespace::RootReplaceBoundary::Unknown {','if bundle.store.with_namespace(|n| Ok(n.is_uncertain()))? {')
-    if name=='root-cleanup-retry':
-        return replace(s,'if let Some(temporary) = &namespace.pending_root_cleanup {','if let Some(temporary) = namespace.pending_root_cleanup.as_ref().filter(|_| false) {')
-    if name in ('first-copy-source','named-copy-source'):
-        return replace(s,'pub(crate) const fn requires_reconciliation(&self) -> bool {\n        self.uncertain', 'pub(crate) const fn requires_reconciliation(&self) -> bool {\n        true')
-    if name=='active-copy-source':
-        a=s.index('pub(crate) fn settle_copy_source('); b=s.index('impl BundleCopy',a)
-        return s[:a]+replace(s[a:b],'.reconciled();', '.mark_uncertain()?;')+s[b:]
-    if name=='failed-commit-release':
-        return replace(s,'        if result.is_err() {\n            self.pending_floor = None;\n            return Err(HistoryError::CommitInvariant);', '        if result.is_err() {\n            return Err(HistoryError::CommitInvariant);')
-    if name=='typed-restore':
-        return replace(s,'let admitted = if state.pending_floor.is_some() {\n                    Err(HistoryError::SaveInProgress)', 'let admitted = if state.pending_floor.is_some() {\n                    Err(HistoryError::Corrupt)')
-    if name=='proof-binding':
-        return replace(s,'if owner.is_some_and(|existing| existing != requested) {', 'if false && owner.is_some_and(|existing| existing != requested) {')
-    if name=='untagged-retention':
-        return replace(s,'if ready && pending.save.tag.is_none() {', 'if false && ready && pending.save.tag.is_none() {')
-    if name=='raw-api-visibility':
-        s=replace(s,'pub(crate) fn begin_history_floor(', 'pub fn begin_history_floor(')
-        return replace(s,'pub(crate) fn settle_history_save(', 'pub fn settle_history_save(')
-    if name=='floor-cache-read':
-        return replace(s,'if let Some(cached) = self.cached_history(branch) {', 'if let Some(cached) = self.cached_history(branch).filter(|_| false) {')
-    if name=='floor-cache-binding':
-        return replace(s,'.filter(|cached| &cached.reference == current)', '.filter(|cached| &cached.reference == current || true)')
+def mutate(s, name):
+    if name == 'root-boundary':
+        return replace(s, 'if failure.boundary == crate::namespace::RootReplaceBoundary::Unknown {', 'if bundle.store.with_namespace(|n| Ok(n.is_uncertain()))? {')
+    if name == 'root-cleanup-retry':
+        return replace(s, 'if let Some(temporary) = &namespace.pending_root_cleanup {', 'if let Some(temporary) = namespace.pending_root_cleanup.as_ref().filter(|_| false) {')
+    if name in ('first-copy-source', 'named-copy-source'):
+        return replace(s, 'pub(crate) const fn requires_reconciliation(&self) -> bool {\n        self.uncertain', 'pub(crate) const fn requires_reconciliation(&self) -> bool {\n        true')
+    if name == 'active-copy-source':
+        a = s.index('pub(crate) fn settle_copy_source(')
+        b = s.index('impl BundleCopy', a)
+        return s[:a] + replace(s[a:b], '.reconciled();', '.mark_uncertain()?;') + s[b:]
     raise AssertionError(name)
 selected=sys.argv[2:] or list(cases)
 if selected==['--check']:

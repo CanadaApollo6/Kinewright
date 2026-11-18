@@ -177,7 +177,7 @@ fn h1_run_and_feedback_publish_atomically_and_reopen() {
     drop(owner);
     let Fixture { temp, host, .. } = f;
     drop(host);
-    let mut owner = Ja1EditingSession::open(&temp.path("project.kinewright")).unwrap();
+    let mut owner = Ja1EditingSession::open(&temp.path("project.kinewright"), &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
     assert_eq!(
         owner
             .orchestration_replay(&request.envelope, Some(&batch))
@@ -204,7 +204,7 @@ fn h1_run_and_feedback_publish_atomically_and_reopen() {
         )
         .unwrap();
     drop(owner);
-    let owner = Ja1EditingSession::open(&copied).unwrap();
+    let owner = Ja1EditingSession::open(&copied, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
     assert!(
         owner.orchestration_projection(&run).unwrap().is_none(),
         "H1_COPY_HAS_NO_INHERITED_RUN"
@@ -218,7 +218,7 @@ fn h1_run_and_feedback_publish_atomically_and_reopen() {
         "H1_COPY_HAS_NO_RUN_CONSUMPTION"
     );
     drop(owner);
-    let original = Ja1EditingSession::open(&temp.path("project.kinewright")).unwrap();
+    let original = Ja1EditingSession::open(&temp.path("project.kinewright"), &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
     assert!(
         original.orchestration_projection(&run).unwrap().is_some(),
         "H1_ORIGINAL_KEEPS_RUN"

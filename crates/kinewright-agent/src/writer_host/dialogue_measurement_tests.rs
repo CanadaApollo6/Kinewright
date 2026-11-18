@@ -34,7 +34,8 @@ fn dq_native_task_cannot_measure_a_recording_outside_its_admission() {
     let owner = f.host.owner.upgrade().unwrap();
     let mut host = owner.lock().unwrap();
     let task_core = host.hooks.runs[&run].tasks[&execution.task].core().clone();
-    let asset = task_core.export_history().unwrap().document.media_pool[0].clone();
+    let history = task_core.export_history().unwrap().validate().unwrap();
+    let asset = history.document().media_pool[0].clone();
     let identity = crate::dialogue_tools::MediaIdentity::of(&asset).unwrap();
     let mut foreign = asset;
     foreign.id = kinewright_core::AssetId(999);

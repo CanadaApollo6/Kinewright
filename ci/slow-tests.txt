@@ -1,6 +1,7 @@
 # Slow-tier manifest: tests skipped in the fast tier on the listed OS.
 kinewright_agent writer_host::hooks_tests::tests::run_limit_cleanup_history_bound_refuses_before_any_live_mutation crates/kinewright-agent/src/writer_host/run_limit_cleanup_tests.rs linux-only # Role-bound fixture preserves pre-mutation refusal and Finish
 kinewright_agent writer_host::hooks_tests::tests::history_capacity_vertical_400_finish_merge_stop_reopen crates/kinewright-agent/src/writer_host/history_capacity_tests.rs linux-only # Referenced 400-clip task through Finish, frozen merge, Stop cleanup and exact reopen
+kinewright_agent writer_host::history_door_audit_tests::snapshot_door_caps_against_a_large_realistic_session crates/kinewright-agent/src/writer_host/history_door_audit_tests.rs any # Snapshot door measurement: 3,000-clip, 2,000-step session (21 s local debug)
 ja_s2_rescue_e2e rescue_reopen_recopy_retention_stress crates/kinewright-agent/tests/ja_s2_rescue_e2e.rs any # C6 bounded local rescue/recopy stress
 kinewright_app ja1_attachment::tests::rescue_complete_app_lifecycle_stress crates/kinewright-app/src/ja1_attachment_tests.rs any # C6 bounded App lifecycle stress
 #
@@ -62,6 +63,7 @@ au3_fixtures au3_delivery_audio_verification_measures_the_written_file crates/ki
 au3_fixtures au3_encoded_fixtures_land_within_the_loudness_and_true_peak_budgets crates/kinewright-media/tests/au3_fixtures.rs any  # 102/128
 
 # kinewright_app
+kinewright_app ja1_attachment::manual_value_tests::hx_h4_strict_drag_saves_all_sub_batches crates/kinewright-app/src/manual_value_tests.rs linux-only # Heavy exposure and sync-lock drags through the real writer
 kinewright_app preview_ui::mo2_tests::new_mo2_combined_transform_real_program_drags crates/kinewright-app/src/preview_ui.rs any  # 21/20
 kinewright_app solo_ui::tests::new_mo2_solo_control_argument_matrix crates/kinewright-app/src/solo_ui.rs any  # 26/12
 
@@ -207,9 +209,11 @@ kinewright_agent writer_host::hooks_tests::tests::c5_linear_fix1_admitted_launch
 kinewright_agent writer_host::hooks_tests::tests::c5_linear_fix1_terminal_notifications_leave_the_history_slot crates/kinewright-agent/src/writer_host/c5_linear_fix1_tests.rs linux-only # C5 terminal reason coalescing retains every attempt wake and a history slot
 kinewright_agent writer_host::hooks_tests::tests::c5_launch_capacity_wait_does_not_stall_other_tasks crates/kinewright-agent/src/writer_host/c5_launch_capacity_tests.rs linux-only # C5 capacity wait preserves other ready launches and Stop
 kinewright_agent writer_host::hooks_tests::tests::tests::storage_admission::tests::followups::c4_followups_settled_pending_releases_hold_without_restart crates/kinewright-agent/src/writer_host/run_limit_c4_followup_tests.rs linux-only # C4 superseded marker refusal retires a settled run's hold and permits a fresh run
-kinewright_agent writer_host::hooks_tests::tests::tests::storage_admission::tests::followups::c4_followups_undo_and_later_removal_match_kept_targets crates/kinewright-agent/src/writer_host/run_limit_c4_followup_tests.rs linux-only # C4 kept document excludes undone clip and track removals, including later re-removal
-kinewright_agent writer_host::hooks_tests::tests::tests::storage_admission::tests::followups::c4_followups_uncertain_edits_reach_both_readers crates/kinewright-agent/src/writer_host/run_limit_c4_followup_tests.rs linux-only # C4 uncertain coverage keeps target identities and actions in run and retained-work views
+kinewright_agent writer_host::hooks_tests::tests::tests::storage_admission::tests::followups::c4_followups_undo_and_later_removal_keep_command_fates_separate crates/kinewright-agent/src/writer_host/run_limit_c4_followup_tests.rs linux-only # C4 later re-removal never credits an undone or discarded approved command
+kinewright_agent writer_host::hooks_tests::tests::tests::storage_admission::tests::followups::c4_followups_uncertain_edits_reach_both_readers crates/kinewright-agent/src/writer_host/run_limit_c4_followup_tests.rs linux-only # C4 unavailable native source binding keeps uncertainty, identities and actions in both readers
 kinewright_agent writer_host::hooks_tests::tests::tests::storage_admission::tests::followups::c4f_fix1_reused_ids_do_not_claim_missing crates/kinewright-agent/src/writer_host/run_limit_c4_followup_tests.rs linux-only # C4 authenticated kept history distinguishes clip and track id reuse from Undo
+undo differential_long crates/kinewright-core/tests/undo.rs any # Longer bounded undo executor differential across operation kinds and cache modes
+undo task_profile_accepts_two_thousand_cuts crates/kinewright-core/tests/undo.rs any # Task profile admits 2000 real cuts within the existing native envelope
 kinewright_app ja1_attachment::tests::s2h_lost_save_floor_stays_frozen_until_exact_publisher_result crates/kinewright-app/src/ja1_attachment_tests.rs linux-only # Real 12,000-edit Save floor; lost reply stays frozen until exact publisher result
 kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_expired_authority_keeps_accepted_work_and_stops crates/kinewright-agent/src/writer_host/c5e_tests.rs linux-only # Exact short authority expiry preserves accepted work through Freeze, Stop and reopen
 
@@ -231,3 +235,24 @@ runtime_native runtime_releases_both_slots_during_bus_disconnect crates/kinewrig
 runtime_native runtime_scope_proof_holds_when_a_removed_scope_keeps_two_links crates/kinewright-media-client/tests/runtime_native.rs linux-only # Hosted-kernel deletion shape: ENODEV proves a two-link removed scope
 runtime_native runtime_scope_proof_error_keeps_the_reservation crates/kinewright-media-client/tests/runtime_native.rs linux-only # Persistent scope proof error: bounded, typed, reservation kept
 runtime_native runtime_unproven_fallback_is_not_relaunched crates/kinewright-media-client/tests/runtime_native.rs linux-only # Attached-then-failed scope with unproven cleanup: no degraded relaunch
+
+# Compact-history session model (portable; native-store companion stays in fast).
+# Linux weights are local seconds rounded up. Windows weights provisionally
+# use five times those values until a completed CI timing replaces them.
+kinewright_project operation_history::stored::session_model::long_generated_sessions_seeds_01_04 crates/kinewright-project/src/operation_history/session_model.rs any # 20/100 Four seeds, 4096 attempts; restart/ack/handoff/Save/rescue/collection grammar
+kinewright_project operation_history::stored::session_model::long_generated_sessions_seeds_05_08 crates/kinewright-project/src/operation_history/session_model.rs any # 20/100 Four seeds, 4096 attempts; restart/ack/handoff/Save/rescue/collection grammar
+kinewright_project operation_history::stored::session_model::long_generated_sessions_seeds_09_12 crates/kinewright-project/src/operation_history/session_model.rs any # 21/105 Four seeds, 4096 attempts; restart/ack/handoff/Save/rescue/collection grammar
+kinewright_project operation_history::stored::session_model::long_generated_sessions_seeds_13_16 crates/kinewright-project/src/operation_history/session_model.rs any # 20/100 Four seeds, 4096 attempts; restart/ack/handoff/Save/rescue/collection grammar
+kinewright_project operation_history::stored::session_model::long_generated_sessions_seeds_17_20 crates/kinewright-project/src/operation_history/session_model.rs any # 20/100 Four seeds, 4096 attempts; restart/ack/handoff/Save/rescue/collection grammar
+kinewright_project operation_history::stored::session_model::long_generated_sessions_seeds_21_24 crates/kinewright-project/src/operation_history/session_model.rs any # 20/100 Four seeds, 4096 attempts; restart/ack/handoff/Save/rescue/collection grammar
+kinewright_project operation_history::stored::session_model::long_generated_sessions_seeds_25_28 crates/kinewright-project/src/operation_history/session_model.rs any # 19/95 Four seeds, 4096 attempts; restart/ack/handoff/Save/rescue/collection grammar
+kinewright_project operation_history::stored::session_model::long_generated_sessions_seeds_29_32 crates/kinewright-project/src/operation_history/session_model.rs any # 20/100 Four seeds, 4096 attempts; restart/ack/handoff/Save/rescue/collection grammar
+kinewright_project operation_history::stored::session_model::long_generated_sessions_seeds_33_36 crates/kinewright-project/src/operation_history/session_model.rs any # 20/100 Four seeds, 4096 attempts; restart/ack/handoff/Save/rescue/collection grammar
+kinewright_project operation_history::stored::session_model::long_generated_sessions_seeds_37_40 crates/kinewright-project/src/operation_history/session_model.rs any # 19/95 Four seeds, 4096 attempts; restart/ack/handoff/Save/rescue/collection grammar
+kinewright_project operation_history::stored::session_model::long_generated_sessions_seeds_41_44 crates/kinewright-project/src/operation_history/session_model.rs any # 20/100 Four seeds, 4096 attempts; restart/ack/handoff/Save/rescue/collection grammar
+kinewright_project operation_history::stored::session_model::long_generated_sessions_seeds_45_48 crates/kinewright-project/src/operation_history/session_model.rs any # 23/115 Four seeds, 4096 attempts; restart/ack/handoff/Save/rescue/collection grammar
+kinewright_project operation_history::stored::session_model::long_generated_sessions_seeds_49_52 crates/kinewright-project/src/operation_history/session_model.rs any # 24/120 Four seeds, 4096 attempts; restart/ack/handoff/Save/rescue/collection grammar
+kinewright_project operation_history::stored::session_model::long_generated_sessions_seeds_53_56 crates/kinewright-project/src/operation_history/session_model.rs any # 27/135 Four seeds, 4096 attempts; restart/ack/handoff/Save/rescue/collection grammar
+kinewright_project operation_history::stored::session_model::long_generated_sessions_seeds_57_60 crates/kinewright-project/src/operation_history/session_model.rs any # 28/140 Four seeds, 4096 attempts; restart/ack/handoff/Save/rescue/collection grammar
+kinewright_project operation_history::stored::session_model::long_generated_sessions_seeds_61_64 crates/kinewright-project/src/operation_history/session_model.rs any # 28/140 Four seeds, 4096 attempts; restart/ack/handoff/Save/rescue/collection grammar
+history_capacity_matrix twenty_thousand_clip_project_opens_edits_forks_merges_and_saves crates/kinewright-project/tests/history_capacity_matrix.rs linux-only # 104/0 Native product save, cold open, task cut, candidate merge and person publication at 20000 clips

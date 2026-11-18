@@ -1,0 +1,335 @@
+diff --git i/crates/kinewright-project/examples/undo_owner_bench.rs w/crates/kinewright-project/examples/undo_owner_bench.rs
+index b1932563..54e501b5 100644
+--- i/crates/kinewright-project/examples/undo_owner_bench.rs
++++ w/crates/kinewright-project/examples/undo_owner_bench.rs
+@@ -285,6 +285,59 @@ fn role_measurements() {
+     reason = "one benchmark lane keeps the fixture, executor and ordered measurement stream together"
+ )]
+ 
++fn fold_counters(checkpoints: usize) {
++    let mut bounds = limits(checkpoints);
++    bounds.operation_bytes = 500;
++    let mut engine = Engine::new("new", fixture::heavy(), bounds);
++    engine.attach_approval();
++    for index in 0..32 {
++        engine.execute(edit(index));
++    }
++    let before = PhaseCounters::read();
++    let owner_before = OwnerCounters::read();
++    engine.execute(edit(32));
++    println!(
++        "{}",
++        serde_json::json!({"fixture_json_bytes":245233,"plain_fold":{"core":PhaseCounters::read().since(before),"owner":OwnerCounters::read().since(owner_before)}})
++    );
++    let Engine::New(attached) = &mut engine else {
++        unreachable!()
++    };
++    for index in 0..32 {
++        let mut id = approval_ref();
++        id.sha256 = format!("{index:064x}");
++        let target = attached
++            .owner
++            .transition_target(kinewright_project::operation_history::Direction::Undo)
++            .unwrap();
++        attached
++            .owner
++            .approve_transition(
++                id,
++                kinewright_project::operation_history::Direction::Undo,
++                target,
++            )
++            .unwrap();
++        let key = attached.owner.history().position();
++        attached
++            .owner
++            .execute(Command::Redo, origin(key.epoch, key.position), vec![], None)
++            .unwrap();
++        let key = attached.owner.history().position();
++        attached
++            .owner
++            .execute(edit(index), origin(key.epoch, key.position), vec![], None)
++            .unwrap();
++    }
++    let before = PhaseCounters::read();
++    let owner_before = OwnerCounters::read();
++    engine.execute(edit(33));
++    println!(
++        "{}",
++        serde_json::json!({"populated_ledger_fold":{"core":PhaseCounters::read().since(before),"owner":OwnerCounters::read().since(owner_before)}})
++    );
++}
++
+ fn identity_measurements(checkpoints: usize) {
+     let mut engine = Engine::new("new", fixture::heavy(), limits(checkpoints));
+     engine.attach_approval();
+@@ -337,6 +390,10 @@ fn main() {
+     let args: Vec<_> = std::env::args().collect();
+     let side = args.get(1).expect("old or new");
+     let checkpoints = args.get(2).map_or(4, |s| s.parse().unwrap());
++    if side == "fold-counters" {
++        fold_counters(checkpoints);
++        return;
++    }
+     if side == "identity" {
+         identity_measurements(checkpoints);
+         return;
+diff --git i/crates/kinewright-project/src/operation_history/ledger.rs w/crates/kinewright-project/src/operation_history/ledger.rs
+index fcc45ec3..9ef99b41 100644
+--- i/crates/kinewright-project/src/operation_history/ledger.rs
++++ w/crates/kinewright-project/src/operation_history/ledger.rs
+@@ -131,10 +131,14 @@ impl ApprovalLedger {
+     pub fn transition_entries(
+         &self,
+     ) -> impl Iterator<Item = &super::transition::TransitionApproval> {
+-        self.transitions.iter()
++        self.transitions
++            .iter()
++            .inspect(|_| super::owner::ledger_entries(1))
+     }
+     pub fn entries(&self) -> impl Iterator<Item = &ApprovalEntry> {
+-        self.commands.values()
++        self.commands
++            .values()
++            .inspect(|_| super::owner::ledger_entries(1))
+     }
+     #[must_use]
+     /// Convenience for an unambiguous key. A reader with a consent binding
+diff --git i/crates/kinewright-project/src/operation_history/lineage.rs w/crates/kinewright-project/src/operation_history/lineage.rs
+index bcdc38eb..907457f3 100644
+--- i/crates/kinewright-project/src/operation_history/lineage.rs
++++ w/crates/kinewright-project/src/operation_history/lineage.rs
+@@ -10,12 +10,21 @@ pub struct CreationOrigin {
+     pub branch: BranchId,
+     pub batch: BatchId,
+ }
+-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(deny_unknown_fields)]
+ pub struct Lineage {
+     pub occurrences: BTreeMap<ClipId, OccurrenceId>,
+     pub split_ancestry: Vec<(OccurrenceId, OccurrenceId, Clip)>,
+ }
++impl Clone for Lineage {
++    fn clone(&self) -> Self {
++        super::owner::seed_map_copies(1);
++        Self {
++            occurrences: self.occurrences.clone(),
++            split_ancestry: self.split_ancestry.clone(),
++        }
++    }
++}
+ impl Lineage {
+     #[must_use]
+     pub fn seed(document: &Document, origin: &CreationOrigin) -> Self {
+@@ -83,6 +92,7 @@ impl Lineage {
+         Ok(())
+     }
+     pub(super) fn prune(&mut self) {
++        super::owner::seed_prune_scans(1);
+         let mut reachable: BTreeSet<_> = self.occurrences.values().cloned().collect();
+         loop {
+             let before = reachable.len();
+@@ -99,6 +109,7 @@ impl Lineage {
+             .retain(|(child, _, _)| reachable.contains(child));
+     }
+     pub(super) fn verify(&self, document: &Document) -> Result<(), Error> {
++        super::owner::seed_verify_scans(1);
+         let expected: BTreeSet<_> = document
+             .tracks
+             .iter()
+@@ -151,6 +162,7 @@ fn occurrence(origin: &CreationOrigin, result_ordinal: u64) -> OccurrenceId {
+ 
+ impl Lineage {
+     pub(super) fn capacity_bytes(&self) -> Result<u64, Error> {
++        super::owner::seed_capacity_scans(1);
+         let mut bytes = 4096_u64;
+         let node = (11 * std::mem::size_of::<(ClipId, OccurrenceId)>() + 128) as u64;
+         bytes = bytes
+diff --git i/crates/kinewright-project/src/operation_history/owner.rs w/crates/kinewright-project/src/operation_history/owner.rs
+index f3adcf78..61f7857b 100644
+--- i/crates/kinewright-project/src/operation_history/owner.rs
++++ w/crates/kinewright-project/src/operation_history/owner.rs
+@@ -23,8 +23,22 @@ pub struct OwnerCounters {
+     pub payload_bytes_serialised: u64,
+     pub owner_identity_hashes: u64,
+     pub owner_identity_bytes_serialised: u64,
++    pub seed_map_copies: u64,
++    pub seed_capacity_scans: u64,
++    pub seed_prune_scans: u64,
++    pub seed_verify_scans: u64,
++    pub resource_document_scans: u64,
++    pub lineage_encodings: u64,
++    pub payload_encodings: u64,
++    pub folded_commands: u64,
++    pub origin_lookups: u64,
++    pub ledger_entries: u64,
++    pub folded_seed_ids: u64,
++    pub folded_ancestry: u64,
++    pub folded_resource_ids: u64,
++    pub folded_payload_references: u64,
+ }
+-thread_local! { static COUNTERS:Cell<OwnerCounters>=const { Cell::new(OwnerCounters { document_scans:0,exact_measurements:0,payload_operations:0,payload_bytes_serialised:0,owner_identity_hashes:0,owner_identity_bytes_serialised:0 }) }; }
++thread_local! { static COUNTERS:Cell<OwnerCounters>=const { Cell::new(OwnerCounters { document_scans:0,exact_measurements:0,payload_operations:0,payload_bytes_serialised:0,owner_identity_hashes:0,owner_identity_bytes_serialised:0,seed_map_copies:0,seed_capacity_scans:0,seed_prune_scans:0,seed_verify_scans:0,resource_document_scans:0,lineage_encodings:0,payload_encodings:0,folded_commands:0,origin_lookups:0,ledger_entries:0,folded_seed_ids:0,folded_ancestry:0,folded_resource_ids:0,folded_payload_references:0 }) }; }
+ impl OwnerCounters {
+     #[must_use]
+     pub fn read() -> Self {
+@@ -40,9 +54,95 @@ impl OwnerCounters {
+             owner_identity_hashes: self.owner_identity_hashes - old.owner_identity_hashes,
+             owner_identity_bytes_serialised: self.owner_identity_bytes_serialised
+                 - old.owner_identity_bytes_serialised,
++            seed_map_copies: self.seed_map_copies - old.seed_map_copies,
++            seed_capacity_scans: self.seed_capacity_scans - old.seed_capacity_scans,
++            seed_prune_scans: self.seed_prune_scans - old.seed_prune_scans,
++            seed_verify_scans: self.seed_verify_scans - old.seed_verify_scans,
++            resource_document_scans: self.resource_document_scans - old.resource_document_scans,
++            lineage_encodings: self.lineage_encodings - old.lineage_encodings,
++            payload_encodings: self.payload_encodings - old.payload_encodings,
++            folded_commands: self.folded_commands - old.folded_commands,
++            origin_lookups: self.origin_lookups - old.origin_lookups,
++            ledger_entries: self.ledger_entries - old.ledger_entries,
++            folded_seed_ids: self.folded_seed_ids - old.folded_seed_ids,
++            folded_ancestry: self.folded_ancestry - old.folded_ancestry,
++            folded_resource_ids: self.folded_resource_ids - old.folded_resource_ids,
++            folded_payload_references: self.folded_payload_references
++                - old.folded_payload_references,
+         }
+     }
+ }
++pub(super) fn seed_map_copies(amount: u64) {
++    let mut c = COUNTERS.get();
++    c.seed_map_copies += amount;
++    COUNTERS.set(c);
++}
++pub(super) fn seed_capacity_scans(amount: u64) {
++    let mut c = COUNTERS.get();
++    c.seed_capacity_scans += amount;
++    COUNTERS.set(c);
++}
++pub(super) fn seed_prune_scans(amount: u64) {
++    let mut c = COUNTERS.get();
++    c.seed_prune_scans += amount;
++    COUNTERS.set(c);
++}
++pub(super) fn seed_verify_scans(amount: u64) {
++    let mut c = COUNTERS.get();
++    c.seed_verify_scans += amount;
++    COUNTERS.set(c);
++}
++pub(super) fn resource_document_scans(amount: u64) {
++    let mut c = COUNTERS.get();
++    c.resource_document_scans += amount;
++    COUNTERS.set(c);
++}
++pub(super) fn lineage_encodings(amount: u64) {
++    let mut c = COUNTERS.get();
++    c.lineage_encodings += amount;
++    COUNTERS.set(c);
++}
++pub(super) fn payload_encodings(amount: u64) {
++    let mut c = COUNTERS.get();
++    c.payload_encodings += amount;
++    COUNTERS.set(c);
++}
++pub(super) fn folded_commands(amount: u64) {
++    let mut c = COUNTERS.get();
++    c.folded_commands += amount;
++    COUNTERS.set(c);
++}
++pub(super) fn origin_lookups(amount: u64) {
++    let mut c = COUNTERS.get();
++    c.origin_lookups += amount;
++    COUNTERS.set(c);
++}
++pub(super) fn ledger_entries(amount: u64) {
++    let mut c = COUNTERS.get();
++    c.ledger_entries += amount;
++    COUNTERS.set(c);
++}
++pub(super) fn folded_seed_ids(amount: u64) {
++    let mut c = COUNTERS.get();
++    c.folded_seed_ids += amount;
++    COUNTERS.set(c);
++}
++pub(super) fn folded_ancestry(amount: u64) {
++    let mut c = COUNTERS.get();
++    c.folded_ancestry += amount;
++    COUNTERS.set(c);
++}
++pub(super) fn folded_resource_ids(amount: u64) {
++    let mut c = COUNTERS.get();
++    c.folded_resource_ids += amount;
++    COUNTERS.set(c);
++}
++pub(super) fn folded_payload_references(amount: u64) {
++    let mut c = COUNTERS.get();
++    c.folded_payload_references += amount;
++    COUNTERS.set(c);
++}
++
+ pub(super) fn identity_started() {
+     let mut c = COUNTERS.get();
+     c.owner_identity_hashes += 1;
+@@ -96,6 +196,7 @@ pub(super) struct LiveOrigin {
+ pub(super) struct Origins(pub VecDeque<LiveOrigin>);
+ impl Origins {
+     pub fn get(&self, key: &CommandKey) -> Option<&LiveOrigin> {
++        origin_lookups(1);
+         self.0
+             .binary_search_by_key(&key.position, |v| v.origin.key.position)
+             .ok()
+@@ -106,6 +207,7 @@ impl Origins {
+         self.0.push_back(origin);
+     }
+     pub fn remove(&mut self, key: &CommandKey) -> Option<LiveOrigin> {
++        origin_lookups(1);
+         let index = self
+             .0
+             .binary_search_by_key(&key.position, |v| v.origin.key.position)
+@@ -444,6 +546,7 @@ fn prepare(
+     mut fold_frontier: Option<CommandKey>,
+ ) -> Result<Plan, Error> {
+     let key = event.effects.accepted;
++    folded_commands(event.effects.folded.len() as u64);
+     if let Some(approval) = &mut approval {
+         approval.targets.sort_unstable();
+         if approval.targets.windows(2).any(|w| w[0] == w[1]) {
+@@ -703,6 +806,7 @@ pub(super) fn baseline_charge(
+     lineage: &Lineage,
+     resources: &BTreeSet<Resource>,
+ ) -> Result<u64, Error> {
++    lineage_encodings(1);
+     let encoded = exact_size(lineage)?
+         .checked_mul(4)
+         .ok_or(Error::Capacity("baseline metadata"))?;
+diff --git i/crates/kinewright-project/src/operation_history/resources.rs w/crates/kinewright-project/src/operation_history/resources.rs
+index 0ab5949f..a3b3be09 100644
+--- i/crates/kinewright-project/src/operation_history/resources.rs
++++ w/crates/kinewright-project/src/operation_history/resources.rs
+@@ -30,6 +30,7 @@ pub struct Resources {
+ impl Resources {
+     #[must_use]
+     pub fn document(document: &Document) -> BTreeSet<Resource> {
++        super::owner::resource_document_scans(1);
+         let mut result: BTreeSet<_> = document
+             .media_pool
+             .iter()
+diff --git i/crates/kinewright-project/src/operation_history/stored.rs w/crates/kinewright-project/src/operation_history/stored.rs
+index e6b18def..40aa0058 100644
+--- i/crates/kinewright-project/src/operation_history/stored.rs
++++ w/crates/kinewright-project/src/operation_history/stored.rs
+@@ -631,6 +631,7 @@ fn payload_decode_charge(value: &impl Serialize, limit: u64) -> Result<u64, Erro
+             Ok(())
+         }
+     }
++    super::owner::payload_encodings(2);
+     let mut counter = Counter { bytes: 0, limit };
+     serde_json::to_writer(&mut counter, value).map_err(|_| Error::Capacity("owner decode"))?;
+     let bytes = serde_json::to_vec(value).map_err(|_| Error::InvalidRecord)?;
+@@ -646,6 +647,7 @@ pub(super) fn baseline_decode_charge(
+ ) -> Result<u64, Error> {
+     // One exact aggregate walk at construction/open/fold, alongside the other
+     // baseline walks. Ordinary commands never visit this map.
++    super::owner::lineage_encodings(3);
+     super::owner::exact_size(lineage)?;
+     payload_decode_charge(lineage, workspace / 4)?
+         .checked_add(resources as u64 * 4096 + 8192)

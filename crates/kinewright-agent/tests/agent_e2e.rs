@@ -8,11 +8,12 @@ use kinewright_agent::{
     BranchApplyOutcome, ClaudeCodeDriver, CursorAcpDriver, McpServer, TimelineBranch,
 };
 use kinewright_core::{
-    AgentDriver, AgentEvent, AssetId, Clip, ClipId, Command, Core, Document, Event, MediaAsset,
+    AgentDriver, AgentEvent, AssetId, Clip, ClipId, Command, Document, Event, MediaAsset,
     MediaKind, Operation, Query, QueryResult, Rational, SessionConfig, TimeCode, Track, TrackId,
     TrackKind,
 };
 use kinewright_media::FfmpegMediaEngine;
+use kinewright_project::operation_actor::Core;
 
 #[test]
 fn claude_splits_then_deletes_via_the_live_mcp_server() {
@@ -23,7 +24,7 @@ fn claude_splits_then_deletes_via_the_live_mcp_server() {
 
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let original = fixture_document();
-    let core = Core::spawn(original.clone()).unwrap();
+    let core = Core::for_test(original.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let confirmations = server.confirmations();
     let mut session = ClaudeCodeDriver
@@ -94,7 +95,7 @@ fn codex_splits_then_deletes_via_the_live_mcp_server() {
 
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let original = fixture_document();
-    let core = Core::spawn(original.clone()).unwrap();
+    let core = Core::for_test(original.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let confirmations = server.confirmations();
     let mut session = kinewright_agent::CodexDriver
@@ -170,13 +171,21 @@ fn codex_edits_an_isolated_branch_then_one_merge_publishes_it() {
 
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let original = fixture_document();
-    let live = Core::spawn(original.clone()).unwrap();
+    let live = Core::for_test(original.clone()).unwrap();
     let Event::QueryResult(QueryResult::Snapshot { revision, document }) =
         live.request(Command::Query(Query::Snapshot)).unwrap()
     else {
         panic!("expected live snapshot");
     };
-    let branch = TimelineBranch::new("Codex smoke", revision, document).unwrap();
+    let branch = TimelineBranch::new(
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+        "Codex smoke",
+        revision,
+        document,
+    )
+    .unwrap();
     let server = McpServer::start_isolated(branch.core(), media.clone(), media).unwrap();
     let mut session = kinewright_agent::CodexDriver
         .start_session(SessionConfig {
@@ -254,13 +263,21 @@ fn codex_uses_m32_source_and_catalog_primitives_on_an_isolated_branch() {
 
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let original = fixture_document();
-    let live = Core::spawn(original.clone()).unwrap();
+    let live = Core::for_test(original.clone()).unwrap();
     let Event::QueryResult(QueryResult::Snapshot { revision, document }) =
         live.request(Command::Query(Query::Snapshot)).unwrap()
     else {
         panic!("expected live snapshot");
     };
-    let branch = TimelineBranch::new("Codex M32 smoke", revision, document).unwrap();
+    let branch = TimelineBranch::new(
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+        "Codex M32 smoke",
+        revision,
+        document,
+    )
+    .unwrap();
     let server = McpServer::start_isolated(branch.core(), media.clone(), media).unwrap();
     let mut session = kinewright_agent::CodexDriver
         .start_session(SessionConfig {
@@ -332,6 +349,10 @@ fn codex_uses_m32_source_and_catalog_primitives_on_an_isolated_branch() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one equipped-session witness keeps its branch result and exact media checks together"
+)]
 fn codex_builds_m33_visual_automation_and_an_audio_bus_on_an_isolated_branch() {
     if std::env::var("KINEWRIGHT_M33_AGENT_TEST").as_deref() != Ok("1") {
         eprintln!("skipped: set KINEWRIGHT_M33_AGENT_TEST=1 to run the Codex M33 smoke");
@@ -340,13 +361,21 @@ fn codex_builds_m33_visual_automation_and_an_audio_bus_on_an_isolated_branch() {
 
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let original = fixture_document();
-    let live = Core::spawn(original.clone()).unwrap();
+    let live = Core::for_test(original.clone()).unwrap();
     let Event::QueryResult(QueryResult::Snapshot { revision, document }) =
         live.request(Command::Query(Query::Snapshot)).unwrap()
     else {
         panic!("expected live snapshot");
     };
-    let branch = TimelineBranch::new("Codex M33 smoke", revision, document).unwrap();
+    let branch = TimelineBranch::new(
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+        "Codex M33 smoke",
+        revision,
+        document,
+    )
+    .unwrap();
     let server = McpServer::start_isolated(branch.core(), media.clone(), media).unwrap();
     let mut session = kinewright_agent::CodexDriver
         .start_session(SessionConfig {
@@ -449,7 +478,7 @@ fn cursor_splits_then_deletes_via_the_live_mcp_server() {
     eprintln!("CURSOR TEST: building fixture and MCP server");
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let original = fixture_document();
-    let core = Core::spawn(original.clone()).unwrap();
+    let core = Core::for_test(original.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let confirmations = server.confirmations();
     eprintln!("CURSOR TEST: starting ACP session");

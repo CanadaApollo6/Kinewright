@@ -1,0 +1,42 @@
+{
+  "source": {
+    "revision": "41171a3ba37fca24a8e52d0f07cc7ab737140b9a",
+    "binary": "/home/riels/.t3/worktrees/Kinewright/t3-4492ddab-ddc6f77f95db0f24/target/hx-part2/bin/owner-41171a3b-9b75633724c4325dbe5b210588ed27ccd2fd12409e6353b4e87199226d10d03f",
+    "sha256": "9b75633724c4325dbe5b210588ed27ccd2fd12409e6353b4e87199226d10d03f"
+  },
+  "roles": {
+    "Candidate": {
+      "body_cap": 1048576,
+      "commands": 400,
+      "fixture": "small (heavy refused)",
+      "graph_cap": 1712128,
+      "owner_bytes": 194624,
+      "retained_bytes": 341824,
+      "retained_envelope": 2097152,
+      "shell_cap": 1581056,
+      "workspace_envelope": 16777216
+    },
+    "Ordinary": {
+      "body_cap": 11534336,
+      "commands": 2000,
+      "fixture": "heavy",
+      "graph_cap": 17833984,
+      "owner_bytes": 1308736,
+      "retained_bytes": 8856298,
+      "retained_envelope": 33554432,
+      "shell_cap": 16785408,
+      "workspace_envelope": 33554432
+    },
+    "Task": {
+      "body_cap": 12582912,
+      "commands": 2000,
+      "fixture": "heavy",
+      "graph_cap": 20979712,
+      "owner_bytes": 1308736,
+      "retained_bytes": 8856298,
+      "retained_envelope": 37748736,
+      "shell_cap": 16785408,
+      "workspace_envelope": 67108864
+    }
+  }
+}

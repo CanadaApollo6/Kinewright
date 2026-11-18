@@ -36,7 +36,7 @@ fn dq_rehearsal_batch_applies_ready_members_and_names_conflicts() {
 fn dq_rehearsal_atomic_batch_keeps_the_old_all_or_nothing_option() {
     let (s, v) = fixture();
     let before = s.snapshot().unwrap();
-    let history = s.core.export_history_identified().unwrap();
+    let history = history_identity(&s);
     let mut request = args(vec![words(&v, 1), words(&v, 99)]);
     request["atomic"] = json!(true);
     let result = cut(&s, request, false);
@@ -47,7 +47,7 @@ fn dq_rehearsal_atomic_batch_keeps_the_old_all_or_nothing_option() {
         "DQ_REHEARSAL_ATOMIC_BEFORE_CONSENT"
     );
     assert_eq!(s.snapshot().unwrap(), before);
-    assert_eq!(s.core.export_history_identified().unwrap(), history);
+    assert_eq!(history_identity(&s), history);
 }
 #[test]
 fn dq_rehearsal_batch_coordinates_do_not_depend_on_request_order() {

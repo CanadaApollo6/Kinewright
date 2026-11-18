@@ -1,0 +1,91 @@
+{
+  "platform": "Linux",
+  "all_exit_statuses": 0,
+  "commands": [
+    {
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "log": "target/hx-h2b/clippy-thirty-first.log",
+      "sha256": "f2066ca264b9a8598ecd436c70919e1efe1acea4098ad2a13b5d82d67bc049ec",
+      "compressed": false
+    },
+    {
+      "command": "cargo test -p kinewright-core -p kinewright-project --features kinewright-project/test-util",
+      "log": "target/hx-h2b/core-project-final.log",
+      "sha256": "e5db04bed28388ac5744f5a1f9a4e1e6410b5eb4680207bbece9b373086415d9",
+      "compressed": false
+    },
+    {
+      "command": "cargo test --workspace --no-fail-fast",
+      "log": "target/hx-h2b/workspace-sixth.log",
+      "sha256": "b7c8bd62a24c89a2b4efe0283e932479b3e046c98eab3fa5557cd9a4ea0a1b47",
+      "compressed": true
+    },
+    {
+      "command": "cargo build --workspace",
+      "log": "target/hx-h2b/workspace-build-final.log",
+      "sha256": "2b1d10fd8c29f5941fa3baccbed07112f5e49a7fc443e90d33ce0a13560eaaf9",
+      "compressed": false
+    },
+    {
+      "command": "cargo build -p kinewright-agent --no-default-features --lib",
+      "log": "target/hx-h2b/shipping-lib-final.log",
+      "sha256": "4f759af3d7175987562774b767a7dff73e0a0ed7fef9ef7804c178228d50c4f7",
+      "compressed": false
+    },
+    {
+      "command": "cargo build -p kinewright-app --no-default-features --bin kinewright-app",
+      "log": "target/hx-h2b/shipping-app-final.log",
+      "sha256": "57ce2ae4f02135e3ad57d055d1cecaee35977e9379c1b0ee6b48ae5b855b1eac",
+      "compressed": false
+    },
+    {
+      "command": "cargo build -p kinewright-agent --no-default-features --bin kinewright",
+      "log": "target/hx-h2b/shipping-host-final.log",
+      "sha256": "406c8b63f8555aae182048a3ad82049e54e677cce05dc16f02f1190775751992",
+      "compressed": false
+    },
+    {
+      "command": "cargo fmt -- --check",
+      "log": "target/hx-h2b/fmt-final.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "compressed": false
+    },
+    {
+      "command": "nice -n 19 python3 -I -B scripts/slow_tests.py lint",
+      "log": "target/hx-h2b/slow-lint-final.log",
+      "sha256": "17a4728bb971a2c248c6003e84d7d3cc34ca9b7883507515af3e3917a5ce9aa9",
+      "compressed": false
+    },
+    {
+      "command": "cargo test -p kinewright-project --release --features test-util,slow-tests --test history_capacity_matrix twenty_thousand_clip_project_opens_edits_forks_merges_and_saves -- --exact --nocapture",
+      "log": "target/hx-h2b/product-20000-clip-final.log",
+      "sha256": "3d295629511baae8fc205393033378d2c4a6732db21f2ab5999711ad47728837",
+      "compressed": false
+    }
+  ],
+  "test_results": {
+    "core-project-final.log": {
+      "test_groups": 49,
+      "passed": 1522,
+      "failed": 0,
+      "ignored": 28,
+      "sha256": "e5db04bed28388ac5744f5a1f9a4e1e6410b5eb4680207bbece9b373086415d9"
+    },
+    "workspace-sixth.log": {
+      "test_groups": 91,
+      "passed": 5535,
+      "failed": 0,
+      "ignored": 287,
+      "sha256": "b7c8bd62a24c89a2b4efe0283e932479b3e046c98eab3fa5557cd9a4ea0a1b47"
+    },
+    "product-20000-clip-final.log": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "test_seconds": 23.45
+    }
+  },
+  "warnings": "The three standalone shipping builds report the unchanged authentication.rs REFRESH dead-code warning. Workspace clippy passes with -D warnings.",
+  "not_run": "Windows and the complete slow tier on this checkpoint tree; CI follows the checkpoint push.",
+  "cargo_prefix": "source scripts/setup-ffmpeg.sh; flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 [RUST_TEST_THREADS=4 for tests] nice -n 10"
+}

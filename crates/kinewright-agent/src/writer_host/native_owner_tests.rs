@@ -65,7 +65,7 @@ fn native_save_as(f: &Fixture, name: &str) -> HostReply {
     let snapshot = {
         let owner = f.host.owner.upgrade().unwrap();
         let host = owner.lock().unwrap();
-        HostSnapshot::capture(host.core()).unwrap()
+        received_snapshot_for_test(host.core()).unwrap()
     };
     f.editor
         .request(HostCommand::SaveAs {
@@ -294,7 +294,7 @@ fn s4b_c2_fix2_owner_scope_checks_project_epoch_and_loss() {
                 }
                 host.execute(HostCommand::Status, f.host.roots.clone())
             } else {
-                let snapshot = HostSnapshot::capture(host.core()).unwrap();
+                let snapshot = received_snapshot_for_test(host.core()).unwrap();
                 // Model an owner lost by a partially completed transition. The
                 // failed command must revoke even with before == after == None.
                 host.owner.take();

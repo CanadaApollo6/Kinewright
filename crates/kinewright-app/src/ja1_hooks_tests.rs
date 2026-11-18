@@ -10,13 +10,6 @@ fn h4_app_close_waits_for_detach_and_keeps_host_run() {
         sync::atomic::Ordering,
         time::{Duration, Instant},
     };
-    struct ChildGuard(std::process::Child);
-    impl Drop for ChildGuard {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
     fn hook(app: &mut Ja1Attachment, command: HostCommand) -> HostReply {
         app.request_orchestration(command).unwrap();
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -32,7 +25,7 @@ fn h4_app_close_waits_for_detach_and_keeps_host_run() {
     }
     let temp = temp();
     let path = temp.path("h4-app.kinewright");
-    let core = Core::spawn(doc()).unwrap();
+    let core = Core::for_test(doc()).unwrap();
     let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
         temp.root(),
         &core,
@@ -51,7 +44,7 @@ fn h4_app_close_waits_for_detach_and_keeps_host_run() {
     // Host handover requires settled ownership; reopen the durable media so the
     // fixture no longer holds the import transaction's temporary input lease.
     drop(owner);
-    let mut owner = kinewright_project::editing_session::Ja1EditingSession::open(&path).unwrap();
+    let mut owner = kinewright_project::editing_session::Ja1EditingSession::open(&path, &kinewright_project::operation_history::HistoryPool::new(kinewright_project::operation_history::PoolLimits::default())).unwrap();
     let mut candidate = owner
         .fork_durable_branch(
             "run-candidate",
@@ -94,16 +87,16 @@ fn h4_app_close_waits_for_detach_and_keeps_host_run() {
     };
     owner.save_active().unwrap();
     let mut app = Ja1Attachment::new(owner).unwrap();
-    app.launch_host_at(
-        &host::executable(),
-        "h4-app".into(),
-        SessionRoots {
-            read: vec![temp.root().into()],
-            write: vec![temp.root().into()],
-        },
-    )
-    .unwrap();
-    let mut child = ChildGuard(app.host.as_mut().unwrap().take_child_for_test());
+    // Use the isolated scripted provider ports. The shipping host deliberately
+    // has no scripted adapter; the fixture still uses the authenticated router
+    // and actual continuation owner after the GUI context is closed.
+    let fixture = kinewright_agent::writer_host::ProtocolFixture::new(
+        temp.root(), kinewright_agent::writer_host::ProtocolFixtureMode::Dormant,
+    );
+    let writer = app.launch_protocol_fixture(
+        SessionRoots { read: vec![temp.root().into()], write: vec![temp.root().into()] },
+        temp.path("scheduler"), &fixture,
+    ).unwrap();
     let issued = hook(&mut app, HostCommand::IssueMetadataIssuer { issuer: None })
         .metadata_issuer
         .unwrap();
@@ -155,7 +148,7 @@ fn h4_app_close_waits_for_detach_and_keeps_host_run() {
     assert!(app.close(), "H4_APP_CONFIRMED_CLOSE");
     assert!(!app.originating_context.load(Ordering::Acquire));
     assert!(
-        child.0.try_wait().unwrap().is_none(),
+        !writer.shutdown_requested(),
         "H4_APP_HOST_SURVIVES"
     );
     let editor = reissuer.reattach_editor().unwrap();
@@ -213,5 +206,6 @@ fn h4_app_close_waits_for_detach_and_keeps_host_run() {
             .is_none(),
         "H4_APP_SHUTDOWN_AFTER_STOP"
     );
-    child.0.wait().unwrap();
+    assert!(writer.shutdown_requested());
+    writer.shutdown().unwrap();
 }

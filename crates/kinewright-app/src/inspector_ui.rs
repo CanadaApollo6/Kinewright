@@ -13325,9 +13325,8 @@ mod rr_probe {
 pub(crate) mod mo2_parity {
     use std::path::PathBuf;
 
-    use kinewright_core::{
-        AssetId, Core, MediaAsset, Rational, SolidColor, Track, TrackId, TrackKind,
-    };
+    use kinewright_core::{AssetId, MediaAsset, Rational, SolidColor, Track, TrackId, TrackKind};
+    use kinewright_project::operation_actor::Core;
 
     use super::review_c2_inspector::{drag_frames, undo};
     use super::tests::media_clip;
@@ -13577,7 +13576,7 @@ pub(crate) mod mo2_parity {
     /// live and the whole drag is one undo step.
     #[test]
     fn mo2_solid_colour_drag_is_one_undo_step() {
-        let core = Core::spawn(mo2_document(solid_clip())).expect("the core starts");
+        let core = Core::for_test(mo2_document(solid_clip())).expect("the core starts");
         let (sent, after) = drag_solid_channel(&core, "solid_r", &[20.0, 40.0, 60.0]);
         assert!(sent.len() > 1, "a live drag sends every frame: {sent:?}");
         assert!(
@@ -13654,16 +13653,16 @@ pub(crate) mod mo2_parity {
             .collect()
     }
 
-    /// The operations `app`'s Core has applied (its op log) — what a GUI
+    /// The operations `app`'s Core has applied — what a GUI
     /// sender actually delivered, not what a helper would have built.
     pub(crate) fn mo2_applied(app: &KinewrightApp) -> Vec<Operation> {
-        let query = kinewright_core::Command::Query(kinewright_core::Query::OpLog);
-        let answer = app.focused().core.request(query).expect("the core answers");
-        let kinewright_core::Event::QueryResult(kinewright_core::QueryResult::OpLog(log)) = answer
-        else {
-            panic!("an op log: {answer:?}");
-        };
-        log.to_vec()
+        app.focused()
+            .core
+            .operations(false)
+            .expect("the applied delta")
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Click the inspector widget recorded as `name` in the real app.

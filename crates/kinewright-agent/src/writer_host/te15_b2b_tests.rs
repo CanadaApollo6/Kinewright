@@ -625,7 +625,11 @@ fn te15_b2b_merge_replay_same_final_document() {
         &kinewright_media::test_support::workspace_target_dir(),
         "b2b-merge-order",
     );
+    let pool = kinewright_project::operation_history::HistoryPool::new(
+        kinewright_project::operation_history::PoolLimits::default(),
+    );
     let measurement = crate::te1_eval::run_scripted(
+        &pool,
         &temp.path("case5"),
         5,
         "codex",
@@ -633,7 +637,8 @@ fn te15_b2b_merge_replay_same_final_document() {
     )
     .unwrap();
     assert!(measurement.checks.passed(), "B2B_MERGE_ORIGINAL_ORACLE");
-    let document = measurement.history.clone();
+    let history = measurement.history.as_ref().unwrap();
+    let identity = history.identity();
     let mut trace = measurement.trace.clone();
     let read = trace
         .calls
@@ -675,7 +680,7 @@ fn te15_b2b_merge_replay_same_final_document() {
         !crate::te1_eval::checks::observed(5, &trace),
         "B2B_REAL_MERGE_READ_REPLAY_REFUSED"
     );
-    assert_eq!(measurement.history, document, "B2B_SAME_FINAL_DOCUMENT");
+    assert_eq!(measurement.history.as_ref().unwrap().identity(), identity, "B2B_SAME_FINAL_DOCUMENT");
 }
 
 #[cfg(all(feature = "te1-eval", target_os = "linux"))]

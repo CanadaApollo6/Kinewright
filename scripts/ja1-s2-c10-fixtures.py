@@ -13,15 +13,15 @@ def reference(name, kind="input"):
 def main():
     index_path = FIXTURES / "fixtures-index.json"
     original = json.loads(index_path.read_text())
-    prefix = [entry for entry in original["fixtures"] if entry["fixture_id"] not in ("s2-manual-recovery", "s2-manual-floor")]
+    prefix = [entry for entry in original["fixtures"] if entry["fixture_id"] not in ("s2-manual-recovery", "s2-manual-first-save")]
     entries = []
-    for floor in (False, True):
-        label = "s2-manual-floor" if floor else "s2-manual-recovery"
+    for first_save in (False, True):
+        label = "s2-manual-first-save" if first_save else "s2-manual-recovery"
         control = label + "-control.json"
-        write(FIXTURES / control, dict(batches=[], at=0, manual_recovery="floor" if floor else "recovery"))
+        write(FIXTURES / control, dict(batches=[], at=0, manual_recovery="first_save" if first_save else "recovery"))
         actions = [dict(id=1, participant="main", action="app_fixture", args=dict(input="control")),
                    dict(id=2, participant="main", action="assert_observed", args=dict(id="query-ran", observation=1, pointer="/query", oracle="true", evidence_class="control", comparison="equal"))]
-        for field in ("exact", "frozen_producers", "fresh_lease", "saved", "floor"):
+        for field in ("exact", "frozen_producers", "fresh_lease", "saved", "stacks_preserved"):
             actions.append(dict(id=len(actions)+1, participant="main", action="assert_observed", args=dict(id=field.replace("_", "-"), observation=1, pointer="/recovery/"+field, oracle="true", evidence_class="revised_property", positive_control="query-ran", comparison="equal")))
         fixture = dict(protocol="kinewright.ja-harness", protocol_version=1, fixture_id=label, gate_ids=["JA1.G5-L"], lane="app-paint", requirements=[], inputs=dict(control=reference(control)), initial=dict(revision=0, participants=[]), actions=actions, barriers=[], oracles={"true": reference("oracle-true.json")}, limits=dict(input_bytes=1048576, output_bytes=16777216, action_timeout_ms=60000, setup_timeout_ms=30000))
         write(FIXTURES / (label + ".json"), fixture)

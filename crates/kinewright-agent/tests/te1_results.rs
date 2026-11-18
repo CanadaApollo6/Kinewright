@@ -1,5 +1,6 @@
 use kinewright_agent::McpServer;
-use kinewright_core::{Core, Document, Marker, MarkerId, TimeCode};
+use kinewright_core::{Document, Marker, MarkerId, TimeCode};
+use kinewright_project::operation_actor::Core;
 use rmcp::{ServiceExt, model::CallToolRequestParams, transport::StreamableHttpClientTransport};
 use std::sync::Arc;
 
@@ -21,7 +22,8 @@ fn te1_result_bytes_match_the_result_received_over_mcp() {
         label: "arbitrary body never retained by size observer".into(),
         color_token: 0,
     });
-    let server = McpServer::start(Core::spawn(document).unwrap(), engine.clone(), engine).unwrap();
+    let server =
+        McpServer::start(Core::for_test(document).unwrap(), engine.clone(), engine).unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let serialized = runtime.block_on(async {
         let client =

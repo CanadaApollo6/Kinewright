@@ -10,6 +10,7 @@ fn in_app(project: &mut Project, attachment: Ja1Attachment) -> KinewrightApp {
     let (mut app, _) = in1_harness(Document::default());
     app.projects[0].recovery.stop_for_studio();
     app.projects[0].ja1 = Some(attachment);
+    app.projects[0].install_ja1_view();
     app.focused_mut().studio.feedback = std::mem::take(&mut project.feedback);
     app
 }
@@ -27,8 +28,13 @@ fn assert_once(app: KinewrightApp, project: &Project, request: &ReviseRequest) {
     assert_eq!(runs, 1, "C7_RETRY_ONE_RUN");
     assert_eq!(batches.len(), 1);
     assert!(batches[0].is_some(), "C7_RETRY_ONE_CONSUMPTION");
-    let owner =
-        kinewright_project::editing_session::Ja1EditingSession::open(&project.path).unwrap();
+    let owner = kinewright_project::editing_session::Ja1EditingSession::open(
+        &project.path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     assert_eq!(
         owner
             .read_submitted_batch(&request.batch_id)

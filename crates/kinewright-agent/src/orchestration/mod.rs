@@ -21,6 +21,7 @@ pub mod requests;
 mod setting_file;
 pub mod specialist_setting;
 pub(crate) mod task_manifest;
+#[cfg(any(target_os = "linux", test, feature = "test-util"))]
 #[path = "../writer_host/task_tool_names.rs"]
 pub(crate) mod task_tool_names;
 pub mod tasks;

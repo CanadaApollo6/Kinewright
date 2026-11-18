@@ -1,13 +1,11 @@
 //! Read-only A1 choice order and selected source closure; no destination namespace is created.
 use super::{
-    BundleError, FrozenRescueCapture, Ja1EditingSession, MissingOwnedUse, ObjectRef,
-    OwnedInputManifest, ProjectBundle, ProjectStore, RetainedDestination, StorageLimits,
-    StorageReservation,
+    BundleError, FrozenRescueCapture, Ja1EditingSession, MissingOwnedUse, ObjectRef, ProjectBundle,
+    ProjectStore, RetainedDestination, StorageLimits, StorageReservation,
 };
 use crate::{
     bundle_records::RecordKind, bundle_rescue::RescueSelection, rescue_record::RecoveryOmission,
 };
-use kinewright_core::HistorySnapshot;
 
 impl Ja1EditingSession {
     pub(super) fn rescue_required_roots(
@@ -105,42 +103,59 @@ impl Ja1EditingSession {
         }
         Ok(unavailable)
     }
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
-        reason = "one selected content union, readability proof and existing floor admission"
+        reason = "the selected full owner, cold archives, explicit omissions and destination forecasts form one closure admission"
     )]
     fn rescue_graph(
         &self,
-        history: &HistorySnapshot,
+        capture: &FrozenRescueCapture,
         omitted: &[RecoveryOmission],
         limits: &StorageLimits,
     ) -> Result<Vec<ObjectRef>, BundleError> {
         let (source, base) = self.capture_source()?;
         let mut roots = base.into_iter().map(|(r, _)| r).collect::<Vec<_>>();
-        let inputs = self.rescue_source_inputs()?;
-        let mut retained = (*source.read_copy_record::<OwnedInputManifest>(&inputs, true)?).clone();
+        roots.push(self.rescue_source_inputs()?);
+        capture.with_snapshot(|snapshot| {
+            roots.extend(snapshot.record_references().cloned());
+            // The current manifest alone cannot cover payloads reachable only
+            // through Undo/Redo. Resolve the selected owner's entire resource
+            // union through its retained certificates before offering omission.
+            let current = self.rescue_source_inputs()?;
+            let mut contexts = snapshot
+                .record_references()
+                .filter(|reference| reference.record_kind == RecordKind::InputManifest)
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            contexts.insert(current.clone());
+            if self.source.is_none() || self.association.as_ref().is_some_and(|a| a.saved.is_some())
+            {
+                let bundle = self.active_bundle()?;
+                contexts.insert(
+                    bundle
+                        .checkpoint(bundle.manual_branch_id())?
+                        .owner_ref
+                        .clone(),
+                );
+            }
+            let bindings =
+                crate::operation_publication::retained_bindings(source, &contexts, &current)?;
+            for resource in snapshot.resources() {
+                if let Some(reference) = bindings.get(resource) {
+                    roots.push(reference.clone());
+                } else if !matches!(
+                    resource,
+                    crate::operation_history::Resource::Media { sha256: None, .. }
+                ) {
+                    return Err(crate::operation_history::Error::MissingResource.into());
+                }
+            }
+            Ok(())
+        })?;
         let named =
             self.association.as_ref().is_some_and(|a| a.saved.is_some()) || self.source.is_none();
         if named {
             let bundle = self.active_bundle()?;
-            let prior = bundle.checkpoint(&bundle.manual_branch_id)?;
-            for reference in &prior.history_input_manifest_refs {
-                retained.entries.extend(
-                    source
-                        .read_copy_record::<OwnedInputManifest>(reference, true)?
-                        .entries
-                        .clone(),
-                );
-            }
-            let original = source.resolve_copy_history(&prior.history_ref, true)?;
-            let cut = usize::try_from(history.floor_offset.saturating_sub(original.floor_offset))
-                .map_err(|_| BundleError::Capacity("rescue history cut"))?;
-            let contexts = &prior.history_input_manifest_refs;
-            if cut == 0 {
-                roots.extend(contexts.iter().cloned());
-            } else {
-                roots.extend(contexts.iter().skip(cut + 1).cloned());
-            }
             for (i, root) in bundle.recovery.predecessors.iter().enumerate() {
                 if !omitted.iter().any(|o| o.role == format!("predecessor:{i}")) {
                     roots.push(root.clone());
@@ -155,11 +170,26 @@ impl Ja1EditingSession {
                 roots.extend(bundle.root_references()?);
             }
         }
-        crate::bundle_commit::retain_history_inputs(history, &mut retained);
-        crate::bundle_commit::validate_inputs(history, &retained)?;
-        for entry in &retained.entries {
-            roots.push(entry.object.clone());
-            roots.extend(entry.dependencies.iter().cloned());
+        // Exact cold archives replace older in-memory rescue holders, never a
+        // second truth about their fates. Only this session's bounded attempts retain them.
+        for attempt in &self.rescue.attempts {
+            let archive = attempt
+                .capture
+                .archive
+                .lock()
+                .map_err(|_| BundleError::Unsettled)?;
+            let store = attempt
+                .capture
+                .archive_store
+                .lock()
+                .map_err(|_| BundleError::Unsettled)?;
+            if let (Some(reference), Some(store)) = (archive.as_ref(), store.as_ref()) {
+                let closure =
+                    store.closure_with_inventory(std::slice::from_ref(reference), false)?;
+                for reference in closure {
+                    store.admit_rescue_record_profile(&reference, limits)?;
+                }
+            }
         }
         roots.sort();
         roots.dedup();
@@ -179,55 +209,32 @@ impl Ja1EditingSession {
         for reference in &closure {
             source.admit_rescue_record_profile(reference, limits)?;
         }
-        let encoded_history =
-            serde_json::to_vec(history).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let decoded_history = crate::store::preflight_record(&encoded_history, limits)?;
-        let metadata = closure
-            .iter()
-            .filter(|r| !r.record_kind.is_owned_bytes())
-            .try_fold(0_u64, |n, r| {
-                n.checked_add(r.byte_length)
-                    .ok_or(BundleError::Capacity("rescue metadata overflow"))
-            })?;
-        if decoded_history > limits.live_history_bytes
-            || metadata
-                .checked_add(decoded_history)
-                .is_none_or(|n| n > limits.metadata_bytes)
-        {
-            return Err(BundleError::Capacity("rescue history/metadata admission"));
-        }
-
-        let bytes = closure.iter().try_fold(
-            history
-                .encoded_bytes()
-                .map_err(crate::bundle::history_error)?,
-            |n, r| {
-                n.checked_add(r.byte_length)
-                    .ok_or(BundleError::Capacity("rescue graph bytes"))
-            },
-        )?;
+        let bytes = capture.with_snapshot(|snapshot| Ok(snapshot.encoded_bytes()?))?;
+        let bytes = closure.iter().try_fold(bytes, |n, r| {
+            n.checked_add(r.byte_length)
+                .ok_or(BundleError::Capacity("rescue graph bytes"))
+        })?;
         if bytes > limits.owned_bytes
             || bytes > limits.copy_overlap_bytes
             || closure.len() as u64 > limits.objects
         {
             return Err(BundleError::Capacity("rescue selected graph/overlap"));
         }
-        let ordinary = crate::bundle_commit::select_history(history, limits)?;
-        if ordinary.history != *history {
-            return Err(BundleError::Capacity("rescue selected branch history"));
-        }
         Ok(roots)
     }
     pub(super) fn preview_rescue_inner(
         &self,
-        capture: StorageReservation<FrozenRescueCapture>,
+        capture: std::sync::Arc<StorageReservation<FrozenRescueCapture>>,
         limits: StorageLimits,
     ) -> Result<RescueSelection, BundleError> {
         limits.validate()?;
+        if limits.objects == 0 || limits.metadata_bytes == 0 || limits.decoded_record_bytes == 0 {
+            return Err(BundleError::Capacity("rescue record profile"));
+        }
         if self
             .attachment
             .capture()
-            .map_err(crate::bundle::history_error)?
+            .map_err(crate::bundle::operation_error)?
             != capture.cut
         {
             return Err(BundleError::HistoryChanged);
@@ -236,45 +243,22 @@ impl Ja1EditingSession {
             self.association.as_ref().is_some_and(|a| a.saved.is_some()) || self.source.is_none();
         let (source, _) = self.capture_source()?;
         let unavailable = self.unavailable_recovery(source, named)?;
-        let before = capture.cut.history();
-        let full = self.rescue_graph(before, &[], &limits);
-        let (history, omissions, roots) = if let Ok(roots) = full {
-            (before.clone(), vec![], roots)
-        } else if let Ok(roots) = self.rescue_graph(before, &unavailable, &limits) {
-            (before.clone(), unavailable, roots)
-        } else {
-            // The common selector still supplies the ordinary earliest branch floor. Additional
-            // graph/readability predicates use Core's same legal oldest-first transition search.
-            let ordinary = crate::bundle_commit::select_history(before, &limits)?;
-            let selected = if self
-                .rescue_graph(&ordinary.history, &unavailable, &limits)
-                .is_ok()
-            {
-                ordinary.history
-            } else {
-                kinewright_core::HistoryTransition::find_floor(
-                    before.clone(),
-                    |_, _, _| true,
-                    |candidate| self.rescue_graph(candidate, &unavailable, &limits).is_ok(),
-                )
-                .map_err(|_| {
-                    self.rescue_graph(before, &unavailable, &limits)
-                        .unwrap_err()
-                })?
-                .after()
-                .clone()
-            };
-            let roots = self.rescue_graph(&selected, &unavailable, &limits)?;
-            (selected, unavailable, roots)
+        let (omissions, roots) = match self.rescue_graph(&capture, &[], &limits) {
+            Ok(roots) => (vec![], roots),
+            Err(_) => (
+                unavailable.clone(),
+                self.rescue_graph(&capture, &unavailable, &limits)?,
+            ),
         };
-        let removed_undo = before
-            .cursor
-            .undo
-            .len()
-            .saturating_sub(history.cursor.undo.len()) as u64;
+        // Capacity is a typed refusal. Only Core folds; rescue never trims the selected history.
         let selected_digest = kinewright_media::sha256_bytes(
-            &serde_json::to_vec(&(&history, &omissions, &roots, format!("{limits:?}")))
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?,
+            &serde_json::to_vec(&(
+                capture.cut.identity(),
+                &omissions,
+                &roots,
+                format!("{limits:?}"),
+            ))
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?,
         );
         let reads = source.admit_retained_content_reads(
             &roots
@@ -285,10 +269,9 @@ impl Ja1EditingSession {
         )?;
         Ok(RescueSelection {
             capture,
-            history,
             limits,
             selected_digest,
-            removed_undo,
+
             omissions,
             roots,
             reads,

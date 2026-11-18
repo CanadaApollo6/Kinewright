@@ -19,7 +19,10 @@ mod tests {
         );
         let [fixture, _] =
             kinewright_project::c0_fixtures::build_c0_fixture_pair(temp.root()).unwrap();
-        let mut bundle = kinewright_project::bundle::LoadedBundle::read(&fixture.path)
+        let pool = kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        );
+        let mut bundle = kinewright_project::bundle::LoadedBundle::read(&fixture.path, &pool)
             .unwrap()
             .into_writer()
             .unwrap();
@@ -35,10 +38,9 @@ mod tests {
             refs.push(reference);
             drop(sealed);
         }
-        let core = Core::spawn(Document::default()).unwrap();
-        // Restore the actual saved history before retaining the fixture evidence.
-        let loaded = kinewright_project::bundle::LoadedBundle::read(&fixture.path).unwrap();
-        loaded.restore_manual(&core).unwrap();
+        let mut loaded =
+            kinewright_project::bundle::LoadedBundle::read(&fixture.path, &pool).unwrap();
+        let core = loaded.open_manual().unwrap();
         let inputs = loaded
             .manual_checkpoint()
             .unwrap()

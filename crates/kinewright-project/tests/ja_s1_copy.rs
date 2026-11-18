@@ -1,6 +1,7 @@
 #![cfg(all(feature = "test-util", target_os = "linux"))]
 use kinewright_core::*;
 use kinewright_media::test_support::TempDirectory;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{BundleError, BundleWriteAdmission, LoadedBundle, ProjectBundle},
     bundle_copy::{BundleCopy, CopyStatus, SaveAsOutcome, SessionStore},
@@ -34,7 +35,29 @@ fn apply(core: &Core, command: Command) {
         Event::DocumentChanged { .. }
     ));
 }
-fn core(asset: MediaAsset) -> Core {
+fn assert_copy_contents(
+    source: &kinewright_project::operation_history::OwnerSnapshot,
+    selected: &kinewright_project::operation_history::OwnerSnapshot,
+) {
+    assert!(
+        selected.history().epoch > source.history().epoch,
+        "COPY_STARTS_A_NEW_EPOCH"
+    );
+    let mut expected: kinewright_core::undo::Record =
+        serde_json::from_value(serde_json::to_value(source.history()).unwrap()).unwrap();
+    expected.epoch = selected.history().epoch;
+    assert_eq!(
+        selected.identity().unwrap().core,
+        expected.snapshot_identity().unwrap(),
+        "COPY_PRESERVES_ALL_COMMANDS_AND_BOTH_STACKS"
+    );
+    assert_eq!(
+        selected.identity().unwrap().owner,
+        source.identity().unwrap().owner,
+        "COPY_PRESERVES_COMPLETE_CANONICAL_OWNER"
+    );
+}
+fn core(asset: MediaAsset, pool: &kinewright_project::operation_history::HistoryPool) -> Core {
     let mut doc = Document::default();
     doc.media_pool.push(asset);
     doc.tracks.push(Track {
@@ -56,7 +79,16 @@ fn core(asset: MediaAsset) -> Core {
             source_path: "/missing/external.cube".into(),
         },
     });
-    let core = Core::spawn(doc).unwrap();
+    let core = Core::spawn(
+        pool,
+        kinewright_project::operation_history::Role::Ordinary,
+        kinewright_project::operation_history::CreationOrigin {
+            branch: kinewright_project::bundle_records::BranchId::fresh().unwrap(),
+            batch: kinewright_project::bundle_records::BatchId::fresh().unwrap(),
+        },
+        doc,
+    )
+    .unwrap();
     apply(
         &core,
         Command::Do(Operation::AddTitle {
@@ -77,10 +109,11 @@ fn core(asset: MediaAsset) -> Core {
         Command::Do(Operation::DeleteClip { clip: ClipId(1) }),
     );
     apply(&core, Command::Undo);
-    assert_eq!(core.export_history().unwrap().cursor.redo.len(), 1);
+    assert_eq!(core.export_history().unwrap().history().redo.len(), 1);
     assert!(
         core.export_history()
             .unwrap()
+            .history()
             .document
             .lut_assets
             .is_empty()
@@ -178,9 +211,13 @@ fn assets(
     (asset, entries, pins, exact)
 }
 fn named(path: &Path) -> (Core, ProjectBundle, ObjectRef, BTreeMap<String, Vec<u8>>) {
-    let mut bundle = ProjectBundle::activate(path, BundleWriteAdmission::new_document()).unwrap();
+    let pool = kinewright_project::operation_history::HistoryPool::new(
+        kinewright_project::operation_history::PoolLimits::default(),
+    );
+    let mut bundle =
+        ProjectBundle::activate(path, BundleWriteAdmission::new_document(), &pool).unwrap();
     let (asset, entries, pins, exact) = assets(bundle.store_mut().unwrap());
-    let core = core(asset);
+    let core = core(asset, &pool);
     let manifest = OwnedInputManifest {
         project_id: Some(bundle.project_id().clone()),
         session_id: None,
@@ -230,13 +267,18 @@ fn byte_session(
         .store_mut()
         .admit_input(&request, &mut Cursor::new(bytes))
         .unwrap();
-    let history = Core::spawn(Document::default()).unwrap();
+    let history = Core::for_test(Document::default()).unwrap();
     (session, sealed, reference, history)
 }
 fn reopen(path: &Path) -> (Core, ProjectBundle) {
-    let loaded = LoadedBundle::read(path).unwrap();
-    let core = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&core).unwrap();
+    let mut loaded = LoadedBundle::read(
+        path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let core = loaded.open_manual().unwrap();
     (core, loaded.into_writer().unwrap())
 }
 fn read_assets(bundle: &ProjectBundle, expected: &BTreeMap<String, Vec<u8>>) {
@@ -373,7 +415,7 @@ fn save_as_copies_every_retained_asset_including_luts_before_root() {
     let strokes_ref = reference(strokes, RecordKind::OwnedEvidence);
     let request = CommandEnvelope {
         switch: None,
-        manual: None,
+        context: None,
         version: 1,
         action: "comment".into(),
         id: CommandId {
@@ -390,7 +432,6 @@ fn save_as_copies_every_retained_asset_including_luts_before_root() {
         comment_text: Some(text_ref.clone()),
         comment_strokes: Some(strokes_ref.clone()),
         evidence: vec![],
-        transition: None,
     };
     let ReceiptLookup::Committed(comment) = bundle
         .command(
@@ -409,13 +450,19 @@ fn save_as_copies_every_retained_asset_including_luts_before_root() {
     let candidate = bundle
         .fork_branch(
             &manual,
-            kinewright_project::history_record::HistoryRole::Ordinary,
+            kinewright_project::operation_history::Role::Ordinary,
         )
         .unwrap();
-    let candidate_core = Core::spawn(Document::default()).unwrap();
-    candidate_core
-        .restore_history((*bundle.branch_history(&candidate).unwrap()).clone())
-        .unwrap();
+    let candidate_core = Core::open(
+        bundle
+            .checkpoint(&candidate)
+            .unwrap()
+            .open(bundle.store(), bundle.history_pool())
+            .unwrap(),
+        candidate.clone(),
+        bundle.checkpoint(&candidate).unwrap().revision,
+    )
+    .unwrap();
     apply(
         &candidate_core,
         Command::Do(Operation::SetTrackSyncLock {
@@ -423,20 +470,19 @@ fn save_as_copies_every_retained_asset_including_luts_before_root() {
             locked: false,
         }),
     );
-    let candidate_history = candidate_core.export_history().unwrap();
+    let candidate_history = candidate_core.snapshot_identity().unwrap();
     bundle.save_branch(&candidate, &candidate_core).unwrap();
     let base = SpecialistBaseRecord {
-        history_role: kinewright_project::history_record::HistoryRole::Candidate,
+        history_role: kinewright_project::operation_history::Role::Candidate,
         target_branch: manual,
         base_head: base_checkpoint.head_id,
-        base_document_hash: base_checkpoint.document_hash,
+        base_document_hash: base_checkpoint.document_ref.sha256.clone(),
         original_baseline_ref: base_checkpoint.document_ref,
         frozen_checkpoint_ref,
-        full_applied_delta: candidate_history.applied_operations(),
     };
     let base_ref = bundle.retain_specialist_base(&base).unwrap();
     let before = graph(&source);
-    let history = core.export_history().unwrap();
+    let history = core.snapshot_identity().unwrap();
     let project = bundle.project_id().clone();
     let branch = bundle.manual_branch_id().clone();
     let (copy, trace) = io_observer::observe(|| copied(bundle.save_as(&destination).unwrap()));
@@ -488,7 +534,11 @@ fn save_as_copies_every_retained_asset_including_luts_before_root() {
             .contains(&candidate)
     );
     assert_eq!(
-        *destination_owner.branch_history(&candidate).unwrap(),
+        destination_owner
+            .branch_history(&candidate)
+            .unwrap()
+            .identity()
+            .unwrap(),
         candidate_history
     );
     assert_eq!(
@@ -499,17 +549,18 @@ fn save_as_copies_every_retained_asset_including_luts_before_root() {
         base
     );
     let candidate_checkpoint = destination_owner.checkpoint(&candidate).unwrap();
-    for reference in &candidate_checkpoint.history_input_manifest_refs {
-        assert_eq!(
+    let retained = destination_owner.branch_history(&candidate).unwrap();
+    for reference in retained.input_contexts() {
+        assert!(
             destination_owner
                 .store()
                 .read_input_manifest(reference)
-                .unwrap()
-                .project_id
-                .as_ref(),
-            Some(destination_owner.project_id())
+                .is_ok(),
+            "HISTORICAL_INPUT_CERTIFICATES_SURVIVE_COPY_WITH_THEIR_ORIGINAL_IDENTITY"
         );
     }
+    assert_eq!(candidate_checkpoint.identity, retained.identity().unwrap());
+    drop(retained);
     assert_eq!(
         &*destination_owner.store().read_evidence(&text_ref).unwrap(),
         text
@@ -541,16 +592,21 @@ fn save_as_copies_every_retained_asset_including_luts_before_root() {
         "copied issuers are archival, never live grants"
     );
     assert_eq!(graph(&source), before);
+    assert_eq!(core.snapshot_identity().unwrap(), history);
+    let installed = destination_owner
+        .checkpoint(destination_owner.manual_branch_id())
+        .unwrap()
+        .identity;
     drop(destination_owner);
     let (restored, destination_owner) = reopen(&destination);
     read_assets(&destination_owner, &exact);
-    assert_eq!(restored.export_history().unwrap(), history);
+    assert_eq!(restored.snapshot_identity().unwrap(), installed);
     for command in [Command::Redo, Command::Undo, Command::Undo] {
         apply(&core, command.clone());
         apply(&restored, command);
-        assert_eq!(
-            core.export_history().unwrap(),
-            restored.export_history().unwrap()
+        assert_copy_contents(
+            &core.export_history().unwrap(),
+            &restored.export_history().unwrap(),
         );
     }
 }
@@ -594,7 +650,15 @@ fn save_as_contention_preserves_source_and_destination_graphs() {
         );
         assert_eq!(graph(&a), before_a, "source after {fault}");
         assert_eq!(graph(&b), before_b, "complete destination after {fault}");
-        assert!(LoadedBundle::read(&b).is_ok());
+        assert!(
+            LoadedBundle::read(
+                &b,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default()
+                )
+            )
+            .is_ok()
+        );
         assert_eq!(first.store().usage().unwrap().reserved_copy_bytes, 0);
     }
     let quota = temp.path("quota.kinewright");
@@ -613,7 +677,15 @@ fn save_as_contention_preserves_source_and_destination_graphs() {
     read_assets(&owner, &exact);
     assert_eq!(graph(&a), before_a);
     drop(owner);
-    assert!(LoadedBundle::read(&b).is_ok());
+    assert!(
+        LoadedBundle::read(
+            &b,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default()
+            )
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -682,7 +754,13 @@ fn save_as_alias_traversal_case_collision_and_foreign_store_refuse() {
     let rejected = temp.path("changed-source-copy.kinewright");
     let (result, trace) = io_observer::observe(|| source.save_as(&rejected));
     assert!(result.is_err());
-    assert!(trace.events.is_empty());
+    assert!(
+        trace
+            .events
+            .iter()
+            .all(|event| event.operation == "publication_memo_reset"),
+        "CHANGED_SOURCE_REFUSAL_PERFORMS_NO_NAMESPACE_MUTATION {trace:?}"
+    );
     assert!(!rejected.exists());
     fs::write(&path, admitted).unwrap();
     drop(source);
@@ -737,7 +815,10 @@ fn first_save_failure_undo_live_reader() {
     let path = temp.path("saved.kinewright");
     let mut session = SessionStore::create(temp.root(), StorageLimits::default()).unwrap();
     let (asset, entries, pins, exact) = assets(session.store_mut());
-    let core = core(asset);
+    let pool = kinewright_project::operation_history::HistoryPool::new(
+        kinewright_project::operation_history::PoolLimits::default(),
+    );
+    let core = core(asset, &pool);
     let history = core.export_history().unwrap();
     let inputs = session
         .admit_inputs(&OwnedInputManifest {
@@ -775,15 +856,22 @@ fn first_save_failure_undo_live_reader() {
     apply(&core, Command::Redo);
     apply(&core, Command::Undo);
     let continued = core.export_history().unwrap();
-    assert_eq!(continued.document, history.document);
-    assert_eq!(continued.cursor, history.cursor);
-    let history = continued;
+    assert_eq!(continued.history().document, history.history().document);
+    assert_eq!(continued.history().undo, history.history().undo);
+    assert_eq!(continued.history().redo, history.history().redo);
+    assert_eq!(continued.history().position, history.history().position + 2);
+    drop(history);
+    drop(continued);
     reader.seek(SeekFrom::Start(0)).unwrap();
     let copy = session.first_save(&path, &core, &input_ref).unwrap();
     assert!(usage().unwrap().reserved_copy_bytes > 0);
     let rebound = copy.rebound_input(&source_ref).unwrap();
     assert_ne!(rebound.manifest_ref, source_ref.manifest_ref);
     let destination = finish(copy);
+    let installed = destination
+        .checkpoint(destination.manual_branch_id())
+        .unwrap()
+        .identity;
     read_assets(&destination, &exact);
     assert_ne!(destination.store().owner_epoch(), reader.owner_epoch());
     assert!(destination.store().lease_input(&source_ref).is_err());
@@ -800,10 +888,15 @@ fn first_save_failure_undo_live_reader() {
     assert!(!source_root.exists());
     assert_eq!(usage().unwrap().physical_bytes, 0);
     assert!(!usage().unwrap().damaged_accounting);
-    let reopened = LoadedBundle::read(&path).unwrap();
-    let restored = Core::spawn(Document::default()).unwrap();
-    reopened.restore_manual(&restored).unwrap();
-    assert_eq!(restored.export_history().unwrap(), history);
+    let mut reopened = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let restored = reopened.open_manual().unwrap();
+    assert_eq!(restored.snapshot_identity().unwrap(), installed);
 }
 
 #[test]
@@ -842,10 +935,11 @@ fn copy_b5_unknown_reconciles_before_handoff_or_retry() {
     assert_eq!(graph(&source), before);
     drop(destination_owner);
     let (restored, _) = reopen(&destination);
-    assert_eq!(
-        restored.export_history().unwrap(),
-        core.export_history().unwrap()
-    );
+    let original = core.export_history().unwrap();
+    let installed = restored.export_history().unwrap();
+    assert_copy_contents(&original, &installed);
+    drop(installed);
+    drop(original);
     let (mut session, sealed, input, history) =
         byte_session(temp.root(), b"frozen source without another reader");
     let source_directory = session
@@ -955,7 +1049,20 @@ fn opposing_save_as_try_locks_do_not_deadlock() {
         assert!(elapsed < Duration::from_secs(5));
         assert_eq!(graph(&source), before_source);
         assert_eq!(graph(&destination), before_destination);
-        fs::write(directory.join(format!("{role}.result")),serde_json::to_vec(&serde_json::json!({"pid":std::process::id(),"contention":true,"source_preserved":true,"destination_preserved":true,"elapsed_ms":elapsed.as_millis()})).unwrap()).unwrap();
+        let result_tmp = directory.join(format!("{role}.result.tmp"));
+        fs::write(
+            &result_tmp,
+            serde_json::to_vec(&serde_json::json!({
+                "pid": std::process::id(),
+                "contention": true,
+                "source_preserved": true,
+                "destination_preserved": true,
+                "elapsed_ms": elapsed.as_millis(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::rename(result_tmp, directory.join(format!("{role}.result"))).unwrap();
         while !directory.join("release").exists() {
             assert!(Instant::now() < deadline, "controller release deadline");
             std::thread::sleep(Duration::from_millis(5));

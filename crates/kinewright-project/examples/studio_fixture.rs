@@ -22,7 +22,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&root)?;
     let pair = build_c0_fixture_pair(&root)?;
     for fixture in pair {
-        let mut bundle = LoadedBundle::read(&fixture.path)?.into_writer()?;
+        let mut bundle = LoadedBundle::read(
+            &fixture.path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )?
+        .into_writer()?;
         for _ in 0..3 {
             let issuer = bundle.issue_metadata_issuer()?;
             let envelope = MetadataEnvelope {

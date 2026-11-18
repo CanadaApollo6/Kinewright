@@ -186,7 +186,7 @@ fn dq_tools_item12_unmeasured_sync_sounding_loss_is_refused() {
             );
             let s = item12_service(doc, Arc::clone(&v), measured);
             let before = s.snapshot().unwrap();
-            let history = s.core.export_history_identified().unwrap();
+            let history = history_identity(&s);
             let mut removal = words(&v, 1);
             if overrule {
                 removal["overrule"] = json!([1_100_000, 1_300_000]);
@@ -254,7 +254,7 @@ fn dq_tools_item12_unproven_sync_origin_refuses_changed_extents() {
     let v = tail_value(false, true);
     let s = item12_service(doc, Arc::clone(&v), true);
     let before = s.snapshot().unwrap();
-    let history = s.core.export_history_identified().unwrap();
+    let history = history_identity(&s);
     assert!(
         dq::spans(&before.1)
             .unwrap()
@@ -288,7 +288,7 @@ fn dq_tools_item12_unmeasured_sync_growth_is_refused() {
     let v = ordinary();
     let s = item12_service(doc, Arc::clone(&v), false);
     let before = s.snapshot().unwrap();
-    let history = s.core.export_history_identified().unwrap();
+    let history = history_identity(&s);
     let r = cut(
         &s,
         args(vec![

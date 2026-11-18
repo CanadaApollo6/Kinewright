@@ -144,7 +144,7 @@ fn c7_revise_cut_starts_one_director_run_and_replays_it() {
         "C7_CANDIDATE_AT_HEAD"
     );
     assert_eq!(
-        director.scope.base.document_hash, manual.document_hash,
+        director.scope.base.document_hash, manual.document_ref.sha256,
         "C7_CANDIDATE_AT_HEAD"
     );
     assert_ne!(

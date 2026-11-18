@@ -5,7 +5,13 @@ mod dialogue_tool_tests {
     };
     use kinewright_core::dialogue::audit::{self, AuditSettings, Detail, KeptRange, RecordingId};
     use kinewright_core::dialogue::{AudibleSide, Hop, Settings, SoundProfile, Word};
+    use kinewright_project::{operation_actor::ChangeId, operation_history::SnapshotIdentity};
     use serde_json::Value;
+
+    fn history_identity(service: &KinewrightMcp) -> (ChangeId, SnapshotIdentity) {
+        let history = service.core.capture_state().unwrap();
+        (history.change, history.snapshot.identity().unwrap())
+    }
 
     struct Fake {
         value: Arc<BoundDialogue>,
@@ -129,7 +135,7 @@ mod dialogue_tool_tests {
         let media = Arc::new(NoopMedia::default());
         let playback = Arc::clone(&media);
         let service = KinewrightMcp::new(
-            Core::spawn(doc).unwrap(),
+            Core::for_test(doc).unwrap(),
             playback,
             media,
             ConfirmationBroker::default(),
@@ -271,7 +277,7 @@ mod dialogue_tool_tests {
         );
         let (s, v) = fixture();
         let before = s.snapshot().unwrap();
-        let history = s.core.export_history_identified().unwrap();
+        let history = history_identity(&s);
         let mut request = args(vec![
             words(&v, 1),
             json!({"kind":"pause","after":address(&v,3),"leave_micros":250_000}),
@@ -295,7 +301,7 @@ mod dialogue_tool_tests {
             before,
             "DQ_TOOLS_REFUSED_BATCH_UNCHANGED"
         );
-        assert_eq!(s.core.export_history_identified().unwrap(), history);
+        assert_eq!(history_identity(&s), history);
     }
     #[test]
     fn dq_tools_overrule_and_no_approval() {

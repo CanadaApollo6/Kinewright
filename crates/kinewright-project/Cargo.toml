@@ -13,7 +13,9 @@ repository.workspace = true
 test-util = ["kinewright-media/test-util"]
 # Executable override for confined probe fixtures. Keep on dev edges only.
 ms2-test-bin-dir = []
+slow-tests = []
 storage-heap-profile = []
+history-metrics = ["kinewright-core/history-metrics"]
 
 [dependencies]
 crossbeam-channel.workspace = true
@@ -24,7 +26,7 @@ kinewright-core = { path = "../kinewright-core" }
 kinewright-hash = { path = "../kinewright-hash" }
 kinewright-media = { path = "../kinewright-media" }
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 
 # Unix open flags (`O_NOFOLLOW`, `O_NONBLOCK`) for the lock/discovery/journal
 # opens (race N-b/N-c); already locked in Cargo.lock, no new download.
@@ -42,6 +44,8 @@ kinewright-media-ipc = { path = "../kinewright-media-ipc" }
 winapi-util = "=0.1.11"
 
 [dev-dependencies]
+proptest.workspace = true
+schemars.workspace = true
 flate2.workspace = true
 dhat = "=0.3.3"
 # Integration tests build the library without cfg(test).
@@ -55,3 +59,11 @@ required-features = ["test-util"]
 
 [lints]
 workspace = true
+
+[[example]]
+name = "undo_owner_bench"
+required-features = ["test-util", "history-metrics"]
+
+[[example]]
+name = "undo_product_bench"
+required-features = ["test-util", "history-metrics"]

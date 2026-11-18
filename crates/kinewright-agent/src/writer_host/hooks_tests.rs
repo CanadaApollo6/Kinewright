@@ -16,6 +16,67 @@ mod tests {
     };
     use std::{collections::BTreeSet, sync::atomic::AtomicUsize, time::Instant};
 
+    fn decode_owner_fixture(
+        value: serde_json::Value,
+    ) -> kinewright_project::operation_history::OwnerSnapshot {
+        let transport: kinewright_project::operation_history::SnapshotTransport =
+            serde_json::from_value(value).unwrap();
+        let role = transport.role();
+        transport
+            .validate(
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+                role,
+            )
+            .unwrap()
+            .into_reader()
+            .unwrap()
+            .into_capture()
+            .unwrap()
+    }
+
+    fn assert_recovered_task_owner(core: &Core, mut expected: serde_json::Value, marker: &str) {
+        let actual = serde_json::to_value(core.export_history().unwrap()).unwrap();
+        assert_eq!(
+            actual["role"], "Ordinary",
+            "{marker}: person recovery uses ordinary retention"
+        );
+        assert_eq!(
+            actual["sizing"]["kind"], "Ordinary",
+            "{marker}: fresh immutable sizing"
+        );
+        assert_eq!(
+            actual["history"]["policy"], "Fold",
+            "{marker}: product retention policy"
+        );
+        if expected["role"] == "Ordinary" {
+            assert_eq!(
+                actual["sizing"], expected["sizing"],
+                "{marker}: ordinary creation sizing is preserved"
+            );
+        }
+        let epoch = actual["history"]["epoch"].as_u64().unwrap();
+        assert!(
+            epoch > expected["history"]["epoch"].as_u64().unwrap(),
+            "{marker}: fresh install epoch"
+        );
+        expected["history"]["epoch"] = serde_json::json!(epoch);
+        for command in expected["ledger"]["commands"].as_array_mut().unwrap() {
+            if command["fate"] == "Redone" {
+                command["fate"] = serde_json::json!("Applied");
+            }
+            command["install_epoch"] = serde_json::json!(epoch);
+        }
+        // Reprofiling preserves the immutable creation baseline. Only its
+        // role, future policy and (candidate-only) initial batch room change.
+        expected["role"] = serde_json::json!("Ordinary");
+        expected["sizing"]["kind"] = serde_json::json!("Ordinary");
+        expected["sizing"]["initial_batch"] = serde_json::json!({"encoded":0,"decoded":0});
+        expected["history"]["policy"] = serde_json::json!("Fold");
+        assert_eq!(actual, expected, "{marker}");
+    }
+
     include!("hooks_attention_tests.rs");
     include!("dialogue_measurement_tests.rs");
     include!("hooks_store_tests.rs");
@@ -104,9 +165,13 @@ mod tests {
             );
             let path = temp.path(name);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            let core = Core::spawn(document).unwrap();
-            let mut bundle =
-                ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+            let core = Core::for_test(document).unwrap();
+            let mut bundle = ProjectBundle::activate(
+                &path,
+                BundleWriteAdmission::new_document(),
+                core.history_pool(),
+            )
+            .unwrap();
             let mut inputs = inputs(&mut bundle);
             bundle.save(&core, &inputs).unwrap();
             drop(bundle);
@@ -117,7 +182,13 @@ mod tests {
                     kinewright_media::test_support::wav_f32(&vec![0.25; 4800], 48_000, 1),
                 )
                 .unwrap();
-                let mut owner = Ja1EditingSession::open(&path).unwrap();
+                let mut owner = Ja1EditingSession::open(
+                    &path,
+                    &kinewright_project::operation_history::HistoryPool::new(
+                        kinewright_project::operation_history::PoolLimits::default(),
+                    ),
+                )
+                .unwrap();
                 owner.import_owned_media(&source).unwrap();
                 owner.save_active().unwrap();
                 inputs = owner.current_inputs_ref().clone();
@@ -333,11 +404,11 @@ mod tests {
                     roots: actor.bootstrap.roots.clone(),
                     command,
                 };
-                HostCommandOwner::execute_attached_shared(
+                received_reply_for_test(HostCommandOwner::execute_attached_shared(
                     &f.host.owner.upgrade().unwrap(),
                     &actor.bootstrap.auth,
                     request,
-                )
+                ))
             }
             1 => actor.request(command).unwrap(),
             _ => {
@@ -354,10 +425,10 @@ mod tests {
         let owner = f.host.owner.upgrade().unwrap();
         let host = owner.lock().unwrap();
         let usage = host.owner().unwrap().store().unwrap().usage().unwrap();
-        serde_json::json!({"root": host.owner().unwrap().root_sha256().unwrap(), "history": host.core().export_history().unwrap(), "manual": host.manual,
+        serde_json::json!({"root": host.owner().unwrap().root_sha256().unwrap(), "history": host.core().export_history().unwrap(), "manual": host.manual.as_ref().map(kinewright_project::editing_session::ManualAuthority::lease),
         "foreground": host.foreground_owner, "sessions": host.sessions.len(), "attachments": host.attachments.iter().map(|a| (a.id, &a.subject, a.role, a.read_pins.len())).collect::<Vec<_>>(),
         "runs": host.hooks.runs.keys().collect::<Vec<_>>(), "pending": host.hooks.pending,
-        "ledger": [usage.physical_bytes, usage.owned_bytes, usage.metadata_bytes, usage.copy_bytes, usage.reserved_bytes, usage.reserved_copy_bytes, usage.decoded_bytes, usage.decoder_bytes, usage.live_history_bytes, usage.objects, usage.edges, usage.unclassified_bytes], "damaged": usage.damaged_accounting, "unsettled": usage.unsettled})
+        "ledger": [usage.physical_bytes, usage.owned_bytes, usage.metadata_bytes, usage.copy_bytes, usage.reserved_bytes, usage.reserved_copy_bytes, usage.decoded_bytes, usage.decoder_bytes, usage.objects, usage.edges, usage.unclassified_bytes], "damaged": usage.damaged_accounting, "unsettled": usage.unsettled})
     }
     #[expect(
         clippy::needless_pass_by_value,
@@ -435,7 +506,13 @@ mod tests {
         let Fixture { temp, host, .. } = f;
         let path = temp.path("project.kinewright");
         drop(host);
-        let owner = Ja1EditingSession::open(&path).unwrap();
+        let owner = Ja1EditingSession::open(
+            &path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         assert_eq!(
             owner.orchestration_projection(&run).unwrap(),
             Some(projection),
@@ -919,7 +996,6 @@ mod tests {
             usage.peak_reserved_bytes = 0;
             usage.peak_decoded_bytes = 0;
             usage.peak_decoder_bytes = 0;
-            usage.peak_live_history_bytes = 0;
         }
         assert_eq!(after_usage, retained, "H4_PINS_CHARGES");
         let reattached = f.issuer.reattach_editor().unwrap();

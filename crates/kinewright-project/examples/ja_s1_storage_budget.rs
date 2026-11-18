@@ -1,16 +1,17 @@
 //! Bounded native storage workload. Run release timing and heap profiling separately.
 #![allow(clippy::too_many_lines)]
 use kinewright_core::{
-    Command, Core, Document, Event, JournalCommand, Operation, Query, QueryResult, Track, TrackId,
+    Command, Document, Event, JournalCommand, Operation, Query, QueryResult, Track, TrackId,
     TrackKind,
 };
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{BundleWriteAdmission, LoadedBundle, ProjectBundle},
     bundle_copy::{SaveAsOutcome, SessionStore},
     bundle_records::{ObjectRef, RecordKind},
     io_observer,
     owned_inputs::{OwnedInputEntry, OwnedInputManifest, OwnedInputRef},
-    receipts::{CommandEnvelope, CommandId, HistoryRequest, ReceiptLookup},
+    receipts::{CommandEnvelope, CommandId, ReceiptLookup},
     storage_budget::{StorageLimits, StorageUsage},
 };
 use serde_json::{Value, json};
@@ -37,7 +38,7 @@ fn reference(bytes: &[u8], kind: RecordKind) -> ObjectRef {
     }
 }
 fn usage(s: &StorageUsage) -> Value {
-    json!({"physical_bytes":s.physical_bytes,"owned_bytes":s.owned_bytes,"metadata_reservation_bytes":s.metadata_bytes,"objects":s.objects,"edges":s.edges,"verified_calls":s.verified_calls,"verified_bytes":s.verified_bytes,"peak_physical_bytes":s.peak_physical_bytes,"peak_reserved_bytes":s.peak_reserved_bytes,"peak_decoded_reservation_bytes":s.peak_decoded_bytes,"live_history_reservation_bytes":s.live_history_bytes,"unclassified_bytes":s.unclassified_bytes})
+    json!({"physical_bytes":s.physical_bytes,"owned_bytes":s.owned_bytes,"metadata_reservation_bytes":s.metadata_bytes,"objects":s.objects,"edges":s.edges,"verified_calls":s.verified_calls,"verified_bytes":s.verified_bytes,"peak_physical_bytes":s.peak_physical_bytes,"peak_reserved_bytes":s.peak_reserved_bytes,"peak_decoded_reservation_bytes":s.peak_decoded_bytes,"unclassified_bytes":s.unclassified_bytes})
 }
 fn rss() -> Value {
     let text = fs::read_to_string("/proc/self/status").unwrap();
@@ -113,7 +114,7 @@ fn request(
     };
     CommandEnvelope {
         switch: None,
-        manual: None,
+        context: None,
         version: 1,
         action: "edit".into(),
         id: CommandId {
@@ -130,7 +131,6 @@ fn request(
         comment_text: None,
         comment_strokes: None,
         evidence: vec![],
-        transition: None,
     }
 }
 fn main() {
@@ -159,7 +159,7 @@ fn run() {
             clips: vec![],
         });
     }
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     for i in 0..96 {
         apply(
             &core,
@@ -173,19 +173,26 @@ fn run() {
         apply(&core, Command::Undo);
     }
     let history = core.export_history().unwrap();
-    let encoded = history.encoded_bytes().unwrap();
+    let encoded = serde_json::to_vec(&history).unwrap().len();
     let history_heap = heap();
+    let wire = serde_json::to_vec(&core.portable_history().unwrap()).unwrap();
     let mut restore_times = vec![];
     for _ in 0..5 {
-        let other = Core::spawn(Document::default()).unwrap();
-        timed(&mut restore_times, || {
-            other.restore_history(history.clone()).unwrap();
+        let other = timed(&mut restore_times, || {
+            Core::peer_for_test(serde_json::from_slice(&wire).unwrap()).unwrap()
         });
         assert_eq!(other.export_history().unwrap(), history);
     }
     let restore_heap = heap();
     let path = root.join("source.kinewright");
-    let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let mut bundle = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     let bytes = vec![113_u8; 8 << 20];
     let object = reference(&bytes, RecordKind::OwnedEvidence);
     let before_duplicate = bundle.store().usage().unwrap();
@@ -207,28 +214,6 @@ fn run() {
     let inputs = bundle.empty_inputs().unwrap();
     let input_ref = inputs.reference.clone();
     bundle.save(&core, &input_ref).unwrap();
-    let decode_before_heap = heap();
-    let decode_before_history = bundle.store().usage().unwrap().live_history_bytes;
-    let decoded_history = bundle
-        .store()
-        .resolve_history(
-            &bundle
-                .checkpoint(bundle.manual_branch_id())
-                .unwrap()
-                .history_ref,
-        )
-        .unwrap();
-    let history_decoded_reservation_bytes =
-        bundle.store().usage().unwrap().live_history_bytes - decode_before_history;
-    let decode_after_heap = heap();
-    #[cfg(feature = "storage-heap-profile")]
-    assert!(
-        decode_after_heap["current_bytes"].as_u64().unwrap()
-            - decode_before_heap["current_bytes"].as_u64().unwrap()
-            <= history_decoded_reservation_bytes,
-        "measured live decode exceeds its format-defined reservation"
-    );
-    drop(decoded_history);
     drop(inputs);
     drop((sealed, duplicate));
     let mut saves = vec![];
@@ -271,9 +256,15 @@ fn run() {
         sync_lock: true,
         clips: vec![],
     });
-    let floor_core = Core::spawn(floor_doc).unwrap();
-    let mut floors =
-        ProjectBundle::activate(&floor_path, BundleWriteAdmission::new_document()).unwrap();
+    let floor_core = Core::for_test(floor_doc).unwrap();
+    let mut floors = ProjectBundle::activate(
+        &floor_path,
+        BundleWriteAdmission::new_document(),
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     let inputs = floors.empty_inputs().unwrap();
     let floor_inputs = inputs.reference.clone();
     floors.save(&floor_core, &floor_inputs).unwrap();
@@ -297,42 +288,21 @@ fn run() {
                 .unwrap(),
             ReceiptLookup::Committed(_)
         ));
-        let mut envelope = request(
-            &mut floors,
-            &floor_core,
-            &floor_issuer,
-            i * 2 + 2,
-            JournalCommand::Undo,
-        );
-        let checkpoint = floors
-            .checkpoint(floors.manual_branch_id())
-            .unwrap()
-            .clone();
-        envelope.action = "floor".into();
-        envelope.command = None;
-        envelope.transition = Some(HistoryRequest::Floor {
-            discard_batches: floor_core.export_history().unwrap().batches.len(),
-            preceding_checkpoint_generation: checkpoint.checkpoint_generation,
-            preceding_floor_generation: checkpoint.floor_generation,
-            command_cut: checkpoint.command_cut.unwrap(),
+        timed(&mut floor_times, || {
+            floor_core.close_gesture().unwrap();
+            floors.save(&floor_core, &floor_inputs).unwrap();
         });
-        assert!(matches!(
-            timed(&mut floor_times, || floors
-                .command(&envelope, &floor_core, &floor_inputs, &[])
-                .unwrap()),
-            ReceiptLookup::Committed(_)
-        ));
     }
     for _ in 0..3 {
         floors.save(&floor_core, &floor_inputs).unwrap();
     }
     assert_eq!(
         floors
-            .evidence_refs()
-            .iter()
-            .filter(|r| r.record_kind == RecordKind::HistoryFloor)
-            .count(),
-        1
+            .checkpoint(floors.manual_branch_id())
+            .unwrap()
+            .identity,
+        floor_core.snapshot_identity().unwrap(),
+        "EXECUTOR_FOLD_PUBLISHES_THE_COMPLETE_OWNER"
     );
     let floor_usage = usage(&floors.store().usage().unwrap());
     drop(floors);
@@ -369,9 +339,16 @@ fn run() {
     let mut recover_times = vec![];
     let mut recovery_usage = Value::Null;
     for _ in 0..5 {
-        let loaded = timed(&mut recover_times, || LoadedBundle::read(&path).unwrap());
-        let restored = Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&restored).unwrap();
+        let mut loaded = timed(&mut recover_times, || {
+            LoadedBundle::read(
+                &path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )
+            .unwrap()
+        });
+        let restored = loaded.open_manual().unwrap();
         assert_eq!(restored.export_history().unwrap(), history);
         let writer = loaded.into_writer().unwrap();
         assert!(writer.store().usage().unwrap().verified_bytes >= object.byte_length);
@@ -406,7 +383,7 @@ fn run() {
     };
     let mut reader = session.store().lease_input(&original).unwrap();
     let monitor = session.store().usage_handle();
-    let empty = Core::spawn(Document::default()).unwrap();
+    let empty = Core::for_test(Document::default()).unwrap();
     let copy = session
         .first_save(
             &root.join("first.kinewright"),
@@ -432,6 +409,6 @@ fn run() {
     drop(destination);
     println!(
         "{}",
-        json!({"schema":1,"profiled":cfg!(feature="storage-heap-profile"),"errors":0,"expected_failed_copies":failed,"baseline_rss":baseline_rss,"final_rss":rss(),"baseline_heap":baseline_heap,"history_heap":history_heap,"restore_heap":restore_heap,"metadata_heap":metadata_heap,"final_heap":heap(),"elapsed_ms":started.elapsed().as_secs_f64()*1000.,"history":{"encoded_bytes":encoded,"decoded_reservation_bytes":history_decoded_reservation_bytes,"decode_before_heap":decode_before_heap,"decode_after_heap":decode_after_heap,"tracks":32,"accepted_commands":120,"undo_entries":history.cursor.undo.len(),"redo_entries":history.cursor.redo.len(),"restore":latencies(&restore_times)},"metadata":{"saves":latencies(&saves),"comments":latencies(&comment_times),"comment_syncs":comment_syncs,"verified_bytes_delta":after_metadata.verified_bytes-before_metadata.verified_bytes},"duplicate":{"before":usage(&before_duplicate),"first":usage(&first),"second":usage(&second)},"floor":{"latencies":latencies(&floor_times),"usage":floor_usage},"source":source_usage,"source_physical":source_physical,"copied":copied_usage,"recovery":{"latencies":latencies(&recover_times),"usage":recovery_usage},"first_save":{"source_overlap":first_overlap,"destination":destination_first,"source_after_last_reader":usage(&monitor().unwrap())}})
+        json!({"schema":1,"profiled":cfg!(feature="storage-heap-profile"),"errors":0,"expected_failed_copies":failed,"baseline_rss":baseline_rss,"final_rss":rss(),"baseline_heap":baseline_heap,"history_heap":history_heap,"restore_heap":restore_heap,"metadata_heap":metadata_heap,"final_heap":heap(),"elapsed_ms":started.elapsed().as_secs_f64()*1000.,"history":{"encoded_bytes":encoded,"tracks":32,"accepted_commands":120,"undo_entries":history.history().undo.len(),"redo_entries":history.history().redo.len(),"restore":latencies(&restore_times)},"metadata":{"saves":latencies(&saves),"comments":latencies(&comment_times),"comment_syncs":comment_syncs,"verified_bytes_delta":after_metadata.verified_bytes-before_metadata.verified_bytes},"duplicate":{"before":usage(&before_duplicate),"first":usage(&first),"second":usage(&second)},"floor":{"latencies":latencies(&floor_times),"usage":floor_usage},"source":source_usage,"source_physical":source_physical,"copied":copied_usage,"recovery":{"latencies":latencies(&recover_times),"usage":recovery_usage},"first_save":{"source_overlap":first_overlap,"destination":destination_first,"source_after_last_reader":usage(&monitor().unwrap())}})
     );
 }

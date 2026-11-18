@@ -1,5 +1,7 @@
 //! Prepared local selection. C5 composes the preliminary ordinary Save and lifecycle.
 #![allow(clippy::missing_errors_doc)]
+use crate::operation_actor::AcceptedCut;
+use crate::operation_actor::Core;
 use crate::{
     bundle::{BundleError, BundleSaveReport, ProjectBundle, PublicationState},
     bundle_commit::BundleCommit,
@@ -8,7 +10,7 @@ use crate::{
     storage_budget::StorageReservation,
     store::StorePin,
 };
-use kinewright_core::{AcceptedCut, AttachmentState, Core};
+use kinewright_core::AttachmentState;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,7 +57,6 @@ pub struct SwitchRequest {
     pub target: SwitchTarget,
     pub source_checkpoint: crate::bundle_records::ObjectRef,
     pub checkpoint_generation: u64,
-    pub floor_generation: u64,
     pub switch_generation: u64,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,10 +66,10 @@ pub struct SwitchBranch {
     pub head: HeadId,
     pub checkpoint: crate::bundle_records::ObjectRef,
     pub history: crate::bundle_records::ObjectRef,
-    pub history_role: crate::history_record::HistoryRole,
-    pub history_digest: String,
+    pub history_role: crate::operation_history::Role,
+    pub history_digest: crate::operation_history::SnapshotIdentity,
     pub inputs: crate::bundle_records::ObjectRef,
-    pub lineage: crate::bundle_records::ObjectRef,
+    pub revision: kinewright_core::TimelineRevision,
 }
 impl SwitchBranch {
     pub(crate) fn from_checkpoint(
@@ -79,11 +80,11 @@ impl SwitchBranch {
             branch: value.branch_id.clone(),
             head: value.head_id.clone(),
             checkpoint,
-            history: value.history_ref.clone(),
-            history_role: value.history_role,
-            history_digest: value.history_digest.clone(),
+            history: value.owner_ref.clone(),
+            history_role: value.role,
+            history_digest: value.identity,
             inputs: value.input_manifest_ref.clone(),
-            lineage: value.lineage_ref.clone(),
+            revision: value.revision,
         }
     }
 }
@@ -106,9 +107,9 @@ pub struct SwitchAttachment {
     pub root_generation: u64,
     pub switch_generation: u64,
     pub current: SwitchBranch,
-    pub history: kinewright_core::HistorySnapshot,
+    // The retained reply shares the same immutable wire buffer and its one capture lease.
+    pub history: crate::operation_actor::PortableHistory,
     pub inputs: crate::owned_inputs::OwnedInputManifest,
-    pub lineage: crate::bundle_records::LineageRecord,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -119,16 +120,15 @@ pub struct SwitchAttachmentIdentity {
     pub switch_generation: u64,
     pub current: SwitchBranch,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SwitchPayload {
-    pub history: kinewright_core::HistorySnapshot,
+    pub history: crate::operation_actor::PortableHistory,
     pub inputs: crate::owned_inputs::OwnedInputManifest,
-    pub lineage: crate::bundle_records::LineageRecord,
 }
 impl SwitchAttachment {
     pub fn identity(&self) -> Result<SwitchAttachmentIdentity, BundleError> {
-        self.verify()?;
+        self.verify_header()?;
         Ok(SwitchAttachmentIdentity {
             project: self.project.clone(),
             root_sha256: self.root_sha256.clone(),
@@ -137,29 +137,32 @@ impl SwitchAttachment {
             current: self.current.clone(),
         })
     }
-    pub fn verify(&self) -> Result<(), BundleError> {
-        if crate::manual_history::history_sha256(&self.history)? != self.current.history_digest {
+    fn verify_header(&self) -> Result<(), BundleError> {
+        if self.history.branch != self.current.branch
+            || self.history.revision != self.current.revision
+            || self.history.identity() != self.current.history_digest
+            || self.history.role() != self.current.history_role
+        {
             return Err(BundleError::HistoryChanged);
         }
-        for (reference, bytes) in [
-            (
-                &self.current.history,
-                serde_json::to_vec(&crate::history_record::HistoryRecord::capture(
-                    &self.history,
-                    self.current.history_role,
-                )?),
-            ),
-            (&self.current.inputs, serde_json::to_vec(&self.inputs)),
-            (&self.current.lineage, serde_json::to_vec(&self.lineage)),
-        ] {
-            let bytes = bytes.map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            if reference.byte_length != bytes.len() as u64
-                || reference.sha256 != kinewright_media::sha256_bytes(&bytes)
-            {
-                return Err(BundleError::HistoryChanged);
-            }
+        let bytes = serde_json::to_vec(&self.inputs).map_err(crate::bundle::encoding_error)?;
+        if self.current.inputs.byte_length != bytes.len() as u64
+            || self.current.inputs.sha256 != kinewright_media::sha256_bytes(&bytes)
+        {
+            return Err(BundleError::HistoryChanged);
         }
         Ok(())
+    }
+    /// Header equality never grants installation: full replay creates the token.
+    pub fn verify(
+        &self,
+        pool: &crate::operation_history::HistoryPool,
+    ) -> Result<crate::operation_history::ValidatedOwnerSnapshot, BundleError> {
+        self.verify_header()?;
+        self.history
+            .snapshot
+            .validate_shared(pool, self.current.history_role)
+            .map_err(BundleError::from)
     }
 }
 
@@ -199,7 +202,13 @@ impl PreparedProjectSelection {
         if self.publication_started() || self.existing_head.is_none() {
             return Err(BundleError::HistoryChanged);
         }
-        self.target_branch = BranchId::fresh()?;
+        let branch = BranchId::fresh()?;
+        self.restore.cut = self
+            .restore
+            .attachment
+            .retarget_selection(&self.restore.cut, branch.clone())
+            .map_err(crate::bundle::operation_error)?;
+        self.target_branch = branch;
         Ok(())
     }
     pub(crate) fn reuses_checkpoint(&self) -> bool {
@@ -214,6 +223,11 @@ impl PreparedProjectSelection {
     #[cfg(any(test, feature = "test-util"))]
     pub fn reuse_new_target_id_probe(&mut self, id: BranchId) {
         assert!(self.existing_head.is_none() && self.published_root.is_none());
+        self.restore.cut = self
+            .restore
+            .attachment
+            .retarget_selection(&self.restore.cut, id.clone())
+            .unwrap();
         self.target_branch = id;
     }
     #[must_use]
@@ -248,14 +262,12 @@ impl ProjectBundle {
             (closure.len() as u64)
                 .checked_mul(128)
                 .ok_or(BundleError::Capacity("selection pin metadata"))?,
-            0,
             false,
         )?;
         for object in &closure {
             self.store.verify(object)?;
         }
         let pin = self.store.pin(std::slice::from_ref(&reference))?;
-        let restore = self.prepare_checkpoint_restore(&target)?;
         let existing_head = match &target {
             RecoverySelection::WorkingBranch(id) => Some(self.checkpoint(id)?.head_id.clone()),
             RecoverySelection::Checkpoint { .. } => None,
@@ -265,10 +277,11 @@ impl ProjectBundle {
         } else {
             BranchId::fresh()?
         };
+        let restore = self.prepare_checkpoint_restore(core, &target, target_branch.clone())?;
         let source_cut = self
             .attach_core(core)?
             .capture()
-            .map_err(crate::bundle::history_error)?;
+            .map_err(crate::bundle::operation_error)?;
         Ok(PreparedProjectSelection {
             envelope: None,
             restore,
@@ -302,15 +315,15 @@ impl ProjectBundle {
             || self.manual_branch_id != prepared.source_branch
             || self.root.as_ref().map(|r| r.manual_switch_generation)
                 != Some(prepared.source_generation)
-            || core.actor_identity() != prepared.source_cut.actor()
+            || core.actor_identity() != prepared.source_cut.change().actor
         {
             return Err(BundleError::HistoryBarrierInvariant);
         }
         let cut = self
             .attach_core(core)?
             .capture()
-            .map_err(crate::bundle::history_error)?;
-        if !self.selection_source_history_matches(&self.manual_branch_id, cut.history())? {
+            .map_err(crate::bundle::operation_error)?;
+        if !self.selection_source_history_matches(&self.manual_branch_id, cut.identity())? {
             return Err(BundleError::HistoryBarrierInvariant);
         }
         prepared.source_cut = cut;
@@ -320,12 +333,9 @@ impl ProjectBundle {
     fn selection_source_history_matches(
         &self,
         branch: &BranchId,
-        history: &kinewright_core::HistorySnapshot,
+        identity: crate::operation_history::SnapshotIdentity,
     ) -> Result<bool, BundleError> {
-        if let Some(cached) = self.cached_history(branch) {
-            return Ok(&***cached == history);
-        }
-        Ok(&*self.branch_history(branch)? == history)
+        Ok(self.checkpoint(branch)?.identity == identity)
     }
     /// Publish exactly one target and activate only after definite root proof.
     pub fn publish_project_selection(
@@ -357,7 +367,7 @@ impl ProjectBundle {
         if let Some(report) = &prepared.result {
             return Ok(report.clone());
         }
-        if core.actor_identity() != prepared.source_cut.actor()
+        if core.actor_identity() != prepared.source_cut.change().actor
             || self.project_id != prepared.source_project
         {
             return Err(BundleError::HistoryBarrierInvariant);
@@ -372,7 +382,7 @@ impl ProjectBundle {
             prepared.published_root = None;
             self.attach_core(core)?
                 .resume(&prepared.source_cut)
-                .map_err(crate::bundle::history_error)?;
+                .map_err(crate::bundle::operation_error)?;
             return Err(BundleError::HistoryBarrierInvariant);
         }
         if prepared.completed {
@@ -382,9 +392,9 @@ impl ProjectBundle {
             return Err(BundleError::Unsettled);
         }
         let owner = self.attach_core(core)?;
-        let cut = owner.freeze().map_err(crate::bundle::history_error)?;
+        let cut = owner.freeze().map_err(crate::bundle::operation_error)?;
         let valid = cut == prepared.source_cut
-            && self.selection_source_history_matches(&prepared.source_branch, cut.history())?
+            && self.selection_source_history_matches(&prepared.source_branch, cut.identity())?
             && self.manual_branch_id == prepared.source_branch
             && self.manual_head() == Some(&prepared.source_head)
             && self.root.as_ref().map(|r| r.manual_switch_generation)
@@ -398,7 +408,7 @@ impl ProjectBundle {
                     .is_some_and(|c| c.head_id == *head)
             });
         if !valid {
-            owner.resume(&cut).map_err(crate::bundle::history_error)?;
+            owner.resume(&cut).map_err(crate::bundle::operation_error)?;
             return Err(BundleError::HistoryBarrierInvariant);
         }
         let target_ref = match &prepared.target {
@@ -413,7 +423,7 @@ impl ProjectBundle {
             if self
                 .attach_core(&prepared.restore.core)?
                 .capture()
-                .map_err(crate::bundle::history_error)?
+                .map_err(crate::bundle::operation_error)?
                 != prepared.restore.cut
             {
                 return Err(BundleError::HistoryBarrierInvariant);
@@ -421,7 +431,7 @@ impl ProjectBundle {
             Ok(())
         })();
         if let Err(error) = verification {
-            owner.resume(&cut).map_err(crate::bundle::history_error)?;
+            owner.resume(&cut).map_err(crate::bundle::operation_error)?;
             return Err(error);
         }
         let result = BundleCommit::publish_selection(self, prepared);
@@ -432,7 +442,7 @@ impl ProjectBundle {
             Ok(_) => self.finish_selection(prepared, core),
             Err(error) => {
                 if !self.unsettled && self.publication_state != PublicationState::Unknown {
-                    owner.resume(&cut).map_err(crate::bundle::history_error)?;
+                    owner.resume(&cut).map_err(crate::bundle::operation_error)?;
                 }
                 Err(error)
             }
@@ -455,10 +465,11 @@ impl ProjectBundle {
             &self.store.resolved_root()?,
         )?;
         let report = BundleSaveReport {
+            position: self.checkpoint(&self.manual_branch_id)?.position,
             history_sha256: self
                 .checkpoint(&self.manual_branch_id)?
-                .history_digest
-                .clone(),
+                .identity
+                .to_string(),
             collection: self.store.collection_status()?,
             path: self.store.resolved_root()?,
             project_id: self.project_id.clone(),
@@ -468,19 +479,23 @@ impl ProjectBundle {
             byte_length: self.admission.raw_bytes().len() as u64,
         };
         if !prepared.completed {
-            if core
+            match core
                 .attachment_state()
-                .map_err(crate::bundle::history_error)?
-                != AttachmentState::Frozen
+                .map_err(crate::bundle::operation_error)?
             {
-                return Err(BundleError::HistoryBarrierInvariant);
+                AttachmentState::Frozen => self
+                    .attach_core(core)?
+                    .retire(&prepared.source_cut)
+                    .map_err(crate::bundle::operation_error)?,
+                // A committed switch may be retried after retiring A but before
+                // B could resume. A's complete state is already in this root.
+                AttachmentState::Sealed
+                    if core.actor_identity() == prepared.source_cut.change().actor => {}
+                _ => return Err(BundleError::HistoryBarrierInvariant),
             }
-            self.attach_core(core)?
-                .seal(&prepared.source_cut)
-                .map_err(crate::bundle::history_error)?;
             self.attach_core(&prepared.restore.core)?
                 .resume(&prepared.restore.cut)
-                .map_err(crate::bundle::history_error)?;
+                .map_err(crate::bundle::operation_error)?;
             prepared.completed = true;
             prepared.pin.take();
             prepared.pin_charge.take();

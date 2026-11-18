@@ -23,6 +23,7 @@ use crate::te1_eval::{Script, SendContext, Trace};
 use kinewright_core::{AgentError, AgentEvent, AgentSession};
 use kinewright_project::{
     bundle::{BundleWriteAdmission, ProjectBundle},
+    operation_history::{CreationOrigin, HistoryPool, Role, SnapshotIdentity, SnapshotTransport},
     receipts::ReceiptResult,
     studio_records::{
         CommentId, FeedbackAnchor, FeedbackBatch, FeedbackBatchId, FeedbackRevision, FrameRate,
@@ -448,7 +449,8 @@ pub(crate) struct Studio {
     pub host: WriterHost,
     pub run: RunId,
     path: PathBuf,
-    manual: Vec<u8>,
+    pool: HistoryPool,
+    manual: SnapshotIdentity,
     trace: Arc<Mutex<Trace>>,
 }
 impl Studio {
@@ -457,6 +459,7 @@ impl Studio {
         reason = "Arm bridge receives the frozen fixture objects and scripted transport"
     )]
     pub fn start(
+        pool: &HistoryPool,
         root: &Path,
         mut document: Document,
         provider: &str,
@@ -483,7 +486,7 @@ impl Studio {
         trace.lock().map_err(io_error)?.initial_tracks =
             document.tracks.iter().map(|t| t.id.0).collect();
         let path = root.join("project.kinewright");
-        let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document())
+        let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document(), pool)
             .map_err(io_error)?;
         let empty = bundle.empty_inputs().map_err(io_error)?.reference.clone();
         let mut manifest = (*bundle
@@ -581,7 +584,16 @@ impl Studio {
         let sealed = bundle.admit_inputs(&manifest).map_err(io_error)?;
         let inputs = sealed.reference.clone();
         pins.push(sealed);
-        let core = Core::spawn(document).map_err(io_error)?;
+        let core = Core::spawn(
+            pool,
+            Role::Ordinary,
+            CreationOrigin {
+                branch: bundle.manual_branch_id().clone(),
+                batch: kinewright_project::bundle_records::BatchId::fresh().map_err(io_error)?,
+            },
+            document,
+        )
+        .map_err(io_error)?;
         core.request(kinewright_core::Command::Do(
             kinewright_core::Operation::MoveMarker {
                 marker: kinewright_core::MarkerId(2),
@@ -591,8 +603,9 @@ impl Studio {
         .map_err(io_error)?;
         core.request(kinewright_core::Command::Undo)
             .map_err(io_error)?;
-        let manual = serde_json::to_vec(&core.export_history().map_err(io_error)?)?;
         bundle.save(&core, &inputs).map_err(io_error)?;
+        let manual = core.snapshot_identity().map_err(io_error)?;
+        retire_persisted_actor(&core, &bundle.attach_core(&core).map_err(io_error)?, manual)?;
         drop(pins);
         drop(bundle);
         let spec = available_connectors()
@@ -666,7 +679,7 @@ impl Studio {
                 ..Default::default()
             }
         };
-        let host = WriterHost::start_inner(
+        let host = WriterHost::start_in_pool(
             HostConfig {
                 data_dir: Some((settings).with_extension("voice-data")),
                 project: "TE1 unpaid measurement".into(),
@@ -680,6 +693,7 @@ impl Studio {
             },
             HostAuth::generate().map_err(io_error)?,
             None,
+            pool,
             ports,
         )
         .map_err(io_error)?;
@@ -878,6 +892,7 @@ impl Studio {
             host,
             run,
             path,
+            pool: pool.clone(),
             manual,
             trace,
         })
@@ -913,7 +928,7 @@ impl Studio {
         }
         Ok(state)
     }
-    pub fn finish(self) -> io::Result<(Document, Value, Value)> {
+    pub fn finish(self) -> io::Result<(SnapshotTransport, Value)> {
         let owner = self
             .host
             .owner
@@ -941,33 +956,32 @@ impl Studio {
                 &candidate.checkpoint,
             )
             .map_err(io_error)?;
-        let history = (*store
-            .resolve_history(&checkpoint.history_ref)
-            .map_err(io_error)?)
-        .clone();
+        let history = checkpoint
+            .open(store, &self.pool)
+            .map_err(io_error)?
+            .into_reader()
+            .map_err(io_error)?
+            .into_capture()
+            .map_err(io_error)?;
         let durable = store
             .read_record::<Document>(&checkpoint.document_ref)
             .map_err(io_error)?;
-        if *history.document != *durable || checkpoint.document_hash != candidate.document_hash {
+        if *history.history().document != *durable
+            || checkpoint.document_ref.sha256 != candidate.document_hash
+        {
             return Err(io_error(
                 "candidate durable checkpoint differs from history",
             ));
         }
-        let manual = locked
-            .owner()
-            .map_err(io_error)?
-            .core()
-            .export_history()
-            .map_err(io_error)?;
-        if serde_json::to_vec(&manual)? != self.manual {
+        let manual_core = locked.core().clone();
+        if manual_core.snapshot_identity().map_err(io_error)? != self.manual {
             return Err(io_error("person's manual history changed"));
         }
         let accounting = locked
             .native_accounting(&state)
             .map_err(io_error)?
             .ok_or_else(|| io_error("eval accounting missing"))?;
-        let document = history.document.clone();
-        let value = serde_json::to_value(history)?;
+        let history = history.into_transport().map_err(io_error)?;
         let accounting = serde_json::to_value(accounting)?;
         drop(locked);
         // Read back authoritative data from the actual bundle, never the trace.
@@ -976,21 +990,67 @@ impl Studio {
         }
         drop(owner);
         self.host.shutdown().map_err(io_error)?;
-        let loaded =
-            kinewright_project::bundle::LoadedBundle::read(&self.path).map_err(io_error)?;
-        let reopened_manual =
-            Core::spawn(std::sync::Arc::clone(&manual.baseline)).map_err(io_error)?;
-        loaded.restore_manual(&reopened_manual).map_err(io_error)?;
-        if reopened_manual.export_history().map_err(io_error)? != manual
-            || manual.cursor.redo.len() != 1
-        {
-            return Err(io_error("reopened manual redo differs"));
+        if !matches!(
+            manual_core.change_id(),
+            Err(kinewright_project::operation_actor::Error::Retired)
+        ) {
+            return Err(io_error(
+                "evaluation writer did not retire its manual actor",
+            ));
         }
-        reopened_manual
-            .request(kinewright_core::Command::Redo)
+        let mut loaded = kinewright_project::bundle::LoadedBundle::read(&self.path, &self.pool)
             .map_err(io_error)?;
-        let redone = reopened_manual.export_history().map_err(io_error)?;
+        let reopened_manual = loaded.open_manual().map_err(io_error)?;
+        verify_manual_redo(&reopened_manual, self.manual)?;
+        let reopened = loaded.into_writer().map_err(io_error)?;
+        let durable = reopened
+            .branch_history(&candidate.branch)
+            .map_err(io_error)?;
+        if durable
+            .into_capture()
+            .map_err(io_error)?
+            .identity()
+            .map_err(io_error)?
+            != history.identity()
+        {
+            return Err(io_error("reopened candidate history differs"));
+        }
+        Ok((history, accounting))
+    }
+}
+fn retire_persisted_actor(
+    core: &Core,
+    attachment: &kinewright_project::ProjectAttachment,
+    expected: SnapshotIdentity,
+) -> io::Result<()> {
+    let live = core.attachment_state().map_err(io_error)? == kinewright_core::AttachmentState::Live;
+    let cut = if live {
+        attachment.freeze()
+    } else {
+        attachment.capture()
+    }
+    .map_err(io_error)?;
+    if cut.identity() != expected {
+        if live {
+            attachment.resume(&cut).map_err(io_error)?;
+        }
+        return Err(io_error(
+            "persisted evaluation actor changed before release",
+        ));
+    }
+    attachment.retire(&cut).map_err(io_error)
+}
+fn verify_manual_redo(core: &Core, expected: SnapshotIdentity) -> io::Result<()> {
+    let before = crate::te1_eval::checks::replay_state(core)?;
+    if core.snapshot_identity().map_err(io_error)? != expected || before.redo_steps != 1 {
+        return Err(io_error("reopened manual redo differs"));
+    }
+    core.request(kinewright_core::Command::Redo)
+        .map_err(io_error)?;
+    {
+        let redone = core.export_history().map_err(io_error)?;
         if !redone
+            .history()
             .document
             .markers
             .iter()
@@ -998,22 +1058,13 @@ impl Studio {
         {
             return Err(io_error("person's redo no longer moves their marker"));
         }
-        reopened_manual
-            .request(kinewright_core::Command::Undo)
-            .map_err(io_error)?;
-        let undone = reopened_manual.export_history().map_err(io_error)?;
-        if undone.document != manual.document || undone.cursor != manual.cursor {
-            return Err(io_error("person's redo/undo changed"));
-        }
-        let reopened = loaded.into_writer().map_err(io_error)?;
-        let durable = reopened
-            .branch_history(&candidate.branch)
-            .map_err(io_error)?;
-        if serde_json::to_value(&*durable)? != value {
-            return Err(io_error("reopened candidate history differs"));
-        }
-        Ok(((*document).clone(), value, accounting))
     }
+    core.request(kinewright_core::Command::Undo)
+        .map_err(io_error)?;
+    if before.advanced(2) != Some(crate::te1_eval::checks::replay_state(core)?) {
+        return Err(io_error("person's redo/undo changed"));
+    }
+    Ok(())
 }
 fn checked(reply: HostReply) -> io::Result<HostReply> {
     if let Some(error) = &reply.error {

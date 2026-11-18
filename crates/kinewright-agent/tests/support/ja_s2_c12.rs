@@ -167,7 +167,7 @@ pub(super) fn run() {
 #[cfg(target_os = "linux")]
 fn composed() {
     use kinewright_agent::writer_host::{HostSourceBinding, SourceServer};
-    use kinewright_core::{AttachmentState, Command as Edit, Event, Operation, TrackId};
+    use kinewright_core::{AttachmentState, Command as Edit, Operation, TrackId};
     use kinewright_project::{
         bundle::LoadedBundle,
         editing_session::HostActivationKind,
@@ -180,7 +180,7 @@ fn composed() {
     let started = Instant::now();
     let root = temp("c12-composed");
     let path = root.path("drive/a.kinewright");
-    let core = Core::spawn(Document {
+    let core = Core::for_test(Document {
         tracks: vec![kinewright_core::Track {
             id: TrackId(1),
             kind: kinewright_core::TrackKind::Video,
@@ -221,7 +221,7 @@ fn composed() {
     let mut callback = SourceServer::start(service.clone()).unwrap();
     let mut configuration = config(root.root(), None);
     configuration.origin = HostOrigin::Gui {
-        initial_snapshot: HostSnapshot::from_history(prepared.history.clone()).unwrap(),
+        initial_snapshot: Some(HostSnapshot::from_history(prepared.history.clone()).unwrap()),
         retention: HostSourceBinding {
             source: Some(descriptor.clone()),
             inputs: Some(inputs.clone()),
@@ -247,18 +247,7 @@ fn composed() {
     let saved = host.ok(HostCommand::Save {
         snapshot: HostSnapshot::capture(gui.core()).unwrap(),
     });
-    let kinewright_agent::writer_host::HostRecoverySelection::Checkpoint {
-        root: target_root,
-        branch,
-    } = saved.status.recovery_points[0].clone()
-    else {
-        panic!("checkpoint")
-    };
-    let target = kinewright_project::bundle_switch::SwitchTarget::Snapshot {
-        root: target_root,
-        branch,
-        version: "c".repeat(32),
-    };
+    assert!(!saved.status.recovery_points.is_empty());
     let source_root = gui
         .source()
         .unwrap()
@@ -275,7 +264,11 @@ fn composed() {
         client: identity.clone(),
     });
     let old_permit = gui
-        .bind_manual_producer(grant.manual_lease.unwrap(), grant.manual_inputs.unwrap())
+        .bind_manual_producer(
+            grant.manual_lease.unwrap(),
+            grant.manual_inputs.unwrap(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        )
         .unwrap();
     old_permit
         .request(Edit::Do(Operation::SetTrackSyncLock {
@@ -291,6 +284,22 @@ fn composed() {
     let old = gui.core().clone();
     let cut = gui.freeze_host_cut().unwrap();
     let source_identity = charged_identity(gui.source().unwrap().store());
+    let target = host
+        .ok(HostCommand::Status)
+        .status
+        .recovery_points
+        .into_iter()
+        .find_map(|point| match point {
+            kinewright_agent::writer_host::HostRecoverySelection::Checkpoint { root, branch } => {
+                Some(kinewright_project::bundle_switch::SwitchTarget::Snapshot {
+                    root,
+                    branch,
+                    version: "c".repeat(32),
+                })
+            }
+            kinewright_agent::writer_host::HostRecoverySelection::WorkingBranch { .. } => None,
+        })
+        .expect("CURRENT_C12_RECOVERY_TARGET");
     let preview = host.ok(HostCommand::PrepareSwitch { target });
     let prepared = gui
         .prepare_gui_switch(preview.switch_preview.unwrap())
@@ -313,13 +322,19 @@ fn composed() {
     host.kill();
     drop(callback);
     callback = SourceServer::start(service.clone()).unwrap();
-    let loaded = LoadedBundle::read(&path).unwrap();
+    let loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
     service
         .ensure_snapshot(&descriptor, &committed.history)
         .unwrap();
     configuration.path = Some(path.clone());
     configuration.origin = HostOrigin::Gui {
-        initial_snapshot: HostSnapshot::from_history(committed.history.clone()).unwrap(),
+        initial_snapshot: Some(HostSnapshot::from_history(committed.history.clone()).unwrap()),
         retention: HostSourceBinding {
             source: Some(descriptor),
             inputs: Some(inputs),
@@ -361,8 +376,8 @@ fn composed() {
         )
         .unwrap();
     assert!(matches!(
-        old_permit.request(Edit::Undo).unwrap(),
-        Event::MutationRefused { .. }
+        old_permit.request(Edit::Undo),
+        Err(kinewright_project::operation_actor::Refusal { .. })
     ));
     permit
         .request(Edit::Do(Operation::SetTrackSyncLock {
@@ -375,13 +390,13 @@ fn composed() {
         messages: permit.pending().unwrap(),
     });
     gui.acknowledge_manual(&permit, ack.manual_ack).unwrap();
-    let captured = gui.core().export_history().unwrap();
+    let captured = serde_json::to_value(gui.core().export_history().unwrap()).unwrap();
     let source_actor = gui.core().clone();
     let cut = gui.freeze_host_cut().unwrap();
     let source_identity = charged_identity(gui.source().unwrap().store());
     let unknown = host.request(
         HostCommand::Save {
-            snapshot: HostSnapshot::from_history(captured.clone()).unwrap(),
+            snapshot: HostSnapshot::capture(gui.core()).unwrap(),
         },
         Some("root_parent_sync"),
     );
@@ -390,9 +405,9 @@ fn composed() {
     std::fs::rename(path.parent().unwrap(), &hidden).unwrap();
     for failed in [true, false] {
         let preview = host.ok(HostCommand::PreviewRescue {
-            snapshot: HostSnapshot::from_history(captured.clone()).unwrap(),
+            snapshot: HostSnapshot::capture(gui.core()).unwrap(),
         });
-        assert!(!preview.status.rescue_trim_required && !preview.status.rescue_omission_required);
+        assert!(!preview.status.rescue_omission_required);
         let destination = root.path(if failed {
             "failed.kinewright"
         } else {
@@ -412,7 +427,10 @@ fn composed() {
         if failed {
             assert!(reply.error.is_some());
             assert!(reply.activation.is_none());
-            assert_eq!(gui.core().export_history().unwrap(), captured);
+            assert_eq!(
+                serde_json::to_value(gui.core().export_history().unwrap()).unwrap(),
+                captured
+            );
         } else {
             assert!(reply.error.is_none(), "{:?}", reply.error);
             assert!(reply.activation.is_some());
@@ -434,7 +452,17 @@ fn composed() {
                 source_actor.attachment_state().unwrap(),
                 AttachmentState::Sealed
             );
-            assert_eq!(gui.core().export_history().unwrap(), captured);
+            let actual = serde_json::to_value(gui.core().export_history().unwrap()).unwrap();
+            let mut expected = captured.clone();
+            assert!(
+                actual["history"]["epoch"].as_u64() > expected["history"]["epoch"].as_u64(),
+                "RESCUE_INSTALL_STARTS_A_FRESH_EPOCH"
+            );
+            expected["history"]["epoch"] = actual["history"]["epoch"].clone();
+            assert_eq!(
+                actual, expected,
+                "RESCUE_INSTALL_PRESERVES_COMMAND_KEYS_DIGESTS_AND_ALL_OWNER_FACTS"
+            );
         }
     }
     let b = root.path("b.kinewright");
@@ -450,8 +478,11 @@ fn composed() {
     assert_eq!(gui.core().actor_identity(), b_actor);
     assert_eq!(gui.core().export_history().unwrap(), b_history);
     assert_eq!(
-        host.ok(HostCommand::ReadHistory).history.unwrap(),
-        b_history
+        host.ok(HostCommand::ReadHistory)
+            .history
+            .unwrap()
+            .identity(),
+        b_history.identity().unwrap()
     );
     assert_eq!(
         charged_identity(gui.source().unwrap().store()),
@@ -474,15 +505,28 @@ fn composed() {
     assert_eq!(retired.reserved_bytes, 0);
     assert_eq!(retired.reserved_copy_bytes, 0);
     assert!(!retired.damaged_accounting);
-    let a = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
+    let a = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
     assert!(
         matches!(a.receipt_lookup(&envelope).unwrap(), ReceiptLookup::Committed(ref receipt) if matches!(receipt.result, ReceiptResult::Switch { .. }))
     );
     assert_eq!(a.manual_branch_id(), &result.new.branch);
     drop(a);
-    let loaded = LoadedBundle::read(&b).unwrap();
-    let fresh = Core::spawn(Document::default()).unwrap();
-    loaded.restore_manual(&fresh).unwrap();
+    let mut loaded = LoadedBundle::read(
+        &b,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    let fresh = loaded.open_manual().unwrap();
     assert_eq!(fresh.export_history().unwrap(), b_history);
     let owner = loaded.into_writer().unwrap();
     let inputs = owner

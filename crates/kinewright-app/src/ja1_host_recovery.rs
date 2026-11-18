@@ -23,7 +23,7 @@ pub(super) struct RecoveredManual {
     completion: Option<Result<CompletedRecovery, BundleError>>,
 }
 struct CompletedRecovery {
-    permit: kinewright_core::ManualPermit,
+    permit: kinewright_project::operation_actor::ManualPermit,
     reply: HostReply,
     digest: String,
 }
@@ -66,23 +66,26 @@ fn run_barrier(
     mut endpoint: ManualRecoveryEndpoint,
     client: String,
     frozen: HostSnapshot,
-    pending: Vec<kinewright_core::AcceptedHistory>,
+    pending: Vec<kinewright_project::operation_protocol::EncodedMessage>,
     live: std::sync::Arc<std::sync::atomic::AtomicBool>,
     saved_plan: &std::sync::Mutex<Option<RecoveryPlan>>,
-    discard: Option<usize>,
-) -> Result<(kinewright_core::ManualPermit, HostReply, String), BundleError> {
-    let original_undo = pending
-        .last()
-        .and_then(|message| {
-            kinewright_project::manual_history::AcceptedManualCommand::decode(message).ok()
-        })
-        .and_then(|value| value.envelope.manual.map(|m| m.batch.undo_entries))
-        .unwrap_or(frozen.history.cursor.undo.len());
+) -> Result<
+    (
+        kinewright_project::operation_actor::ManualPermit,
+        HostReply,
+        String,
+    ),
+    BundleError,
+> {
     let retained = saved_plan
         .lock()
         .map_err(|_| BundleError::Unsettled)?
         .clone();
     let mut plan = if let Some(retained) = retained {
+        // A retry uses the already authenticated barrier. Its newly captured
+        // source is not sent and must not occupy a fourth lease during install.
+        drop(frozen);
+        drop(pending);
         retained
     } else {
         let reply = checked(
@@ -91,7 +94,6 @@ fn run_barrier(
                     client,
                     frozen: Some(frozen),
                     pending,
-                    discard_batches: discard,
                 })
                 .map_err(host_error)?,
         )?;
@@ -110,20 +112,15 @@ fn run_barrier(
                     })
                     .map_err(host_error)?,
             )?;
-            if published.history.as_ref() != Some(&barrier.after.history)
-                || published
-                    .barrier_checkpoint
-                    .as_ref()
-                    .is_none_or(|c| c.history_digest != barrier.after.history_sha256)
-            {
+            if published.history.as_ref() != Some(&barrier.after.history) {
                 return Err(BundleError::HistoryChanged);
             }
-            endpoint.install(barrier.after.history.clone())?;
+            endpoint.install(barrier.after.history.clone(), published.manual_ack)?;
             *saved_plan.lock().map_err(|_| BundleError::Unsettled)? =
                 Some(RecoveryPlan::Confirm(barrier.clone()));
         }
         let installed = HostSnapshot::from_history(endpoint.snapshot()?).map_err(host_error)?;
-        let mut reply = checked(
+        let reply = checked(
             host.client
                 .request(HostCommand::ConfirmBarrier {
                     barrier: Box::new(barrier.clone()),
@@ -134,12 +131,6 @@ fn run_barrier(
         if let Some(next) = reply.recovery.clone() {
             plan = RecoveryPlan::Publish(next);
             continue;
-        }
-        let removed = original_undo.saturating_sub(barrier.after.history.cursor.undo.len());
-        if removed > 0 {
-            reply.status.save_disclosure = format!(
-                "Older Undo history removed by the shared floor: {removed} entries. Current edits, Redo and the gesture are kept."
-            );
         }
         let digest = barrier.after.history_sha256;
         let permit = endpoint.finish(
@@ -157,20 +148,13 @@ fn run_barrier(
     }
 }
 impl HostAttachment {
-    pub fn begin_manual_recovery(
-        &mut self,
-        owner: &mut Ja1EditingSession,
-    ) -> Result<(), BundleError> {
-        self.begin_manual_recovery_with_floor(owner, None)
-    }
     #[allow(
         clippy::too_many_lines,
         reason = "one GUI-owned freeze, source proof and background process handoff"
     )]
-    pub fn begin_manual_recovery_with_floor(
+    pub fn begin_manual_recovery(
         &mut self,
         owner: &mut Ja1EditingSession,
-        discard: Option<usize>,
     ) -> Result<(), BundleError> {
         if self.recovery.is_some() {
             return Ok(());
@@ -187,7 +171,7 @@ impl HostAttachment {
         }
         // This barrier precedes joining the submitted stream worker and every child operation.
         let cut = owner.recapture_host_recovery_cut()?;
-        self.cut = Some(cut.clone());
+        self.cut = Some(cut);
         self.status.frozen = true;
         self.edits.abandon_unaccepted();
         let gate = self.manual.as_ref().ok_or(BundleError::HistoryChanged)?;
@@ -206,9 +190,21 @@ impl HostAttachment {
         }
         let pending = self.recovery_originals.clone();
         let endpoint = owner.manual_recovery_endpoint(&cut, actor_pending)?;
+        // C10 now owns the exact frozen actor and original outbox. A lost Save's
+        // request capture duplicates that evidence and must not keep another
+        // full lease through installing and confirming the selected barrier.
+        // Selection and destination requests use their own recovery protocol.
+        if self
+            .pending_operation
+            .as_ref()
+            .is_some_and(|(_, command)| !matches!(command, HostCommand::Save { .. }))
+        {
+            return Err(BundleError::HistoryChanged);
+        }
+        self.pending_operation = None;
         let saved_plan = std::sync::Arc::clone(&self.recovery_plan);
         let live = self.context.upgrade().ok_or(BundleError::HistoryChanged)?;
-        let frozen = HostSnapshot::from_history(cut.history().clone()).map_err(host_error)?;
+        let frozen = HostSnapshot::capture(owner.core()).map_err(host_error)?;
         // Borrow the same actual GUI admission. A replacement callback never owns
         // source cleanup, pins or a new accounting ledger.
         if !self.status.destinations.is_empty() || self.status.prepared_selection {
@@ -275,6 +271,7 @@ impl HostAttachment {
         } else {
             None
         };
+        let pool = owner.core().history_pool().clone();
         self.recovery = Some(std::thread::spawn(move || {
             // Joining does not consume the original queue: the successor resolves lost replies.
             if let Some(worker) = inflight {
@@ -285,12 +282,20 @@ impl HostAttachment {
                     let _ = child.kill();
                     let _ = child.wait();
                 }
-                let loaded = LoadedBundle::read(&path)?;
-                let root = loaded.root()?;
-                let core = kinewright_core::Core::spawn(kinewright_core::Document::default())
-                    .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-                loaded.restore_manual(&core)?;
-                let snapshot = HostSnapshot::capture(&core).map_err(host_error)?;
+                let mut loaded = LoadedBundle::read(&path, &pool)?;
+                let root = loaded.root()?.clone();
+                let checkpoint = loaded.manual_checkpoint()?.clone();
+                let validated = loaded.take_manual_snapshot()?;
+                let snapshot = HostSnapshot::from_history(
+                    kinewright_project::operation_actor::PortableHistory {
+                        snapshot: std::sync::Arc::new(
+                            validated.into_reader()?.into_capture()?.into_transport()?,
+                        ),
+                        branch: checkpoint.branch_id,
+                        revision: checkpoint.revision,
+                    },
+                )
+                .map_err(host_error)?;
                 if let Some(reader) = &retained_source {
                     reader.ensure_snapshot(
                         source_descriptor
@@ -317,7 +322,7 @@ impl HostAttachment {
                             inputs: source_inputs,
                             callback: callback.ok_or(BundleError::HistoryChanged)?,
                         },
-                        initial_snapshot: snapshot,
+                        initial_snapshot: Some(snapshot),
                         expected_root_sha256: Some(kinewright_media::sha256_bytes(
                             loaded.admission().raw_bytes(),
                         )),
@@ -346,7 +351,6 @@ impl HostAttachment {
                 pending,
                 live,
                 &saved_plan,
-                discard,
             )
             .map(|(permit, reply, digest)| CompletedRecovery {
                 permit,

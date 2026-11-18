@@ -1,3 +1,4 @@
+use kinewright_project::operation_actor::Core;
 use std::{
     collections::BTreeSet,
     path::Path,
@@ -526,7 +527,7 @@ impl BranchProvenance {
 
 #[allow(clippy::too_many_arguments)]
 fn start_branch_server(
-    core: kinewright_core::Core,
+    core: kinewright_project::operation_actor::Core,
     playback: Arc<dyn Playback>,
     analysis: Arc<dyn Analysis>,
     exporter: Arc<dyn Export>,
@@ -572,6 +573,7 @@ fn start_branch_server(
 impl AgentThread {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        live: &Core,
         name: impl Into<String>,
         harness: AgentHarnessChoice,
         chat: Vec<ChatEntry>,
@@ -585,6 +587,7 @@ impl AgentThread {
         dialogue: Option<Arc<kinewright_media::SessionMedia>>,
     ) -> Result<Self, String> {
         Self::new_with_execution(
+            live,
             name,
             harness,
             chat,
@@ -603,11 +606,12 @@ impl AgentThread {
 
     #[allow(clippy::too_many_arguments)]
     fn new_with_execution(
+        live: &Core,
         name: impl Into<String>,
         harness: AgentHarnessChoice,
         mut chat: Vec<ChatEntry>,
-        base_revision: TimelineRevision,
-        base_document: &Arc<Document>,
+        _base_revision: TimelineRevision,
+        _base_document: &Arc<Document>,
         playback: &Arc<dyn Playback>,
         analysis: &Arc<dyn Analysis>,
         exporter: &Arc<dyn Export>,
@@ -618,8 +622,8 @@ impl AgentThread {
         exports: Option<kinewright_agent::export_queue::ExportQueue>,
     ) -> Result<Self, String> {
         let name = name.into();
-        let branch = TimelineBranch::new(name.clone(), base_revision, Arc::clone(base_document))
-            .map_err(|error| error.to_string())?;
+        let branch =
+            TimelineBranch::fork(name.clone(), live, false).map_err(|error| error.to_string())?;
         let mcp_server = if local_execution {
             match start_branch_server(
                 branch.core(),
@@ -668,8 +672,9 @@ impl AgentThread {
     #[allow(clippy::too_many_arguments)]
     fn replace_branch(
         &mut self,
-        base_revision: TimelineRevision,
-        base_document: Arc<Document>,
+        live: &Core,
+        _base_revision: TimelineRevision,
+        _base_document: Arc<Document>,
         playback: Arc<dyn Playback>,
         analysis: Arc<dyn Analysis>,
         exporter: Arc<dyn Export>,
@@ -685,7 +690,7 @@ impl AgentThread {
         }
         self.pending_confirmations.clear();
         self.selected_operations.clear();
-        let branch = TimelineBranch::new(self.name.clone(), base_revision, base_document)
+        let branch = TimelineBranch::fork(self.name.clone(), live, false)
             .map_err(|error| error.to_string())?;
         if !local_execution {
             if let Some(server) = self.mcp_server.take() {
@@ -995,8 +1000,8 @@ impl KinewrightApp {
         let client = self.projects[project_index]
             .studio_host_client()
             .expect("attached host");
-        let revision = self.projects[project_index].revision;
-        let document = Arc::clone(&self.projects[project_index].document);
+        let _document = Arc::clone(&self.projects[project_index].document);
+        let live = self.projects[project_index].core.clone();
         let thread = &mut self.projects[project_index].threads[thread_index];
         if let Some(chat) = &mut thread.host_chat {
             if let Err(error) = chat.send(message.clone()) {
@@ -1004,7 +1009,7 @@ impl KinewrightApp {
                 return;
             }
         } else {
-            match TimelineBranch::new(thread.name.clone(), revision, document) {
+            match TimelineBranch::fork(thread.name.clone(), &live, false) {
                 Ok(branch) => thread.branch = branch,
                 Err(error) => {
                     self.status = error.to_string();
@@ -1116,7 +1121,9 @@ impl KinewrightApp {
         let local_execution = !self.projects[project_index].studio_host_managed();
         let ports = self.projects[project_index].media();
         let exports = self.projects[project_index].exports.clone();
+        let live = self.projects[project_index].core.clone();
         let result = self.projects[project_index].threads[thread_index].replace_branch(
+            &live,
             revision,
             document,
             ports.playback,
@@ -1530,15 +1537,31 @@ impl KinewrightApp {
                         thread.running = status.running;
                         if let Some(history) = status.history {
                             // Display-only shadow. Real commands and sessions remain in the host.
-                            let same_base = thread.branch.compare().is_ok_and(|comparison| {
-                                history.baseline == comparison.base_document
-                            });
-                            if !same_base || thread.branch.core().restore_history(history).is_err()
-                            {
-                                project.retired_agent_threads.insert(thread.id);
-                                thread.chat.push(ChatEntry::Text("The host preview could not be installed. Its session continues in the host.".into()));
+                            let branch = history.branch.clone();
+                            let revision = history.revision;
+                            let result = history
+                                .validate(project.core.history_pool())
+                                .map_err(|error| error.to_string())
+                                .and_then(|snapshot| {
+                                    kinewright_project::operation_actor::Core::open(
+                                        snapshot, branch, revision,
+                                    )
+                                    .map_err(|error| error.to_string())
+                                });
+                            match result {
+                                Ok(core) => {
+                                    thread.branch =
+                                        TimelineBranch::from_preview(thread.name.as_str(), core)
+                                            .map_err(|error| error.to_string())
+                                            .unwrap_or_else(|_| thread.branch.clone());
+                                }
+                                Err(error) => {
+                                    project.retired_agent_threads.insert(thread.id);
+                                    thread.chat.push(ChatEntry::Text(format!("The host preview could not be installed: {error}. Its session continues in the host.")));
+                                }
                             }
                         }
+
                         for event in status.events {
                             let event = match event.kind.as_str() {
                                 "done" => AgentEvent::Done,
@@ -1707,6 +1730,7 @@ impl KinewrightApp {
         let local_execution = !self.projects[project_index].studio_host_managed();
         let ports = self.projects[project_index].media();
         let thread = AgentThread::new_with_execution(
+            &self.projects[project_index].core,
             format!("Thread {next_number}"),
             harness,
             Vec::new(),
@@ -3644,10 +3668,16 @@ mod tests {
         let root = TempDirectory::new_in(&workspace_target_dir(), "c2-branch-thumbnail");
         let [fixture, replacement] =
             kinewright_project::c0_fixtures::build_c0_fixture_pair(root.root()).unwrap();
-        let mut document = (*fixture.history.document).clone();
+        let mut document = (*fixture.history.history().document).clone();
         document.media_pool[0].path = root.path("external.mkv");
         let document = Arc::new(document);
-        let loaded = LoadedBundle::read(&fixture.path).unwrap();
+        let loaded = LoadedBundle::read(
+            &fixture.path,
+            &kinewright_project::operation_history::HistoryPool::new(
+                kinewright_project::operation_history::PoolLimits::default(),
+            ),
+        )
+        .unwrap();
         let inputs_ref = loaded
             .manual_checkpoint()
             .unwrap()

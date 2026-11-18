@@ -1,6 +1,7 @@
 use super::*;
+use crate::operation_actor::Core;
 use crate::{editing_session::DurableBranchRole, storage_budget::StorageLimits};
-use kinewright_core::{Command, Core, Document, Operation, Track, TrackId, TrackKind};
+use kinewright_core::{Command, Document, Operation, Track, TrackId, TrackKind};
 use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
 
 fn fixture() -> (
@@ -10,7 +11,7 @@ fn fixture() -> (
     DurableBranchSessionGuard,
 ) {
     let temp = TempDirectory::new_in(&workspace_target_dir(), "native-actor-release");
-    let core = Core::spawn(Document {
+    let core = Core::for_test(Document {
         tracks: vec![Track {
             id: TrackId(1),
             kind: TrackKind::Video,
@@ -44,7 +45,7 @@ fn native_release_waits_for_dirty_work_handles_and_capacity_then_rehydrates_exac
         .unwrap();
     task.core().request(Command::Undo).unwrap();
     let expected = task.core().export_history().unwrap();
-    assert!(!expected.cursor.redo.is_empty());
+    assert!(!expected.history().redo.is_empty());
     assert!(
         !owner.release_checkpointed_native_branch(&task).unwrap(),
         "DIRTY_NOT_RELEASED"
@@ -71,7 +72,7 @@ fn native_release_waits_for_dirty_work_handles_and_capacity_then_rehydrates_exac
     let mut held = Vec::new();
     while available != 0 {
         let bytes = available.min(store.limits().decoded_record_bytes);
-        held.push(store.reserve_copy_read(0, bytes, 0, false, true).unwrap());
+        held.push(store.reserve_copy_read(0, bytes, false, true).unwrap());
         available -= bytes;
     }
     assert!(
@@ -131,19 +132,23 @@ fn native_release_freshly_reads_the_journal_and_keeps_a_failed_actor_usable() {
         .unwrap();
     let path = temp.path(&format!(
         "project.kinewright-assets/studio/objects/{}",
-        checkpoint.history_ref.sha256
+        checkpoint.owner_ref.sha256
     ));
     let original = std::fs::read(&path).unwrap();
     let root = std::fs::read(temp.path("project.kinewright")).unwrap();
     let mut damaged = original.clone();
     damaged[0] = b'!';
     std::fs::write(&path, &damaged).unwrap();
+    let refused = owner.release_checkpointed_native_branch(&task);
     assert!(
         matches!(
-            owner.release_checkpointed_native_branch(&task),
-            Err(BundleError::Corrupt(_))
+            refused,
+            Err(BundleError::Corrupt(_)
+                | BundleError::Operation(crate::operation_actor::Error::History(
+                    crate::operation_history::Error::Store(_)
+                )))
         ),
-        "FRESH_REPLAY_REFUSES_DAMAGED_BYTES"
+        "FRESH_REPLAY_REFUSES_DAMAGED_BYTES: {refused:?}"
     );
     assert_eq!(
         owner.durable_sessions().len(),
@@ -164,8 +169,8 @@ fn native_release_freshly_reads_the_journal_and_keeps_a_failed_actor_usable() {
     );
     task.core().request(Command::Redo).unwrap();
     assert_eq!(
-        task.core().export_history().unwrap().document,
-        expected.document
+        task.core().export_history().unwrap().history().document,
+        expected.history().document
     );
     assert_eq!(
         std::fs::read(temp.path("project.kinewright")).unwrap(),
@@ -180,6 +185,10 @@ fn native_release_freshly_reads_the_journal_and_keeps_a_failed_actor_usable() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one lifecycle checks the released result, review and merge without retaining extra history leases"
+)]
 fn native_release_frozen_review_and_merge_preserve_the_exact_result() {
     let (_temp, mut owner, candidate, mut task) = fixture();
     task.core()
@@ -233,7 +242,10 @@ fn native_release_frozen_review_and_merge_preserve_the_exact_result() {
         .unwrap();
     assert_eq!(after.source(), frozen.source());
     assert_eq!(after.base(), frozen.base());
-    assert_eq!(after.delta(), frozen.delta());
+    assert_eq!(
+        after.delta(&owner).unwrap().operations(),
+        frozen.delta(&owner).unwrap().operations()
+    );
     assert_eq!(
         after.captured_history().position,
         frozen.captured_history().position
@@ -241,11 +253,34 @@ fn native_release_frozen_review_and_merge_preserve_the_exact_result() {
     let review = owner
         .active_bundle()
         .unwrap()
-        .prepare_checkpoint_restore(&crate::bundle_recovery::RecoverySelection::WorkingBranch(
-            task_branch,
-        ))
+        .prepare_checkpoint_restore(
+            owner.core(),
+            &crate::bundle_recovery::RecoverySelection::WorkingBranch(task_branch),
+            crate::bundle_records::BranchId::fresh().unwrap(),
+        )
         .unwrap();
-    assert_eq!(review.core().export_history().unwrap(), expected);
+    let installed = review.core().export_history().unwrap();
+    assert_eq!(
+        installed.history().document,
+        expected.history().document,
+        "REVIEW_INSTALL_PRESERVES_DOCUMENT"
+    );
+    assert_eq!(
+        installed.history().undo,
+        expected.history().undo,
+        "REVIEW_INSTALL_PRESERVES_COMMAND_KEYS"
+    );
+    assert_eq!(
+        installed.history().redo,
+        expected.history().redo,
+        "REVIEW_INSTALL_PRESERVES_REDO"
+    );
+    assert_eq!(
+        installed.resources(),
+        expected.resources(),
+        "REVIEW_INSTALL_PRESERVES_RESOURCES"
+    );
+    drop(installed);
     drop(review);
     let issuer = owner
         .issue_manual_lease("candidate".into(), "candidate-private".into())
@@ -272,8 +307,8 @@ fn native_release_frozen_review_and_merge_preserve_the_exact_result() {
         .unwrap()
         .1;
     assert_eq!(
-        merged.core().export_history().unwrap().document,
-        expected.document
+        merged.core().export_history().unwrap().history().document,
+        expected.history().document
     );
     assert_eq!(owner.commit_candidate(&after, &envelope).unwrap(), result);
 }
@@ -289,7 +324,15 @@ fn native_release_checks_split_occurrences_and_every_history_boundary() {
             color: kinewright_core::SolidColor::default(),
         }))
         .unwrap();
-    let clip = task.core().export_history().unwrap().document.tracks[0].clips[0].id;
+    let clip = task
+        .core()
+        .export_history()
+        .unwrap()
+        .history()
+        .document
+        .tracks[0]
+        .clips[0]
+        .id;
     task.core()
         .request(Command::Do(Operation::SplitClip {
             clip,
@@ -305,7 +348,7 @@ fn native_release_checks_split_occurrences_and_every_history_boundary() {
         .unwrap()
         .branch_lineage(task.branch_id())
         .unwrap();
-    assert!(!lineage.split_ancestry.is_empty());
+    assert!(!lineage.lineage().split_ancestry.is_empty());
     let branch = task.branch_id().clone();
     assert!(owner.release_checkpointed_native_branch(&task).unwrap());
     drop(task);
@@ -314,11 +357,12 @@ fn native_release_checks_split_occurrences_and_every_history_boundary() {
         .unwrap();
     assert_eq!(restored.core().export_history().unwrap(), expected);
     assert_eq!(
-        *owner
+        owner
             .active_bundle()
             .unwrap()
             .branch_lineage(&branch)
-            .unwrap(),
-        *lineage
+            .unwrap()
+            .lineage(),
+        lineage.lineage()
     );
 }

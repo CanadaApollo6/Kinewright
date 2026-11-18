@@ -1,13 +1,12 @@
 //! Verified project-owned recovery payloads and the restricted L1 linkage projection.
 #![allow(clippy::missing_errors_doc)]
+use crate::operation_actor::Core;
 use crate::{
     bundle::{BundleError, BundleWriteAdmission, ProjectBundle, SupportInventory},
-    bundle_records::{BranchCheckpoint, BranchId, LineageRecord, ObjectRef, RecordKind},
-    owned_inputs::OwnedInputManifest,
+    bundle_records::{BranchCheckpoint, BranchId, ObjectRef, RecordKind},
     rescue_record::{RescueCopyV1, RescueRecoveryPoint},
     store::StoreManifest,
 };
-use kinewright_core::{Core, HistorySnapshot};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,12 +16,10 @@ pub enum RecoverySelection {
 }
 pub struct PreparedCheckpointRestore {
     pub(crate) attachment: crate::ProjectAttachment,
-    pub(crate) history_digest: String,
     pub(crate) core: Core,
     pub(crate) checkpoint: BranchCheckpoint,
-    pub(crate) history: std::sync::Arc<crate::storage_budget::StorageReservation<HistorySnapshot>>,
-    pub(crate) lineage: crate::storage_budget::StorageReservation<LineageRecord>,
-    pub(crate) cut: kinewright_core::AcceptedCut,
+    pub(crate) cut: crate::operation_actor::AcceptedCut,
+    _pin: crate::store::StorePin,
     pub(crate) input_leases: Vec<crate::owned_inputs::OwnedInputLease>,
 }
 impl PreparedCheckpointRestore {
@@ -45,7 +42,9 @@ impl ProjectBundle {
     )]
     pub fn prepare_checkpoint_restore(
         &self,
+        source: &Core,
         selection: &RecoverySelection,
+        branch: BranchId,
     ) -> Result<PreparedCheckpointRestore, BundleError> {
         let reference = match selection {
             RecoverySelection::WorkingBranch(branch) => self.checkpoint_reference(branch)?,
@@ -105,93 +104,69 @@ impl ProjectBundle {
             self.store.verify(object)?;
         }
         let checkpoint = self.store.read_record::<BranchCheckpoint>(&reference)?;
-        let history = self.store.resolve_history(&checkpoint.history_ref)?;
-        crate::history_record::HistoryRecord::verify_checkpoint(&checkpoint, &history)?;
-        let document = self
-            .store
-            .read_record::<kinewright_core::Document>(&checkpoint.document_ref)?;
-        let baseline = self
-            .store
-            .read_record::<kinewright_core::Document>(&checkpoint.baseline_ref)?;
-        if *document != *history.document
-            || *baseline != *history.baseline
-            || checkpoint.document_hash != checkpoint.document_ref.sha256
-            || checkpoint.applied_operations_digest
-                != kinewright_media::sha256_bytes(
-                    &serde_json::to_vec(&history.applied_operations())
-                        .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-                )
-            || checkpoint.batch_ids.len() != history.batches.len()
-            || checkpoint.history_input_manifest_refs.len() != history.batches.len() + 1
-        {
-            return Err(BundleError::Corrupt("recovery payload agreement".into()));
-        }
+        let validated = checkpoint.open(&self.store, &self.history_pool)?;
+        let snapshot = validated
+            .into_reader()?
+            .into_capture()?
+            .into_ordinary(&self.history_pool)?
+            .validate()?;
         let inputs = self
             .store
-            .read_record::<OwnedInputManifest>(&checkpoint.input_manifest_ref)?;
-        let mut retained = (*inputs).clone();
+            .read_input_manifest(&checkpoint.input_manifest_ref)?;
+        crate::bundle_commit::validate_document_inputs(snapshot.document(), &inputs)?;
         let mut input_leases = Vec::new();
-        let mut seen = std::collections::BTreeSet::new();
-        for manifest_ref in std::iter::once(&checkpoint.input_manifest_ref)
-            .chain(&checkpoint.history_input_manifest_refs)
+        for reference in closure
+            .iter()
+            .filter(|r| r.record_kind == RecordKind::InputManifest)
         {
-            if !seen.insert(manifest_ref.clone()) {
-                continue;
-            }
-            let manifest = self.store.read_input_manifest(manifest_ref)?;
-            if manifest.session_id.is_some()
-                || !manifest.project_id.as_ref().is_some_and(|id| {
-                    id == &self.project_id || self.origin_project_ids.contains(id)
-                })
+            let manifest = self.store.read_input_manifest(reference)?;
+            if !manifest
+                .project_id
+                .as_ref()
+                .is_some_and(|id| id == &self.project_id || self.origin_project_ids.contains(id))
+                && !manifest
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|id| self.origin_session_ids.contains(id))
             {
                 return Err(BundleError::Identity("recovery input owner".into()));
             }
-            let owner = (manifest.project_id.clone(), None);
+            let owner = (manifest.project_id.clone(), manifest.session_id.clone());
             for entry in &manifest.entries {
                 input_leases.push(self.store.lease_input_for_owner(
                     &crate::owned_inputs::OwnedInputRef {
-                        manifest_ref: manifest_ref.clone(),
+                        manifest_ref: reference.clone(),
                         entry: entry.clone(),
                     },
                     &owner,
                 )?);
             }
         }
-        for reference in &checkpoint.history_input_manifest_refs {
-            retained.entries.extend(
-                self.store
-                    .read_record::<OwnedInputManifest>(reference)?
-                    .entries
-                    .clone(),
-            );
+        let pin = self.store.pin(std::slice::from_ref(&reference))?;
+        let owner = self.attach_core(source)?;
+        let was_live = source
+            .attachment_state()
+            .map_err(crate::bundle::operation_error)?
+            == kinewright_core::AttachmentState::Live;
+        let source_cut = owner.freeze().map_err(crate::bundle::operation_error)?;
+        let selected = owner.prepare_selection(&source_cut, snapshot, branch);
+        if was_live {
+            owner
+                .resume(&source_cut)
+                .map_err(crate::bundle::operation_error)?;
         }
-        crate::bundle_commit::validate_document_inputs(&history.document, &inputs)?;
-        crate::bundle_commit::validate_inputs(&history, &retained)?;
-        let core = Core::spawn(std::sync::Arc::clone(&history.baseline))
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        self.attach_core(&core)?
-            .restore_history((*history).clone())
-            .map_err(crate::bundle::history_error)?;
-        let lineage = self
-            .store
-            .read_record::<LineageRecord>(&checkpoint.lineage_ref)?;
-        let cut = self
-            .attach_core(&core)?
-            .freeze()
-            .map_err(crate::bundle::history_error)?;
+        let core = selected.map_err(crate::bundle::operation_error)?;
         let attachment = self.attach_core(&core)?;
-        let history_digest = kinewright_media::sha256_bytes(
-            &serde_json::to_vec(&*history).map_err(|e| BundleError::Corrupt(e.to_string()))?,
-        );
+        let cut = attachment
+            .freeze()
+            .map_err(crate::bundle::operation_error)?;
         Ok(PreparedCheckpointRestore {
             attachment,
-            history_digest,
             core,
             cut,
             input_leases,
             checkpoint: (*checkpoint).clone(),
-            history: std::sync::Arc::new(history),
-            lineage,
+            _pin: pin,
         })
     }
 
@@ -295,7 +270,7 @@ impl crate::store::ProjectStore {
         {
             return Err(BundleError::Corrupt("checkpoint kind/length".into()));
         }
-        let _charge = self.reserve(0, reference.byte_length, 0, false)?;
+        let _charge = self.reserve(0, reference.byte_length, false)?;
         let bytes = super::bounded_bytes(self.open_verified(reference)?, reference.byte_length)?;
         let admission = BundleWriteAdmission::from_bytes_with_limits(
             None,

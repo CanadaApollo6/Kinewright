@@ -469,7 +469,9 @@ mod tests {
                     Mode::Baseline
                 )
                 .unwrap(),
-                0
+                0,
+                "CONTROL {name}: {}",
+                std::fs::read_to_string(temp.path("out/summary.json")).unwrap()
             );
         }
     }

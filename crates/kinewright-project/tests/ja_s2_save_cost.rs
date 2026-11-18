@@ -1,7 +1,8 @@
 //! Paired incremental-save measurement; no timing threshold is a correctness assertion.
 #![cfg(all(feature = "test-util", target_os = "linux"))]
-use kinewright_core::{Command, Core, Event, Operation, TrackId};
+use kinewright_core::{Command, Event, Operation, TrackId};
 use kinewright_media::test_support::TempDirectory;
+use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{BundleWriteAdmission, LoadedBundle, ProjectBundle},
     bundle_records::{ObjectRef, RecordKind},
@@ -36,28 +37,42 @@ fn fixture() -> SaveCostFixture {
     let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "s2-save-cost");
     let path = temp.path("project.kinewright");
     let document = kinewright_project::c0_fixtures::save_cost_document();
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     for n in 0..24 {
         edit(&core, n % 2 == 0);
     }
-    let mut owner = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let mut owner = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
     let inputs = owner.empty_inputs().unwrap().reference.clone();
     owner.save(&core, &inputs).unwrap();
     let manual = owner.manual_branch_id().clone();
-    let mut histories = vec![owner.checkpoint(&manual).unwrap().history_ref.clone()];
+    let mut histories = vec![owner.checkpoint(&manual).unwrap().owner_ref.clone()];
     for branch in 0..5 {
         let id = owner
             .fork_branch(
                 &manual,
-                kinewright_project::history_record::HistoryRole::Ordinary,
+                kinewright_project::operation_history::Role::Ordinary,
             )
             .unwrap();
-        let other = Core::spawn((*owner.branch_history(&id).unwrap().document).clone()).unwrap();
+        let other = Core::open(
+            owner
+                .checkpoint(&id)
+                .unwrap()
+                .open(owner.store(), owner.history_pool())
+                .unwrap(),
+            id.clone(),
+            owner.checkpoint(&id).unwrap().revision,
+        )
+        .unwrap();
         for n in 0..24 + branch {
             edit(&other, n % 2 == 0);
         }
         owner.save_branch(&id, &other).unwrap();
-        histories.push(owner.checkpoint(&id).unwrap().history_ref.clone());
+        histories.push(owner.checkpoint(&id).unwrap().owner_ref.clone());
     }
     SaveCostFixture {
         _temp: temp,
@@ -73,6 +88,10 @@ fn seconds(nanoseconds: u128) -> f64 {
         .as_secs_f64()
 }
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the paired save observer includes all six branch preparations and the cold verification in one measurement"
+)]
 fn repeated_small_saves_with_six_populated_branches() {
     let SaveCostFixture {
         _temp,
@@ -110,7 +129,7 @@ fn repeated_small_saves_with_six_populated_branches() {
     for sequence in 1..=12 {
         let envelope = CommandEnvelope {
             switch: None,
-            manual: None,
+            context: None,
             version: 1,
             action: "comment".into(),
             id: CommandId {
@@ -127,7 +146,6 @@ fn repeated_small_saves_with_six_populated_branches() {
             comment_text: Some(reference(text)),
             comment_strokes: Some(reference(strokes)),
             evidence: vec![],
-            transition: None,
         };
         owner.store().reset_decode_peaks_probe().unwrap();
         let usage = owner.store().usage().unwrap();
@@ -157,8 +175,14 @@ fn repeated_small_saves_with_six_populated_branches() {
         decodes.push(io_observer::history_decode_count() - before_decodes);
         decoded_peaks.push(after.peak_decoded_bytes);
     }
-    let loaded = LoadedBundle::read(&path).unwrap();
-    assert!(loaded.usage_probe().unwrap().live_history_bytes > 0);
+    let loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    assert!(loaded.usage_probe().unwrap().peak_decoded_bytes > 0);
     let report = serde_json::json!({
         "branches": 6, "tracks_per_branch": 12, "clips_per_branch": 120,
         "history_batches": [24,24,25,26,27,28],

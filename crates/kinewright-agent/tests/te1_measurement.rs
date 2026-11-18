@@ -1,6 +1,8 @@
 //! Unpaid Studio E2E. There is no installed-provider or paid entry point here.
 #![cfg(feature = "te1-eval")]
 use kinewright_agent::te1_eval::{fixtures, pin};
+#[cfg(target_os = "linux")]
+use kinewright_project::operation_history::{HistoryPool, PoolLimits};
 use serde_json::{Value, json};
 use std::path::Path;
 fn committed_pin() -> Value {
@@ -146,8 +148,10 @@ fn te15_b2b0_home_capacity() {
         &kinewright_media::test_support::workspace_target_dir(),
         "b2b0-capacity",
     );
+    let pool = HistoryPool::new(PoolLimits::default());
     for provider in ["codex", "claude"] {
         let result = kinewright_agent::te1_eval::run_scripted(
+            &pool,
             &temp.path(provider),
             5,
             provider,
@@ -191,8 +195,10 @@ fn scripted(case: u8) {
         &kinewright_media::test_support::workspace_target_dir(),
         "te15-b2a",
     );
+    let pool = HistoryPool::new(PoolLimits::default());
     for provider in ["codex", "claude"] {
         let correct = run_scripted(
+            &pool,
             &temp.path(&format!("{case}-{provider}-green")),
             case,
             provider,
@@ -239,6 +245,7 @@ fn scripted(case: u8) {
         assert!(!correct.trace.calls.is_empty());
         task_scopes(&correct, case);
         let wrong = run_scripted(
+            &pool,
             &temp.path(&format!("{case}-{provider}-red")),
             case,
             provider,
@@ -644,8 +651,10 @@ fn te15_b2af1_alternative_outcomes() {
         &kinewright_media::test_support::workspace_target_dir(),
         "b2a",
     );
+    let pool = HistoryPool::new(PoolLimits::default());
     for case in [1, 5, 6] {
         let m = kinewright_agent::te1_eval::run_scripted(
+            &pool,
             &temp.path(&format!("case-{case}")),
             case,
             "codex",

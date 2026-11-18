@@ -1,12 +1,13 @@
 //! Durable command results. Lookup precedes fresh authority and never executes a command.
 #![allow(clippy::missing_errors_doc)]
+use crate::operation_actor::Core;
 use crate::{
     bundle::{BundleError, ProjectBundle},
     bundle_records::{BatchId, BranchId, HeadId, ObjectRef, ProjectId, RecordKind, SessionId},
     storage_budget::StorageLimits,
     store::BundleRecord,
 };
-use kinewright_core::{Core, HistorySnapshot, JournalCommand, TimelineRevision};
+use kinewright_core::{JournalCommand, TimelineRevision};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -17,7 +18,7 @@ impl IssuerId {
     pub(crate) fn fresh() -> Result<Self, BundleError> {
         Ok(Self(SessionId::fresh()?.as_str().to_owned()))
     }
-    fn validate(&self) -> Result<(), BundleError> {
+    pub(crate) fn validate(&self) -> Result<(), BundleError> {
         if !hex(&self.0, 32) {
             return Err(BundleError::Corrupt("invalid issuer identity".into()));
         }
@@ -40,23 +41,6 @@ fn hex(value: &str, length: usize) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// A transition is admitted only at its original acknowledged checkpoint and cut.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum HistoryRequest {
-    Floor {
-        discard_batches: usize,
-        preceding_checkpoint_generation: u64,
-        preceding_floor_generation: u64,
-        command_cut: CommandId,
-    },
-    RecoveryClose {
-        preceding_checkpoint_generation: u64,
-        reconciled_cut: Option<CommandId>,
-        suffix_digest: String,
-    },
-}
-
 /// An absent manual command reauthorized only inside the shared recovery barrier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,8 +55,8 @@ pub struct OriginalCommand {
 pub struct CommandEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub switch: Option<Box<crate::bundle_switch::SwitchRequest>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub manual: Option<crate::manual_history::ManualHistoryIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::operation_actor::CommandContext>,
     pub version: u32,
     pub action: String,
     pub id: CommandId,
@@ -86,8 +70,6 @@ pub struct CommandEnvelope {
     pub comment_text: Option<ObjectRef>,
     pub comment_strokes: Option<ObjectRef>,
     pub evidence: Vec<ObjectRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transition: Option<HistoryRequest>,
 }
 impl CommandEnvelope {
     pub fn encoded_bytes(&self) -> Result<u64, BundleError> {
@@ -100,11 +82,6 @@ impl CommandEnvelope {
                 "command envelope version/identity".into(),
             ));
         }
-        if self.action != "manual" && self.manual.is_some() {
-            return Err(BundleError::Unsupported(
-                "manual identity on ordinary command".into(),
-            ));
-        }
         if self.action != "switch" && self.switch.is_some() {
             return Err(BundleError::Unsupported(
                 "switch payload on ordinary command".into(),
@@ -113,9 +90,7 @@ impl CommandEnvelope {
         match self.action.as_str() {
             "metadata"
                 if self.switch.is_none()
-                    && self.manual.is_none()
                     && self.lease.is_none()
-                    && self.transition.is_none()
                     && self.command.is_none()
                     && self.comment_text.is_none()
                     && self.comment_strokes.is_none()
@@ -127,7 +102,6 @@ impl CommandEnvelope {
             "switch"
                 if self.switch.is_some()
                     && self.lease.is_some()
-                    && self.transition.is_none()
                     && self.command.is_none()
                     && self.comment_text.is_none()
                     && self.comment_strokes.is_none()
@@ -147,36 +121,14 @@ impl CommandEnvelope {
                 }
             }
             "edit"
-                if self.transition.is_none()
-                    && self.command.is_some()
-                    && self.comment_text.is_none()
-                    && self.comment_strokes.is_none()
-                    && self.evidence.is_empty() => {}
-            "manual"
-                if self.manual.is_some()
-                    && self.lease.is_some()
-                    && self.transition.is_none()
-                    && self.command.is_some()
+                if self.command.is_some()
                     && self.comment_text.is_none()
                     && self.comment_strokes.is_none()
                     && self.evidence.is_empty() => {}
             "comment"
-                if self.transition.is_none()
-                    && self.command.is_none()
+                if self.command.is_none()
                     && self.comment_text.is_some()
                     && self.comment_strokes.is_some() => {}
-            "floor"
-                if matches!(self.transition, Some(HistoryRequest::Floor { .. }))
-                    && self.command.is_none()
-                    && self.comment_text.is_none()
-                    && self.comment_strokes.is_none()
-                    && self.evidence.is_empty() => {}
-            "recovery_close"
-                if matches!(self.transition, Some(HistoryRequest::RecoveryClose { .. }))
-                    && self.command.is_none()
-                    && self.comment_text.is_none()
-                    && self.comment_strokes.is_none()
-                    && self.evidence.is_empty() => {}
             _ => {
                 return Err(BundleError::Unsupported(
                     "command action/payload, including branch switch".into(),
@@ -361,13 +313,10 @@ impl ReceiptLedger {
                             .any(|r| r.record_kind != RecordKind::BranchCheckpoint)
                         || [&result.old.history, &result.new.history]
                             .iter()
-                            .any(|r| r.record_kind != RecordKind::History)
+                            .any(|r| r.record_kind != RecordKind::OperationHistory)
                         || [&result.old.inputs, &result.new.inputs]
                             .iter()
                             .any(|r| r.record_kind != RecordKind::InputManifest)
-                        || [&result.old.lineage, &result.new.lineage]
-                            .iter()
-                            .any(|r| r.record_kind != RecordKind::Lineage)
                     {
                         return Err(BundleError::Corrupt("switch result identity/kind".into()));
                     }
@@ -463,7 +412,7 @@ impl ProjectBundle {
         core: &Core,
         inputs: &ObjectRef,
         first_sequence: u64,
-        cut: Option<&kinewright_core::AcceptedCut>,
+        cut: Option<&crate::operation_actor::AcceptedCut>,
     ) -> Result<IssuerId, BundleError> {
         if self.unsettled || self.pending_command.is_some() {
             return Err(BundleError::Unsettled);
@@ -483,6 +432,12 @@ impl ProjectBundle {
                 .store
                 .run_error(BundleError::Capacity("issuer entries")));
         }
+        // A newly named document has no saved cut yet. Establish that baseline
+        // before issuing authority; later issuance stays metadata-only and never
+        // publishes an existing project's unrelated unsaved suffix.
+        if self.root.is_none() && self.branches.is_empty() {
+            self.save_current(core, inputs)?;
+        }
         let id = IssuerId::fresh()?;
         self.issuers.insert(
             id.clone(),
@@ -493,11 +448,12 @@ impl ProjectBundle {
                 metadata_subject: None,
             },
         );
-        let result = if let Some(cut) = cut {
-            self.save_frozen(core, inputs, cut)
-        } else {
-            self.save_current(core, inputs)
-        };
+        if let Some(cut) = cut
+            && core.change_id().map_err(crate::bundle::operation_error)? != cut.change()
+        {
+            return Err(BundleError::HistoryChanged);
+        }
+        let result = crate::bundle_commit::BundleCommit::publish_maintenance(self);
         if let Err(error) = result {
             if !self.unsettled {
                 self.issuers.remove(&id);
@@ -512,6 +468,20 @@ impl ProjectBundle {
         for issuer in self.issuers.values_mut() {
             issuer.retired = true;
         }
+    }
+    /// A saved receipt can be returned after restart immediately. In this
+    /// process its matching private shadow must finish before the first ack.
+    pub(crate) fn settle_matching_receipt(
+        &mut self,
+        envelope: &CommandEnvelope,
+    ) -> Result<(), BundleError> {
+        if self.pending_command.as_deref() == Some(envelope)
+            && let Some(pending) = &self.pending_publication
+        {
+            let core = pending.core.clone();
+            self.reconcile_command(&core)?;
+        }
+        Ok(())
     }
     pub fn receipt_lookup(&self, envelope: &CommandEnvelope) -> Result<ReceiptLookup, BundleError> {
         let _reading = crate::run_admission::reading(&self.store);
@@ -539,9 +509,7 @@ impl ProjectBundle {
         let mut recovery = self.recovery.predecessors.clone();
         recovery.extend(records.iter().filter_map(|r| r.acknowledged_root.clone()));
         for reference in &recovery {
-            let _encoded = self
-                .store
-                .reserve_read(0, reference.byte_length, 0, false)?;
+            let _encoded = self.store.reserve_read(0, reference.byte_length, false)?;
             let mut file = self.store.open_verified(reference)?;
             let bytes = crate::bundle_recovery::bounded_bytes(&mut file, reference.byte_length)?;
             let prior = crate::bundle::BundleWriteAdmission::from_bytes_using(
@@ -593,8 +561,8 @@ impl ProjectBundle {
         &mut self,
         id: &IssuerId,
         through: u64,
-        core: &Core,
-        inputs: &ObjectRef,
+        _core: &Core,
+        _inputs: &ObjectRef,
     ) -> Result<(), BundleError> {
         if self.unsettled || self.pending_command.is_some() {
             return Err(BundleError::Unsettled);
@@ -615,7 +583,7 @@ impl ProjectBundle {
                 BundleError::Corrupt("issuer disappeared during owner operation".into())
             })?
             .reconciled_high_water = through;
-        if let Err(error) = self.save_current(core, inputs) {
+        if let Err(error) = crate::bundle_commit::BundleCommit::publish_maintenance(self) {
             if !self.unsettled {
                 self.issuers.insert(id.clone(), old);
             }
@@ -628,8 +596,8 @@ impl ProjectBundle {
         &mut self,
         id: &IssuerId,
         forget: bool,
-        core: &Core,
-        inputs: &ObjectRef,
+        _core: &Core,
+        _inputs: &ObjectRef,
     ) -> Result<(), BundleError> {
         if self.unsettled || self.pending_command.is_some() {
             return Err(BundleError::Unsettled);
@@ -670,7 +638,7 @@ impl ProjectBundle {
         {
             self.issuers.remove(id);
         }
-        if let Err(error) = self.save_current(core, inputs) {
+        if let Err(error) = crate::bundle_commit::BundleCommit::publish_maintenance(self) {
             if !self.unsettled {
                 self.receipts = prior;
                 self.issuers.insert(id.clone(), old);
@@ -691,18 +659,25 @@ impl ProjectBundle {
     pub fn install_reconciled_command(
         &mut self,
         core: &Core,
-        before: HistorySnapshot,
+        before: crate::operation_actor::AcceptedCut,
     ) -> Result<(), BundleError> {
-        let attachment = self.attach_core(core)?;
         self.reconcile_command(core)?;
-        let checkpoint = self
-            .branches
-            .get(&self.manual_branch_id)
-            .ok_or_else(|| BundleError::Corrupt("missing acknowledged checkpoint".into()))?;
-        let history = self.store.resolve_history(&checkpoint.history_ref)?;
-        attachment
-            .install_checkpoint(before, (*history).clone())
-            .map_err(crate::bundle::history_error)
+        let owner = self.attach_core(core)?;
+        let current = owner.capture().map_err(crate::bundle::operation_error)?;
+        let checkpoint = self.checkpoint(self.manual_branch_id())?;
+        if current.identity() == checkpoint.identity {
+            return Ok(());
+        }
+        if current != before {
+            return Err(BundleError::HistoryChanged);
+        }
+        let incoming = checkpoint.open(&self.store, self.history_pool())?;
+        let epoch = incoming.position().epoch;
+        owner
+            .install_snapshot(&before, incoming, Some(epoch))
+            .map_err(crate::bundle::operation_error)?;
+        let cut = owner.freeze().map_err(crate::bundle::operation_error)?;
+        owner.resume(&cut).map_err(crate::bundle::operation_error)
     }
 }
 

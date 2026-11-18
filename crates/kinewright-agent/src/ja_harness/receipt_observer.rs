@@ -75,7 +75,7 @@ impl Adapter {
                 .map_err(|e| e.to_string())?;
             let request = CommandEnvelope {
                 switch: None,
-                manual: None,
+                context: None,
                 version: 1,
                 action: "edit".into(),
                 id: CommandId {
@@ -100,7 +100,6 @@ impl Adapter {
                 comment_text: None,
                 comment_strokes: None,
                 evidence: vec![],
-                transition: None,
             };
             write_request(&request_path, &request)?;
             request
@@ -150,7 +149,7 @@ impl Adapter {
                 .map_err(|e| e.to_string())?;
             let request = CommandEnvelope {
                 switch: None,
-                manual: None,
+                context: None,
                 version: 1,
                 action: "comment".into(),
                 id: CommandId {
@@ -167,7 +166,6 @@ impl Adapter {
                 comment_text: Some(text_ref.clone()),
                 comment_strokes: Some(strokes_ref.clone()),
                 evidence: vec![],
-                transition: None,
             };
             write_request(&request_path, &request)?;
             request

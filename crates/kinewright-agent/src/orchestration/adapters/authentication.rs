@@ -35,6 +35,7 @@ pub struct ProviderAuthContract {
 }
 
 /// The protocol fixtures' store: locks, sibling temp files and atomic replace.
+#[cfg(any(test, feature = "test-util"))]
 pub(crate) const REFRESH: CredentialRefreshContract = CredentialRefreshContract {
     operations: &[
         CredentialStoreOperation::ReadCredentials,

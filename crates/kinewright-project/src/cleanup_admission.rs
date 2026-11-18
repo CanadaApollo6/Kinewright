@@ -70,8 +70,7 @@ impl ProjectStore {
             || matches!(
                 kind,
                 RecordKind::Document
-                    | RecordKind::History
-                    | RecordKind::Lineage
+                    | RecordKind::OperationHistory
                     | RecordKind::BranchCheckpoint
                     | RecordKind::BranchIndex
                     | RecordKind::SpecialistBase

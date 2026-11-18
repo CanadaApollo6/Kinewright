@@ -41,9 +41,9 @@ use std::{collections::BTreeMap, fmt::Write as _, fs, path::Path, sync::Arc};
 
 use half::f16;
 use kinewright_core::{
-    AutomationCurve, ClipId, ColorNodeInactiveReason, ColorNodeKind, ColorStage, Command, Core,
-    Document, Effect, EffectId, Event, JournalCommand, Keyframe, KeyframeInterpolation,
-    LUT_ASSET_ID_MAX, LUT_NODE_LIMIT_PER_LAYER, LutAsset, LutAssetId, LutAssetKind, LutAssetSource,
+    AutomationCurve, ClipId, ColorNodeInactiveReason, ColorNodeKind, ColorStage, Command, Document,
+    Effect, EffectId, JournalCommand, Keyframe, KeyframeInterpolation, LUT_ASSET_ID_MAX,
+    LUT_NODE_LIMIT_PER_LAYER, LutAsset, LutAssetId, LutAssetKind, LutAssetSource,
     LutAvailabilityKind, LutNodeParams, MANAGED_COLOR_NODE_NAMES, OpError, Operation, ParamValue,
     QaSeverity, TimeCode, active_color_nodes, color_node_inactive_reason, effect_descriptor,
     is_matte_parameter, qa_document, validate_lut_asset,
@@ -3767,24 +3767,6 @@ fn cc4_recovery_rejections_are_typed_and_leave_the_store_untouched() {
     );
 }
 
-fn document_from(event: Event, label: &str) -> Arc<Document> {
-    match event {
-        Event::DocumentChanged { doc, .. } => doc,
-        other => panic!("{label} was not an accepted document state: {other:?}"),
-    }
-}
-
-/// The actor's current document, read through the public query boundary.
-fn query_document(core: &Core) -> Arc<Document> {
-    match core
-        .request(Command::Query(kinewright_core::Query::Document))
-        .expect("the actor answers a document query")
-    {
-        Event::QueryResult(kinewright_core::QueryResult::Document(document)) => document,
-        other => panic!("expected a document query result, got {other:?}"),
-    }
-}
-
 /// The first CC4 §10.3.13 batch: register an asset and place a technical LUT
 /// at an exact index. The legacy conversion and the automation follow as their
 /// own batches in the test body, so undo and redo have several entries to walk.
@@ -3825,11 +3807,16 @@ fn cc4_serialization_and_history_preserve_assets_and_nodes() {
     let reopened: Document = serde_json::from_value(serialized).expect("it reopens");
     assert_eq!(reopened, pre_cc4);
 
-    let core = Core::spawn(cc4_document()).expect("cc4 history core");
+    let mut core = kinewright_core::undo::History::new(
+        cc4_document(),
+        kinewright_core::undo::RetentionPolicy::NeverFold,
+        kinewright_core::undo::RoleBounds::TASK,
+    )
+    .expect("cc4 history core");
     let base = cc4_document();
-    let added = document_from(
-        core.request(Command::DoBatch(history_operations(&asset)))
-            .expect("the CC4 batch must be accepted"),
+    let added = document_after(
+        &mut core,
+        Command::DoBatch(history_operations(&asset)),
         "AddLutAsset + InsertEffect",
     );
     assert_eq!(added.lut_assets, vec![asset.clone()]);
@@ -3849,17 +3836,18 @@ fn cc4_serialization_and_history_preserve_assets_and_nodes() {
         "look_lut",
         &[("preset_token", 1), ("intensity_percent", 65)],
     );
-    let with_legacy = document_from(
-        core.request(Command::Do(Operation::AddEffect {
+    let with_legacy = document_after(
+        &mut core,
+        Command::Do(Operation::AddEffect {
             clip: ClipId(1),
             effect: legacy.clone(),
-        }))
-        .expect("a legacy look is still storable"),
+        }),
         "AddEffect look_lut",
     );
     assert_eq!(clip_effects(&with_legacy)[1].name, "look_lut");
-    let converted = document_from(
-        core.request(Command::DoBatch(vec![
+    let converted = document_after(
+        &mut core,
+        Command::DoBatch(vec![
             Operation::AddLutAsset {
                 asset: builtin.clone(),
             },
@@ -3869,8 +3857,7 @@ fn cc4_serialization_and_history_preserve_assets_and_nodes() {
                 lut_asset: LutAssetId(2),
                 mix_basis_points: 6_500,
             },
-        ]))
-        .expect("[AddLutAsset, ConvertLegacyLook] must be accepted"),
+        ]),
         "ConvertLegacyLook",
     );
     assert_eq!(
@@ -3889,8 +3876,9 @@ fn cc4_serialization_and_history_preserve_assets_and_nodes() {
     assert_eq!(converted.lut_assets[1], builtin);
 
     // Parameter edits and automation.
-    let automated = document_from(
-        core.request(Command::DoBatch(vec![
+    let automated = document_after(
+        &mut core,
+        Command::DoBatch(vec![
             Operation::SetEffectParam {
                 clip: ClipId(1),
                 effect: EffectId(2),
@@ -3934,8 +3922,7 @@ fn cc4_serialization_and_history_preserve_assets_and_nodes() {
                     }],
                 },
             },
-        ]))
-        .expect("parameter and keyframe edits must be accepted"),
+        ]),
         "SetEffectParam + SetEffectKeyframes",
     );
     assert_eq!(
@@ -3970,7 +3957,12 @@ fn cc4_serialization_and_history_preserve_assets_and_nodes() {
         "imported provenance carries an informational source path"
     );
 
-    let replay_core = Core::spawn(cc4_document()).expect("cc4 replay core");
+    let mut replay_core = kinewright_core::undo::History::new(
+        cc4_document(),
+        kinewright_core::undo::RetentionPolicy::NeverFold,
+        kinewright_core::undo::RoleBounds::TASK,
+    )
+    .expect("cc4 replay core");
     let mut replayed = Arc::new(base.clone());
     for (label, journal) in [
         ("batch", JournalCommand::DoBatch(history_operations(&asset))),
@@ -3999,24 +3991,19 @@ fn cc4_serialization_and_history_preserve_assets_and_nodes() {
         let wire = serde_json::to_value(&journal).expect("a journal command serializes");
         let decoded: JournalCommand =
             serde_json::from_value(wire).expect("a journal command deserializes");
-        replayed = document_from(
-            replay_core
-                .request(decoded.into())
-                .unwrap_or_else(|error| panic!("replay of {label} failed: {error:?}")),
-            label,
-        );
+        replayed = document_after(&mut replay_core, decoded.into(), label);
     }
     assert_eq!(replayed.lut_assets, converted.lut_assets);
     assert_eq!(clip_effects(&replayed), clip_effects(&converted));
 
     let before_undo = serde_json::to_vec(automated.as_ref()).expect("serializes");
-    let undone = document_from(core.request(Command::Undo).expect("undo"), "Undo");
+    let undone = document_after(&mut core, Command::Undo, "Undo");
     assert_eq!(
         clip_effects(&undone)[1].keyframes.get("mix_basis_points"),
         None,
         "undo must remove the automation the last batch added"
     );
-    let redone = document_from(core.request(Command::Redo).expect("redo"), "Redo");
+    let redone = document_after(&mut core, Command::Redo, "Redo");
     assert_eq!(
         serde_json::to_vec(redone.as_ref()).expect("serializes"),
         before_undo,
@@ -4024,38 +4011,39 @@ fn cc4_serialization_and_history_preserve_assets_and_nodes() {
     );
 
     for _ in 0..4 {
-        let _ = core.request(Command::Undo).expect("undo");
+        let _ = core.execute(Command::Undo).expect("undo");
     }
-    let empty = query_document(&core);
+    let empty = Arc::clone(core.document());
     assert!(empty.lut_assets.is_empty(), "undo removes the asset record");
     assert!(clip_effects(&empty).is_empty());
     assert_eq!(empty.as_ref(), &base);
 
     // Redo re-registers the same hash without touching the filesystem.
     for _ in 0..4 {
-        let _ = core.request(Command::Redo).expect("redo");
+        let _ = core.execute(Command::Redo).expect("redo");
     }
-    let restored = query_document(&core);
+    let restored = Arc::clone(core.document());
     assert_eq!(
         serde_json::to_vec(restored.as_ref()).expect("serializes"),
         before_undo
     );
 
-    let cleared = document_from(
-        core.request(Command::Do(Operation::ClearEffectKeyframes {
+    let cleared = document_after(
+        &mut core,
+        Command::Do(Operation::ClearEffectKeyframes {
             clip: ClipId(1),
             effect: EffectId(2),
             name: "mix_basis_points".to_owned(),
-        }))
-        .expect("clearing the mix automation is legal"),
+        }),
         "ClearEffectKeyframes",
     );
     assert_eq!(
         clip_effects(&cleared)[1].keyframes.get("mix_basis_points"),
         None
     );
-    let freed = document_from(
-        core.request(Command::DoBatch(vec![
+    let freed = document_after(
+        &mut core,
+        Command::DoBatch(vec![
             Operation::RemoveEffect {
                 clip: ClipId(1),
                 effect: EffectId(2),
@@ -4063,8 +4051,7 @@ fn cc4_serialization_and_history_preserve_assets_and_nodes() {
             Operation::RemoveLutAsset {
                 lut_asset: LutAssetId(2),
             },
-        ]))
-        .expect("removing the node then the asset is legal"),
+        ]),
         "RemoveLutAsset",
     );
     assert_eq!(freed.lut_assets, vec![asset.clone()]);
@@ -4921,4 +4908,15 @@ fn cc4_input_encoding_tokens_are_hand_derived_and_dispatched() {
         json_hash(&metrics),
         metrics,
     );
+}
+
+fn document_after(
+    history: &mut kinewright_core::undo::History,
+    command: Command,
+    label: &str,
+) -> Arc<Document> {
+    history
+        .execute(command)
+        .unwrap_or_else(|error| panic!("{label} was refused: {error:?}"));
+    Arc::clone(history.document())
 }

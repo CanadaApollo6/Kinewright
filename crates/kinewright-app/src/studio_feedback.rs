@@ -9,7 +9,7 @@ use kinewright_agent::writer_host::{FeedbackMapping, MapTarget};
 use kinewright_agent::writer_host::{
     HostClient, HostError, RecoveryReadiness, RunViewPage, ScopedOrchestrationRequest,
 };
-use kinewright_core::{ClipId, Document, FrameTexture, HistorySnapshot, TimeCode, TrackKind};
+use kinewright_core::{ClipId, Document, FrameTexture, TimeCode, TrackKind};
 use kinewright_project::orchestration_records::{OpaqueRevision, RunActionKind, RunCleanup};
 use kinewright_project::{
     bundle::{BundleError, ProjectBundle},
@@ -121,15 +121,26 @@ pub(crate) struct AcceptedCut {
     pub(crate) batches: u64,
 }
 impl AcceptedCut {
-    pub(crate) fn of(branch: &BranchId, history: &HistorySnapshot) -> Result<Self, String> {
-        let document = serde_json::to_vec(&*history.document).map_err(text)?;
-        let whole = serde_json::to_vec(history).map_err(text)?;
+    pub(crate) fn of(
+        branch: &BranchId,
+        history: &kinewright_project::operation_history::OwnerSnapshot,
+    ) -> Result<Self, String> {
+        let document = serde_json::to_vec(&*history.history().document).map_err(text)?;
+        let identity = history.identity().map_err(text)?;
         Ok(Self {
             branch: branch.clone(),
-            history_sha256: kinewright_media::sha256_bytes(&whole),
+            history_sha256: identity.to_string(),
             document_hash: kinewright_media::sha256_bytes(&document),
-            batches: history.floor_offset + history.batches.len() as u64,
+            batches: history.history().position,
         })
+    }
+    fn checkpoint(checkpoint: &BranchCheckpoint) -> Self {
+        Self {
+            branch: checkpoint.branch_id.clone(),
+            history_sha256: checkpoint.identity.to_string(),
+            document_hash: checkpoint.document_ref.sha256.clone(),
+            batches: checkpoint.position.position,
+        }
     }
     /// Only the same branch and history acknowledge a cut.
     pub(crate) fn acknowledged_by(&self, published: &Self) -> bool {
@@ -581,13 +592,7 @@ fn published_cuts(
             let checkpoint = store
                 .read_record::<BranchCheckpoint>(&descriptor.checkpoint_ref)
                 .map_err(text)?;
-            let history = store
-                .resolve_history(&checkpoint.history_ref)
-                .map_err(text)?;
-            Ok((
-                descriptor.key,
-                AcceptedCut::of(&checkpoint.branch_id, &history)?,
-            ))
+            Ok((descriptor.key, AcceptedCut::checkpoint(&checkpoint)))
         })
         .collect()
 }
@@ -898,10 +903,7 @@ impl FeedbackPort for HostFeedback<'_> {
                 let checkpoint = reader
                     .read_record::<BranchCheckpoint>(&reader.descriptor().checkpoint_ref)
                     .map_err(text)?;
-                let history = reader
-                    .resolve_history(&checkpoint.history_ref)
-                    .map_err(text)?;
-                Ok((key, AcceptedCut::of(&checkpoint.branch_id, &history)?))
+                Ok((key, AcceptedCut::checkpoint(&checkpoint)))
             })
             .collect()
     }
@@ -2829,10 +2831,11 @@ impl KinewrightApp {
                 history = session.core.export_history().map_err(text)?;
                 // Every change before the export has its event queued by now. An
                 // unprocessed one means the picture may not show this history yet.
-                (session.core_events.is_empty() && *history.document == *inputs.document())
-                    .then(|| AcceptedCut::of(&branch, &history))
-                    .transpose()?
-                    .map(|cut| (cut, inputs.document()))
+                (session.core_events.is_empty()
+                    && *history.history().document == *inputs.document())
+                .then(|| AcceptedCut::of(&branch, &history))
+                .transpose()?
+                .map(|cut| (cut, inputs.document()))
             }
             _ => None,
         };
@@ -2876,7 +2879,7 @@ impl KinewrightApp {
                 .and_then(|attachment| attachment.studio_lineage(key).ok())
         {
             for layer in layers.iter_mut() {
-                layer.occurrence = lineage.current.get(&layer.clip).cloned();
+                layer.occurrence = lineage.lineage().occurrences.get(&layer.clip).cloned();
             }
         }
         let comment = draft.comment.clone();

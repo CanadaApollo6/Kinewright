@@ -15,7 +15,12 @@ impl LocalEditingSession {
     /// Unsupported/raw-invalid graphs and unsupported durable storage refuse without mutation.
     pub fn open(path: &Path) -> Result<Self, BundleError> {
         Ok(Self {
-            owner: Ja1EditingSession::open(path)?,
+            owner: Ja1EditingSession::open(
+                path,
+                &kinewright_project::operation_history::HistoryPool::new(
+                    kinewright_project::operation_history::PoolLimits::default(),
+                ),
+            )?,
         })
     }
     /// The local caller uses the same recovery/rescue lifecycle as the App.

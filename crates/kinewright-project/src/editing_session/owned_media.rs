@@ -2,11 +2,11 @@ use super::{BundleError, Ja1EditingSession};
 use crate::{
     bundle::BundleSaveReport,
     bundle_records::ObjectRef,
-    manual_history::ManualLease,
+    operation_protocol::Lease as ManualLease,
     owned_inputs::{OwnedInputManifest, PreparedOwnedMedia},
     store::ProjectStore,
 };
-use kinewright_core::{AssetId, Command, Core, Event, Operation};
+use kinewright_core::{AssetId, Command, Event, Operation};
 use std::path::Path;
 
 impl Ja1EditingSession {
@@ -31,12 +31,8 @@ impl Ja1EditingSession {
         {
             return Err(BundleError::Unsettled);
         }
-        let history = self
-            .core
-            .export_history()
-            .map_err(crate::bundle::history_error)?;
-        let current = history
-            .document
+        let document = self.current_document()?;
+        let current = document
             .media_pool
             .iter()
             .find(|current| current.id == asset.id)
@@ -88,38 +84,13 @@ impl Ja1EditingSession {
                 entry: retained_entry,
             })?;
         if self.destination.is_none() {
-            let before = self
-                .core
-                .export_history()
-                .map_err(crate::bundle::history_error)?;
-            let candidate = Core::spawn(std::sync::Arc::clone(&before.baseline))
-                .map_err(|error| BundleError::Corrupt(error.to_string()))?;
-            crate::ProjectAttachment::new(&candidate)
-                .map_err(crate::bundle::history_error)?
-                .restore_history(before.clone())
-                .map_err(crate::bundle::history_error)?;
-            if !matches!(
-                candidate
-                    .request(Command::Do(Operation::SetAssetColorDescription {
-                        asset: asset.id,
-                        color_description: asset.color_description.clone(),
-                    }))
-                    .map_err(|error| BundleError::Corrupt(error.to_string()))?,
-                Event::DocumentChanged { .. }
-            ) {
-                return Err(BundleError::Unsupported(
-                    "Core rejected colour interpretation".into(),
-                ));
-            }
-            let after = candidate
-                .export_history()
-                .map_err(crate::bundle::history_error)?;
-            crate::manual_history::OrdinaryHistoryLimits::from_limits(self.store()?.limits())?
-                .check(&after)?;
-            crate::bundle_commit::validate_inputs(&after, &prepared.manifest)?;
-            self.attachment
-                .install_checkpoint(before, after)
-                .map_err(crate::bundle::history_error)?;
+            self.apply_local_input_operation(
+                Operation::SetAssetColorDescription {
+                    asset: asset.id,
+                    color_description: asset.color_description.clone(),
+                },
+                &prepared.inputs_ref,
+            )?;
             self.inputs.clone_from(&prepared.inputs_ref);
             self.input_leases.push(retained);
             return Ok(());
@@ -128,8 +99,9 @@ impl Ja1EditingSession {
         let revision = self
             .attachment
             .capture()
-            .map_err(crate::bundle::history_error)?
-            .revision();
+            .map_err(crate::bundle::operation_error)?
+            .change()
+            .revision;
         let bundle = self
             .destination
             .as_mut()
@@ -138,8 +110,7 @@ impl Ja1EditingSession {
         let issuer = bundle.issue_issuer(&core, &self.inputs, 1)?;
         let envelope = crate::receipts::CommandEnvelope {
             switch: None,
-            manual: None,
-            transition: None,
+            context: None,
             version: 1,
             action: "edit".into(),
             id: crate::receipts::CommandId {
@@ -199,12 +170,8 @@ impl Ja1EditingSession {
         {
             return Err(BundleError::Unsettled);
         }
-        let before = self
-            .core
-            .export_history()
-            .map_err(crate::bundle::history_error)?;
-        if before
-            .document
+        if self
+            .current_document()?
             .media_pool
             .iter()
             .any(|asset| asset.id == asset_id)
@@ -275,12 +242,8 @@ impl Ja1EditingSession {
         if self.destination.is_some() {
             self.require_local_writer()?;
         }
-        let before = self
-            .core
-            .export_history()
-            .map_err(crate::bundle::history_error)?;
-        let next = before
-            .document
+        let next = self
+            .current_document()?
             .media_pool
             .iter()
             .map(|asset| asset.id.0)
@@ -288,33 +251,16 @@ impl Ja1EditingSession {
             .unwrap_or(0)
             .checked_add(1)
             .ok_or(BundleError::Capacity("asset ID overflow"))?;
-        let prepared = self.prepare_owned_media_with_color(path, AssetId(next), color)?;
-        let candidate = Core::spawn(std::sync::Arc::clone(&before.baseline))
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let attachment =
-            crate::ProjectAttachment::new(&candidate).map_err(crate::bundle::history_error)?;
-        attachment
-            .restore_history(before.clone())
-            .map_err(crate::bundle::history_error)?;
-        if !matches!(
-            candidate
-                .request(Command::Do(Operation::AddAsset {
-                    asset: prepared.asset.clone()
-                }))
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-            Event::DocumentChanged { .. }
-        ) {
-            return Err(BundleError::Unsupported(
-                "Core rejected imported asset".into(),
-            ));
+        // A foreground source replacement consumes a retained attempt. Refuse
+        // that fixed admission before accepting any document operation.
+        if self.host_attached && self.destination.is_none() {
+            self.source
+                .as_ref()
+                .ok_or(BundleError::HistoryBarrierInvariant)?
+                .check_borrowed_source_room()?;
         }
-        let after = candidate
-            .export_history()
-            .map_err(crate::bundle::history_error)?;
-        crate::manual_history::OrdinaryHistoryLimits::from_limits(self.store()?.limits())?
-            .check(&after)?;
-        crate::bundle_commit::validate_inputs(&after, &prepared.manifest)?;
-        let retained_entry = prepared
+        let prepared = self.prepare_owned_media_with_color(path, AssetId(next), color)?;
+        let entry = prepared
             .manifest
             .entries
             .iter()
@@ -325,47 +271,18 @@ impl Ja1EditingSession {
             .store()?
             .lease_input(&crate::owned_inputs::OwnedInputRef {
                 manifest_ref: prepared.inputs_ref.clone(),
-                entry: retained_entry,
+                entry,
             })?;
-        let mut transfer = if self.host_attached && self.destination.is_none() {
-            let source = self
-                .source
-                .as_mut()
-                .ok_or(BundleError::HistoryBarrierInvariant)?;
-            let descriptor = source.retain_borrowed_source(
-                std::slice::from_ref(&prepared.inputs_ref),
-                after
-                    .encoded_bytes()
-                    .map_err(crate::bundle::history_error)?,
-            )?;
-            let admitted: Result<super::PreparedHostAttachment, BundleError> = (|| {
-                source.ensure_borrowed_snapshot(descriptor.admission_id(), &after)?;
-                let service = source.borrowed_source_service(&descriptor)?;
-                Ok(super::PreparedHostAttachment {
-                    named_path: None,
-                    expected_root_sha256: None,
-                    project_id: None,
-                    history: after.clone(),
-                    inputs: prepared.inputs_ref.clone(),
-                    source: Some(descriptor.clone()),
-                    source_service: Some(service),
-                })
-            })();
-            if admitted.is_err() {
-                source.release_unpublished_borrowed_source(descriptor.admission_id());
-            }
-            Some(admitted?)
-        } else {
-            None
+        let operation = Operation::AddAsset {
+            asset: prepared.asset.clone(),
         };
-        let mut retained = Some(retained);
         let report = if let Some(destination) = &mut self.destination {
+            let core = self.core.clone();
             let bundle = destination.bundle_mut()?;
-            let issuer = bundle.issue_issuer(&self.core, &self.inputs, 1)?;
+            let issuer = bundle.issue_issuer(&core, &self.inputs, 1)?;
             let envelope = crate::receipts::CommandEnvelope {
                 switch: None,
-                manual: None,
-                transition: None,
+                context: None,
                 version: 1,
                 action: "edit".into(),
                 id: crate::receipts::CommandId {
@@ -377,14 +294,11 @@ impl Ja1EditingSession {
                 owner_epoch: bundle.store().owner_epoch(),
                 lease: None,
                 expected_head: bundle.manual_head().cloned(),
-                expected_revision: self
-                    .attachment
-                    .capture()
-                    .map_err(crate::bundle::history_error)?
-                    .revision(),
-                command: Some(kinewright_core::JournalCommand::Do(Operation::AddAsset {
-                    asset: prepared.asset.clone(),
-                })),
+                expected_revision: core
+                    .change_id()
+                    .map_err(crate::bundle::operation_error)?
+                    .revision,
+                command: Some(kinewright_core::JournalCommand::Do(operation)),
                 comment_text: None,
                 comment_strokes: None,
                 evidence: vec![],
@@ -392,64 +306,115 @@ impl Ja1EditingSession {
             crate::bundle_commit::BundleCommit::command(
                 bundle,
                 &envelope,
-                &self.core,
+                &core,
                 &prepared.inputs_ref,
                 &[],
             )?;
-            self.inputs.clone_from(&prepared.inputs_ref);
-            self.input_leases.push(
-                retained
-                    .take()
-                    .ok_or(BundleError::HistoryBarrierInvariant)?,
-            );
-            let report = bundle.save(&self.core, &prepared.inputs_ref)?;
-            if let Some(association) = &mut self.association {
-                association.saved = Some(report.history_sha256.clone());
-            }
-            Some(report)
+            Some(bundle.current_save_report()?)
         } else {
-            let frozen = self
-                .core
-                .attachment_state()
-                .map_err(crate::bundle::history_error)?
-                == kinewright_core::AttachmentState::Frozen;
-            if frozen {
-                let cut = self
-                    .host_cut
-                    .as_ref()
-                    .filter(|cut| cut.history() == &before)
-                    .ok_or(BundleError::HistoryChanged)?;
-                self.attachment
-                    .resume(cut)
-                    .map_err(crate::bundle::history_error)?;
-            }
-            let installed = self
-                .attachment
-                .install_checkpoint(before, after)
-                .map_err(crate::bundle::history_error);
-            if frozen {
-                self.host_cut = Some(
-                    self.attachment
-                        .freeze()
-                        .map_err(crate::bundle::history_error)?,
-                );
-            }
-            if let Err(error) = installed {
-                if let Some(staged) = transfer.take()
-                    && let (Some(owner), Some(descriptor)) = (&mut self.source, staged.source)
-                {
-                    owner.release_unpublished_borrowed_source(descriptor.admission_id());
-                }
-                return Err(error);
-            }
+            self.apply_local_input_operation(operation, &prepared.inputs_ref)?;
             None
         };
-        self.inputs.clone_from(&prepared.inputs_ref);
-        self.pending_import_source = transfer;
-        if let Some(retained) = retained {
-            self.input_leases.push(retained);
+        // Pin the new immutable bytes and publish the local input identity before
+        // any fallible host transfer. A failed transfer leaves the accepted edit
+        // and its media available for the explicit refresh retry.
+        self.inputs = prepared.inputs_ref.clone();
+        self.input_leases.push(retained);
+        if let Some(report) = &report
+            && let Some(association) = &mut self.association
+        {
+            association.saved = Some(report.history_sha256.clone());
+            association.saved_position = Some(report.position);
+        }
+        if self.host_attached && self.destination.is_none() {
+            self.pending_import_source = Some(self.prepare_unsaved_transfer()?);
         }
         Ok((prepared.asset, report))
+    }
+    fn current_document(&self) -> Result<std::sync::Arc<kinewright_core::Document>, BundleError> {
+        match self
+            .core
+            .request(Command::Query(kinewright_core::Query::Document))
+            .map_err(crate::bundle::operation_refusal)?
+        {
+            Event::QueryResult(kinewright_core::QueryResult::Document(document)) => Ok(document),
+            _ => Err(BundleError::HistoryChanged),
+        }
+    }
+    fn apply_local_input_operation(
+        &mut self,
+        operation: Operation,
+        inputs: &ObjectRef,
+    ) -> Result<(), BundleError> {
+        let certificate = crate::operation_inputs::ManualInputs::read(self.store()?, inputs)?;
+        certificate.check(std::slice::from_ref(&operation))?;
+        let frozen = self
+            .core
+            .attachment_state()
+            .map_err(crate::bundle::operation_error)?
+            == kinewright_core::AttachmentState::Frozen;
+        if frozen {
+            let cut = self.host_cut.as_ref().ok_or(BundleError::HistoryChanged)?;
+            self.attachment
+                .resume(cut)
+                .map_err(crate::bundle::operation_error)?;
+        }
+        let context = crate::operation_actor::CommandContext {
+            creation: crate::operation_history::CreationOrigin {
+                branch: self
+                    .core
+                    .creation_branch()
+                    .map_err(crate::bundle::operation_error)?,
+                batch: crate::bundle_records::BatchId::fresh()?,
+            },
+            inputs: vec![inputs.clone()],
+            approval: None,
+            transition: None,
+        };
+        let result = self
+            .core
+            .request_with_context(Command::Do(operation), context)
+            .map_err(crate::bundle::operation_refusal);
+        if frozen {
+            self.host_cut = Some(
+                self.attachment
+                    .freeze()
+                    .map_err(crate::bundle::operation_error)?,
+            );
+        }
+        match result? {
+            Event::DocumentChanged { .. } => Ok(()),
+            _ => Err(BundleError::HistoryChanged),
+        }
+    }
+    fn prepare_unsaved_transfer(&mut self) -> Result<super::PreparedHostAttachment, BundleError> {
+        let history = self
+            .core
+            .portable_history()
+            .map_err(crate::bundle::operation_error)?;
+        let source = self
+            .source
+            .as_mut()
+            .ok_or(BundleError::HistoryBarrierInvariant)?;
+        let descriptor = source
+            .retain_borrowed_source(std::slice::from_ref(&self.inputs), history.encoded_bytes()?)?;
+        let admitted = (|| {
+            source.ensure_borrowed_snapshot(descriptor.admission_id(), &history)?;
+            let service = source.borrowed_source_service(&descriptor)?;
+            Ok(super::PreparedHostAttachment {
+                named_path: None,
+                expected_root_sha256: None,
+                project_id: None,
+                history,
+                inputs: self.inputs.clone(),
+                source: Some(descriptor.clone()),
+                source_service: Some(service),
+            })
+        })();
+        if admitted.is_err() {
+            source.release_unpublished_borrowed_source(descriptor.admission_id());
+        }
+        admitted
     }
 
     /// Replace the borrowed manifest only at an explicit GUI-owned foreground boundary.
@@ -463,15 +428,18 @@ impl Ja1EditingSession {
         {
             return Err(BundleError::HistoryChanged);
         }
+        if self.pending_import_source.is_none() {
+            self.pending_import_source = Some(self.prepare_unsaved_transfer()?);
+        }
         let staged = self
             .pending_import_source
             .as_ref()
             .ok_or(BundleError::HistoryChanged)?;
         let current = self
-            .core
-            .export_history()
-            .map_err(crate::bundle::history_error)?;
-        if staged.history != current || staged.inputs != self.inputs {
+            .attachment
+            .capture()
+            .map_err(crate::bundle::operation_error)?;
+        if staged.history.identity() != current.identity() || staged.inputs != self.inputs {
             return Err(BundleError::HistoryChanged);
         }
         self.host_source_admission = staged
@@ -498,7 +466,6 @@ fn prepare(
             .decoded_charge()
             .checked_add(8192)
             .ok_or(BundleError::Capacity("staged manifest charge"))?,
-        0,
         false,
     )?;
     let mut manifest: OwnedInputManifest = (*prior).clone();

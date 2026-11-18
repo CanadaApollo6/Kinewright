@@ -161,7 +161,7 @@ pub(super) struct HostRun {
     pub pending_provider_wait: Option<String>,
 }
 #[cfg(test)]
-pub type ConsentApplyHook = Arc<dyn Fn(&kinewright_core::Core) + Send + Sync>;
+pub type ConsentApplyHook = Arc<dyn Fn(&kinewright_project::operation_actor::Core) + Send + Sync>;
 #[derive(Default)]
 pub(super) struct Hooks {
     pub pending_edit_applications: Vec<super::task_mcp::consent::PendingEditApplication>,
@@ -1090,9 +1090,10 @@ impl HostCommandOwner {
                 .and_then(|run| run.tasks.get(&publish.task))
                 .ok_or_else(|| refused("result task missing"))?;
             let delta = runtime
-                .frozen_delta()
+                .frozen_delta(self.owner()?)?
                 .ok_or_else(|| refused("task is not frozen"))?
-                .to_vec();
+                .operations()
+                .to_owned();
             let result = &publish.result;
             // `usage_ref` was bound by the host above; only base, head and
             // delta identify the frozen task.
@@ -1250,6 +1251,34 @@ impl HostCommandOwner {
         run: &RunId,
         after_sequence: u64,
     ) -> Result<RunViewPage, HostError> {
+        self.observe_run_inner(index, run, after_sequence)
+            .map_err(|error| {
+                let Some(notice) = self
+                    .hooks
+                    .runs
+                    .get(run)
+                    .and_then(|runtime| runtime.release_notice.as_ref())
+                else {
+                    return error;
+                };
+                let mut refusal = error.refusal();
+                if refusal.code == "damaged_bundle" && !refusal.message.contains(notice) {
+                    // A shared immutable record can affect several task results.
+                    // Retained-work notices still reach the reader if building its
+                    // ordinary summary fails at the first damaged dependency.
+                    refusal.message.push(' ');
+                    refusal.message.push_str(notice);
+                    return refusal.into();
+                }
+                error
+            })
+    }
+    fn observe_run_inner(
+        &self,
+        index: usize,
+        run: &RunId,
+        after_sequence: u64,
+    ) -> Result<RunViewPage, HostError> {
         if let Some(scope) = &self.attachments[index].producer_scope {
             if &scope.run != run || scope.expired() {
                 return Err(refused("Producer observation scope or expiry"));
@@ -1320,12 +1349,18 @@ impl HostCommandOwner {
             };
         // C5 fix 10: the invariant witness. A stall the pump has not yet
         // surfaced is still reported, never shown as a running run.
-        let runtime_status = runtime_status
-            .or(self.owner()?.run_publication_status(run)?)
-            .or(self.run_recovery_message(&projection)?)
-            .or_else(|| {
+        let runtime_status = runtime_status.or(self.owner()?.run_publication_status(run)?);
+        // Startup readiness and retained work are independent facts. A generic
+        // recovery notice must not hide the saved task's branch and open route.
+        let runtime_status = match (runtime_status, self.run_recovery_message(&projection)?) {
+            (Some(status), Some(retained)) if status != retained => {
+                Some(format!("{status} {retained}"))
+            }
+            (Some(status), _) | (_, Some(status)) => Some(status),
+            (None, None) => {
                 machine::silently_stalled(&projection).then(|| machine::SILENT_STALL.into())
-            });
+            }
+        };
         let runtime_status = match (
             runtime_status,
             self.hooks

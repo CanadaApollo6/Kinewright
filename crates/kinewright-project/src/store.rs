@@ -103,13 +103,13 @@ struct MediaAdmission {
 
 struct StoreInner {
     admission_identity: Arc<()>,
-    replay_gate: Arc<crate::history_record::ReplayGate>,
     run_budget: std::sync::atomic::AtomicBool,
     run_limit: std::sync::atomic::AtomicBool,
     read_authority: Option<kinewright_media::owned_io::ReadAuthority>,
     read_graph_charge: Option<snapshot_reader::GraphCharge>,
     namespace: Mutex<ProjectNamespace>,
     verified_memo: Mutex<crate::bundle_recovery::VerifiedIdentityMemo>,
+    history_pool: Mutex<Option<crate::operation_history::HistoryPool>>,
     chunk_tables:
         Mutex<BTreeMap<ObjectRef, WeakCacheEntry<crate::owned_media::CertifiedChunkTable>>>,
     resources:
@@ -199,21 +199,6 @@ impl Seek for RetainedReadLease {
     }
 }
 impl RetainedReadAdmission {
-    pub(crate) fn reserve_snapshot_history(
-        &self,
-        history: &kinewright_core::HistorySnapshot,
-    ) -> Result<StorageReservation, BundleError> {
-        let store = ProjectStore {
-            inner: Arc::clone(&self.hold.pin.inner),
-            publication: None,
-            person_publication: None,
-            cleanup_publication: None,
-        };
-        // A dirty foreground capture may need flooring before publication. It
-        // uses the shared ordinary pool, not a published record's single-history cap.
-        let live = crate::history_size::history_live_bytes(history)?;
-        store.reserve_copy_read(0, live, live, false, true)
-    }
     pub(crate) fn reserve_snapshot_growth(
         &self,
         overlap: &StorageReservation,
@@ -247,7 +232,7 @@ impl RetainedReadAdmission {
             person_publication: None,
             cleanup_publication: None,
         };
-        store.reserve_copy_read(0, encoded_bytes, 0, false, true)
+        store.reserve_copy_read(0, encoded_bytes, false, true)
     }
     pub(crate) fn inspect_destination(
         &self,
@@ -285,7 +270,7 @@ impl RetainedReadAdmission {
         };
         let path = ProjectStore::object_path(reference)?;
         crate::namespace::note("rescue_permission_read", path.as_path());
-        let charge = store.reserve_copy_read(0, 256, 0, false, true)?;
+        let charge = store.reserve_copy_read(0, 256, false, true)?;
         let file = store.open_copy_source(reference, true)?;
         Ok(RetainedReadLease {
             file,
@@ -433,10 +418,10 @@ impl ProjectStore {
         bytes: &[u8],
     ) -> Result<StorageReservation, BundleError> {
         let decoded = preflight_record(bytes, self.limits())?;
-        self.reserve_copy_read(0, decoded, 0, false, true)
+        self.reserve_copy_read(0, decoded, false, true)
     }
     pub(crate) fn reserve_capture_scratch(&self) -> Result<StorageReservation, BundleError> {
-        self.reserve_copy_read(0, self.limits().decoded_record_bytes, 0, false, true)
+        self.reserve_copy_read(0, self.limits().decoded_record_bytes, false, true)
     }
     pub fn inspect_rescue_destination(
         path: &Path,
@@ -536,7 +521,6 @@ impl ProjectStore {
                     working.push(self.reserve_copy_read(
                         0,
                         additions as u64 * 1024,
-                        0,
                         false,
                         true,
                     )?);
@@ -545,7 +529,7 @@ impl ProjectStore {
                     }
                 }
                 Err(error) => {
-                    working.push(self.reserve_copy_read(0, 1024, 0, false, true)?);
+                    working.push(self.reserve_copy_read(0, 1024, false, true)?);
                     complete = false;
                     uses.entry(root.clone()).or_default().insert(role.clone());
                     missing.insert(root.clone(), error.to_string());
@@ -613,7 +597,7 @@ impl ProjectStore {
                 .ok_or(BundleError::Capacity("retained source bytes"))
         })?;
         let objects = self
-            .reserve_copy_read(0, objects.len() as u64 * 256, 0, false, true)?
+            .reserve_copy_read(0, objects.len() as u64 * 256, false, true)?
             .hold(objects);
         let hold = self.begin_copy_source(&roots, bytes, true)?;
         Ok(RetainedReadAdmission {
@@ -639,7 +623,6 @@ impl ProjectStore {
             .map_err(|_| BundleError::Capacity("usage poisoned"))?;
         usage.peak_decoded_bytes = usage.decoded_bytes;
         usage.peak_decoder_bytes = usage.decoder_bytes;
-        usage.peak_live_history_bytes = usage.live_history_bytes;
         Ok(())
     }
     pub fn collection_status(&self) -> Result<CollectionStatus, BundleError> {
@@ -708,13 +691,13 @@ impl ProjectStore {
         Ok(Self {
             inner: Arc::new(StoreInner {
                 admission_identity: Arc::new(()),
-                replay_gate: Arc::new(crate::history_record::ReplayGate::default()),
                 run_budget: std::sync::atomic::AtomicBool::new(false),
                 run_limit: std::sync::atomic::AtomicBool::new(false),
                 read_authority,
                 read_graph_charge: None,
                 namespace: Mutex::new(namespace),
                 verified_memo: Mutex::new(crate::bundle_recovery::VerifiedIdentityMemo::default()),
+                history_pool: Mutex::new(None),
                 chunk_tables: Mutex::new(BTreeMap::new()),
                 resources: Mutex::new(BTreeMap::new()),
                 media_admissions: Mutex::new(BTreeMap::new()),
@@ -789,6 +772,16 @@ impl ProjectStore {
             cleanup_publication: None,
         }
     }
+    /// The same namespace and already granted admission, for a frozen private
+    /// selection actor sealing its objects. Root publication stays in Bundle.
+    pub(crate) fn actor_object_store(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            publication: self.publication.clone(),
+            person_publication: self.person_publication.clone(),
+            cleanup_publication: self.cleanup_publication.clone(),
+        }
+    }
     pub(crate) fn person_publication_store(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -844,22 +837,11 @@ impl ProjectStore {
         self.with_namespace(|n| Ok(n.identity().resolved_root.clone()))
     }
     pub fn reserve_copy(&self, bytes: u64) -> Result<StorageReservation, BundleError> {
-        self.reserve(bytes, 0, 0, true)
+        self.reserve(bytes, 0, true)
     }
     #[cfg(any(test, feature = "test-util"))]
-    pub fn reserve_probe(
-        &self,
-        decoded: u64,
-        history: u64,
-    ) -> Result<StorageReservation, BundleError> {
-        self.reserve(0, decoded, history, false)
-    }
-    pub fn reserve_history_shadow(&self, bytes: u64) -> Result<StorageReservation, BundleError> {
-        self.admit_run_write()?;
-        if bytes > self.admission_limits().branch_history_bytes {
-            return Err(self.run_error(BundleError::Capacity("branch history shadow")));
-        }
-        self.reserve(0, bytes, bytes, false)
+    pub fn reserve_probe(&self, decoded: u64) -> Result<StorageReservation, BundleError> {
+        self.reserve(0, decoded, false)
     }
     #[must_use]
     pub fn limits(&self) -> &StorageLimits {
@@ -888,7 +870,96 @@ impl ProjectStore {
         }
         result
     }
+    pub(crate) fn bind_history_pool(
+        &self,
+        pool: &crate::operation_history::HistoryPool,
+    ) -> Result<(), BundleError> {
+        let mut bound = self
+            .inner
+            .history_pool
+            .lock()
+            .map_err(|_| BundleError::Capacity("history pool poisoned"))?;
+        if bound.as_ref().is_some_and(|prior| !prior.same_pool(pool)) {
+            return Err(BundleError::HistoryBarrierInvariant);
+        }
+        *bound = Some(pool.clone());
+        Ok(())
+    }
+    /// Warm fixed semantic facts while the caller still has a spare reader
+    /// slot, before retaining another frozen rescue capture. This accepts no
+    /// graph: selection diagnostics and publication validate every chosen byte
+    /// afterwards, including any unavailable or invalid record skipped here.
+    pub(crate) fn prime_retained_owner_proofs(
+        &self,
+        roots: &[ObjectRef],
+        pool: &crate::operation_history::HistoryPool,
+    ) -> Result<(), BundleError> {
+        // Archived roots validate their own recorded inventory too. Warm those
+        // fixed proofs before retaining the foreground capture, including a
+        // recovery point that has left the automatic list but remains there.
+        for reference in self.closure_with_inventory(roots, true)? {
+            if reference.record_kind != RecordKind::BranchCheckpoint {
+                continue;
+            }
+            let Ok(checkpoint) =
+                self.read_copy_record::<crate::operation_checkpoint::Checkpoint>(&reference, true)
+            else {
+                continue;
+            };
+            if self
+                .inner
+                .verified_memo
+                .lock()
+                .map_err(|_| BundleError::Capacity("memo poisoned"))?
+                .owner_proof(&checkpoint.owner_ref)
+                .is_some()
+            {
+                continue;
+            }
+            let validated = self.with_namespace(|namespace| {
+                crate::operation_history::StoredOwnerRecord::read_namespace(
+                    namespace,
+                    &checkpoint,
+                    pool,
+                    &self.inner.usage,
+                    self.limits(),
+                )
+                .map_err(BundleError::from)
+            });
+            if let Ok(validated) = validated {
+                self.remember_owner(
+                    checkpoint.owner_ref.clone(),
+                    crate::bundle_recovery::OwnerProof {
+                        identity: validated.identity(),
+                        position: validated.position(),
+                        sizing: validated.creation_sizing(),
+                        document: crate::bundle_recovery::ProjectionRef::new(
+                            &checkpoint.document_ref,
+                        )?,
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn remember_owner(
+        &self,
+        reference: ObjectRef,
+        proof: crate::bundle_recovery::OwnerProof,
+    ) -> Result<(), BundleError> {
+        self.inner
+            .verified_memo
+            .lock()
+            .map_err(|_| BundleError::Capacity("memo poisoned"))?
+            .remember_owner(reference, proof, self.limits());
+        Ok(())
+    }
     pub(crate) fn clear_verified_memo(&self) -> Result<(), BundleError> {
+        #[cfg(any(test, feature = "test-util"))]
+        crate::namespace::note(
+            "publication_memo_reset",
+            Path::new("verified-identity-memo"),
+        );
         self.inner
             .verified_memo
             .lock()
@@ -938,7 +1009,7 @@ impl ProjectStore {
         &self,
         bytes: u64,
         decoded: u64,
-        history: u64,
+
         copy: bool,
     ) -> Result<StorageReservation, BundleError> {
         if self
@@ -954,7 +1025,6 @@ impl ProjectStore {
             &self.admission_limits(),
             bytes,
             decoded,
-            history,
             copy,
             free,
         )
@@ -1005,7 +1075,7 @@ impl ProjectStore {
         self.admit_run_write()?;
         self.check_cleanup_kind(reference.record_kind)?;
         reference.validate()?;
-        let _working = self.reserve(0, (1 << 20) + 65_536, 0, false)?;
+        let _working = self.reserve(0, (1 << 20) + 65_536, false)?;
         let mut dependencies = dependencies.to_vec();
         dependencies.sort();
         dependencies.dedup();
@@ -1102,14 +1172,13 @@ impl ProjectStore {
                 inner: reader,
                 bytes: 0,
                 limit: reference.byte_length,
+                #[cfg(test)]
+                fault_reference: None,
             };
-            let digest = kinewright_media::sha256_reader(&mut counted)
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            if counted.bytes != reference.byte_length || digest != reference.sha256 {
-                return Err(BundleError::Corrupt(
-                    "duplicate input differs from owned bytes".into(),
-                ));
-            }
+            counted.verify_digest(
+                &reference.sha256,
+                "duplicate input differs from owned bytes",
+            )?;
             self.verify(reference)?;
             return Ok(SealedObject {
                 reference: reference.clone(),
@@ -1122,7 +1191,6 @@ impl ProjectStore {
             } else {
                 reference.byte_length
             },
-            0,
             0,
             false,
         )?;
@@ -1137,23 +1205,24 @@ impl ProjectStore {
                 inner: reader,
                 bytes: 0,
                 limit: reference.byte_length,
+                #[cfg(test)]
+                fault_reference: None,
             };
-            let digest = kinewright_media::sha256_reader(&mut measured)?;
-            if digest == reference.sha256 && measured.bytes == reference.byte_length {
-                #[cfg(any(test, feature = "test-util"))]
-                crate::io_observer::note_digest(
-                    "object_stage",
-                    path.as_path(),
-                    digest,
-                    usize::try_from(measured.bytes)
-                        .map_err(|_| BundleError::Capacity("object address space"))?,
-                );
-                self.with_namespace(|n| n.seal_existing(&path))
-            } else {
-                Err(BundleError::Corrupt(
-                    "recovered input differs from owned object".into(),
-                ))
-            }
+            let digest = measured.verify_digest(
+                &reference.sha256,
+                "recovered input differs from owned object",
+            )?;
+            #[cfg(any(test, feature = "test-util"))]
+            crate::io_observer::note_digest(
+                "object_stage",
+                path.as_path(),
+                digest,
+                usize::try_from(measured.bytes)
+                    .map_err(|_| BundleError::Capacity("object address space"))?,
+            );
+            #[cfg(not(any(test, feature = "test-util")))]
+            drop(digest);
+            self.with_namespace(|n| n.seal_existing(&path))
         } else {
             self.with_namespace(|namespace| {
                 namespace.publish_with(&path, |file| {
@@ -1174,8 +1243,7 @@ impl ProjectStore {
                         return Err(BundleError::Corrupt("short owned input".into()));
                     }
                     file.seek(SeekFrom::Start(0))?;
-                    let digest = kinewright_media::sha256_reader(file)
-                        .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+                    let digest = kinewright_media::sha256_reader(file)?;
                     if digest != reference.sha256 {
                         return Err(BundleError::Corrupt("owned input digest mismatch".into()));
                     }
@@ -1313,7 +1381,7 @@ impl ProjectStore {
         self.admit_run_write()?;
         let count =
             crate::owned_inputs::InputChunkTable::checked_count(length, &self.admission_limits())?;
-        let _scratch = self.reserve(0, (1 << 20) + count * 32 + 1024, 0, false)?;
+        let _scratch = self.reserve(0, (1 << 20) + count * 32 + 1024, false)?;
         let usage = self.usage()?;
         if usage.objects >= self.admission_limits().objects
             || usage
@@ -1327,7 +1395,7 @@ impl ProjectStore {
         {
             return Err(self.run_error(BundleError::Capacity("import object admission")));
         }
-        let reservation = self.reserve(length, 0, 0, false)?;
+        let reservation = self.reserve(length, 0, false)?;
         let mut table = None;
         let published = self.with_namespace(|namespace| {
             namespace.publish_hashed(|file| {
@@ -1424,7 +1492,7 @@ impl ProjectStore {
         }
         let table =
             self.read_copy_record::<crate::owned_inputs::InputChunkTable>(reference, true)?;
-        let _encoded = self.reserve_copy_read(0, reference.byte_length, 0, false, true)?;
+        let _encoded = self.reserve_copy_read(0, reference.byte_length, false, true)?;
         let canonical = serde_json::to_vec(&*table).map_err(crate::bundle::encoding_error)?;
         if canonical.len() as u64 != reference.byte_length
             || kinewright_media::sha256_bytes(&canonical) != reference.sha256
@@ -1438,7 +1506,6 @@ impl ProjectStore {
             (table.chunk_sha256.len() as u64)
                 .checked_mul(32)
                 .ok_or(BundleError::Capacity("table allocation"))?,
-            0,
             false,
             true,
         )?;
@@ -1456,7 +1523,7 @@ impl ProjectStore {
             reference.clone(),
             WeakCacheEntry {
                 value: Arc::downgrade(&value),
-                _charge: self.reserve_copy_read(0, 256, 0, false, true)?,
+                _charge: self.reserve_copy_read(0, 256, false, true)?,
             },
         );
         Ok(value)
@@ -1492,7 +1559,6 @@ impl ProjectStore {
                 .byte_length
                 .checked_add(256)
                 .ok_or(BundleError::Capacity("resource charge"))?,
-            0,
             false,
             true,
         )?;
@@ -1530,7 +1596,7 @@ impl ProjectStore {
             reference.clone(),
             WeakCacheEntry {
                 value: Arc::downgrade(&value),
-                _charge: self.reserve_copy_read(0, 256, 0, false, true)?,
+                _charge: self.reserve_copy_read(0, 256, false, true)?,
             },
         );
         Ok(value)
@@ -1545,7 +1611,7 @@ impl ProjectStore {
         };
         Arc::new(move |bytes| {
             store
-                .reserve_copy_read(0, bytes, 0, false, true)
+                .reserve_copy_read(0, bytes, false, true)
                 .map(|charge| Arc::new(charge) as kinewright_media::owned_io::LifetimeGuard)
                 .map_err(|error| error.to_string())
         })
@@ -1645,7 +1711,7 @@ impl ProjectStore {
             key,
             MediaAdmission {
                 binding,
-                _charge: self.reserve_copy_read(0, charge, 0, false, true)?,
+                _charge: self.reserve_copy_read(0, charge, false, true)?,
             },
         );
         Ok(())
@@ -1784,40 +1850,6 @@ impl ProjectStore {
     pub fn verify(&self, reference: &ObjectRef) -> Result<(), BundleError> {
         self.open_verified(reference).map(drop)
     }
-    pub(crate) fn verify_cached_history(
-        &self,
-        checkpoint: &crate::bundle_records::BranchCheckpoint,
-        cached: &StorageReservation<kinewright_core::HistorySnapshot>,
-    ) -> Result<(), BundleError> {
-        // Recheck the immutable bytes and their exact materialized binding. A
-        // verified cache hit needs no second set of replayed boundary documents.
-        self.with_namespace(|namespace| {
-            Self::verify_in_namespace(
-                namespace,
-                &checkpoint.history_ref,
-                &self.inner.usage,
-                self.limits(),
-            )
-            .map(drop)
-        })?;
-        crate::history_record::HistoryRecord::verify_checkpoint(checkpoint, cached)?;
-        crate::history_size::check_retained_history(
-            cached,
-            checkpoint.history_role,
-            self.limits(),
-        )?;
-        self.inner
-            .verified_memo
-            .lock()
-            .map_err(|_| BundleError::Capacity("memo poisoned"))?
-            .remember_resolved_history(
-                &checkpoint.history_ref,
-                cached.decoded_charge(),
-                checkpoint.history_role,
-                self.limits(),
-            );
-        Ok(())
-    }
     pub(crate) fn open_verified(&self, reference: &ObjectRef) -> Result<File, BundleError> {
         self.open_copy_source(reference, false)
     }
@@ -1826,58 +1858,45 @@ impl ProjectStore {
         reference: &ObjectRef,
         cleanup_only: bool,
     ) -> Result<File, BundleError> {
-        self.inner
-            .verified_memo
-            .lock()
-            .map_err(|_| BundleError::Capacity("memo poisoned"))?
-            .forget(reference);
-        // Opening archived bytes does not promote their automatic inventory into live roots.
-        self.closure_with_inventory(std::slice::from_ref(reference), false)?;
-        let _working = self.reserve_copy_read(0, 1 << 20, 0, false, cleanup_only)?;
-        let path = Self::object_path(reference)?;
-        let mut file = self
-            .with_namespace(|namespace| namespace.open_owned(&path))?
-            .ok_or_else(|| BundleError::Corrupt("missing owned object".into()))?;
-        let mut reader = CountingReader {
-            inner: &mut file,
-            bytes: 0,
-            limit: reference.byte_length,
-        };
-        let digest = kinewright_media::sha256_reader(&mut reader);
-        let bytes = reader.bytes;
-        let mut usage = self
-            .inner
-            .usage
-            .lock()
-            .map_err(|_| BundleError::Capacity("usage poisoned"))?;
-        usage.verified_calls = usage
-            .verified_calls
-            .checked_add(1)
-            .ok_or(BundleError::Capacity("verification count overflow"))?;
-        usage.verified_bytes = usage
-            .verified_bytes
-            .checked_add(bytes)
-            .ok_or(BundleError::Capacity("verification byte overflow"))?;
-        drop(usage);
-        if file.metadata()?.len() != reference.byte_length
-            || !digest.as_ref().is_ok_and(|h| h == &reference.sha256)
-        {
+        // A successful byte-for-byte verification preserves immutable owner
+        // facts. Only a failed open/identity check invalidates them; discarding
+        // them before every read needlessly replays archived histories later.
+        let result = (|| {
+            // Opening archived bytes does not promote their automatic inventory into live roots.
+            self.closure_with_inventory(std::slice::from_ref(reference), false)?;
+            let _working = self.reserve_copy_read(0, 1 << 20, false, cleanup_only)?;
+            let path = Self::object_path(reference)?;
+            let mut file = self
+                .with_namespace(|namespace| namespace.open_owned(&path))?
+                .ok_or_else(|| BundleError::Corrupt("missing owned object".into()))?;
+            let verified = verify_owned_bytes(&mut file, reference, &self.inner.usage);
+            if verified.is_err() || file.metadata()?.len() != reference.byte_length {
+                self.inner
+                    .ledger
+                    .lock()
+                    .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+                    .verified
+                    .remove(&reference.sha256);
+                verified?;
+                return Err(BundleError::Corrupt("owned identity changed".into()));
+            }
+            file.seek(SeekFrom::Start(0))?;
             self.inner
                 .ledger
                 .lock()
                 .map_err(|_| BundleError::Capacity("ledger poisoned"))?
                 .verified
-                .remove(&reference.sha256);
-            return Err(BundleError::Corrupt("owned identity changed".into()));
+                .insert(reference.sha256.clone());
+            Ok(file)
+        })();
+        if result.is_err() {
+            self.inner
+                .verified_memo
+                .lock()
+                .map_err(|_| BundleError::Capacity("memo poisoned"))?
+                .forget(reference);
         }
-        file.seek(SeekFrom::Start(0))?;
-        self.inner
-            .ledger
-            .lock()
-            .map_err(|_| BundleError::Capacity("ledger poisoned"))?
-            .verified
-            .insert(reference.sha256.clone());
-        Ok(file)
+        result
     }
     #[must_use]
     pub fn input_owner(&self) -> (Option<ProjectId>, Option<SessionId>) {
@@ -2047,9 +2066,20 @@ struct CountingReader<'a, R> {
     inner: &'a mut R,
     bytes: u64,
     limit: u64,
+    #[cfg(test)]
+    fault_reference: Option<&'a ObjectRef>,
 }
 impl<R: Read> Read for CountingReader<'_, R> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        #[cfg(test)]
+        if self.bytes > 0
+            && let Some(reference) = self.fault_reference
+        {
+            crate::io_observer::check_failure(
+                "owned_verification_read",
+                Path::new(&reference.sha256),
+            )?;
+        }
         let count = self.inner.read(buffer)?;
         self.bytes = self
             .bytes
@@ -2060,6 +2090,50 @@ impl<R: Read> Read for CountingReader<'_, R> {
         }
         Ok(count)
     }
+}
+
+impl<R: Read> CountingReader<'_, R> {
+    fn verify_digest(&mut self, expected: &str, mismatch: &str) -> Result<String, BundleError> {
+        let digest = kinewright_media::sha256_reader(self);
+        // A successful read can exceed the reservation and stop the hash.
+        if self.bytes > self.limit {
+            return Err(BundleError::Corrupt(mismatch.into()));
+        }
+        let digest = digest?;
+        if self.bytes != self.limit || digest != expected {
+            return Err(BundleError::Corrupt(mismatch.into()));
+        }
+        Ok(digest)
+    }
+}
+
+fn verify_owned_bytes(
+    reader: &mut impl Read,
+    reference: &ObjectRef,
+    usage: &Mutex<StorageUsage>,
+) -> Result<(), BundleError> {
+    let mut counted = CountingReader {
+        inner: reader,
+        bytes: 0,
+        limit: reference.byte_length,
+        #[cfg(test)]
+        fault_reference: Some(reference),
+    };
+    let verified = counted.verify_digest(&reference.sha256, "owned identity changed");
+    let measured = counted.bytes;
+    let mut state = usage
+        .lock()
+        .map_err(|_| BundleError::Capacity("usage poisoned"))?;
+    state.verified_calls = state
+        .verified_calls
+        .checked_add(1)
+        .ok_or(BundleError::Capacity("verification calls"))?;
+    state.verified_bytes = state
+        .verified_bytes
+        .checked_add(measured)
+        .ok_or(BundleError::Capacity("verification bytes"))?;
+    drop(state);
+    verified.map(drop)
 }
 impl StorePin {
     #[cfg(any(test, feature = "test-util"))]
@@ -2459,8 +2533,10 @@ pub(crate) mod record_sealed {
 /// Only production record types can use the typed-record ingress.
 pub trait BundleRecord: record_sealed::Sealed + Serialize + serde::de::DeserializeOwned {
     const KIND: RecordKind;
-    fn run_history_limit(&self, _store: &ProjectStore) -> Result<Option<u64>, BundleError> {
-        Ok(None)
+    /// Decoded allocation preflight for this type. Compact raw bodies override
+    /// node inflation; existing record types keep their current accounting.
+    fn decoded_bound(bytes: &[u8], limits: &StorageLimits) -> Result<u64, BundleError> {
+        preflight_record(bytes, limits)
     }
     fn dependencies(&self) -> Vec<ObjectRef> {
         vec![]
@@ -2478,17 +2554,13 @@ pub trait BundleRecord: record_sealed::Sealed + Serialize + serde::de::Deseriali
         self.validate_store(store)
     }
 }
-macro_rules! record {
-    ($ty:ty, $kind:ident) => {
-        impl record_sealed::Sealed for $ty {}
-        impl BundleRecord for $ty {
-            const KIND: RecordKind = RecordKind::$kind;
-        }
-    };
-}
+
 impl record_sealed::Sealed for kinewright_core::Document {}
 impl BundleRecord for kinewright_core::Document {
     const KIND: RecordKind = RecordKind::Document;
+    fn decoded_bound(bytes: &[u8], limits: &StorageLimits) -> Result<u64, BundleError> {
+        preflight_document_value(bytes, limits)
+    }
     fn validate(&self, _: &StorageLimits) -> Result<(), BundleError> {
         self.validate()
             .map_err(|e| BundleError::Corrupt(e.to_string()))
@@ -2550,22 +2622,6 @@ impl BundleRecord for crate::owned_inputs::OwnedInputManifest {
         Ok(())
     }
 }
-impl record_sealed::Sealed for crate::bundle_records::BranchCheckpoint {}
-impl BundleRecord for crate::bundle_records::BranchCheckpoint {
-    const KIND: RecordKind = RecordKind::BranchCheckpoint;
-    fn dependencies(&self) -> Vec<ObjectRef> {
-        let mut refs = vec![
-            self.document_ref.clone(),
-            self.baseline_ref.clone(),
-            self.history_ref.clone(),
-            self.lineage_ref.clone(),
-            self.input_manifest_ref.clone(),
-        ];
-        refs.extend(self.history_input_manifest_refs.clone());
-        refs.extend(self.take_map_revision_ref.clone());
-        refs
-    }
-}
 impl record_sealed::Sealed for BTreeMap<crate::bundle_records::BranchId, ObjectRef> {}
 impl BundleRecord for BTreeMap<crate::bundle_records::BranchId, ObjectRef> {
     const KIND: RecordKind = RecordKind::BranchIndex;
@@ -2588,66 +2644,25 @@ impl BundleRecord for BTreeMap<crate::bundle_records::BranchId, ObjectRef> {
 impl record_sealed::Sealed for crate::bundle_records::SpecialistBaseRecord {}
 impl BundleRecord for crate::bundle_records::SpecialistBaseRecord {
     const KIND: RecordKind = RecordKind::SpecialistBase;
-    fn run_history_limit(&self, store: &ProjectStore) -> Result<Option<u64>, BundleError> {
-        Ok(Some(self.history_role.persisted_limit(store.limits())))
-    }
     fn dependencies(&self) -> Vec<ObjectRef> {
         vec![
             self.original_baseline_ref.clone(),
             self.frozen_checkpoint_ref.clone(),
         ]
     }
-    fn validate(&self, limits: &StorageLimits) -> Result<(), BundleError> {
-        if self.base_document_hash.len() != 64
-            || self.full_applied_delta.len() as u64 > kinewright_core::HISTORY_COMMANDS as u64
-        {
-            return Err(BundleError::Capacity("specialist delta"));
-        }
-        let mut counter = BoundedCounter {
-            bytes: 0,
-            limit: limits.branch_history_bytes,
-        };
-        serde_json::to_writer(&mut counter, self)
-            .map_err(|_| BundleError::Capacity("specialist delta bytes"))?;
-        Ok(())
-    }
-}
-impl record_sealed::Sealed for crate::bundle_records::HistoryFloorCheckpoint {}
-impl BundleRecord for crate::bundle_records::HistoryFloorCheckpoint {
-    const KIND: RecordKind = RecordKind::HistoryFloor;
-    fn dependencies(&self) -> Vec<ObjectRef> {
-        vec![
-            self.old_baseline_ref.clone(),
-            self.new_baseline_ref.clone(),
-            self.checkpoint_ref.clone(),
-        ]
-    }
     fn validate(&self, _: &StorageLimits) -> Result<(), BundleError> {
-        if self.preceding_floor_generation.checked_add(1) != Some(self.floor_generation)
-            || self.equivalence_digest.len() != 64
+        self.original_baseline_ref.validate()?;
+        self.frozen_checkpoint_ref.validate()?;
+        if self.base_document_hash != self.original_baseline_ref.sha256
+            || self.original_baseline_ref.record_kind != RecordKind::Document
+            || self.frozen_checkpoint_ref.record_kind != RecordKind::BranchCheckpoint
+            || self.history_role == crate::operation_history::Role::Ordinary
         {
-            return Err(BundleError::Corrupt("floor generation/equivalence".into()));
+            return Err(BundleError::Corrupt("delta branch base".into()));
         }
         Ok(())
     }
 }
-impl record_sealed::Sealed for crate::bundle_records::RecoveryCloseCheckpoint {}
-impl BundleRecord for crate::bundle_records::RecoveryCloseCheckpoint {
-    const KIND: RecordKind = RecordKind::RecoveryClose;
-    fn dependencies(&self) -> Vec<ObjectRef> {
-        vec![
-            self.preceding_checkpoint_ref.clone(),
-            self.closed_checkpoint_ref.clone(),
-        ]
-    }
-    fn validate(&self, _: &StorageLimits) -> Result<(), BundleError> {
-        if self.suffix_digest.len() != 64 {
-            return Err(BundleError::Corrupt("recovery suffix digest".into()));
-        }
-        Ok(())
-    }
-}
-record!(crate::bundle_records::LineageRecord, Lineage);
 impl record_sealed::Sealed for StoreManifest {}
 impl BundleRecord for StoreManifest {
     const KIND: RecordKind = RecordKind::StoreManifest;
@@ -2687,140 +2702,16 @@ impl ProjectStore {
     ) -> Result<SealedObject, BundleError> {
         self.admit_record(document)
     }
-    pub fn admit_history(
-        &mut self,
-        history: &kinewright_core::HistorySnapshot,
-    ) -> Result<SealedObject, BundleError> {
-        self.admit_run_write()?;
-        let role = crate::history_record::HistoryRole::Ordinary;
-        let record = crate::history_record::HistoryRecord::capture(history, role)?;
-        record
-            .validate(&self.admission_limits())
-            .map_err(|error| self.run_error(error))?;
-        let live = self.with_history_admission(role, self.limits(), || {
-            crate::history_size::verify_history_admission(history, role, self.limits())
-        })?;
-        if history.ordinary_admission_bytes().is_err() {
-            return Err(self.run_error(BundleError::Capacity("live branch history")));
-        }
-        let _history = self.reserve_role_history_shadow(live, role)?;
-        let baseline = self.admit_document(&history.baseline)?;
-        let current = self.admit_document(&history.document)?;
-        if record.baseline_ref != baseline.reference || record.current_ref != current.reference {
-            return Err(BundleError::Corrupt(
-                "history staged document identities".into(),
-            ));
-        }
-        self.admit_record(&record)
-    }
     pub(crate) fn admit_record<T: BundleRecord>(
         &mut self,
         record: &T,
     ) -> Result<SealedObject, BundleError> {
-        Ok(self.admit_record_offering(record, None)?.0)
-    }
-    /// Decode `bytes` as a history record, as the commit check does, and keep the support
-    /// fields that decode observed together with the bytes it observed them in.
-    pub(crate) fn check_history_bytes(
-        &self,
-        bytes: &[u8],
-        role: crate::history_record::HistoryRole,
-    ) -> Result<
-        (
-            StorageReservation<kinewright_core::HistorySnapshot>,
-            CheckedHistoryBytes,
-        ),
-        BundleError,
-    > {
-        self.replay_gate()
-            .with(|| self.check_history_bytes_serial(bytes, role))?
-    }
-    fn check_history_bytes_serial(
-        &self,
-        bytes: &[u8],
-        role: crate::history_record::HistoryRole,
-    ) -> Result<
-        (
-            StorageReservation<kinewright_core::HistorySnapshot>,
-            CheckedHistoryBytes,
-        ),
-        BundleError,
-    > {
-        #[cfg(any(test, feature = "test-util"))]
-        crate::io_observer::note_history_decode();
-        let charge = preflight_record(bytes, self.limits())?;
-        let _wire = self.reserve_copy_read(0, charge, 0, false, true)?;
-        let transport: kinewright_core::HistoryTransport = serde_json::from_slice(bytes)
-            .map_err(|error| BundleError::Corrupt(error.to_string()))?;
-        let reserve = self.reserve_history_replay(role.replay_limit(self.limits()), role)?;
-        let (history, _) = transport
-            .journal
-            .resolve_with_budget(
-                transport.baseline,
-                &transport.document,
-                role.replay_limit(self.limits()),
-            )
-            .map_err(crate::bundle::history_error)?;
-        let live = crate::history_size::check_retained_history(&history, role, self.limits())?;
-        let checked = reserve.finish_history_replay(live)?.hold(history);
-        let record = crate::history_record::HistoryRecord::capture(&checked, role)?;
-        let raw = serde_json::to_value(&record.journal).map_err(crate::bundle::encoding_error)?;
-        let fields = kinewright_core::history_journal_support_fields(&raw)
-            .map_err(BundleError::Unsupported)?;
-        let bytes = serde_json::to_vec(&record).map_err(crate::bundle::encoding_error)?;
-        let charge = preflight_record(&bytes, self.limits())?;
-        Ok((
-            checked,
-            CheckedHistoryBytes {
-                bytes,
-                charge,
-                live_charge: live,
-                fields,
-            },
-        ))
-    }
-    /// [`Self::admit_record`] for a history the commit check decoded from `checked`'s bytes.
-    /// When the bytes it seals are exactly the checked bytes, it takes the check's
-    /// preflight charge in place of preflighting them again, and it returns the check's
-    /// support fields bound to the sealed object; [`Self::support_fields`] then uses them
-    /// in place of decoding that object again. Otherwise it preflights the bytes, returns no
-    /// fields, and the support read decodes the object as before.
-    pub(crate) fn admit_checked_history(
-        &mut self,
-        record: &kinewright_core::HistorySnapshot,
-        checked: Option<CheckedHistoryBytes>,
-        role: crate::history_record::HistoryRole,
-    ) -> Result<(SealedObject, Option<SealedSupport>), BundleError> {
-        let verified_cost = checked.as_ref().map(|checked| {
-            (
-                kinewright_media::sha256_bytes(&checked.bytes),
-                checked.bytes.len() as u64,
-                checked.live_charge,
-            )
-        });
-        let admitted = self.admit_record_offering(
-            &crate::history_record::HistoryRecord::capture(record, role)?,
-            checked,
-        )?;
-        if let Some((hash, length, live)) = verified_cost
-            && admitted.0.reference.sha256 == hash
-            && admitted.0.reference.byte_length == length
-        {
-            // Only the complete bounded replay can certify this retained
-            // charge. Publication separately models the reader's replay window.
-            self.inner
-                .verified_memo
-                .lock()
-                .map_err(|_| BundleError::Capacity("memo poisoned"))?
-                .remember_resolved_history(&admitted.0.reference, live, role, self.limits());
-        }
-        Ok(admitted)
+        self.admit_record_offering(record)
     }
     fn admit_record_offering<T: BundleRecord>(
         &mut self,
         record: &T,
-        checked: Option<CheckedHistoryBytes>,
-    ) -> Result<(SealedObject, Option<SealedSupport>), BundleError> {
+    ) -> Result<SealedObject, BundleError> {
         self.admit_run_write()?;
         record
             .validate(&self.admission_limits())
@@ -2831,9 +2722,7 @@ impl ProjectStore {
         if !T::KIND.supported() {
             return Err(BundleError::Unsupported("inactive record kind".into()));
         }
-        let limit = if T::KIND == RecordKind::History {
-            self.admission_limits().branch_history_bytes
-        } else if self.run_budget_active() && !self.is_project_publication() {
+        let limit = if self.run_budget_active() && !self.is_project_publication() {
             self.limits()
                 .decoded_record_bytes
                 .min(crate::run_admission::RECORD_BYTES)
@@ -2843,7 +2732,7 @@ impl ProjectStore {
         let mut counter = BoundedCounter { bytes: 0, limit };
         serde_json::to_writer(&mut counter, record)
             .map_err(|_| self.run_error(BundleError::Capacity("encoded record")))?;
-        let _encoded = self.reserve(0, counter.bytes, 0, false)?;
+        let _encoded = self.reserve(0, counter.bytes, false)?;
         let capacity =
             usize::try_from(counter.bytes).map_err(|_| BundleError::Capacity("record size"))?;
         let mut bytes = Vec::with_capacity(capacity);
@@ -2851,38 +2740,22 @@ impl ProjectStore {
         if bytes.len() != capacity {
             return Err(BundleError::Corrupt("unstable record serialization".into()));
         }
-        let checked = checked.and_then(|checked| checked.matching(&bytes));
-        let preflight = self.reserve(0, self.limits().decoded_record_bytes, 0, false)?;
-        let decoded = match &checked {
-            // These are the checked bytes, which the check's decode preflighted under these
-            // same (fixed) limits; preflighting them again would repeat that pass exactly.
-            Some(checked) => checked.charge,
-            None => {
-                preflight_record(&bytes, self.limits()).map_err(|error| self.run_error(error))?
-            }
-        };
+        let preflight = self.reserve(0, self.limits().decoded_record_bytes, false)?;
+        let decoded =
+            T::decoded_bound(&bytes, self.limits()).map_err(|error| self.run_error(error))?;
         drop(preflight);
-        // Candidate deltas share the task admission bound: their retained
-        // capture is part of the same finite cleanup allowance.
+        // History is charged by the immutable owner creation descriptor. All
+        // other run records retain the independent terminal record limit;
+        // SpecialistBase is only a fixed-size binding to its owner checkpoint.
         if self.run_budget_active()
             && !self.is_project_publication()
-            && decoded
-                > if T::KIND == RecordKind::SpecialistBase {
-                    record
-                        .run_history_limit(self)?
-                        .unwrap_or(crate::history_record::TASK_BYTES)
-                } else {
-                    crate::run_admission::DECODED_BYTES
-                }
+            && decoded > crate::run_admission::DECODED_BYTES
         {
             self.note_run_limit();
             return Err(BundleError::RunLimit);
         }
-        if T::KIND == RecordKind::History && decoded > self.admission_limits().branch_history_bytes
-        {
-            return Err(BundleError::Capacity("live branch history"));
-        }
-        let _decoded = self.reserve(0, decoded, 0, false)?;
+
+        let _decoded = self.reserve(0, decoded, false)?;
         let reference = ObjectRef {
             sha256: kinewright_media::sha256_bytes(&bytes),
             byte_length: counter.bytes,
@@ -2906,15 +2779,9 @@ impl ProjectStore {
             .lock()
             .map_err(|_| BundleError::Capacity("memo poisoned"))?
             .remember(&sealed.reference, record, decoded, None, self.limits());
-        let support = checked
-            .and_then(|checked| checked.fields_for(&sealed.reference, self.limits()))
-            .map(|fields| SealedSupport {
-                reference: sealed.reference.clone(),
-                decoded,
-                fields,
-            });
-        Ok((sealed, support))
+        Ok(sealed)
     }
+
     pub fn read_record<T: BundleRecord>(
         &self,
         reference: &ObjectRef,
@@ -2926,22 +2793,14 @@ impl ProjectStore {
         reference: &ObjectRef,
         cleanup_only: bool,
     ) -> Result<StorageReservation<T>, BundleError> {
-        #[cfg(any(test, feature = "test-util"))]
-        if T::KIND == RecordKind::History {
-            crate::io_observer::note_history_decode();
-        }
         if reference.record_kind != T::KIND {
             return Err(BundleError::Corrupt("typed record kind mismatch".into()));
         }
-        let limit = if T::KIND == RecordKind::History {
-            self.limits().branch_history_bytes
-        } else {
-            self.limits().decoded_record_bytes
-        };
+        let limit = self.limits().decoded_record_bytes;
         if reference.byte_length > limit {
             return Err(BundleError::Capacity("encoded record"));
         }
-        let _encoded = self.reserve_copy_read(0, reference.byte_length, 0, false, cleanup_only)?;
+        let _encoded = self.reserve_copy_read(0, reference.byte_length, false, cleanup_only)?;
         let mut file = self.open_copy_source(reference, cleanup_only)?;
         let bytes = crate::bundle_recovery::bounded_bytes(&mut file, reference.byte_length)?;
         if bytes.len() as u64 != reference.byte_length
@@ -2949,26 +2808,16 @@ impl ProjectStore {
         {
             return Err(BundleError::Corrupt("record changed while decoding".into()));
         }
-        let preflight = self.reserve_copy_read(
-            0,
-            self.limits().decoded_record_bytes,
-            0,
-            false,
-            cleanup_only,
-        )?;
-        let decoded = preflight_record(&bytes, self.limits())?;
-        let decoded = if T::KIND == RecordKind::Lineage {
-            decoded
-                .checked_add(crate::lineage_journal::decode_live_bound(&bytes)?)
-                .ok_or(BundleError::Capacity("lineage decode overflow"))?
-        } else {
-            decoded
-        };
+        let preflight =
+            self.reserve_copy_read(0, self.limits().decoded_record_bytes, false, cleanup_only)?;
+        let decoded = T::decoded_bound(&bytes, self.limits())?;
         drop(preflight);
-        if T::KIND == RecordKind::History && decoded > self.limits().branch_history_bytes {
-            return Err(BundleError::Capacity("live branch history"));
-        }
-        let decoded_reservation = self.reserve_copy_read(0, decoded, 0, false, cleanup_only)?;
+        let decoded_reservation = self.reserve_copy_read(0, decoded, false, cleanup_only)?;
+        let _parser = if T::KIND == RecordKind::Document {
+            Some(self.reserve_copy_read(0, 2 * bytes.len() as u64, false, cleanup_only)?)
+        } else {
+            None
+        };
         let value: T =
             serde_json::from_slice(&bytes).map_err(|e| BundleError::Corrupt(e.to_string()))?;
         value.validate(self.limits())?;
@@ -2981,43 +2830,6 @@ impl ProjectStore {
         self.check_read_authority()?;
         Ok(decoded_reservation.hold(value))
     }
-}
-/// A history's encoded bytes with the preflight charge and the support fields one decode
-/// of exactly these bytes observed. Only [`ProjectStore::check_history_bytes`] makes one,
-/// so the charge and fields cannot belong to any other bytes, and sealing uses them only
-/// for bytes equal to these.
-pub(crate) struct CheckedHistoryBytes {
-    bytes: Vec<u8>,
-    charge: u64,
-    live_charge: u64,
-    fields: BTreeSet<String>,
-}
-impl CheckedHistoryBytes {
-    /// `self`, when `sealed` is exactly the checked bytes.
-    fn matching(self, sealed: &[u8]) -> Option<Self> {
-        #[cfg(any(test, feature = "test-util"))]
-        if crate::io_observer::save_reuse_disabled() {
-            return None;
-        }
-        (self.bytes == sealed).then_some(self)
-    }
-    /// The fields of matched bytes sealed as `reference`.
-    ///
-    /// A history over the support-read size cap is left to `support_fields`, which
-    /// refuses it there, as it always has.
-    fn fields_for(self, reference: &ObjectRef, limits: &StorageLimits) -> Option<BTreeSet<String>> {
-        (reference.record_kind == RecordKind::History
-            && reference.byte_length <= limits.control_bytes)
-            .then_some(self.fields)
-    }
-}
-/// The support fields of one sealed history object and the decoded charge of its bytes,
-/// taken from the commit check's decode of exactly those bytes. Only
-/// [`ProjectStore::admit_checked_history`] makes one.
-pub(crate) struct SealedSupport {
-    reference: ObjectRef,
-    decoded: u64,
-    fields: BTreeSet<String>,
 }
 pub(crate) struct BoundedCounter {
     pub(crate) bytes: u64,
@@ -3038,8 +2850,26 @@ impl Write for BoundedCounter {
 }
 
 /// Admission bound, not a measured heap/RSS value. Runs before typed allocations.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn preflight_record(bytes: &[u8], limits: &StorageLimits) -> Result<u64, BundleError> {
+    preflight_json(bytes, limits, true)
+}
+/// Documents and project roots reserve their parser scratch separately from
+/// the retained JSON/typed value. Neither limit nor structural slot changes.
+pub(crate) fn preflight_document_value(
+    bytes: &[u8],
+    limits: &StorageLimits,
+) -> Result<u64, BundleError> {
+    preflight_json(bytes, limits, false)
+}
+#[allow(
+    clippy::too_many_lines,
+    reason = "one recursive bounded JSON visitor shares duplicate-key and depth admission"
+)]
+fn preflight_json(
+    bytes: &[u8],
+    limits: &StorageLimits,
+    combined_scratch: bool,
+) -> Result<u64, BundleError> {
     use serde::de::{DeserializeSeed, Error, MapAccess, SeqAccess, Visitor};
     use std::{cell::Cell, fmt};
     struct Scan<'a> {
@@ -3135,7 +2965,7 @@ pub(crate) fn preflight_record(bytes: &[u8], limits: &StorageLimits) -> Result<u
     if scratch > limits.decoded_record_bytes {
         return Err(BundleError::Capacity("parser scratch"));
     }
-    let charge = Cell::new(scratch);
+    let charge = Cell::new(if combined_scratch { scratch } else { 0 });
     let mut d = serde_json::Deserializer::from_slice(bytes);
     Scan {
         charge: &charge,
@@ -3161,38 +2991,32 @@ impl ProjectStore {
         usage: &Arc<Mutex<StorageUsage>>,
         limits: &StorageLimits,
     ) -> Result<File, BundleError> {
+        Self::verify_in_namespace_for_read(namespace, reference, usage, limits, false)
+    }
+    pub(crate) fn verify_in_namespace_for_read(
+        namespace: &ProjectNamespace,
+        reference: &ObjectRef,
+        usage: &Arc<Mutex<StorageUsage>>,
+        limits: &StorageLimits,
+        retained: bool,
+    ) -> Result<File, BundleError> {
         reference.validate()?;
-        let _working = StorageReservation::reserve(usage, limits, 0, 1 << 20, 0, false, u64::MAX)?;
+        let _working = StorageReservation::reserve_for_retained_read(
+            usage,
+            limits,
+            0,
+            1 << 20,
+            false,
+            u64::MAX,
+            retained,
+        )?;
         let mut file = namespace
             .open_owned(&Self::object_path(reference)?)?
             .ok_or_else(|| BundleError::Corrupt("missing owned object".into()))?;
         if file.metadata()?.len() != reference.byte_length {
             return Err(BundleError::Corrupt("owned byte length changed".into()));
         }
-        let mut counted = CountingReader {
-            inner: &mut file,
-            bytes: 0,
-            limit: reference.byte_length,
-        };
-        let digest = kinewright_media::sha256_reader(&mut counted);
-        let measured = counted.bytes;
-        let mut state = usage
-            .lock()
-            .map_err(|_| BundleError::Capacity("usage poisoned"))?;
-        state.verified_calls = state
-            .verified_calls
-            .checked_add(1)
-            .ok_or(BundleError::Capacity("verification calls"))?;
-        state.verified_bytes = state
-            .verified_bytes
-            .checked_add(measured)
-            .ok_or(BundleError::Capacity("verification bytes"))?;
-        drop(state);
-        if measured != reference.byte_length
-            || !digest.as_ref().is_ok_and(|h| h == &reference.sha256)
-        {
-            return Err(BundleError::Corrupt("owned identity changed".into()));
-        }
+        verify_owned_bytes(&mut file, reference, usage)?;
         file.seek(SeekFrom::Start(0))?;
         Ok(file)
     }
@@ -3351,7 +3175,7 @@ impl ProjectStore {
             .iter()
             .filter(|r| r.record_kind == RecordKind::RootCheckpoint)
         {
-            let _encoded = self.reserve(0, reference.byte_length, 0, false)?;
+            let _encoded = self.reserve(0, reference.byte_length, false)?;
             let bytes = crate::bundle_recovery::bounded_bytes(
                 self.open_verified(reference)?,
                 reference.byte_length,
@@ -3591,7 +3415,7 @@ impl ProjectStore {
         };
         serde_json::to_writer(&mut count, inventory)
             .map_err(|_| BundleError::Capacity("recovery inventory"))?;
-        let encoded = self.reserve(0, count.bytes, 0, false)?;
+        let encoded = self.reserve(0, count.bytes, false)?;
         let bytes = serde_json::to_vec(inventory).map_err(crate::bundle::encoding_error)?;
         let control = self.prepare_control_write(&bytes, false)?;
         Ok(PreparedInventoryWrite {
@@ -3696,6 +3520,12 @@ impl ProjectStore {
                     .verified_memo
                     .lock()
                     .map_err(|_| BundleError::Capacity("memo poisoned"))?,
+                self.inner
+                    .history_pool
+                    .lock()
+                    .map_err(|_| BundleError::Capacity("history pool poisoned"))?
+                    .as_ref()
+                    .ok_or(BundleError::HistoryBarrierInvariant)?,
             )
         })?;
         Ok(())
@@ -3727,7 +3557,7 @@ impl ProjectStore {
         }
         // The future control's metadata and its temporary physical file are
         // admitted together, so another reader cannot spend this headroom.
-        let reservation = self.reserve(length, length, 0, false)?;
+        let reservation = self.reserve(length, length, false)?;
         Ok(PreparedControlWrite {
             store: self.admission_lifetime(),
             root,
@@ -3844,26 +3674,16 @@ impl ProjectStore {
             );
         Ok(())
     }
-    /// The support fields of every record in the closure of `roots`. `sealed` is the
-    /// support of the history this publication just sealed, if
-    /// [`Self::admit_checked_history`] bound one: where the read would decode that object,
-    /// it verifies the object as before and records the given fields and charge, the
-    /// result that decode would produce, instead of reading and decoding the bytes again.
-    /// Every other object is read as before.
+    /// Collect support fields from the reachable records.
     pub(crate) fn support_fields(
         &self,
         roots: &[ObjectRef],
-        mut sealed: Option<SealedSupport>,
     ) -> Result<BTreeSet<String>, BundleError> {
         let mut fields = BTreeSet::new();
         for reference in self.closure(roots)? {
             if !matches!(
                 reference.record_kind,
-                RecordKind::Document
-                    | RecordKind::SpecialistBase
-                    | RecordKind::History
-                    | RecordKind::Lineage
-                    | RecordKind::RootCheckpoint
+                RecordKind::Document | RecordKind::SpecialistBase | RecordKind::RootCheckpoint
             ) {
                 continue;
             }
@@ -3897,14 +3717,9 @@ impl ProjectStore {
             if reference.byte_length > self.limits().control_bytes {
                 return Err(BundleError::Capacity("support record bytes"));
             }
-            let _encoded = self.reserve(0, reference.byte_length, 0, false)?;
+            let _encoded = self.reserve(0, reference.byte_length, false)?;
             let mut file = self.open_verified(&reference)?;
-            if let Some(own) = sealed.take_if(|own| own.reference == reference) {
-                // The bytes `open_verified` just checked are the bytes the commit check
-                // decoded: `admit_checked_history` bound the fields to them.
-                self.memoize_support_decode(&reference, own.decoded, own.fields.clone())?;
-                object_fields = own.fields;
-            } else {
+            {
                 let mut bytes = Vec::new();
                 bytes
                     .try_reserve_exact(
@@ -3943,7 +3758,7 @@ impl ProjectStore {
                     .ok_or(BundleError::Capacity("support field cache"))
             })?;
             fields.extend(object_fields.iter().cloned());
-            let cached = self.reserve(0, cache_charge, 0, false)?.hold(object_fields);
+            let cached = self.reserve(0, cache_charge, false)?.hold(object_fields);
             self.inner
                 .ledger
                 .lock()
@@ -4094,7 +3909,7 @@ impl ProjectStore {
             return Err(BundleError::Capacity("evidence snapshot"));
         }
         let _pin = self.pin(std::slice::from_ref(reference))?;
-        let charge = self.reserve_copy_read(0, reference.byte_length, 0, false, retained)?;
+        let charge = self.reserve_copy_read(0, reference.byte_length, false, retained)?;
         let file = self.open_copy_source(reference, retained)?;
         let bytes = crate::bundle_recovery::bounded_bytes(file, reference.byte_length)?;
         if bytes.len() as u64 != reference.byte_length {
@@ -4149,7 +3964,7 @@ impl ProjectStore {
         if roots.len() as u64 > self.limits().objects {
             return Err(BundleError::Capacity("borrowed source roots"));
         }
-        let _working = self.reserve_copy_read(0, self.usage()?.metadata_bytes, 0, false, true)?;
+        let _working = self.reserve_copy_read(0, self.usage()?.metadata_bytes, false, true)?;
         let roots_with_roles = roots
             .iter()
             .cloned()
@@ -4207,8 +4022,8 @@ impl ProjectStore {
             objects: ordered,
         };
         descriptor.validate(self.limits())?;
-        let metadata = self.reserve_copy_read(0, descriptor.metadata_bytes()?, 0, false, true)?;
-        let overlap = self.reserve_copy_read(extra_overlap_bytes, 0, 0, true, true)?;
+        let metadata = self.reserve_copy_read(0, descriptor.metadata_bytes()?, false, true)?;
+        let overlap = self.reserve_copy_read(extra_overlap_bytes, 0, true, true)?;
         Ok(RetainedBorrowedSource {
             descriptor,
             reads: admission,
@@ -4216,7 +4031,6 @@ impl ProjectStore {
             overlap: Mutex::new(BorrowedSnapshotOverlap {
                 reservation: overlap,
                 snapshot: None,
-                history: None,
             }),
             accepting_reads: std::sync::atomic::AtomicBool::new(true),
             reader: Mutex::new(None),
@@ -4238,7 +4052,7 @@ impl ProjectStore {
                 "borrowed destination identity differs".into(),
             ));
         }
-        let _working = self.reserve(0, source.metadata_bytes()?, 0, false)?;
+        let _working = self.reserve(0, source.metadata_bytes()?, false)?;
         for object in &source.objects {
             let mut stream = crate::source_boundary::BorrowedObjectReader::new(
                 source,
@@ -4267,16 +4081,15 @@ impl ProjectStore {
         &self,
         bytes: u64,
         decoded: u64,
-        history: u64,
         copy: bool,
     ) -> Result<StorageReservation, BundleError> {
-        self.reserve_copy_read(bytes, decoded, history, copy, false)
+        self.reserve_copy_read(bytes, decoded, copy, false)
     }
     pub(crate) fn reserve_copy_read(
         &self,
         bytes: u64,
         decoded: u64,
-        history: u64,
+
         copy: bool,
         cleanup_only: bool,
     ) -> Result<StorageReservation, BundleError> {
@@ -4299,7 +4112,6 @@ impl ProjectStore {
             },
             bytes,
             decoded,
-            history,
             copy,
             free,
             cleanup_only,
@@ -4334,7 +4146,7 @@ impl ProjectStore {
         if !cleanup_only {
             self.with_namespace(|n| n.verify())?;
         }
-        let overlap = self.reserve_copy_read(bytes, 0, 0, true, cleanup_only)?;
+        let overlap = self.reserve_copy_read(bytes, 0, true, cleanup_only)?;
         let pin = self.pin(roots)?;
         let mut ledger = self
             .inner
@@ -4386,7 +4198,6 @@ impl ProjectStore {
         limits: &StorageLimits,
     ) -> Result<(), BundleError> {
         let cap = match reference.record_kind {
-            RecordKind::History => limits.branch_history_bytes,
             RecordKind::RootCheckpoint | RecordKind::OwnedEvidence => limits.control_bytes,
             _ if reference.record_kind.is_owned_bytes() => return Ok(()),
             _ => limits.decoded_record_bytes,
@@ -4397,54 +4208,33 @@ impl ProjectStore {
         if reference.record_kind == RecordKind::OwnedEvidence {
             return Ok(());
         }
-        let _encoded = self.reserve_copy_read(0, reference.byte_length, 0, false, true)?;
+        let _encoded = self.reserve_copy_read(0, reference.byte_length, false, true)?;
         let bytes = crate::bundle_recovery::bounded_bytes(
             self.open_copy_source(reference, true)?,
             reference.byte_length,
         )?;
         let _decoded =
-            self.reserve_copy_read(0, self.limits().decoded_record_bytes, 0, false, true)?;
-        let charge = preflight_record(&bytes, limits)?;
-        if reference.record_kind == RecordKind::History && charge > limits.branch_history_bytes {
-            return Err(BundleError::Capacity("rescue decoded branch history"));
-        }
-        if reference.record_kind == RecordKind::History {
-            self.replay_gate().with(|| -> Result<(), BundleError> {
-                let record: crate::history_record::HistoryRecord =
-                    serde_json::from_slice(&bytes)
-                        .map_err(|error| BundleError::Corrupt(error.to_string()))?;
-                record.validate(limits)?;
-                let baseline =
-                    self.read_copy_record::<kinewright_core::Document>(&record.baseline_ref, true)?;
-                let current =
-                    self.read_copy_record::<kinewright_core::Document>(&record.current_ref, true)?;
-                let window = record
-                    .role
-                    .replay_limit(limits)
-                    .min(self.limits().decoded_record_bytes);
-                // This proves the destination's profile through the retained
-                // source's physical read ledger. The source's edit cap must not
-                // replace the explicitly selected destination admission policy.
-                let _replay = self.reserve_copy_read(
-                    0,
-                    window,
-                    if record.role == crate::history_record::HistoryRole::Ordinary {
-                        window
-                    } else {
-                        0
-                    },
-                    false,
-                    true,
-                )?;
-                let (history, _) = record
-                    .journal
-                    .resolve_with_budget(Arc::new(baseline.take()), &current, window)
-                    .map_err(crate::bundle::history_error)?;
-                crate::history_size::check_retained_history(&history, record.role, limits)?;
-                Ok(())
-            })??;
-        }
+            self.reserve_copy_read(0, self.limits().decoded_record_bytes, false, true)?;
+        let _charge = if matches!(
+            reference.record_kind,
+            RecordKind::Document | RecordKind::RootCheckpoint
+        ) {
+            preflight_document_value(&bytes, limits)?
+        } else {
+            preflight_record(&bytes, limits)?
+        };
         Ok(())
+    }
+    pub(crate) fn pin_rescue_capture(
+        &self,
+        reference: &ObjectRef,
+    ) -> Result<StorePin, BundleError> {
+        let roots = std::slice::from_ref(reference);
+        let pin = self.pin(roots)?;
+        for reference in self.closure_with_inventory(roots, false)? {
+            self.open_copy_source(&reference, true)?;
+        }
+        Ok(pin)
     }
     pub(crate) fn copy_rescue_graph(
         &mut self,
@@ -4461,7 +4251,7 @@ impl ProjectStore {
         inventory: bool,
     ) -> Result<(), BundleError> {
         let _working =
-            source.reserve_copy_read(0, source.usage()?.metadata_bytes, 0, false, cleanup_only)?;
+            source.reserve_copy_read(0, source.usage()?.metadata_bytes, false, cleanup_only)?;
         let selected = source.closure_with_inventory(roots, inventory)?;
         let manifest = source.manifest()?;
         let mut remaining: BTreeMap<_, _> = selected
@@ -4489,6 +4279,12 @@ impl ProjectStore {
                     .remove(&hash)
                     .ok_or_else(|| BundleError::Corrupt("copy selection disappeared".into()))?;
                 let dependencies = &manifest.dependencies[&hash];
+                let proof = source
+                    .inner
+                    .verified_memo
+                    .lock()
+                    .map_err(|_| BundleError::Capacity("memo poisoned"))?
+                    .owner_proof(&reference);
                 let mut file = source.open_copy_source(&reference, cleanup_only)?;
                 #[cfg(any(test, feature = "test-util"))]
                 crate::io_observer::check_failure(
@@ -4503,6 +4299,14 @@ impl ProjectStore {
                         .map_err(|_| BundleError::Capacity("ledger poisoned"))?
                         .inventory_dependencies
                         .insert(hash.clone(), inventory.clone());
+                }
+                // Content-addressed bytes and every dependency were verified
+                // and copied above. Carry only the fixed semantic proof, never
+                // a decoded history or a source namespace authority.
+                if reference.record_kind == RecordKind::OperationHistory
+                    && let Some(proof) = proof
+                {
+                    self.remember_owner(reference, proof)?;
                 }
                 copied.insert(hash);
                 drop(object);
@@ -4715,7 +4519,6 @@ impl ProjectStore {
                 )
                 .is_none_or(|n| n > limits.metadata_bytes)
             || usage.decoder_bytes > limits.decoder_bytes
-            || usage.live_history_bytes > limits.live_history_bytes
         {
             return Err(BundleError::Capacity("destination quota"));
         }
@@ -4785,6 +4588,117 @@ impl ProjectStore {
         // the exact prior inventory that rollback just restored.
         ledger.can_collect = false;
         result.map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod verified_read_tests {
+    use super::*;
+
+    fn object_reference(bytes: &[u8]) -> ObjectRef {
+        ObjectRef {
+            sha256: kinewright_media::sha256_bytes(bytes),
+            byte_length: bytes.len() as u64,
+            record_kind: RecordKind::OwnedData,
+        }
+    }
+
+    #[test]
+    fn incomplete_verification_preserves_read_error_and_counts_prefix() {
+        struct FailingRead;
+        impl Read for FailingRead {
+            fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("mid-object read failed"))
+            }
+        }
+        let reference = object_reference(b"complete");
+        let mut reader = b"com".as_slice().chain(FailingRead);
+        let usage = Mutex::new(StorageUsage::default());
+        let error = verify_owned_bytes(&mut reader, &reference, &usage).unwrap_err();
+        assert!(
+            matches!(&error, BundleError::Io(cause) if cause.to_string() == "mid-object read failed"),
+            "{error:?}"
+        );
+        let usage = usage.into_inner().unwrap();
+        assert_eq!((usage.verified_calls, usage.verified_bytes), (1, 3));
+    }
+
+    #[test]
+    fn complete_verification_reports_length_and_digest_mismatches() {
+        let reference = object_reference(b"complete");
+        let usage = Mutex::new(StorageUsage::default());
+        for mut bytes in [b"com".as_slice(), b"modified".as_slice()] {
+            assert!(matches!(
+                verify_owned_bytes(&mut bytes, &reference, &usage),
+                Err(BundleError::Corrupt(reason)) if reason == "owned identity changed"
+            ));
+        }
+        let usage = usage.into_inner().unwrap();
+        assert_eq!((usage.verified_calls, usage.verified_bytes), (2, 11));
+    }
+
+    #[cfg(target_os = "linux")]
+    mod stored_objects {
+        use super::*;
+        use crate::bundle_copy::SessionStore;
+        use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+
+        fn admitted_object() -> (TempDirectory, SessionStore, SealedObject) {
+            let temp = TempDirectory::new_in(&workspace_target_dir(), "owned-read-size");
+            let mut session = SessionStore::create(temp.root(), StorageLimits::default()).unwrap();
+            let bytes = b"complete";
+            let sealed = session
+                .store_mut()
+                .admit_blob(&mut bytes.as_slice(), &object_reference(bytes), &[])
+                .unwrap();
+            (temp, session, sealed)
+        }
+
+        #[test]
+        fn verify_rejects_appended_owned_byte_as_corrupt() {
+            let (_temp, session, sealed) = admitted_object();
+            let store = session.store();
+            store.verify(&sealed.reference).unwrap();
+            let root = store.resolved_root().unwrap();
+            let object = root.with_extension("kinewright-assets").join(
+                ProjectStore::object_path(&sealed.reference)
+                    .unwrap()
+                    .as_path(),
+            );
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(object)
+                .unwrap()
+                .write_all(b"!")
+                .unwrap();
+            let error = store.verify(&sealed.reference).unwrap_err();
+            assert!(
+                matches!(&error, BundleError::Corrupt(reason) if reason == "owned identity changed"),
+                "{error:?}"
+            );
+        }
+
+        #[test]
+        fn duplicate_admission_rejects_an_extra_byte_as_corrupt() {
+            struct UnexpectedTail;
+            impl Read for UnexpectedTail {
+                fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+                    panic!("duplicate admission kept reading after exceeding the length limit")
+                }
+            }
+            let (_temp, mut session, sealed) = admitted_object();
+            let mut longer = b"complete!".as_slice().chain(UnexpectedTail);
+            let error = session
+                .store_mut()
+                .admit_blob(&mut longer, &sealed.reference, &[])
+                .err()
+                .expect("over-long duplicate must be refused");
+            assert!(
+                matches!(&error, BundleError::Corrupt(reason) if reason == "duplicate input differs from owned bytes"),
+                "{error:?}"
+            );
+            session.store().verify(&sealed.reference).unwrap();
+        }
     }
 }
 
@@ -4933,8 +4847,4 @@ impl ProjectStore {
     }
 }
 
-impl ProjectStore {
-    pub(crate) fn replay_gate(&self) -> Arc<crate::history_record::ReplayGate> {
-        Arc::clone(&self.inner.replay_gate)
-    }
-}
+impl ProjectStore {}

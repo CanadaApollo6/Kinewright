@@ -57,7 +57,7 @@ impl Drop for OwnedFixture {
 fn fixture() -> OwnedFixture {
     let root = TempDirectory::new_in(&workspace_target_dir(), "c2-fix2-owned");
     let [red, blue] = kinewright_project::c0_fixtures::build_c0_fixture_pair(root.root()).unwrap();
-    let locator = red.history.document.media_pool[0].path.clone();
+    let locator = red.history.history().document.media_pool[0].path.clone();
     assert!(
         !locator.exists(),
         "the generator retired its external source"
@@ -273,8 +273,14 @@ fn c2_r1_file_open_before_activation_never_decodes_the_locator() {
 #[test]
 fn c2_r2_uncached_owned_colour_qc_keeps_its_certified_inputs() {
     let mut fixture = fixture();
-    fixture.app.focused_mut().ja1 =
-        Some(crate::ja1_attachment::Ja1Attachment::open(&fixture.path).unwrap());
+    fixture.app.focused_mut().ja1 = Some(
+        crate::ja1_attachment::Ja1Attachment::open_document_view(
+            &fixture.path,
+            &fixture.app.focused().core,
+            &fixture.app.focused().document,
+        )
+        .unwrap(),
+    );
     fixture.app.focused_mut().install_ja1_view();
     let ctx = egui::Context::default();
     let deadline = Instant::now() + Duration::from_secs(30);

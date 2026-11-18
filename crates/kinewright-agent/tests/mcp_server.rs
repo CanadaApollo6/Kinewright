@@ -3,14 +3,15 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use kinewright_agent::McpServer;
 use kinewright_core::{
-    Analysis, AssetId, Clip, ClipId, Command, Core, Document, Effect, EffectId, Event, Marker,
-    MarkerId, MediaAsset, MediaError, MediaEvent, MediaKind, ParamValue, Playback, Query,
-    QueryResult, Rational, TimeCode, Track, TrackId, TrackKind,
+    Analysis, AssetId, Clip, ClipId, Command, Document, Effect, EffectId, Event, Marker, MarkerId,
+    MediaAsset, MediaError, MediaEvent, MediaKind, ParamValue, Playback, Query, QueryResult,
+    Rational, TimeCode, Track, TrackId, TrackKind,
 };
 use kinewright_media::{
     FfmpegMediaEngine,
     test_support::{GeneratedMedia, single_clip_document},
 };
+use kinewright_project::operation_actor::Core;
 use rmcp::{
     RoleClient, ServiceExt as _,
     model::{CallToolRequest, CallToolRequestParams, CallToolResult, ClientRequest},
@@ -21,7 +22,7 @@ use serde_json::json;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn compact_runtime_applies_a_plan_and_rejects_direct_internal_tools() {
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
@@ -129,7 +130,7 @@ async fn compact_runtime_applies_a_plan_and_rejects_direct_internal_tools() {
 #[tokio::test(flavor = "multi_thread")]
 async fn edit_plans_cross_the_real_mcp_server_atomically_with_one_confirmation() {
     let original = edit_plan_document();
-    let core = Core::spawn(original.clone()).unwrap();
+    let core = Core::for_test(original.clone()).unwrap();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let confirmations = server.confirmations();
@@ -216,7 +217,7 @@ async fn ripple_marker_position_renders_through_the_real_mcp_server() {
         label: "Review cut".to_owned(),
         color_token: 0,
     });
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
@@ -276,7 +277,7 @@ async fn a_cancelled_tool_call_cancels_its_waiting_frame_proof() {
     let generated = GeneratedMedia::ffmpeg("pf1-cancel", &arguments, "mp4");
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
-    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let core = Core::for_test(single_clip_document(asset)).unwrap();
     let server = McpServer::start(core, media.clone(), media.clone()).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -363,7 +364,7 @@ async fn visual_proof_and_analysis_lifecycle_work_on_generated_media() {
         ]),
         keyframes: std::collections::BTreeMap::new(),
     });
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core, media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -554,7 +555,7 @@ async fn cc1_color_context_plan_and_commit_advance_the_revision_exactly_once() {
     let generated = managed_color_media();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
-    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let core = Core::for_test(single_clip_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -646,7 +647,7 @@ async fn mo1_plan_motion_push_in_applies() {
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let duration = asset.duration.0;
-    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let core = Core::for_test(single_clip_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -716,7 +717,7 @@ async fn cc5_secondary_plan_and_commit_land_the_matte_parameters() {
     let generated = managed_color_media();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
-    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let core = Core::for_test(single_clip_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -995,7 +996,7 @@ async fn cc3_color_wheels_plan_and_commit_create_the_ordered_node() {
     let generated = managed_color_media();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
-    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let core = Core::for_test(single_clip_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -1153,7 +1154,7 @@ async fn cc4_creative_look_plan_and_commit_create_the_ordered_node() {
     }];
     document.validate().expect("the seeded CC4 stack is valid");
 
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     server.set_project_path(Some(std::env::temp_dir().join(format!(
         "kinewright-cc4-live-{}.kinewright",
@@ -1317,7 +1318,7 @@ async fn cc4_convert_legacy_look_submits_the_batch_the_evidence_publishes() {
         .validate()
         .expect("the seeded legacy stack is valid");
 
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -1463,7 +1464,7 @@ async fn cc4_branch_server_with_the_project_path_handle_resolves_imported_availa
     document.lut_assets = vec![imported.into_lut_asset(kinewright_core::LutAssetId(1))];
     document.validate().expect("the imported record is valid");
 
-    let blind_core = Core::spawn(document.clone()).unwrap();
+    let blind_core = Core::for_test(document.clone()).unwrap();
     let blind = McpServer::start_isolated(blind_core, media.clone(), media.clone()).unwrap();
     let blind_client =
         ().serve(StreamableHttpClientTransport::from_uri(blind.endpoint()))
@@ -1481,7 +1482,7 @@ async fn cc4_branch_server_with_the_project_path_handle_resolves_imported_availa
 
     // Sharing the session's handle resolves it.
     let handle = Arc::new(std::sync::RwLock::new(Some(project.clone())));
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start_isolated_with_project_path(
         core,
         media.clone(),
@@ -1552,7 +1553,7 @@ async fn cc4_render_color_proof_reports_the_unpublished_lut_asset_from_the_real_
         .validate()
         .expect("the CC4 stack is a valid document");
 
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core, media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -1606,7 +1607,7 @@ async fn cc2_scope_tools_are_read_only_over_the_live_endpoint() {
     let generated = managed_color_media();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
-    let core = Core::spawn(two_shot_color_document(&asset)).unwrap();
+    let core = Core::for_test(two_shot_color_document(&asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -1701,7 +1702,7 @@ async fn cc6_get_color_qc_is_evidence_only_and_revision_gated() {
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
     let duration = asset.duration.0;
-    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let core = Core::for_test(single_clip_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -1970,7 +1971,7 @@ async fn cc6_video_scopes_v2_points_at_get_color_qc_instead_of_a_fabricated_zero
     let generated = managed_color_media();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
-    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let core = Core::for_test(single_clip_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -2583,7 +2584,7 @@ async fn cc7_prepare_commit_and_compare(
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core, media.clone(), media).unwrap();
     let client =
@@ -2767,7 +2768,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
 /// rendering — and a neutral set removes both the entry and the suffix.
 #[tokio::test(flavor = "multi_thread")]
 async fn au1_set_track_mix_round_trips_through_edit_plans_and_state() {
-    let core = Core::spawn(edit_plan_document()).unwrap();
+    let core = Core::for_test(edit_plan_document()).unwrap();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
@@ -2911,7 +2912,7 @@ async fn au1_get_audio_levels_measures_the_real_mix() {
         duration > 2,
         "the fixture needs a measurable span: {duration}"
     );
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -3068,7 +3069,7 @@ async fn au1_get_audio_levels_measures_the_real_mix() {
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn au2_set_audio_master_and_pan_law_round_trip_through_edit_plans_and_state() {
-    let core = Core::spawn(edit_plan_document()).unwrap();
+    let core = Core::for_test(edit_plan_document()).unwrap();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
@@ -3242,7 +3243,7 @@ fn rendered_curve(text: &str, key: &str) -> String {
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn au4_set_clip_gain_envelope_and_track_automation_round_trip_through_edit_plans_and_state() {
-    let core = Core::spawn(edit_plan_document()).unwrap();
+    let core = Core::for_test(edit_plan_document()).unwrap();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
@@ -3431,7 +3432,7 @@ async fn au4_set_clip_gain_envelope_and_track_automation_round_trip_through_edit
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn au4_audio_bus_and_master_fader_curves_round_trip_and_clear_when_omitted() {
-    let core = Core::spawn(edit_plan_document()).unwrap();
+    let core = Core::for_test(edit_plan_document()).unwrap();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
@@ -3586,7 +3587,7 @@ async fn au4_get_audio_levels_reports_both_track_automation_curves() {
     let asset = media.probe(generated.path()).unwrap();
     let document = single_clip_document(asset);
     let duration = document.duration.0;
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -3726,7 +3727,7 @@ async fn au2_get_audio_spectrum_measures_the_real_mix() {
         duration > 30,
         "the fixture must exceed the 512 ms Welch minimum: {duration}"
     );
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -4010,7 +4011,7 @@ async fn au3_get_audio_qc_is_evidence_only_and_revision_gated() {
     let document = single_clip_document(asset);
     let duration = document.duration.0;
     assert_eq!(duration, 60, "the fixture is exactly 60 frames at 30 fps");
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -4266,7 +4267,7 @@ async fn au3_get_audio_qc_measures_the_real_mix() {
     let document = single_clip_document(asset);
     let duration = document.duration.0;
     assert_eq!(duration, 60, "the fixture is exactly 60 frames at 30 fps");
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -4528,7 +4529,7 @@ async fn au5_get_audio_repair_is_evidence_only_and_revision_gated() {
     let document = single_clip_document(asset);
     let duration = document.duration.0;
     assert_eq!(duration, 60, "the fixture is exactly 60 frames at 30 fps");
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -4839,7 +4840,7 @@ async fn au3_plan_audio_normalization_converges_through_the_real_engine() {
     let generated = au3_sine_media();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
-    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let core = Core::for_test(single_clip_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -4975,7 +4976,7 @@ async fn au3_plan_audio_normalization_engages_the_true_peak_limiter_on_hot_mater
     let generated = au3_hot_sine_media();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
-    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let core = Core::for_test(single_clip_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -5221,7 +5222,7 @@ async fn au3_queue_export_normalizes_and_verifies_audio() {
     std::fs::create_dir_all(&directory).unwrap();
     let output = directory.join("normalized.mp4");
 
-    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let core = Core::for_test(single_clip_document(asset)).unwrap();
     let server =
         McpServer::start_with_exporter(core.clone(), media.clone(), media.clone(), media.clone())
             .unwrap();
@@ -5394,7 +5395,7 @@ async fn cc7_a_mixed_camera_match_retains_the_reference_and_lands_the_canonical_
         cc7_canonical_document(&base, &cc7_canonical_operations(Cc7Scenario::MixedCamera)),
         CC7_CANDIDATE_CLIP_ID,
     );
-    let core = Core::spawn(base.clone()).unwrap();
+    let core = Core::for_test(base.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -5681,7 +5682,7 @@ async fn cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning() {
     let recoverable = media.probe(recoverable_media.path()).unwrap();
     let candidate_start = reference.duration.0;
     let base = cc7_two_clip_document(reference, recoverable);
-    let core = Core::spawn(base.clone()).unwrap();
+    let core = Core::for_test(base.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media.clone()).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -5796,7 +5797,7 @@ async fn cc7_b_wrong_balance_publishes_the_clamp_and_the_range_warning() {
         cc7_canonical_document(&base, &cc7_canonical_operations(Cc7Scenario::WhiteBalance)),
         CC7_CANDIDATE_CLIP_ID,
     );
-    let core = Core::spawn(base.clone()).unwrap();
+    let core = Core::for_test(base.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -6074,7 +6075,7 @@ async fn cc7_c_log_like_input_is_normalised_by_an_imported_technical_lut() {
         &base,
         &cc7_lut_backed_canonical_operations(Cc7Scenario::LogLike, asset_record),
     );
-    let core = Core::spawn(base.clone()).unwrap();
+    let core = Core::for_test(base.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let approvals = cc7_approve_confirmations(server.confirmations(), "import_lut_asset");
     let client =
@@ -6308,7 +6309,7 @@ async fn cc7_d_product_qualifier_selects_its_patch_and_leaves_skin_alone() {
         &base,
         &cc7_canonical_operations(Cc7Scenario::ProductAndSkin),
     );
-    let core = Core::spawn(base.clone()).unwrap();
+    let core = Core::for_test(base.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -6612,7 +6613,7 @@ async fn cc7_e_creative_look_bypass_matches_absent_and_reports_its_gamut() {
     let expected =
         cc7_canonical_document(&base, &cc7_canonical_operations(Cc7Scenario::CreativeLook));
 
-    let core = Core::spawn(base.clone()).unwrap();
+    let core = Core::for_test(base.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     server.set_project_path(Some(project.clone()));
     let approvals = cc7_approve_confirmations(server.confirmations(), "import_lut_asset");
@@ -6937,7 +6938,7 @@ async fn cc7_f_tracked_secondary_drops_only_the_occluded_samples() {
         &base,
         &cc7_canonical_operations(Cc7Scenario::TrackedSecondary),
     );
-    let core = Core::spawn(base.clone()).unwrap();
+    let core = Core::for_test(base.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -7432,7 +7433,7 @@ async fn cc7_f2_the_default_floor_does_not_refuse() {
     let generated = cc7_tracked_source();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(generated.path()).unwrap();
-    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let core = Core::for_test(single_clip_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -7629,7 +7630,7 @@ async fn au4_plan_audio_ducking_converges_through_the_real_engine() {
             blend_mode: kinewright_core::BlendMode::Normal,
         }],
     });
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -7788,7 +7789,7 @@ async fn au4_plan_clip_fades_measures_the_real_mix_and_commits_set_clip_audio() 
     // An editor-set fade-in the planner must not overwrite.
     document.tracks[0].clips[0].audio_fade_in_frames = TimeCode(7);
     document.tracks[0].clips[0].audio_gain_tenth_db = -35;
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -8024,7 +8025,7 @@ async fn au5_plan_dialogue_repair_moves_the_snr_through_the_real_engine() {
     let asset = media.probe(noisy.path()).unwrap();
     assert_eq!(asset.kind, MediaKind::Audio);
     assert_eq!(asset.duration, TimeCode(90), "3 s at the 30 fps audio grid");
-    let core = Core::spawn(au5_audio_document(asset)).unwrap();
+    let core = Core::for_test(au5_audio_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media.clone()).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -8121,7 +8122,7 @@ async fn au5_plan_dialogue_repair_moves_the_snr_through_the_real_engine() {
     let clean = au5_clean_media();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let asset = media.probe(clean.path()).unwrap();
-    let core = Core::spawn(au5_audio_document(asset)).unwrap();
+    let core = Core::for_test(au5_audio_document(asset)).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -8266,7 +8267,7 @@ async fn au5_the_repair_and_normalization_planners_agree_in_either_order() {
         let generated = au5_repair_media();
         let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
         let asset = media.probe(generated.path()).unwrap();
-        let core = Core::spawn(au5_audio_document(asset)).unwrap();
+        let core = Core::for_test(au5_audio_document(asset)).unwrap();
         let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
         let client =
             ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -8466,7 +8467,7 @@ async fn au5_capture_room_tone_and_fill_a_gap_through_the_real_store() {
         duration: TimeCode(90),
         ..Document::default()
     };
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let project = kinewright_media::test_support::TempDirectory::new("au5-room-tone");
     let handle = Arc::new(std::sync::RwLock::new(Some(
         project.path("show.kinewright"),
@@ -8737,7 +8738,7 @@ async fn au5_plan_room_tone_fill_commits_a_covering_tile_at_25_fps() {
         "R96: source 0..8 is exact in frames and short in samples, so phase 0 is not the answer"
     );
 
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -8883,7 +8884,7 @@ async fn au5_plan_room_tone_fill_commits_a_covering_tile_at_29_97_fps() {
     )
     .expect("core's widened phase window reaches an NTSC covering range");
 
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -9012,7 +9013,7 @@ async fn au5_plan_room_tone_fill_tiles_a_1200_frame_asset_at_29_97_fps() {
         Some(vec![TimeCode(30)..TimeCode(40)])
     );
 
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -9243,7 +9244,7 @@ async fn au6_decide_capture(broker: kinewright_agent::ConfirmationBroker, approv
 async fn au6_a1_the_interview_ducks_the_bed_and_matches_the_voices() {
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Interview);
-    let core = Core::spawn(scene.document.clone()).unwrap();
+    let core = Core::for_test(scene.document.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -9332,7 +9333,7 @@ async fn au6_a1_the_interview_ducks_the_bed_and_matches_the_voices() {
 async fn au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride() {
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Podcast);
-    let core = Core::spawn(scene.document.clone()).unwrap();
+    let core = Core::for_test(scene.document.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -9457,7 +9458,7 @@ async fn au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride() {
 async fn au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled() {
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let scene = au6_agent_scene(media.as_ref(), Au6Scenario::LocationDialogue);
-    let core = Core::spawn(scene.document.clone()).unwrap();
+    let core = Core::for_test(scene.document.clone()).unwrap();
     let project = kinewright_media::test_support::TempDirectory::new("au6-a3");
     let handle = Arc::new(std::sync::RwLock::new(Some(
         project.path("show.kinewright"),
@@ -9687,7 +9688,7 @@ async fn au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled() {
     client.cancel().await.unwrap();
     server.shutdown();
 
-    let unsaved = Core::spawn(scene.document.clone()).unwrap();
+    let unsaved = Core::for_test(scene.document.clone()).unwrap();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(unsaved, media.clone(), media).unwrap();
     let client =
@@ -9722,7 +9723,7 @@ async fn au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled() {
 async fn au6_a4_the_multicam_cuts_leave_the_master_audio_untouched() {
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Multicam);
-    let core = Core::spawn(scene.document.clone()).unwrap();
+    let core = Core::for_test(scene.document.clone()).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -9825,7 +9826,7 @@ async fn au6_queue_and_poll(
 async fn au6_a5a_the_delivery_lands_on_the_ebu_r128_target() {
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Interview);
-    let core = Core::spawn(scene.document.clone()).unwrap();
+    let core = Core::for_test(scene.document.clone()).unwrap();
     let server =
         McpServer::start_with_exporter(core.clone(), media.clone(), media.clone(), media.clone())
             .unwrap();
@@ -9862,7 +9863,7 @@ async fn au6_a5a_the_delivery_lands_on_the_ebu_r128_target() {
 async fn au6_a5b_the_streaming_target_is_reachable_by_the_agent() {
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Interview);
-    let core = Core::spawn(scene.document.clone()).unwrap();
+    let core = Core::for_test(scene.document.clone()).unwrap();
     let server =
         McpServer::start_with_exporter(core.clone(), media.clone(), media.clone(), media.clone())
             .unwrap();
@@ -9954,7 +9955,7 @@ async fn au6_a5b_the_streaming_target_is_reachable_by_the_agent() {
 async fn au6_b_a_clip_whose_head_window_is_silent_gets_no_fade() {
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Podcast);
-    let core = Core::spawn(scene.document).unwrap();
+    let core = Core::for_test(scene.document).unwrap();
     let server = McpServer::start(core, media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -10174,7 +10175,7 @@ async fn in1_the_untagged_source_opens_one_incident_and_the_tagged_twin_opens_no
         in1_untagged_mp4_probe(),
         "the fixture must probe IN1 §3 rule 5's tuple"
     );
-    let core = Core::spawn(document.clone()).unwrap();
+    let core = Core::for_test(document.clone()).unwrap();
     let server = McpServer::start(core, media.clone(), media.clone()).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -10291,7 +10292,7 @@ async fn in1_the_untagged_source_opens_one_incident_and_the_tagged_twin_opens_no
 async fn in1_the_agent_applies_the_recovery_and_records_the_outcome() {
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -10357,7 +10358,7 @@ async fn in1_the_agent_applies_the_recovery_and_records_the_outcome() {
 async fn in1_a_stale_resolve_is_refused_and_changes_nothing() {
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -10412,7 +10413,7 @@ async fn in1_a_stale_resolve_is_refused_and_changes_nothing() {
 async fn in1_the_revert_restores_the_probed_description_and_clears_the_record() {
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -10480,7 +10481,7 @@ async fn in1_the_revert_restores_the_probed_description_and_clears_the_record() 
 async fn in1_a_wrong_outcome_claim_is_refused_by_code() {
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -10562,7 +10563,7 @@ async fn in1_a_wrong_outcome_claim_is_refused_by_code() {
 async fn in1_neither_capability_is_callable_as_a_tool() {
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core, media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -10623,7 +10624,7 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
 async fn mo2_the_served_quad_does_not_move_for_the_twenty_third_measurement() {
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
-    let core = Core::spawn(document).unwrap();
+    let core = Core::for_test(document).unwrap();
     let server = McpServer::start(core, media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
@@ -10746,7 +10747,7 @@ async fn in2_the_scripted_driver_and_the_pump_are_public_surface() {
     };
     use kinewright_core::{AgentDriver, SessionConfig};
 
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core, media.clone(), media).unwrap();
 
@@ -10810,7 +10811,7 @@ async fn in2_the_scripted_driver_and_the_pump_are_public_surface() {
 /// server's log, read back through the real `invoke_capability` round trip.
 #[tokio::test(flavor = "multi_thread")]
 async fn in2b_get_incidents_returns_the_observed_name() {
-    let core = Core::spawn(Document::default()).unwrap();
+    let core = Core::for_test(Document::default()).unwrap();
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
     let server = McpServer::start(core.clone(), media.clone(), media).unwrap();
     let client =
@@ -10928,7 +10929,7 @@ fn mo2_solo_stack(mut document: Document, clips: Vec<Clip>) -> Document {
 
 async fn mo2_solo_start(document: Document) -> (McpServer, RunningService<RoleClient, ()>) {
     let media = Arc::new(FfmpegMediaEngine::legacy_fixture().unwrap());
-    let server = McpServer::start(Core::spawn(document).unwrap(), media.clone(), media).unwrap();
+    let server = McpServer::start(Core::for_test(document).unwrap(), media.clone(), media).unwrap();
     let client =
         ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
             .await
@@ -12068,7 +12069,7 @@ mod mo2_solo_review {
             noise: true,
             ..ProofDouble::default()
         });
-        let core = Core::spawn(doc(440, 440, 1, false)).unwrap();
+        let core = Core::for_test(doc(440, 440, 1, false)).unwrap();
         let server = McpServer::start(core, media, proof).unwrap();
         let raw = RawSession::open(&server).await;
         let arguments = json!({"expected_revision": 0, "clip_id": 1, "full_res": true});
@@ -12230,7 +12231,7 @@ mod mo2_solo_review {
             panic_len: 2000,
             ..ProofDouble::default()
         });
-        let core = Core::spawn(doc(2, 2, 1, false)).unwrap();
+        let core = Core::for_test(doc(2, 2, 1, false)).unwrap();
         let server = McpServer::start(core, media, proof).unwrap();
         let raw = RawSession::open(&server).await;
         let arguments = outcome_arguments("success");
@@ -12262,7 +12263,7 @@ mod mo2_solo_review {
             panic_len: 2000,
             ..ProofDouble::default()
         });
-        let core = Core::spawn(doc(2, 2, 1, false)).unwrap();
+        let core = Core::for_test(doc(2, 2, 1, false)).unwrap();
         let server = McpServer::start(core, media, proof).unwrap();
         let raw = RawSession::open(&server).await;
         let arguments = json!({"expected_revision": 0, "path": "/nonexistent/x.mp4"});

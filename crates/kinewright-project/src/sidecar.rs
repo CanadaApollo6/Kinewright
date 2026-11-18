@@ -522,12 +522,10 @@ fn write_batch(
             let authority: &crate::LockfileHandle = if let Some(authority) = &job.authority {
                 authority.as_ref()
             } else {
-                acquired = crate::lockfile::acquire_gui_project_lock(
-                    &path.with_extension("kinewright"),
-                    Path::new(""), // GUI lock acquisition does not scan recovery journals.
-                )
-                .map_err(io::Error::other)?
-                .handle;
+                acquired =
+                    crate::lockfile::acquire_gui_project_lock(&path.with_extension("kinewright"))
+                        .map_err(io::Error::other)?
+                        .handle;
                 &acquired
             };
             authority.verify().map_err(io::Error::other)?;
@@ -840,7 +838,7 @@ mod writer_authority_tests {
             crate::serialize_project_document(&kinewright_core::Document::default()).unwrap(),
         )
         .unwrap();
-        let owner = crate::lockfile::acquire_gui_project_lock(&project, temp.root()).unwrap();
+        let owner = crate::lockfile::acquire_gui_project_lock(&project).unwrap();
         let writer = SidecarWriter::new();
         let (arrived, waiting) = crossbeam_channel::bounded(1);
         let (release, released) = crossbeam_channel::bounded(1);
@@ -855,7 +853,7 @@ mod writer_authority_tests {
         waiting
             .recv_timeout(std::time::Duration::from_secs(30))
             .unwrap();
-        let competitor = crate::lockfile::acquire_gui_project_lock(&project, temp.root());
+        let competitor = crate::lockfile::acquire_gui_project_lock(&project);
         release.send(()).unwrap();
         drop(writer);
         assert!(
@@ -863,7 +861,7 @@ mod writer_authority_tests {
             "the queued job owns the actual lock after its originating session drops"
         );
         assert_eq!(std::fs::read(&sidecar).unwrap(), bytes);
-        crate::lockfile::acquire_gui_project_lock(&project, temp.root())
+        crate::lockfile::acquire_gui_project_lock(&project)
             .unwrap()
             .handle
             .release()
