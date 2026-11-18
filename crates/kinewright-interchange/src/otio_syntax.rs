@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::{MAX_ITEMS, MAX_MEDIA, MAX_TREE_DEPTH, Refusal, parse};
+use crate::{MAX_ITEMS, MAX_TREE_DEPTH, Refusal, parse};
 
 enum PathPart<'a> {
     Object(Option<Cow<'a, str>>),
@@ -30,7 +30,6 @@ fn scan(bytes: &[u8], stop: usize, limits: bool) -> Result<String, Refusal> {
     let mut scopes = Vec::new();
     let mut i = 0;
     let mut items = 0;
-    let mut media = 0;
     while i < stop {
         match bytes[i] {
             byte @ (b'{' | b'[') => {
@@ -76,19 +75,19 @@ fn scan(bytes: &[u8], stop: usize, limits: bool) -> Result<String, Refusal> {
                         && let Some(schema) = string(token)
                     {
                         let name = schema.split('.').next().unwrap_or_default();
-                        if name.ends_with("Reference") {
-                            media += 1;
-                        } else if !matches!(
-                            name,
-                            "RationalTime"
-                                | "TimeRange"
-                                | "Track"
-                                | "Sequence"
-                                | "SerializableCollection"
-                        ) {
+                        if !name.ends_with("Reference")
+                            && !matches!(
+                                name,
+                                "RationalTime"
+                                    | "TimeRange"
+                                    | "Track"
+                                    | "Sequence"
+                                    | "SerializableCollection"
+                            )
+                        {
                             items += 1;
                         }
-                        if items > MAX_ITEMS || media > MAX_MEDIA {
+                        if items > MAX_ITEMS {
                             return Err(parse::too_many_items());
                         }
                     }

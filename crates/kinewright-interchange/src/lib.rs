@@ -5,12 +5,18 @@ mod fcpxml_syntax;
 mod fcpxml_time;
 pub mod ir;
 pub mod locator;
+mod lower;
+mod media;
 pub mod otio;
 mod otio_syntax;
 mod parse;
+mod record;
 mod refusal;
 mod time;
 
+pub use lower::{Lowered, lower, lower_with_sites};
+pub use media::{Availability, MediaTable, ProbedMedia};
+pub use record::{SitePage, SiteQuery};
 pub use refusal::{Refusal, RefusalCode};
 pub use time::Time;
 
