@@ -116,15 +116,19 @@ fn window_item(placed: &mut Placed, window: &Range<Time>) -> Result<(), Refusal>
         if end <= window.start || begin >= window.end {
             discard(placed);
         } else if begin < window.start || end > window.end || !window.contains(&placed.at) {
-            placed
-                .notes
-                .push(Loss::approximation(LossCode::OutsideWindow));
-            placed
-                .notes
-                .push(Loss::approximation(LossCode::TransitionAtNestCut).named(kind));
-            placed.item = Item::Gap {
-                duration: Time::ZERO,
-            };
+            if placed.counts_item {
+                placed
+                    .notes
+                    .push(Loss::approximation(LossCode::OutsideWindow));
+                placed
+                    .notes
+                    .push(Loss::approximation(LossCode::TransitionAtNestCut).named(kind));
+                placed.item = Item::Gap {
+                    duration: Time::ZERO,
+                };
+            } else {
+                discard(placed);
+            }
         }
         placed.at = placed.at.max(window.start).checked_sub(window.start)?;
         return Ok(());

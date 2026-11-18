@@ -19,7 +19,7 @@ fn authored_fixtures_match_document_and_report_goldens() {
         })
         .collect();
     inputs.sort_unstable();
-    assert_eq!(inputs.len(), 45);
+    assert_eq!(inputs.len(), 46);
     let mut opaque_frames = 0;
     for input in inputs {
         let name = input.file_name().unwrap().to_str().unwrap();

@@ -46,6 +46,11 @@ impl Report {
         item.0 = item.0.max(count);
     }
 
+    pub fn mark_item(&mut self, source: &str, fidelity: Fidelity) {
+        let item = self.items.entry(source.into()).or_default();
+        item.1 = item.1.max(Some(fidelity));
+    }
+
     pub fn is_empty(&self) -> bool {
         self.items.values().all(|(count, _)| *count == 0)
     }
@@ -77,8 +82,7 @@ impl Report {
             return;
         }
         if loss.code.is_item() {
-            let item = self.items.entry(source.into()).or_default();
-            item.1 = item.1.max(Some(loss.fidelity));
+            self.mark_item(source, loss.fidelity);
         }
         let row = self.rows.entry(loss.code).or_insert_with(|| LossRow {
             code: loss.code,

@@ -3,11 +3,14 @@ mod grid;
 mod layout;
 mod transition;
 
-use std::{collections::BTreeMap, ops::Range};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::Range,
+};
 
 use kinewright_core::{
-    ClipContent, ClipId, Document, ImportRecord, InterchangeFormat, LossBound, LossCode, Marker,
-    Rational, TRACK_NAME_MAX_BYTES, TimeCode, Title, TrackKind,
+    ClipContent, ClipId, Document, Fidelity, ImportRecord, InterchangeFormat, LossBound, LossCode,
+    Marker, Rational, TRACK_NAME_MAX_BYTES, TimeCode, Title, TrackKind,
 };
 
 use crate::{
@@ -168,6 +171,41 @@ struct Overlay {
     anchors: BTreeMap<i64, Block>,
 }
 
+#[derive(Default)]
+struct StackTransitions<'a> {
+    applied_video: BTreeSet<&'a str>,
+    otio_nest_cuts: BTreeMap<Time, NestCut<'a>>,
+}
+
+struct NestCut<'a> {
+    site: &'a str,
+    frames: u64,
+}
+
+fn otio_nest_cuts(stack: &Stack) -> Result<BTreeMap<Time, NestCut<'_>>, Refusal> {
+    let mut cuts = BTreeMap::new();
+    for track in &stack.tracks {
+        let mut boundaries = BTreeSet::new();
+        for placed in &track.items {
+            if let Item::Nested { duration, .. } = placed.item
+                && duration > Time::ZERO
+            {
+                boundaries.insert(placed.at);
+                boundaries.insert(placed.at.checked_add(duration)?);
+            }
+        }
+        for placed in &track.items {
+            if matches!(placed.item, Item::Transition { .. }) && boundaries.contains(&placed.at) {
+                cuts.entry(placed.at).or_insert(NestCut {
+                    site: &placed.site,
+                    frames: 0,
+                });
+            }
+        }
+    }
+    Ok(cuts)
+}
+
 impl State {
     fn id(&mut self) -> ClipId {
         self.next_clip += 1;
@@ -183,18 +221,32 @@ impl State {
     ) -> Result<Block, Refusal> {
         let mut block = Block::default();
         self.decorations(&stack.decorations, map, None)?;
+        let mut transitions = StackTransitions::default();
+        if self.format == InterchangeFormat::Otio {
+            transitions.otio_nest_cuts = otio_nest_cuts(stack)?;
+        }
         for track in &stack.tracks {
-            block.append(self.track(track, map, window, depth)?)?;
+            block.append(self.track(track, map, window, depth, &mut transitions)?)?;
+        }
+        for (at, cut) in transitions.otio_nest_cuts {
+            self.report.loss(
+                &Loss::approximation(LossCode::TransitionAtNestCut)
+                    .bounded(LossBound::Frames(cut.frames)),
+                cut.site,
+                map.to_parent(at)?.frame(self.project)?.0,
+                None,
+            );
         }
         Ok(block)
     }
 
-    fn track(
+    fn track<'a>(
         &mut self,
-        track: &ir::Track,
+        track: &'a ir::Track,
         map: ContainerTime,
         window: &Range<i64>,
         depth: usize,
+        transitions: &mut StackTransitions<'a>,
     ) -> Result<Block, Refusal> {
         if depth > MAX_NEST_DEPTH {
             return Err(parse::too_deep());
@@ -241,6 +293,7 @@ impl State {
                 depth,
                 &mut overlay,
                 lane != 0,
+                transitions,
             )?;
             result.append(sub)?;
         }
@@ -283,16 +336,17 @@ impl State {
         clippy::too_many_lines,
         reason = "Lowering a lane needs its parent transform and reserved blocks"
     )]
-    fn track_lane(
+    fn track_lane<'a>(
         &mut self,
         kind: TrackKind,
         name: Option<&str>,
-        locations: &[Location<'_>],
+        locations: &[Location<'a>],
         map: ContainerTime,
         window: &Range<i64>,
         depth: usize,
         overlay: &mut Overlay,
         spill: bool,
+        transitions: &mut StackTransitions<'a>,
     ) -> Result<Block, Refusal> {
         let mut slots = Vec::with_capacity(locations.len());
         let mut previous = None;
@@ -387,7 +441,7 @@ impl State {
                 pair,
             });
         }
-        let heads = self.transitions(&mut slots, kind, map, window.start)?;
+        let heads = self.transitions(&mut slots, kind, map, window.start, transitions)?;
         for slot in slots {
             if let Some(candidate) = slot.candidate {
                 self.store(&mut block, kind, 0, slot.location, slot.pair, candidate)?;
@@ -550,7 +604,13 @@ impl State {
         at: i64,
     ) -> Result<(), Refusal> {
         for anchor in &placed.anchors {
-            let block = self.track(&anchor.track, map, window, depth + 1)?;
+            let block = self.track(
+                &anchor.track,
+                map,
+                window,
+                depth + 1,
+                &mut StackTransitions::default(),
+            )?;
             if anchors.entry(anchor.lane).or_default().overlay(block)? {
                 self.report.loss(
                     &Loss::approximation(LossCode::LaneAdded),
@@ -569,6 +629,7 @@ impl State {
         kind: TrackKind,
         map: ContainerTime,
         horizon: i64,
+        transitions: &mut StackTransitions<'a>,
     ) -> Result<Vec<(Location<'a>, Option<Pair>, Candidate)>, Refusal> {
         let mut heads = Vec::new();
         let neighbors: Vec<_> = slots
@@ -587,6 +648,12 @@ impl State {
             else {
                 continue;
             };
+            if self.format == InterchangeFormat::Fcpxml
+                && !placed.counts_item
+                && !transitions.applied_video.contains(placed.site.as_str())
+            {
+                continue;
+            }
             let mut losses = Vec::new();
             let (before, after) = (
                 before.checked_div(map.speed)?.frame(self.project)?.0.max(0),
@@ -611,10 +678,15 @@ impl State {
                 .is_some_and(|a| matches!(a.location.placed.item, Item::Nested { .. }))
                 || b.as_ref()
                     .is_some_and(|b| matches!(b.location.placed.item, Item::Nested { .. }));
-            if nesting {
-                losses.push(Loss::approximation(LossCode::TransitionAtNestCut).bounded(
-                    LossBound::Frames(before.saturating_add(after).unsigned_abs()),
-                ));
+            let frames = before.saturating_add(after).unsigned_abs();
+            if let Some(nest_cut) = transitions.otio_nest_cuts.get_mut(&placed.at) {
+                self.report.mark_item(&placed.site, Fidelity::Approximated);
+                nest_cut.frames = nest_cut.frames.max(frames);
+            } else if nesting {
+                losses.push(
+                    Loss::approximation(LossCode::TransitionAtNestCut)
+                        .bounded(LossBound::Frames(frames)),
+                );
             } else {
                 let input = TransitionInput {
                     kind,
@@ -631,10 +703,17 @@ impl State {
                 let mut right_none = None;
                 let left = a.map_or(&mut left_none, |slot| &mut slot.candidate);
                 let right = b.map_or(&mut right_none, |slot| &mut slot.candidate);
-                if let Some(head) = lower_same_track_transition(&input, left, right, &mut losses)?
-                    && let Some(location) = location
+                if let Some(applied) =
+                    lower_same_track_transition(&input, left, right, &mut losses)?
                 {
-                    heads.push((location, pair, head));
+                    if self.format == InterchangeFormat::Fcpxml && kind == TrackKind::Video {
+                        transitions.applied_video.insert(placed.site.as_str());
+                    }
+                    if let Some(head) = applied.head
+                        && let Some(location) = location
+                    {
+                        heads.push((location, pair, head));
+                    }
                 }
             }
             self.losses(

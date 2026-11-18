@@ -22,12 +22,16 @@ pub(super) struct TransitionInput<'a> {
     pub head_id: ClipId,
 }
 
+pub(super) struct AppliedTransition {
+    pub head: Option<Candidate>,
+}
+
 pub(super) fn lower_same_track_transition(
     input: &TransitionInput<'_>,
     a: &mut Option<Candidate>,
     b: &mut Option<Candidate>,
     notes: &mut Vec<Loss>,
-) -> Result<Option<Candidate>, Refusal> {
+) -> Result<Option<AppliedTransition>, Refusal> {
     let length = input.before.saturating_add(input.after);
     if length == 0 {
         notes.push(Loss::approximation(LossCode::TransitionHandlesShort));
@@ -50,16 +54,12 @@ pub(super) fn lower_same_track_transition(
             if entering.end == entering.clip.timeline_start.0 {
                 *b = None;
             }
-            Ok(head)
+            Ok(head.map(|head| AppliedTransition { head: Some(head) }))
         }
-        (_, Some(entering)) => {
-            fade_in(entering, input.kind, descriptor, length, notes);
-            Ok(None)
-        }
-        (Some(outgoing), None) => {
-            fade_out(outgoing, input.kind, length, notes);
-            Ok(None)
-        }
+        (_, Some(entering)) => Ok(fade_in(entering, input.kind, descriptor, length, notes)
+            .then_some(AppliedTransition { head: None })),
+        (Some(outgoing), None) => Ok(fade_out(outgoing, input.kind, length, notes)
+            .then_some(AppliedTransition { head: None })),
         (None, None) => {
             notes.push(
                 Loss::approximation(LossCode::TransitionHandlesShort)
@@ -176,13 +176,13 @@ fn fade_in(
     descriptor: &str,
     requested: i64,
     notes: &mut Vec<Loss>,
-) {
+) -> bool {
     let length = requested.min(entering.end - entering.clip.timeline_start.0);
     if length < requested {
         notes.push(Loss::approximation(LossCode::TransitionFadeClamped));
     }
     if length == 0 {
-        return;
+        return false;
     }
     if kind == TrackKind::Audio && entering.clip.content.is_media() {
         entering.clip.audio_fade_in_frames = TimeCode(length);
@@ -192,10 +192,18 @@ fn fade_in(
             name: descriptor.into(),
             duration: TimeCode(length),
         });
+    } else {
+        return false;
     }
+    true
 }
 
-fn fade_out(outgoing: &mut Candidate, kind: TrackKind, requested: i64, notes: &mut Vec<Loss>) {
+fn fade_out(
+    outgoing: &mut Candidate,
+    kind: TrackKind,
+    requested: i64,
+    notes: &mut Vec<Loss>,
+) -> bool {
     let span = outgoing.end - outgoing.clip.timeline_start.0;
     let length = requested.min(span);
     if length < requested {
@@ -220,7 +228,10 @@ fn fade_out(outgoing: &mut Candidate, kind: TrackKind, requested: i64, notes: &m
             enabled: true,
             enabled_curve: None,
         });
+    } else {
+        return false;
     }
+    length > 0
 }
 
 fn clamp_fades(clip: &mut Candidate, notes: &mut Vec<Loss>) {

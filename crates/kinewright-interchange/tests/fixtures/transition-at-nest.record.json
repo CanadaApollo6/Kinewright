@@ -2,11 +2,11 @@
   "format": "otio",
   "format_version": "Timeline.1",
   "source_name": "transition-at-nest.otio",
-  "source_sha256": "54b0bc89fbad61e29dc6be4a3b44b2e3a87fe970fffadf24cf831746447028e1",
+  "source_sha256": "d2594df277dc3b6b9fbb7e4bd1efb42cb1fe725dd7c04ee1372821632a6b090e",
   "start_offset_frames": 0,
-  "items": 5,
-  "exact": 3,
-  "approximated": 2,
+  "items": 8,
+  "exact": 5,
+  "approximated": 3,
   "dropped": 0,
   "media": {
     "assets": 3,
@@ -60,7 +60,7 @@
     {
       "code": "clip_names_dropped",
       "fidelity": "dropped",
-      "count": 3,
+      "count": 5,
       "names": [
         "CutA",
         "InnerLower"
@@ -69,12 +69,12 @@
         {
           "source": "/tracks/children/0/children/0",
           "frame": 0,
-          "clip": 6
+          "clip": 7
         },
         {
           "source": "/tracks/children/0/children/2/children/0/children/0",
           "frame": 24,
-          "clip": 7
+          "clip": 8
         }
       ]
     },

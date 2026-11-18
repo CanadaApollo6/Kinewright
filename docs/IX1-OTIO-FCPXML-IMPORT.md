@@ -312,7 +312,9 @@ is capped at 8 (`too_deep`), the limit in the Mirage repository's
 composites. The outgoing layers stay visible at weight `(1 − a)²` under an opaque entering top
 layer, and extending an outgoing nest past its window is undefined. Any transition with a flattened
 container on either side therefore lowers as a hard cut at the cut point, audio included, and
-counts `transition_at_nest_cut` (A, bound = window frames).
+counts `transition_at_nest_cut` (A, bound = window frames). OTIO transitions on sibling tracks
+at that cut share one report occurrence, bounded by the longest window. An FCPXML audio
+mirror is applied only when its video transition was applied.
 
 Compositing is associative, so for opaque, normal-blend clips without container effects the
 topmost item per frame is unchanged; §12 checks this.

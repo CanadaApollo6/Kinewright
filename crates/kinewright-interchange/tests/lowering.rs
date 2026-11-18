@@ -495,3 +495,91 @@ fn a_present_unprobed_asset_is_inspected_without_a_fingerprint_or_estimated_rang
             .any(|row| row.code == LossCode::RelinkedByName)
     );
 }
+
+#[test]
+fn fcpxml_nest_edge_is_a_hard_cut_for_mirrored_audio() {
+    let timeline = fcpxml::parse(
+        include_bytes!("fixtures/av-transition-at-nest.fcpxml"),
+        "av-transition-at-nest.fcpxml",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    assert_av_hard_cut(&timeline);
+}
+
+#[test]
+fn otio_nest_edge_is_one_hard_cut_for_video_and_audio() {
+    let timeline = otio::parse(
+        include_bytes!("fixtures/transition-at-nest.otio"),
+        "transition-at-nest.otio",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    assert_av_hard_cut(&timeline);
+}
+
+fn assert_av_hard_cut(timeline: &Timeline) {
+    let (document, record) = lower(timeline, &MediaTable::default()).unwrap();
+    let mut audio: Vec<_> = document
+        .tracks
+        .iter()
+        .filter(|track| track.kind == TrackKind::Audio)
+        .flat_map(|track| &track.clips)
+        .collect();
+    audio.sort_by_key(|clip| clip.timeline_start);
+    let [outgoing, entering] = audio.as_slice() else {
+        panic!(
+            "expected only the two original audio clips, got {}",
+            audio.len()
+        );
+    };
+    assert_eq!(outgoing.audio_fade_out_frames, TimeCode::ZERO);
+    assert_eq!(entering.audio_fade_in_frames, TimeCode::ZERO);
+    assert_eq!(clip_end(&document, outgoing), TimeCode(24));
+    assert_eq!(entering.timeline_start, TimeCode(24));
+    assert!(
+        document
+            .tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .all(|clip| clip.transition_in.is_none())
+    );
+    let row = record
+        .rows
+        .iter()
+        .find(|row| row.code == LossCode::TransitionAtNestCut)
+        .unwrap();
+    assert_eq!(row.count, 1);
+    assert_eq!(row.bound, Some(LossBound::Frames(6)));
+    assert!(!record.rows.iter().any(|row| matches!(
+        row.code,
+        LossCode::AudioCrossfadeLinear | LossCode::TransitionLane
+    )));
+}
+
+#[test]
+fn fcpxml_nest_edge_mirroring_requires_an_applied_video_transition() {
+    let xml = include_str!("fixtures/av-cross-dissolve.fcpxml")
+        .replace("hasVideo=\"1\"", "hasVideo=\"0\"");
+    let timeline =
+        fcpxml::parse(xml.as_bytes(), "audio-only.fcpxml", ParseOptions::default()).unwrap();
+    let (document, record) = lower(&timeline, &MediaTable::default()).unwrap();
+    let clips: Vec<_> = document
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .collect();
+    let [outgoing, entering] = clips.as_slice() else {
+        panic!("expected the two unmodified audio clips");
+    };
+    assert_eq!(outgoing.audio_fade_out_frames, TimeCode::ZERO);
+    assert_eq!(entering.audio_fade_in_frames, TimeCode::ZERO);
+    assert_eq!(clip_end(&document, outgoing), TimeCode(25));
+    assert_eq!(entering.timeline_start, TimeCode(25));
+    assert!(
+        !record
+            .rows
+            .iter()
+            .any(|row| row.code == LossCode::AudioCrossfadeLinear)
+    );
+}
