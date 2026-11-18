@@ -151,6 +151,7 @@ fn config(path: &Path, named: Option<PathBuf>) -> HostConfig {
         origin: HostOrigin::Headless,
     }
 }
+#[track_caller]
 fn successful(
     client: &HostClient,
     command: HostCommand,
