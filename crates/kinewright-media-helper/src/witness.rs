@@ -14,6 +14,8 @@ pub enum Witness {
     BeforeArm,
     BeforeShimArm,
     RssBurst,
+    /// Contained and released, the shim never forks and never replies.
+    Silent,
     /// A deliberately malicious helper: under the complete boundary it tries
     /// one escape at the first decoder packet. A seccomp denial kills it
     /// (`Crashed`); an errno denial replies `UnsupportedMedia`; an escape
@@ -28,6 +30,7 @@ impl Witness {
             "before-arm" => Ok(Self::BeforeArm),
             "before-shim-arm" => Ok(Self::BeforeShimArm),
             "rss-burst" => Ok(Self::RssBurst),
+            "silent" => Ok(Self::Silent),
             stage if stage.starts_with("escape=") => {
                 let (attack, target) = stage["escape=".len()..]
                     .split_once('=')
@@ -60,6 +63,11 @@ impl Witness {
             wait_for_loss(parent)?;
         }
         Ok(())
+    }
+    pub fn silent(self) {
+        if self == Self::Silent {
+            park();
+        }
     }
     pub fn before_ready(self) {
         if self == Self::BeforeReady {

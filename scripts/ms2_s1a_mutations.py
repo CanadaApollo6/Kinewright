@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run MS2's kill-chain red witnesses, restore source, then rerun controls.
+"""Run MS2's kill-chain and probe-bound red witnesses, restore source, then rerun controls.
 
 Invoke after `source scripts/setup-ffmpeg.sh`, without an outer flock.
 Only this checkout's two audited source files and its target directory change.
@@ -32,15 +32,25 @@ CASES = [
     ("spawner-abort-guard", ACTOR, "std::process::abort();",
      "std::hint::black_box(());", RACE, "abort"),
 ]
+# A silent helper must get its typed failure within the design's probe bound,
+# in both resource modes. Each removal leaves the caller waiting until the
+# witness's named outer deadline fires.
+SILENT = "a_silent_helper_fails_typed_within_the_probe_bound"
+BOUNDS = [
+    ("probe-reap-budget", "&& job.answer_at.is_some_and(|deadline| now >= deadline)",
+     "&& false", "held"),
+    ("probe-deadline", "} else if now >= job.deadline {", "} else if false {", "unheld"),
+]
+MODES = ("primary", "degraded")
 
 
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def cargo(label: str, args: list[str]) -> tuple[int, Path]:
+def cargo(label: str, args: list[str], extra: tuple[str, ...] = ()) -> tuple[int, Path]:
     log = OUT / (label + ".log")
-    command = ["flock", "-o", "/tmp/kinewright-cargo-heavy.lock", "env",
+    command = ["flock", "-o", "/tmp/kinewright-cargo-heavy.lock", "env", *extra,
                "CARGO_BUILD_JOBS=4", "RUST_TEST_THREADS=1", "nice", "-n", "10",
                "cargo", "+1.99.1", *args]
     with log.open("w") as output:
@@ -73,6 +83,32 @@ def expected_failure(text: str, kind: str) -> bool:
     return f"live or unreaped owned process {pid}" in text
 
 
+def mode_env(mode: str) -> tuple[str, ...]:
+    # Degraded mode: a session bus address with nothing behind it.
+    if mode == "degraded":
+        return (f"DBUS_SESSION_BUS_ADDRESS=unix:path={OUT / 'no-bus'}",)
+    return ()
+
+
+def silent_test(label: str, mode: str) -> tuple[int, Path]:
+    return cargo(label, ["test", "-p", "kinewright-media-client", "--features",
+                         "slow-tests", "--test", "witness_native", SILENT, "--",
+                         "--exact", "--nocapture"], mode_env(mode))
+
+
+def bound_failure(text: str, kind: str, mode: str) -> bool:
+    if "could not compile" in text or "MS2_TEST_DEADLINE silent helper probe bound" not in text:
+        return False
+    if ("MS2_RESOURCE_MODE degraded" in text) != (mode == "degraded"):
+        return False
+    unheld = re.search(r"MS2_SILENT_PROBE held=false degraded=(true|false) .*"
+                       r"outcome=Err\(Sandbox\(TimedOut\)\)", text)
+    if kind == "held":
+        # The unheld probe still ends; only the held cleanup strands the caller.
+        return bool(unheld) and "MS2_SILENT_PROBE held=true" not in text
+    return "MS2_SILENT_PROBE" not in text
+
+
 def main() -> None:
     if not os.environ.get("FFMPEG_DIR"):
         raise SystemExit("source scripts/setup-ffmpeg.sh first; do not add an outer flock")
@@ -101,6 +137,22 @@ def main() -> None:
                     raise RuntimeError(f"{name}: mutation did not fail at its intended assertion")
             finally:
                 path.write_bytes(originals[path])
+        source = originals[ACTOR].decode()
+        for name, before, after, kind in BOUNDS:
+            if source.count(before) != 1:
+                raise RuntimeError(f"{name}: source anchor is not unique")
+            ACTOR.write_text(source.replace(before, after))
+            try:
+                for mode in MODES:
+                    code, log = silent_test(f"{name}-{mode}-red", mode)
+                    rejected = code != 0 and bound_failure(log.read_text(), kind, mode)
+                    rows.append({"mutation": name, "mode": mode, "test": SILENT, "exit": code,
+                                 "expected_assertion_failed": rejected,
+                                 "log": str(log.relative_to(ROOT)), "log_sha256": digest(log)})
+                    if not rejected:
+                        raise RuntimeError(f"{name} {mode}: did not fail at its outer deadline")
+            finally:
+                ACTOR.write_bytes(originals[ACTOR])
     finally:
         for path, data in originals.items():
             path.write_bytes(data)
@@ -111,11 +163,22 @@ def main() -> None:
             "--features", "slow-tests", "--test", "witness_native", "--", "--show-output"])
         controls = {"exit": code, "log": str(log.relative_to(ROOT)),
                     "log_sha256": digest(log)}
+        bound_controls = []
+        for mode in MODES:
+            code, log = silent_test(f"restored-bound-{mode}", mode)
+            text = log.read_text()
+            bound_controls.append({
+                "mode": mode, "exit": code, "log": str(log.relative_to(ROOT)),
+                "log_sha256": digest(log),
+                "mode_matches": ("MS2_RESOURCE_MODE degraded" in text) == (mode == "degraded")})
         report = {"mutations": rows, "restored_controls": controls,
+                  "restored_bound_controls": bound_controls,
                   "source_restored": all(path.read_bytes() == data for path, data in originals.items())}
         (OUT / "results.json").write_text(json.dumps(report, indent=2) + "\n")
     if controls["exit"] != 0:
         raise SystemExit("restored native controls failed")
+    if any(row["exit"] != 0 or not row["mode_matches"] for row in bound_controls):
+        raise SystemExit("restored probe-bound controls failed")
 
 
 if __name__ == "__main__":

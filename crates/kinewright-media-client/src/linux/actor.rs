@@ -1,6 +1,6 @@
 //! Sole process spawner and admission owner. No media parsing or scope RPC here.
 use super::{
-    ACTIVE_PROBES, CANCEL_GRACE, Config, Failure, Outcome, Request, Status, TICK,
+    ACTIVE_PROBES, CANCEL_GRACE, Config, Failure, Outcome, REAP_BUDGET, Request, Status, TICK,
     admission::{Health, Pending, Queue, attribute},
     controller::Controller,
     worker,
@@ -30,11 +30,29 @@ struct Job {
     running: worker::Running,
     cause: Option<Failure>,
     kill_at: Option<Instant>,
+    /// When a caused job's caller gets its typed failure even though native
+    /// cleanup has not finished. The job, and so its reservation, stays active.
+    answer_at: Option<Instant>,
+    answered: bool,
     payload: Option<kinewright_job_sys::ProcessHandle>,
     next_rss: Instant,
     memory_violation: bool,
 }
 impl Job {
+    fn launched(pending: Pending, running: worker::Running, now: Instant) -> Self {
+        Self {
+            deadline: pending.decode_deadline(now),
+            pending,
+            running,
+            cause: None,
+            kill_at: None,
+            answer_at: None,
+            answered: false,
+            payload: None,
+            next_rss: now,
+            memory_violation: false,
+        }
+    }
     fn resident_total(&mut self) -> std::io::Result<u64> {
         let shim = media_host::resident_bytes(&self.running.pin)?;
         if self.payload.is_none() {
@@ -153,6 +171,7 @@ impl Actor {
         for job in &mut self.active {
             if !job.pending.degraded
                 || job.cause.is_some()
+                || job.answered
                 || job.running.thread.is_finished()
                 || now < job.next_rss
             {
@@ -180,7 +199,7 @@ impl Actor {
     fn settle(&mut self, now: Instant) {
         for index in (0..self.active.len()).rev() {
             let job = &mut self.active[index];
-            if job.cause.is_none() {
+            if job.cause.is_none() && !job.answered {
                 if let Err(error) = job.pending.request.source.check() {
                     job.cause = Some(Failure::Authority(error));
                     let _ = job.running.pin.kill();
@@ -197,6 +216,42 @@ impl Actor {
             if job.kill_at.is_some_and(|deadline| now >= deadline) {
                 let _ = job.running.pin.kill();
             }
+            if job.cause.is_some() && job.answer_at.is_none() {
+                // Every cause sends the kill by `kill_at`, or already did when
+                // the cause was set. Terminate, reap and empty within a further
+                // REAP_BUDGET; the caller never waits on native cleanup past it.
+                job.answer_at = Some(job.kill_at.unwrap_or(now) + REAP_BUDGET);
+            }
+            if !job.answered
+                && !job.running.thread.is_finished()
+                && job.answer_at.is_some_and(|deadline| now >= deadline)
+            {
+                // The cause moves to the caller; `answered` keeps the job from
+                // being caused, charged or answered again when cleanup ends.
+                job.answered = true;
+                let Some(cause) = job.cause.take() else {
+                    continue;
+                };
+                eprintln!(
+                    "MS2_CLEANUP_PENDING shim={} cause={cause:?} reservation=retained",
+                    job.running.pin.pid()
+                );
+                let result = match job.pending.request.source.check() {
+                    Err(error) => Err(Failure::Authority(error)),
+                    Ok(()) => Err(cause),
+                };
+                let identity = job.pending.request.source.identity();
+                let paused = self
+                    .queue
+                    .circuit
+                    .record(identity, Health::of(&result), now)
+                    .paused;
+                let _ = job.pending.reply.send(result);
+                if paused {
+                    self.queue.clear_for_pause(&self.status, now);
+                }
+                continue;
+            }
             if job.running.thread.is_finished() {
                 let job = self.active.swap_remove(index);
                 let uncaused = job.cause.is_none();
@@ -205,6 +260,10 @@ impl Actor {
                 let identity = request.request.source.identity();
                 if job.memory_violation {
                     self.queue.circuit.quarantine(identity, now);
+                }
+                if job.answered {
+                    // The caller already has its failure and the breaker its token.
+                    continue;
                 }
                 let mut result = match done {
                     Ok(done) if job.cause.is_none() && done.fallback && !request.degraded => {
@@ -338,18 +397,11 @@ impl Actor {
                 // I/O workers; no observer or extra sharing ships by default.
                 #[cfg(feature = "slow-tests")]
                 observer: self.config.observer.as_ref().map(Arc::clone),
+                #[cfg(feature = "slow-tests")]
+                held_cleanup: self.config.held_cleanup.as_ref().map(Arc::clone),
             };
             if let Ok(running) = worker::start(launch) {
-                self.active.push(Job {
-                    deadline: item.decode_deadline(now),
-                    pending: item,
-                    running,
-                    cause: None,
-                    kill_at: None,
-                    payload: None,
-                    next_rss: now,
-                    memory_violation: false,
-                });
+                self.active.push(Job::launched(item, running, now));
             } else {
                 let failure = Failure::Sandbox(Error::SandboxUnavailable);
                 let identity = item.request.source.identity();

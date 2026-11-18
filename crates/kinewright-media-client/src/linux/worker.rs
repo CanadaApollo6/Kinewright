@@ -71,7 +71,7 @@ impl Tracer {
 struct Trace(Tracer);
 impl Trace {
     fn claim(shim: u32) -> Self {
-        let value = u64::from(shim) << 8;
+        let value = u64::from(shim) << 8 | Phase::Launch as u64;
         let slot = WAITING.iter().find(|slot| {
             slot.compare_exchange(0, value, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
@@ -141,6 +141,8 @@ pub(super) struct Launch<'a> {
     pub spawner: Option<BorrowedFd<'a>>,
     #[cfg(feature = "slow-tests")]
     pub observer: Option<Arc<super::ProbeObserver>>,
+    #[cfg(feature = "slow-tests")]
+    pub held_cleanup: Option<Arc<AtomicBool>>,
 }
 struct Root(PathBuf);
 impl Drop for Root {
@@ -161,6 +163,8 @@ struct Lease {
     trace: Trace,
     #[cfg(feature = "slow-tests")]
     shim_smaps: Option<File>,
+    #[cfg(feature = "slow-tests")]
+    held_cleanup: Option<Arc<AtomicBool>>,
 }
 
 fn pin_child(child: Child) -> io::Result<(Child, Arc<ProcessHandle>)> {
@@ -213,8 +217,6 @@ pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
     let shared = Arc::new(Shared::default());
     let observed_shared = Arc::clone(&shared);
     let trace = Trace::claim(pin.pid());
-    trace.set(Phase::Launch);
-    let tracer = trace.0;
     let mut lease = Lease {
         child,
         pin,
@@ -228,6 +230,8 @@ pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
         trace,
         #[cfg(feature = "slow-tests")]
         shim_smaps: None,
+        #[cfg(feature = "slow-tests")]
+        held_cleanup: launch.held_cleanup,
     };
     #[cfg(feature = "slow-tests")]
     if launch.observer.is_some() {
@@ -255,7 +259,7 @@ pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
                 generation,
                 cancelled: false,
                 traffic: ProbeSession::new(1, generation, selected),
-                tracer,
+                tracer: lease.trace.0,
             };
             let result = lease.probe(
                 &Settings {
@@ -499,6 +503,14 @@ impl Lease {
             if Instant::now() >= end {
                 let _ = self.pin.kill();
             }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        #[cfg(feature = "slow-tests")]
+        while self
+            .held_cleanup
+            .as_ref()
+            .is_some_and(|held| held.load(Ordering::Acquire))
+        {
             std::thread::sleep(Duration::from_millis(10));
         }
         self.trace.set(Phase::Members);

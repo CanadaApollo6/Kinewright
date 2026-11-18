@@ -32,6 +32,11 @@ const INITIAL_DEADLINE: Duration = Duration::from_secs(5);
 const CANCEL_GRACE: Duration = Duration::from_millis(250);
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(15);
 const TICK: Duration = Duration::from_millis(100);
+/// After the kill, termination, reap and native emptiness get this long before
+/// the caller receives its typed failure (design: "Cancellation and kill",
+/// `docs/MS2-MEDIA-SANDBOX.md` performance table). The reservation stays until
+/// cleanup really ends.
+const REAP_BUDGET: Duration = Duration::from_secs(2);
 
 /// The actor owns this capability until native cleanup, independently of the
 /// caller's lifetime. Only a duplicate file descriptor reaches the I/O worker.
@@ -63,6 +68,8 @@ pub struct Config {
     pub limits: Limits,
     #[cfg(feature = "slow-tests")]
     observer: Option<Arc<ProbeObserver>>,
+    #[cfg(feature = "slow-tests")]
+    held_cleanup: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 impl Config {
     #[must_use]
@@ -73,12 +80,22 @@ impl Config {
             limits,
             #[cfg(feature = "slow-tests")]
             observer: None,
+            #[cfg(feature = "slow-tests")]
+            held_cleanup: None,
         }
     }
     #[cfg(feature = "slow-tests")]
     #[must_use]
     pub fn observe(mut self, observer: Arc<ProbeObserver>) -> Self {
         self.observer = Some(observer);
+        self
+    }
+    /// While `held` is set, each worker waits after its shim has exited and
+    /// before native membership cleanup: a cleanup that does not end.
+    #[cfg(feature = "slow-tests")]
+    #[must_use]
+    pub fn hold_cleanup(mut self, held: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.held_cleanup = Some(held);
         self
     }
 }

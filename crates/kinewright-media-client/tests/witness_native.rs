@@ -417,6 +417,60 @@ mod support {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+    /// A helper that is contained and released but never forks or replies.
+    /// The caller gets `TimedOut` (a breaker token) within the design's probe
+    /// bound: 5 s initial probe, 250 ms grace, 2 s for kill, reap and native
+    /// emptiness. Then the same while cleanup cannot end, and the reservation
+    /// stays active until it does.
+    pub fn silent() {
+        // The design bound is 7.25 s. The actor notices each instant up to one
+        // 100 ms tick late, twice; launch time also counts from the call.
+        let bound = Duration::from_millis(5_000 + 250 + 2_000 + 2 * 100 + 500);
+        // One runtime per test process: the spawner is process-wide.
+        let (_directory, config, png) = workspace("silent");
+        let hold = Arc::new(AtomicBool::new(false));
+        let runtime = Runtime::start(config.hold_cleanup(Arc::clone(&hold))).unwrap();
+        for held in [false, true] {
+            hold.store(held, std::sync::atomic::Ordering::Release);
+            let started = Instant::now();
+            let outcome = runtime.probe(Request {
+                source: Box::new(Input {
+                    file: File::open(&png).unwrap(),
+                    revoked: Arc::new(AtomicBool::new(false)),
+                }),
+                video: None,
+                audio: None,
+                cancel: Arc::new(AtomicBool::new(false)),
+                explicit_retry: false,
+            });
+            let elapsed = started.elapsed();
+            let active = runtime.snapshot().active;
+            println!(
+                "MS2_SILENT_PROBE held={held} degraded={} elapsed_ms={} active={active} outcome={outcome:?}",
+                runtime.snapshot().degraded,
+                elapsed.as_millis()
+            );
+            hold.store(false, std::sync::atomic::Ordering::Release);
+            assert!(
+                matches!(outcome, Err(Failure::Sandbox(MediaSandboxError::TimedOut))),
+                "silent helper held={held}: {outcome:?}"
+            );
+            assert!(
+                elapsed <= bound,
+                "silent helper held={held} answered after {elapsed:?}, bound {bound:?}"
+            );
+            assert_eq!(
+                active,
+                usize::from(held),
+                "a reservation outlived or preceded its cleanup"
+            );
+        }
+        runtime.shutdown().unwrap();
+        assert_eq!(
+            (runtime.snapshot().active, runtime.snapshot().pending),
+            (0, 0)
+        );
+    }
     pub fn loss(degraded: bool, stage: &str, loss: &str) -> bool {
         kinewright_job_sys::install_subreaper().unwrap();
         let private_bus = degraded.then(bus);
@@ -565,6 +619,22 @@ fn watchdog_disabled_spawner_abort_and_payload_prearm_race() {
     }
     #[cfg(feature = "slow-tests")]
     assert!(support::loss(true, "before-arm", "shim"));
+}
+
+#[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn a_silent_helper_fails_typed_within_the_probe_bound() {
+    // Two probes of at most about 8 s each, plus launch and shutdown.
+    let _deadline = deadline::start(
+        "silent helper probe bound",
+        std::time::Duration::from_secs(40),
+    );
+    deadline::report_with(kinewright_media_client::diagnostics);
+    #[cfg(feature = "slow-tests")]
+    support::silent();
 }
 
 #[test]

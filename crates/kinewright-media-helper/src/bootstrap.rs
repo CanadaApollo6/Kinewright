@@ -135,6 +135,8 @@ fn run_inner(
         return Err(io::Error::other("scope join not released"));
     }
     drop(release);
+    #[cfg(feature = "slow-tests")]
+    witness.silent();
     boundary::enter_namespaces(app_pid, spawner.as_ref())?;
     drop(spawner);
     let parent = boundary::pidfd(std::process::id(), false)?;
