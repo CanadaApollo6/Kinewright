@@ -1864,9 +1864,14 @@ impl KinewrightApp {
             return;
         }
         let admission = kinewright_project::bundle::BundleWriteAdmission::new_document();
-        let grant = admission
-            .legacy_media()
-            .expect("new projects admit local media");
+        let Some(grant) = admission.legacy_media() else {
+            self.note_label(
+                LabelIncident::Project,
+                IncidentSubject::Project,
+                "Could not open timeline: local media access is unavailable.",
+            );
+            return;
+        };
         let analysis = self
             .lut_publisher
             .legacy_media(grant, Arc::new(Document::default()));

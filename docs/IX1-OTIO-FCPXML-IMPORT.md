@@ -1035,6 +1035,7 @@ Lead rulings (2026-11-17):
     keeping the generator's timeline span as a gap (§3).
 38. **Reader-selected controls.** Route Open and drop by extension, then use the reader's format
     or rate-required refusal to decide which settings can be edited (§9).
+39. **Open admission.** An unavailable local media grant yields a project incident (§9).
 
 Open questions:
 1. **Marker colour switch.** Should `MARKER_COLOR_POLICY` ship as `LabelPrefix` or `Drop`? This is

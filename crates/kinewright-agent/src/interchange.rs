@@ -509,6 +509,89 @@ mod tests {
     }
 
     #[test]
+    fn ix1_agent_add_asset_refuses_a_supplied_remote_locator() {
+        use kinewright_core::{
+            AssetId, BatchError, ColorDescription, Document, Event, MediaAsset, MediaKind,
+            MediaSourceFingerprint, OpError, Operation, RemoteLocator, TimeCode,
+        };
+
+        let document = Document::default();
+        let core = Core::spawn(document.clone()).unwrap();
+        let events = core.subscribe().unwrap();
+        let service = KinewrightMcp::new(
+            core,
+            Arc::new(RefusedMedia),
+            Arc::new(RefusedMedia),
+            ConfirmationBroker::default(),
+        );
+        let asset = MediaAsset {
+            id: AssetId(1),
+            path: std::path::PathBuf::new(),
+            remote_locator: Some(RemoteLocator::new(
+                "file://unapproved.invalid/share/source.mov".into(),
+            )),
+            name: "Source".into(),
+            duration: TimeCode(24),
+            fps: Rational::new(24, 1).unwrap(),
+            kind: MediaKind::Video,
+            resolution: Some((1920, 1080)),
+            source_fingerprint: MediaSourceFingerprint::unknown(),
+            color_description: ColorDescription::default(),
+            assumed_from: None,
+        };
+        let expected =
+            OpError::InvalidImportRecord("a new asset cannot supply a preserved remote locator");
+        let result = service
+            .call_blocking(
+                CallToolRequestParams::new("add_asset").with_arguments(
+                    json!({"expected_revision":0,"asset":asset})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.content[0].as_text().unwrap().text,
+            expected.to_string()
+        );
+        let rejected = events.try_iter().find_map(|event| match event {
+            Event::OpRejected { op, error, .. } => Some((op, error)),
+            _ => None,
+        });
+        assert_eq!(
+            rejected,
+            Some((
+                Operation::AddAsset {
+                    asset: asset.clone()
+                },
+                expected.clone()
+            ))
+        );
+
+        let plan = service
+            .call_exposed_blocking(
+                CallToolRequestParams::new("prepare_edit_plan").with_arguments(
+                    json!({"expected_revision":0,"operations":[{"op":"add_asset","asset":asset}]})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .unwrap();
+        let failure = crate::runtime::PreparePlanError::InvalidPlan(BatchError::OperationFailed {
+            op_number: 1,
+            error: expected,
+        });
+        assert_eq!(plan.is_error, Some(true));
+        assert_eq!(plan.content[0].as_text().unwrap().text, failure.to_string());
+        let (revision, current) = service.snapshot().unwrap();
+        assert_eq!(revision, TimelineRevision(0));
+        assert_eq!(*current, document);
+    }
+
+    #[test]
     fn ix1_agent_relink_refuses_a_remote_candidate_and_leaves_the_import_locator_in_place() {
         let directory = TempDirectory::new("ix1-agent-relink");
         let path = directory.path("source.otio");
