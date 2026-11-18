@@ -1192,6 +1192,61 @@ mod tests {
     }
 
     #[test]
+    fn ix1_review_share_shows_the_full_root_and_allows_exactly_that_share() {
+        use crate::ix1_tests::{click_text, layout_text_position};
+        use kinewright_interchange::locator::{Platform, share_path};
+
+        let host = ["A".repeat(56), "B".repeat(56), "C".repeat(56)].join(".");
+        let parsed = share_path(&format!("file://{host}/Camera/take.mov"), Platform::Windows)
+            .expect("the root is eligible for review");
+        let expected = format!(r"\\{}\camera", host.to_ascii_lowercase());
+        assert_eq!(parsed.root.as_str(), expected);
+        assert!(expected.chars().count() > ROW_CHARS);
+        let other = share_path(r"\\other\camera\take.mov", Platform::Windows).unwrap();
+        let mut dialog = ImportDialog {
+            source: PathBuf::new(),
+            analysis: Arc::new(RefusedMedia),
+            options: ImportOptions::default(),
+            allowed: BTreeSet::new(),
+            share_choices: vec![other.root, parsed.root.clone()],
+            timeline_choices: Vec::new(),
+            overrides: None,
+            folder_picker: None,
+            state: Preparation::Refused(Refusal::new(RefusalCode::Cancelled, "Import cancelled.")),
+            focus_open: false,
+            selected_media: None,
+        };
+
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut changed = false;
+        let mut draw = |ui: &mut egui::Ui| {
+            let modal = egui::Modal::new(egui::Id::new("import-timeline")).show(ui.ctx(), |ui| {
+                dialog_width_and_height(ui);
+                dialog.show_share_choices(ui)
+            });
+            changed |= modal.inner;
+        };
+        let _ = ctx.run_ui(input(), &mut draw);
+        let output = ctx.run_ui(input(), &mut draw);
+        let review = layout_text_position(&output, |text| text == "Review share…");
+        let _ = click_text(&ctx, review, egui::PointerButton::Primary, &mut draw);
+
+        let popup = ctx.run_ui(input(), &mut draw);
+        assert!(
+            popup.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::epaint::Shape::Text(text)
+                    if text.galley.text() == expected && !text.galley.elided)
+            }),
+            "the popup showed the complete parsed root"
+        );
+        let allow = layout_text_position(&popup, |text| text == "Allow");
+        let _ = click_text(&ctx, allow, egui::PointerButton::Primary, draw);
+        assert!(changed);
+        assert_eq!(dialog.allowed, BTreeSet::from([parsed.root]));
+    }
+
+    #[test]
     fn ix1_a_malformed_timeline_shows_the_typed_refusal_in_the_modal() {
         let directory = TempDirectory::new("ix1-refusal");
         let input = directory.path("edit.otio");

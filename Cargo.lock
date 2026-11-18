@@ -2342,6 +2342,7 @@ dependencies = [
  "image",
  "kinewright-agent",
  "kinewright-core",
+ "kinewright-interchange",
  "kinewright-media",
  "kinewright-project",
  "pollster",
