@@ -19,7 +19,8 @@ pub enum Witness {
     /// A deliberately malicious helper: under the complete boundary it tries
     /// one escape at the first decoder packet. A seccomp denial kills it
     /// (`Crashed`); an errno denial replies `UnsupportedMedia`; an escape
-    /// replies `ProtocolViolation`. `control` attempts nothing.
+    /// replies `ProtocolViolation` before it closes anything. `control`
+    /// attempts nothing.
     Escape,
 }
 impl Witness {
@@ -137,20 +138,33 @@ impl Witness {
         }
     }
 }
-/// Attempt the configured escape. Return only for `control`.
+/// What a successful attack obtained. It stays alive until the helper is
+/// killed, so no descriptor teardown (a `close` the filter forbids) can turn
+/// an escape into a kill before the reply is written (F3).
+enum Obtained {
+    File(std::fs::File),
+    Socket(OwnedFd),
+    Child(std::process::Child),
+    Signal,
+}
+
+/// Attempt the configured escape and reply as soon as the attack's own
+/// syscall returns: `ProtocolViolation` if it obtained a descriptor, a child
+/// or a delivered signal, `UnsupportedMedia` if it was denied with an errno.
+/// A seccomp kill leaves no reply. Return only for `control`.
 fn escape(response: &mut MediaFile, request: u32, generation: u64) {
     use kinewright_media_ipc::{Frame, MediaSandboxError, Message, write_frame};
-    use std::io::Write;
+    use std::io::{Read, Write};
     let Some((attack, target)) = ESCAPE.get() else {
         kinewright_job_sys::media_boundary::exit_helper(125);
     };
-    let attempt: io::Result<()> = match attack.as_str() {
+    let mut attempt: io::Result<Obtained> = match attack.as_str() {
         "control" => return,
-        "read" => std::fs::read(target).map(drop),
+        "read" => std::fs::File::open(target).map(Obtained::File),
         "write" => std::fs::OpenOptions::new()
             .append(true)
             .open(target)
-            .and_then(|mut file| file.write_all(b"escaped")),
+            .map(Obtained::File),
         "socket" => {
             use rustix::net::{AddressFamily, SocketType, socket};
             let (family, kind) = match target.as_str() {
@@ -161,20 +175,24 @@ fn escape(response: &mut MediaFile, request: u32, generation: u64) {
                 _ => kinewright_job_sys::media_boundary::exit_helper(125),
             };
             socket(family, kind, None)
-                .map(drop)
+                .map(Obtained::Socket)
                 .map_err(io::Error::from)
         }
+        // Inherited stdio: std opens nothing and needs no error pipe, so the
+        // first attack syscall is the process creation itself.
         "spawn" => std::process::Command::new(target)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(drop),
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .map(Obtained::Child),
         "signal" => {
             let Some(pid) = target.parse().ok().and_then(rustix::process::Pid::from_raw) else {
                 kinewright_job_sys::media_boundary::exit_helper(125);
             };
-            rustix::process::test_kill_process(pid).map_err(io::Error::from)
+            rustix::process::test_kill_process(pid)
+                .map(|()| Obtained::Signal)
+                .map_err(io::Error::from)
         }
         _ => kinewright_job_sys::media_boundary::exit_helper(125),
     };
@@ -194,6 +212,27 @@ fn escape(response: &mut MediaFile, request: u32, generation: u64) {
     .is_err()
     {
         kinewright_job_sys::media_boundary::exit_helper(125);
+    }
+    // Only after the reply: use what was obtained, so the canary and source
+    // checks also see a real read or write. A later denial can only kill a
+    // helper that has already answered. Nothing is closed: park never
+    // returns, so `attempt` is never dropped, and the host kills the helper.
+    if let Ok(obtained) = &mut attempt {
+        match obtained {
+            Obtained::File(file) if attack == "read" => {
+                let _ = file.read(&mut [0; 1]);
+            }
+            Obtained::File(file) => {
+                let _ = file.write_all(b"escaped");
+            }
+            Obtained::Socket(socket) => {
+                let _ = rustix::io::write(&*socket, b"escaped");
+            }
+            Obtained::Child(child) => {
+                let _ = child.try_wait();
+            }
+            Obtained::Signal => {}
+        }
     }
     park();
 }

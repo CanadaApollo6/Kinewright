@@ -5,8 +5,15 @@
 //! the complete boundary. Each attack must end the helper by a seccomp kill
 //! (`Crashed`), and host canaries and the source must be unchanged. An errno
 //! denial by a lower layer replies `UnsupportedMedia`, and a successful escape
-//! replies `ProtocolViolation`, so removing a guard changes the outcome. The
-//! `control` attack attempts nothing and must be admitted.
+//! replies `ProtocolViolation` before the helper closes any descriptor, so
+//! removing a guard changes the outcome. The `control` attack attempts nothing
+//! and must be admitted. Both modes always run, and every check is collected
+//! before the one assertion, so a removal shows its result in each mode
+//! (`scripts/ms2_s1a_mutations.py`).
+//!
+//! The runtime result carries `Crashed`, not the signal: the shim turns the
+//! payload's SIGSYS into exit status 159, but the host kills the shim as soon
+//! as the reply pipe closes, so that status races SIGKILL and is not asserted.
 #[path = "../../kinewright-job-sys/test_support/deadline.rs"]
 mod deadline;
 
@@ -135,6 +142,12 @@ mod support {
         let output = command.output().unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success(), "{attack} {target}: {output:?}");
+        // Evidence only (see the module note): how the shim itself ended.
+        for line in String::from_utf8_lossy(&output.stderr).lines() {
+            if line.starts_with("MS2_HELPER_EXIT ") {
+                println!("{line} attack={attack} target={target}");
+            }
+        }
         stdout
             .lines()
             .find_map(|line| {
@@ -254,18 +267,17 @@ fn full_stack_escapes_are_killed_and_canaries_unchanged() {
             identity += 1;
             let control = attack(&directory, degraded, "control", "", identity);
             println!("MS2_ESCAPE requested={mode} attack=control result={control}");
-            assert!(
-                control.starts_with(&format!("{mode} "))
-                    || (!degraded && control.starts_with("degraded ")),
-                "requested {mode}, ran {control}"
-            );
-            assert!(
-                control.ends_with(&format!(
-                    "{:?}",
-                    Ok::<_, ()>(kinewright_media_ipc::Kind::Image)
-                )),
-                "the attack harness itself must admit: {control}"
-            );
+            if !(control.starts_with(&format!("{mode} "))
+                || (!degraded && control.starts_with("degraded ")))
+            {
+                failures.push(format!("{mode} control: ran {control}"));
+            }
+            if !control.ends_with(&format!(
+                "{:?}",
+                Ok::<_, ()>(kinewright_media_ipc::Kind::Image)
+            )) {
+                failures.push(format!("{mode} control: not admitted: {control}"));
+            }
             for (name, target) in attacks {
                 identity += 1;
                 let result = attack(&directory, degraded, name, target, identity);
@@ -277,16 +289,15 @@ fn full_stack_escapes_are_killed_and_canaries_unchanged() {
                 }
             }
         }
-        assert_eq!(
-            std::fs::read(&png).unwrap(),
-            source_before,
-            "source changed"
+        if std::fs::read(&png).unwrap() != source_before {
+            failures.push("source changed".into());
+        }
+        if std::fs::read(canary).unwrap() != canary_before {
+            failures.push("canary changed".into());
+        }
+        assert!(
+            failures.is_empty(),
+            "escape witnesses failed: {failures:#?}"
         );
-        assert_eq!(
-            std::fs::read(canary).unwrap(),
-            canary_before,
-            "canary changed"
-        );
-        assert!(failures.is_empty(), "escapes not killed: {failures:#?}");
     }
 }
