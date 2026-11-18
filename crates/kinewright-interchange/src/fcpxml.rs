@@ -761,8 +761,7 @@ impl<'a, 'input> Parser<'a, 'input> {
             }
             let lane = lane(element)?;
             let local = optional(element, "offset")?.unwrap_or(parent.in_point);
-            let at = parent.to_parent(local)?;
-            for (kind, mut placed) in self.parts(element, at, at, depth + 1)? {
+            for (kind, mut placed) in self.parts(element, local, local, depth + 1)? {
                 if retimed {
                     placed
                         .notes
@@ -771,7 +770,11 @@ impl<'a, 'input> Parser<'a, 'input> {
                 let mut track = Track::new(kind);
                 track.items.push(placed);
                 self.track_roles(&mut track);
-                anchors.push(Anchor { lane, track });
+                anchors.push(Anchor {
+                    lane,
+                    time: parent,
+                    track,
+                });
             }
         }
         Ok(anchors)

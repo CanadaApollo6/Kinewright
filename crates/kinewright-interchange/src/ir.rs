@@ -104,7 +104,7 @@ pub struct Placed {
     pub decorations: Decorations,
     /// A separate A/V part can share the original source item's accounting site.
     pub counts_item: bool,
-    /// FCPXML connected clips, with placements in this track's coordinate system.
+    /// FCPXML connected clips and their maps into this track.
     pub anchors: Vec<Anchor>,
 }
 
@@ -152,6 +152,8 @@ impl Placed {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Anchor {
     pub lane: i64,
+    /// Maps the connected track's local time to the containing track.
+    pub time: ContainerTime,
     pub track: Track,
 }
 
@@ -344,6 +346,18 @@ impl Default for ContainerTime {
 }
 
 impl ContainerTime {
+    /// Map an inner container directly into this transform's parent.
+    ///
+    /// # Errors
+    /// Refuses unrepresentable offsets or speeds and a zero outer speed.
+    pub fn compose(self, inner: Self) -> Result<Self, Refusal> {
+        Ok(Self {
+            offset: self.to_parent(inner.offset)?,
+            in_point: inner.in_point,
+            speed: self.speed.checked_mul(inner.speed)?,
+        })
+    }
+
     /// # Errors
     /// Refuses a zero speed or an unrepresentable mapped time.
     pub fn to_parent(self, local: Time) -> Result<Time, Refusal> {

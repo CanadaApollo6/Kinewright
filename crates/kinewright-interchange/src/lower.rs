@@ -607,7 +607,7 @@ impl State {
         for anchor in &placed.anchors {
             let block = self.track(
                 &anchor.track,
-                map,
+                map.compose(anchor.time)?,
                 window,
                 depth + 1,
                 &mut StackTransitions::default(),

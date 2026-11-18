@@ -4,8 +4,8 @@ use kinewright_core::{Document, InterchangeFormat, MediaKind, Rational, TimeCode
 use kinewright_interchange::{
     MediaTable, RefusalCode, Time, fcpxml,
     ir::{
-        Anchor, Clip, Item, Media, MediaId, ParseOptions, Placed, Playback, Source, Stack,
-        Timeline, Track,
+        Anchor, Clip, ContainerTime, Item, Media, MediaId, ParseOptions, Placed, Playback, Source,
+        Stack, Timeline, Track,
     },
     lower, otio,
 };
@@ -332,7 +332,7 @@ proptest! {
             clip("upper", 2, time(4,24),Time::ONE,time(16,24),Playback::Normal)
         ]);
         let mut nest = Placed::new(Time::ZERO, Item::Nested { stack:Stack { tracks:vec![inner_lower,upper], ..Stack::default() },duration:Time::ONE }, "nest");
-        nest.anchors.push(Anchor { lane:1,track:on_track(TrackKind::Video,vec![clip("anchor",3,time(anchor_start,24),Time::ONE,time(anchor_length,24),Playback::Normal)]) });
+        nest.anchors.push(Anchor { lane:1,time:ContainerTime::default(),track:on_track(TrackKind::Video,vec![clip("anchor",3,time(anchor_start,24),Time::ONE,time(anchor_length,24),Playback::Normal)]) });
         let inputs = (0..4).map(|index| media(&format!("{index}.mov"),fps,MediaKind::Video)).collect();
         let model = timeline(InterchangeFormat::Fcpxml,b"model","nest.fcpxml",24,vec![on_track(TrackKind::Video,vec![nest])],inputs);
         let (document, _) = lower(&model,&MediaTable::default()).unwrap();

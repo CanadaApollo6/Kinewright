@@ -294,8 +294,10 @@ instant through every level:
 
 *Anchored items.* FCPXML anchored (connected) clips use the same function, with their parent as
 the container, because an anchored `@offset` is in the parent's local time. A spine clip at 10 s
-with `start="3600s"` places a lane clip with `offset="3602s"` at 12 s. On a retimed parent this
-rests on a reading that is unverified against an editor (`anchor_retime_reading`).
+with `start="3600s"` places a lane clip with `offset="3602s"` at 12 s. The map applies to
+both boundaries of the connected clip and multiplies its playback speed by the parent's speed.
+On a 2× parent, a one-second local interval becomes half a second before frame snapping. This
+reading is unverified against an editor (`anchor_retime_reading`).
 
 *Variable and unsupported maps.* A variable map on a container is averaged into `s`, with the
 largest drift in parent frames as its bound (`variable_speed_averaged`). If the map falls, is not

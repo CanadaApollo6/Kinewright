@@ -34,7 +34,7 @@ fn track_picture(track: &ir::Track, map: ContainerTime, at: Time) -> Option<Pict
     let below = anchors
         .iter()
         .filter(|anchor| anchor.lane < 0)
-        .filter_map(|anchor| track_picture(&anchor.track, map, at))
+        .filter_map(|anchor| track_picture(&anchor.track, map.compose(anchor.time).unwrap(), at))
         .next_back();
     let mut by_time: Vec<_> = track.items.iter().collect();
     by_time.sort_by_key(|placed| placed.at);
@@ -90,7 +90,7 @@ fn track_picture(track: &ir::Track, map: ContainerTime, at: Time) -> Option<Pict
     let above = anchors
         .iter()
         .filter(|anchor| anchor.lane >= 0)
-        .filter_map(|anchor| track_picture(&anchor.track, map, at))
+        .filter_map(|anchor| track_picture(&anchor.track, map.compose(anchor.time).unwrap(), at))
         .next_back();
     above.or(body).or(below)
 }

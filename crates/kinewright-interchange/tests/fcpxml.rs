@@ -30,9 +30,22 @@ fn normal_and_retimed_anchors_use_parent_local_time() {
     let [normal, retimed] = timeline.root.tracks[0].items.as_slice() else {
         panic!("expected two clips");
     };
-    assert_eq!(normal.anchors[0].track.items[0].at, Time::integer(12));
-    let connected = &retimed.anchors[0].track.items[0];
-    assert_eq!(connected.at, Time::integer(15));
+    let normal = &normal.anchors[0];
+    assert_eq!(
+        normal.time.to_parent(normal.track.items[0].at).unwrap(),
+        Time::integer(12)
+    );
+    let anchor = &retimed.anchors[0];
+    let connected = &anchor.track.items[0];
+    assert_eq!(
+        anchor.time.to_parent(connected.at).unwrap(),
+        Time::integer(15)
+    );
+    let local_end = connected.at.checked_add(connected.item.span()).unwrap();
+    assert_eq!(
+        anchor.time.to_parent(local_end).unwrap(),
+        Time::new(31, 2).unwrap()
+    );
     assert!(
         connected
             .notes
@@ -203,4 +216,32 @@ fn fcpxml_clip_enabled_state_is_inherited_inside_and_across_resources() {
         clips.sort_unstable();
         assert_eq!(clips, [(0, false), (24, false), (48, true), (72, false)]);
     }
+}
+
+#[test]
+fn fcpxml_retimed_parent_maps_anchor_start_end_and_speed() {
+    use kinewright_core::TimeCode;
+    let timeline = fcpxml::parse(ANCHORS, "anchors.fcpxml", ParseOptions::default()).unwrap();
+    let (document, _) =
+        kinewright_interchange::lower(&timeline, &kinewright_interchange::MediaTable::default())
+            .unwrap();
+    let connected = document
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .filter(|clip| {
+            document
+                .asset(clip.asset)
+                .is_some_and(|asset| asset.name == "Anchor")
+        })
+        .max_by_key(|clip| clip.timeline_start)
+        .unwrap();
+    assert_eq!(connected.timeline_start, TimeCode(375));
+    // The exact frame 387.5 ties between two cuts, so the shorter cut wins.
+    let length = document.clip_duration(connected).unwrap();
+    assert_eq!(
+        connected.timeline_start.checked_add(length),
+        Some(TimeCode(387))
+    );
+    assert_eq!(connected.speed_percent, 200);
 }

@@ -219,6 +219,7 @@ fn a_dissolve_next_to_a_nest_is_a_cut_and_an_anchor_stays_above_its_layers() {
     );
     nested.anchors.push(Anchor {
         lane: 1,
+        time: ContainerTime::default(),
         track: track("D", 3, Time::ONE, seconds(12, 24)),
     });
     base.items.push(nested);

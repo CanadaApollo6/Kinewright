@@ -5,8 +5,8 @@
   "source_sha256": "3fe60f37ae33775b8f2789a27b36390fe2153c69de15a96fbc5490a23cf52752",
   "start_offset_frames": 0,
   "items": 4,
-  "exact": 4,
-  "approximated": 0,
+  "exact": 3,
+  "approximated": 1,
   "dropped": 0,
   "media": {
     "assets": 2,
@@ -28,6 +28,23 @@
       "count": 2,
       "names": [],
       "at": []
+    },
+    {
+      "code": "cut_snapped",
+      "fidelity": "approximated",
+      "count": 1,
+      "bound": {
+        "unit": "frames",
+        "value": 1
+      },
+      "names": [],
+      "at": [
+        {
+          "source": "25:13",
+          "frame": 375,
+          "clip": 8
+        }
+      ]
     },
     {
       "code": "color_space_default",

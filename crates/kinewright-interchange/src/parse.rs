@@ -100,7 +100,11 @@ pub(crate) fn window_track(track: &mut Track, window: &Range<Time>) -> Result<()
 
 fn window_item(placed: &mut Placed, window: &Range<Time>) -> Result<(), Refusal> {
     for anchor in &mut placed.anchors {
-        window_track(&mut anchor.track, window)?;
+        let local = anchor.time.in_local(window.start)?..anchor.time.in_local(window.end)?;
+        window_track(&mut anchor.track, &local)?;
+        // Both tracks rebase to their respective window starts.
+        anchor.time.offset = Time::ZERO;
+        anchor.time.in_point = Time::ZERO;
     }
     if matches!(placed.item, Item::Discarded { .. }) {
         return Ok(());
