@@ -53,8 +53,25 @@ impl std::error::Error for RecoveryDirectoryRefusal {}
 ///
 /// # Errors
 /// Returns the reason a durable per-user folder could not be resolved.
+#[cfg(not(test))]
 pub fn default_recovery_directory() -> Result<PathBuf, RecoveryDirectoryRefusal> {
     default_recovery_directory_with(|name| std::env::var_os(name), &std::env::temp_dir())
+}
+
+/// The unit-test build requires the explicit resolver seam.
+///
+/// # Errors
+/// The test guard panics before a resolution can return.
+///
+/// # Panics
+/// Always panics with the recovery test isolation rule.
+#[cfg(test)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "matches the shipping resolver signature"
+)]
+pub fn default_recovery_directory() -> Result<PathBuf, RecoveryDirectoryRefusal> {
+    panic!("recovery test rule: use the explicit recovery directory resolver with a fixture root");
 }
 
 /// Resolve a crash-recovery folder from an explicit environment.
@@ -840,6 +857,12 @@ mod tests {
             None,
             "nothing pends after the retire"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "recovery test rule: use the explicit recovery directory resolver")]
+    fn default_recovery_directory_requires_an_explicit_test_override() {
+        let _ = default_recovery_directory();
     }
 
     #[test]

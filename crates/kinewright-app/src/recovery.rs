@@ -38,11 +38,10 @@ use kinewright_core::{
 };
 #[cfg(test)]
 use kinewright_project::canonical_project_identity;
+#[cfg(not(test))]
+use kinewright_project::default_recovery_directory;
 use kinewright_project::operation_actor::Core;
-use kinewright_project::{
-    JOURNAL_MAGIC as MAGIC, RecoveryDirectoryRefusal, allocate_journal_path,
-    default_recovery_directory,
-};
+use kinewright_project::{JOURNAL_MAGIC as MAGIC, RecoveryDirectoryRefusal, allocate_journal_path};
 use serde::{Deserialize, Serialize};
 
 use crate::theme::{self, type_size};
@@ -81,16 +80,33 @@ pub(crate) fn with_directory_result<T>(
 }
 
 /// Use the same recovery root for the GUI recorder and Studio activation.
+#[cfg(not(test))]
 pub(crate) fn directory() -> Result<PathBuf, RecoveryDirectoryRefusal> {
-    #[cfg(test)]
-    if let Some(directory) = JA_DIRECTORY.with_borrow_mut(|slot| match slot {
-        Some(Ok(path)) => Some(Ok(path.clone())),
-        Some(Err(_)) => slot.take(),
-        None => None,
-    }) {
-        return directory;
-    }
     default_recovery_directory()
+}
+
+#[cfg(test)]
+pub(crate) fn directory() -> Result<PathBuf, RecoveryDirectoryRefusal> {
+    JA_DIRECTORY.with_borrow_mut(|slot| match slot {
+        Some(Ok(path)) => Ok(path.clone()),
+        Some(Err(_)) => slot.take().expect("an explicit refusal is set"),
+        None => panic!(
+            "recovery test rule: supply an explicit recovery directory in the test's temp root"
+        ),
+    })
+}
+
+/// Give each test session a private journal folder unless its fixture supplied one.
+#[cfg(test)]
+pub(crate) fn with_test_directory(start: impl FnOnce() -> Recovery) -> Recovery {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    if JA_DIRECTORY.with_borrow(Option::is_some) {
+        return start();
+    }
+    let root = TempDirectory::new_in(&workspace_target_dir(), "app-recovery");
+    let mut recovery = with_ja_directory(root.path("recovery"), start);
+    recovery.test_directory = Some(root);
+    recovery
 }
 
 fn create_recovery_directory(directory: &Path) -> io::Result<()> {
@@ -806,6 +822,8 @@ pub(crate) struct Recovery {
     recorder: Option<Recorder>,
     pending: Vec<PendingJournal>,
     runtime_error: Arc<Mutex<Option<String>>>,
+    #[cfg(test)]
+    test_directory: Option<kinewright_media::test_support::TempDirectory>,
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -842,6 +860,8 @@ impl Recovery {
             recorder: None,
             pending: vec![],
             runtime_error: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            test_directory: None,
         }
     }
 
@@ -923,6 +943,8 @@ impl Recovery {
             recorder: None,
             pending,
             runtime_error,
+            #[cfg(test)]
+            test_directory: None,
         };
         recovery.attach(core, project_path);
         recovery
@@ -1632,6 +1654,12 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "recovery test rule: supply an explicit recovery directory")]
+    fn default_recovery_directory_requires_an_explicit_test_override() {
+        let _ = directory();
+    }
+
+    #[test]
     fn journal_round_trip_preserves_agent_ops_and_undo_redo_history() {
         let directory = TestDirectory::new("round-trip");
         let initial = Document::default();
@@ -1986,8 +2014,17 @@ mod tests {
 
     #[test]
     fn stale_journal_from_crashed_child_is_detected_and_replayed() {
-        let directory = TestDirectory::new("crash");
-        let path = directory.journal();
+        let root = kinewright_media::test_support::TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "crash-recovery",
+        );
+        let state = root.path("state");
+        let directory = kinewright_project::default_recovery_directory_with(
+            |key| (key == "XDG_STATE_HOME").then(|| state.as_os_str().to_os_string()),
+            &root.path("temp"),
+        )
+        .unwrap();
+        let path = directory.join("crashed.journal");
         let output = ProcessCommand::new(std::env::current_exe().unwrap())
             .arg("recovery::tests::crash_child_process")
             .arg("--exact")
@@ -2321,6 +2358,8 @@ mod tests {
             recorder: None,
             pending: Vec::new(),
             runtime_error: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            test_directory: None,
         };
         let pending = |state| PendingJournal {
             directory: None,

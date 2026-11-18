@@ -387,12 +387,19 @@ impl ProjectSession {
         // Open already resolved the source once. Claim and journal that identity,
         // even if the original caller alias was repointed before session creation.
         let io_project_path = source_admission.source().or(project_path.as_deref());
-        let recovery = if !writable {
-            Recovery::read_only()
-        } else if id == 1 {
-            Recovery::start(&core, io_project_path)
+        let recovery = if writable {
+            let start = || {
+                if id == 1 {
+                    Recovery::start(&core, io_project_path)
+                } else {
+                    Recovery::start_attached(&core, io_project_path)
+                }
+            };
+            #[cfg(test)]
+            let start = || crate::recovery::with_test_directory(start);
+            start()
         } else {
-            Recovery::start_attached(&core, io_project_path)
+            Recovery::read_only()
         };
         let document = Arc::new(document);
         let writer_identity = recovery

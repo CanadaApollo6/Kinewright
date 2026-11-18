@@ -15334,6 +15334,80 @@ mod in2b_tests {
         in2b_shutdown(&mut app);
     }
 
+    #[test]
+    fn recovery_folder_refusal_paints_and_records_the_incident_without_journaling() {
+        use kinewright_project::{RecoveryDirectoryRefusal, default_recovery_directory_with};
+
+        let root = TempDirectory::new("recovery-folder-refusal");
+        let refusal = default_recovery_directory_with(|_| None, root.root()).unwrap_err();
+        assert!(matches!(refusal, RecoveryDirectoryRefusal::NoStateFolder));
+        let project = root.path("edit.kinewright");
+        let document = Document::default();
+        fs::write(&project, serialize_project_document(&document).unwrap()).unwrap();
+        let (mut app, engine) = crate::recovery::with_directory_result(Err(refusal), || {
+            in2b_harness(document, Some(project.clone()))
+        });
+
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let frame = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(frame(), |ui| app.show_recovery_dialogs(ui.ctx()));
+        let output = ctx.run_ui(frame(), |ui| app.show_recovery_dialogs(ui.ctx()));
+        let text = theme::painted_text(&output).join("\n");
+        assert!(text.contains("Crash recovery unavailable"), "{text}");
+        assert!(
+            text.contains("Unsaved work will not survive a crash"),
+            "{text}"
+        );
+        assert!(text.contains("no per-user state folder is set"), "{text}");
+        app.route_incidents();
+        assert!(
+            app.focused()
+                .incidents
+                .read()
+                .unwrap()
+                .all()
+                .any(|incident| {
+                    incident.code == IncidentCode::Label(LabelIncident::RecoveryUnavailable)
+                        && incident
+                            .observed
+                            .contains("no per-user state folder is set")
+                })
+        );
+
+        app.focused()
+            .core
+            .request(Command::Do(Operation::AddTrack {
+                track: Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![],
+                },
+            }))
+            .unwrap();
+        crate::app::in1_tests::in1_drain_core(&mut app, 0);
+        assert_eq!(app.focused().document.tracks[0].id, TrackId(1));
+        app.write_project(&project).unwrap();
+        assert_eq!(load_document(&project).unwrap().0, *app.focused().document);
+        assert!(app.focused().recovery.journal_path().as_os_str().is_empty());
+        assert!(
+            admission_tree(root.root()).keys().all(|path| {
+                path.extension()
+                    .is_none_or(|extension| extension != "journal")
+            }),
+            "no journal can be written anywhere under the fixture root",
+        );
+        in2b_shutdown(&mut app);
+        drop(engine);
+    }
+
     /// N6/H8: the startup missing-media aggregate is transient, like
     /// File → Open — a per-run note must never persist `Open` against a
     /// later open. Driven through the production startup path.
