@@ -194,6 +194,9 @@ impl<'a> Parser<'a> {
         if let Some(window) = node.source_range {
             parse::apply_window(&mut root, self.range(window, path)?)?;
         }
+        if node.enabled == Some(false) {
+            root.disable();
+        }
         Ok(root)
     }
 
@@ -255,6 +258,9 @@ impl<'a> Parser<'a> {
         if let Some(window) = node.source_range {
             parse::apply_window(&mut root, self.range(window, path)?)?;
         }
+        if node.enabled == Some(false) {
+            root.disable();
+        }
         Ok(root)
     }
 
@@ -283,6 +289,9 @@ impl<'a> Parser<'a> {
         }
         if let Some(window) = node.source_range {
             parse::window_track(&mut track, &self.range(window, path)?)?;
+        }
+        if node.enabled == Some(false) {
+            track.disable();
         }
         Ok(track)
     }

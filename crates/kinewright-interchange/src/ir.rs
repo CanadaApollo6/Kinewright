@@ -70,6 +70,12 @@ pub struct Track {
 }
 
 impl Track {
+    pub(crate) fn disable(&mut self) {
+        for placed in &mut self.items {
+            placed.disable();
+        }
+    }
+
     #[must_use]
     pub const fn new(kind: TrackKind) -> Self {
         Self {
@@ -103,6 +109,18 @@ pub struct Placed {
 }
 
 impl Placed {
+    pub(crate) fn disable(&mut self) {
+        match &mut self.item {
+            Item::Clip(clip) => clip.enabled = false,
+            Item::Nested { stack, .. } => stack.disable(),
+            Item::Title { enabled, .. } => *enabled = false,
+            _ => {}
+        }
+        for anchor in &mut self.anchors {
+            anchor.track.disable();
+        }
+    }
+
     #[must_use]
     pub fn new(at: Time, item: Item, site: impl Into<String>) -> Self {
         Self {
@@ -155,6 +173,7 @@ pub enum Item {
     Title {
         text: String,
         duration: Time,
+        enabled: bool,
         decorations: Decorations,
     },
     Unsupported {
@@ -194,6 +213,12 @@ impl Item {
 }
 
 impl Stack {
+    pub(crate) fn disable(&mut self) {
+        for track in &mut self.tracks {
+            track.disable();
+        }
+    }
+
     #[must_use]
     pub fn population(&self) -> u32 {
         self.decorations.population()

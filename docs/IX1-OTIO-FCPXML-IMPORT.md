@@ -145,7 +145,7 @@ N = faithful, A = approximated (bound stated), Ø = dropped.
 | Clip range | `source_range` − `available_range.start_time` | `@start` − `asset@start` (or `timeMap(@start)`), `@offset`, `@duration` | `Clip.source_range`, `timeline_start` (`model.rs:429-443`); cuts snap to the outgoing clip (§4.2) | N on grid; A: snapped cuts and source ends bounded by §4.2 |
 | A/V clip, split edit | paired only by §5.4 | `asset-clip`, `audioStart`/`audioDuration` | linked pair (`model.rs:446-450`), as `media_bin.rs:617` builds | N; A unpaired OTIO split edit (`av_link_unpaired`) |
 | Dual-mono, channel maps, pan | same file, same range on two audio tracks | `audio-channel-source`, `adjust-panner` | one clip kept (§5.4); no clip pan | A `channel_map_dropped`; Ø pan |
-| Gap; disabled | `Gap.1`; `enabled` | `gap`; `@enabled="0"` | empty span; `Clip.enabled` (`model.rs:484-489`) | N for retained space and enabled state; A for the timeline tail (§6.2) |
+| Gap; disabled | `Gap.1`; `enabled` | `gap`; `@enabled="0"` | empty span; `Clip.enabled` (`model.rs:484-489`) | N for retained space and enabled state inherited from all ancestors; A for the timeline tail (§6.2) |
 | Constant speed | `LinearTimeWarp.1` (§4.3, unverified reading) | two-point `timeMap`; `conform-rate` | `speed_percent` 10..=1000 (`model.rs:473-483`) | A: speed rounded or clamped, cut snap and source-end drift (§4.2–4.3); Ø audio (muted, `model.rs:477-478`) |
 | Reverse, variable | negative scalar; other `TimeEffect` | falling or multi-point `timeMap` | none | Ø reverse (plays forward); A variable: average speed, drift in frames |
 | Freeze | `FreezeFrame.1`, scalar 0 | constant-value `timeMap` segment (unverified reading) | `ClipContent::Freeze` (`model.rs:341`, `:393-398`) | N |

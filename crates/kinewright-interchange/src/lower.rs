@@ -519,7 +519,7 @@ impl State {
                     notes,
                 )
             }
-            Item::Title { text, .. } if kind == TrackKind::Video => {
+            Item::Title { text, enabled, .. } if kind == TrackKind::Video => {
                 let end = location.end.frame(self.project)?.0.min(limit);
                 if end <= start {
                     notes.push(Loss::dropped(LossCode::ClipTooShort));
@@ -530,7 +530,7 @@ impl State {
                     notes.push(Loss::approximation(LossCode::TitleTextTruncated));
                 }
                 notes.push(Loss::approximation(LossCode::TitleStyleDefault));
-                let clip = clips::blank(
+                let mut clip = clips::blank(
                     self.id(),
                     ClipContent::Title(Title {
                         text: title,
@@ -539,6 +539,7 @@ impl State {
                     start,
                     TimeCode::ZERO..TimeCode(end - start),
                 );
+                clip.enabled = *enabled;
                 Ok(Some(Candidate {
                     clip,
                     end,

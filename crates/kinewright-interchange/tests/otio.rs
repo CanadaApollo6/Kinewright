@@ -122,3 +122,48 @@ fn a_window_edge_turns_a_dissolve_into_a_reported_cut() {
             .any(|row| row.code == LossCode::TransitionAtNestCut)
     );
 }
+
+#[test]
+fn otio_clip_enabled_state_is_inherited_from_each_composition() {
+    use serde_json::{Value, json};
+
+    let source: Value = serde_json::from_slice(WINDOW).unwrap();
+    let mut enabled_clip = source["tracks"]["children"][0]["children"][0].clone();
+    enabled_clip["enabled"] = json!(true);
+    let timeline = |timeline_enabled, stack_enabled, track_enabled, clip: &Value| {
+        json!({
+            "OTIO_SCHEMA": "Timeline.1",
+            "enabled": timeline_enabled,
+            "global_start_time": {"rate": 24, "value": 0},
+            "tracks": {
+                "OTIO_SCHEMA": "Stack.1",
+                "enabled": stack_enabled,
+                "children": [{
+                    "OTIO_SCHEMA": "Track.1",
+                    "kind": "Video",
+                    "enabled": track_enabled,
+                    "children": [clip]
+                }]
+            }
+        })
+    };
+    for (timeline_enabled, stack_enabled, track_enabled, expected) in [
+        (true, true, false, false),
+        (true, false, true, false),
+        (false, true, true, false),
+        (true, true, true, true),
+    ] {
+        let bytes = serde_json::to_vec(&timeline(
+            timeline_enabled,
+            stack_enabled,
+            track_enabled,
+            &enabled_clip,
+        ))
+        .unwrap();
+        let parsed = otio::parse(&bytes, "disabled.otio", ParseOptions::default()).unwrap();
+        let (document, _) =
+            kinewright_interchange::lower(&parsed, &kinewright_interchange::MediaTable::default())
+                .unwrap();
+        assert_eq!(document.tracks[0].clips[0].enabled, expected);
+    }
+}

@@ -69,7 +69,9 @@ fn track_picture(track: &ir::Track, map: ContainerTime, at: Time) -> Option<Pict
                         in_point: clip.source_start,
                     })
                 }
-                Item::Title { .. } if track.kind == TrackKind::Video => Some(Picture::Title),
+                Item::Title { enabled: true, .. } if track.kind == TrackKind::Video => {
+                    Some(Picture::Title)
+                }
                 Item::Nested { stack, .. } if stack.time.speed > Time::ZERO => {
                     let offset = start
                         .checked_add(stack.time.offset.checked_div(map.speed).unwrap())

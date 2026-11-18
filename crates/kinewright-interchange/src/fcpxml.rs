@@ -344,40 +344,26 @@ impl<'a, 'input> Parser<'a, 'input> {
                 let item = self.nested(node, span, in_point, &playback, depth, &mut notes)?;
                 vec![(TrackKind::Video, Placed::new(offset, item, source))]
             }
-            "gap" => vec![(
-                TrackKind::Video,
-                Placed::new(offset, Item::Gap { duration: span }, source),
-            )],
             "transition" => vec![(
                 TrackKind::Video,
                 self.transition(node, offset, span, cut, &source)?,
             )],
-            "title" => {
-                let text = title_text(node);
-                vec![(
-                    TrackKind::Video,
-                    Placed::new(
-                        offset,
-                        Item::Title {
-                            text,
-                            duration: span,
-                            decorations: Decorations::empty(),
-                        },
-                        source,
-                    ),
-                )]
-            }
-            _ => vec![(
-                TrackKind::Video,
-                Placed::new(
-                    offset,
-                    Item::Unsupported {
+            name => {
+                let item = match name {
+                    "gap" => Item::Gap { duration: span },
+                    "title" => Item::Title {
+                        text: title_text(node),
+                        duration: span,
+                        enabled: true,
+                        decorations: Decorations::empty(),
+                    },
+                    _ => Item::Unsupported {
                         what: text(name),
                         duration: span,
                     },
-                    source,
-                ),
-            )],
+                };
+                vec![(TrackKind::Video, Placed::new(offset, item, source))]
+            }
         };
         if let Some((_, first)) = parts.first_mut() {
             first.notes.append(&mut notes);
@@ -404,6 +390,14 @@ impl<'a, 'input> Parser<'a, 'input> {
                 && child(node, "spine").is_none();
             if !owns_inline_children {
                 first.anchors = self.anchors(node, parent, depth, speed != Time::ONE)?;
+            }
+        }
+        if node
+            .ancestors()
+            .any(|ancestor| ancestor.attribute("enabled") == Some("0"))
+        {
+            for (_, placed) in &mut parts {
+                placed.disable();
             }
         }
         Ok(parts)
@@ -551,7 +545,6 @@ impl<'a, 'input> Parser<'a, 'input> {
                 span
             };
             let mut clip = Clip::new(id, source_start, clip_span);
-            clip.enabled = node.attribute("enabled") != Some("0");
             // A split edit has two independent IR parts and both retain the time map.
             clip.time = if video && has_audio && !audio {
                 playback.clone().unwrap_or_default()

@@ -163,3 +163,44 @@ fn distinct_active_multicam_picture_and_sound_angles_are_both_lowered() {
             .any(|row| row.code == LossCode::MulticamActiveAngle && row.count == 2)
     );
 }
+
+#[test]
+fn fcpxml_clip_enabled_state_is_inherited_inside_and_across_resources() {
+    let xml = br#"<fcpxml version="1.13">
+      <resources>
+        <format id="f" frameDuration="1/24s" width="1920" height="1080"/>
+        <asset id="a" format="f" start="0s" duration="4s" hasVideo="1" hasAudio="1">
+          <media-rep kind="original-media" src="file:///a.mov"/>
+        </asset>
+        <media id="c"><sequence format="f"><spine>
+          <asset-clip ref="a" duration="1s" enabled="1"/>
+        </spine></sequence></media>
+      </resources>
+      <project><sequence format="f"><spine>
+        <sync-clip enabled="0" offset="0s" duration="1s"><spine>
+          <asset-clip ref="a" duration="1s" enabled="1"/>
+        </spine></sync-clip>
+        <ref-clip ref="c" enabled="0" offset="1s" duration="1s"/>
+        <ref-clip ref="c" offset="2s" duration="1s"/>
+        <asset-clip ref="a" enabled="0" offset="3s" duration="1s"/>
+      </spine></sequence></project>
+    </fcpxml>"#;
+    let timeline = fcpxml::parse(xml, "disabled.fcpxml", ParseOptions::default()).unwrap();
+    let (document, _) =
+        kinewright_interchange::lower(&timeline, &kinewright_interchange::MediaTable::default())
+            .unwrap();
+    for kind in [
+        kinewright_core::TrackKind::Video,
+        kinewright_core::TrackKind::Audio,
+    ] {
+        let mut clips: Vec<_> = document
+            .tracks
+            .iter()
+            .filter(|track| track.kind == kind)
+            .flat_map(|track| &track.clips)
+            .map(|clip| (clip.timeline_start.0, clip.enabled))
+            .collect();
+        clips.sort_unstable();
+        assert_eq!(clips, [(0, false), (24, false), (48, true), (72, false)]);
+    }
+}
