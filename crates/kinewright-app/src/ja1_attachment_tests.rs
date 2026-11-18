@@ -3902,15 +3902,37 @@ fn te13_fix3_retained_app(
     )
     .unwrap();
     if hosted {
-        app.launch_host_at(
-            &host::executable(),
-            "te13-fix1-app".into(),
-            kinewright_agent::writer_host::SessionRoots {
-                read: vec![temp.root().into()],
-                write: vec![temp.root().into()],
-            },
-        )
-        .unwrap();
+        use kinewright_agent::writer_host::{
+            HostCommand, ProtocolFixture, ProtocolFixtureMode, RecoveryPhase, SessionRoots,
+        };
+        let roots = SessionRoots {
+            read: vec![temp.root().into()],
+            write: vec![temp.root().into()],
+        };
+        if scenario == "live" {
+            let fixture = ProtocolFixture::new(temp.root(), ProtocolFixtureMode::Dormant);
+            let writer = app
+                .launch_protocol_fixture(roots, temp.path("settings"), &fixture)
+                .unwrap();
+            app.fixture_host = Some(writer);
+            // Completed is emitted after recover_on_open finishes its MachineClaim
+            // and RecoveryExit publishes the settled startup status.
+            assert!(
+                fixture.wait_recovery(RecoveryPhase::Completed, std::time::Duration::from_secs(5))
+            );
+            let reply = app
+                .host
+                .as_ref()
+                .unwrap()
+                .client
+                .request(HostCommand::Status)
+                .unwrap();
+            app.accept_host_reply(reply).unwrap();
+            app.start_host_manual().unwrap();
+        } else {
+            app.launch_host_at(&host::executable(), "te13-fix1-app".into(), roots)
+                .unwrap();
+        }
     }
     (temp, app, source.branch, expected)
 }
