@@ -164,17 +164,39 @@ jobs:
         with:
           no-binary-cache: 'true'
 
-      - name: Provision FFmpeg, test, build, and package
+      - uses: ./.github/actions/ci-user-session
+
+      - name: Test workspace with the Linux media sandbox
         run: |
-          cargo test --workspace --locked
-          cargo build --package kinewright-app --release --locked
+          cargo build --locked -p kinewright-media-helper -p kinewright-media-supervisor --bins
+          if [[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || true)" == 1 ]]; then
+            trap 'sudo ./scripts/install-apparmor-profile.sh remove' EXIT
+            sudo ./scripts/install-apparmor-profile.sh install "$PWD/target/debug/kinewright-media-helper"
+          fi
+          systemd-run --user --scope --quiet --collect -- cargo test --workspace --locked
+
+      - name: Build and package Kinewright for Linux
+        run: |
+          cargo build --release --locked -p kinewright-app -p kinewright-media-helper -p kinewright-media-supervisor
           ./scripts/package-linux.sh --version "${KINEWRIGHT_VERSION}" --no-binary-cache
-          ./scripts/test-linux-bundle.sh --bundle-dir ./dist/linux-x64
-          tarball="$(find ./dist/tarball -maxdepth 1 -type f -name '*.tar.gz')"
-          if [[ -z "${tarball}" || "$(echo "${tarball}" | wc -l)" -ne 1 ]]; then
-            echo "Expected one Linux tarball, found: ${tarball}" >&2
+
+      - name: Test the unpacked Linux tarball
+        run: |
+          shopt -s nullglob
+          tarballs=(dist/tarball/*.tar.gz)
+          if [[ "${#tarballs[@]}" -ne 1 ]]; then
+            echo "Expected one Linux tarball, found ${#tarballs[@]}." >&2
             exit 1
           fi
+          tarball="${tarballs[0]}"
+          unpack_dir="$(mktemp -d "$RUNNER_TEMP/Kinewright bundle.XXXXXX")"
+          bundle="$unpack_dir/linux-x64"
+          tar -xzf "$tarball" -C "$unpack_dir"
+          if [[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || true)" == 1 ]]; then
+            trap 'sudo "$bundle/scripts/install-apparmor-profile.sh" remove' EXIT
+            sudo "$bundle/scripts/install-apparmor-profile.sh" install "$bundle/kinewright-media-helper"
+          fi
+          systemd-run --user --scope --quiet --collect -- ./scripts/test-linux-bundle.sh --bundle-dir "$bundle"
           hash="$(sha256sum "${tarball}" | awk '{print $1}')"
           echo "${hash}  $(basename "${tarball}")" > "${tarball}.sha256"
           echo "Tarball SHA-256: ${hash}"
