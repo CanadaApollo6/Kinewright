@@ -353,6 +353,7 @@ enum Inspection {
     Missing,
     Recoverable(RecoveryReport),
     Unusable,
+    Unchecked(String),
 }
 
 fn parse_journal(bytes: &[u8]) -> Result<ParsedJournal, Damage> {
@@ -451,26 +452,57 @@ fn inspect_bytes(bytes: &[u8]) -> Inspection {
 fn inspect_path(path: &Path) -> Inspection {
     match fs::read(path) {
         Ok(bytes) => inspect_bytes(&bytes),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Inspection::Missing,
-        Err(_) => Inspection::Unusable,
+        Err(error) => inspect_read_error(&error),
     }
 }
 
+fn inspect_read_error(error: &io::Error) -> Inspection {
+    if error.kind() == io::ErrorKind::NotFound {
+        Inspection::Missing
+    } else {
+        Inspection::Unchecked(bounded_recovery_text(
+            &format!("Couldn't read the recovery file: {error}"),
+            160,
+        ))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static REFUSE_NEXT_REPLAY_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn replay(parsed: ParsedJournal) -> Inspection {
-    let pool = kinewright_project::operation_history::HistoryPool::new(
-        kinewright_project::operation_history::PoolLimits::default(),
-    );
+    use kinewright_project::operation_history::{HistoryPool, PoolLimits};
+
+    let limits = PoolLimits::default();
+    #[cfg(test)]
+    let limits = if REFUSE_NEXT_REPLAY_SPAWN.replace(false) {
+        PoolLimits {
+            retained: [0; 3],
+            ..limits
+        }
+    } else {
+        limits
+    };
+    let pool = HistoryPool::new(limits);
     let origin = kinewright_project::operation_history::CreationOrigin {
         branch: kinewright_project::bundle_records::BranchId::fresh().expect("OS randomness"),
         batch: kinewright_project::bundle_records::BatchId::fresh().expect("OS randomness"),
     };
-    let Ok(core) = Core::spawn(
+    let core = match Core::spawn(
         &pool,
         kinewright_project::operation_history::Role::Ordinary,
         origin,
         parsed.initial_document.clone(),
-    ) else {
-        return Inspection::Unusable;
+    ) {
+        Ok(core) => core,
+        Err(error) => {
+            return Inspection::Unchecked(bounded_recovery_text(
+                &format!("Couldn't start replaying the recovery file: {error}"),
+                160,
+            ));
+        }
     };
     let project_path = parsed.project_path;
     let mut document = parsed.initial_document;
@@ -732,6 +764,7 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 enum PendingState {
     Recoverable(RecoveryReport),
     Unusable,
+    Unchecked(String),
 }
 
 /// One journal found on disk at startup, awaiting a restore/discard decision.
@@ -1152,7 +1185,11 @@ impl Recovery {
                 Some((index, entry, report))
             });
         let readable_count = readable.clone().count();
-        let unreadable = self.pending.len() - readable_count;
+        let unreadable = self
+            .pending
+            .iter()
+            .filter(|entry| matches!(entry.state, PendingState::Unusable))
+            .count();
         let last_page = readable_count.saturating_sub(1) / PAGE_SIZE;
         self.pending_page = self.pending_page.min(last_page);
 
@@ -1217,7 +1254,58 @@ impl Recovery {
                 action = Some(PendingAction::DiscardUnreadable);
             }
         }
+        self.show_unchecked(ui);
         action
+    }
+
+    fn show_unchecked(&self, ui: &mut egui::Ui) {
+        let unchecked = || {
+            self.pending.iter().filter_map(|entry| match &entry.state {
+                PendingState::Unchecked(reason) => {
+                    Some((entry.journal_path.as_path(), reason.as_str()))
+                }
+                _ => None,
+            })
+        };
+        let count = unchecked().count();
+        if count == 0 {
+            return;
+        }
+        let (plural, pronoun) = if count == 1 {
+            ("", "It is")
+        } else {
+            ("s", "They are")
+        };
+        ui.separator();
+        let label = ui.label(format!(
+            "{count} recovery file{plural} couldn't be checked this time. \
+             {pronoun} kept and will be checked again when Kinewright next starts."
+        ));
+
+        // The default hover tooltip closes on wheel input. Keep this one open
+        // while the pointer is on the row or over the file list itself.
+        let region_id = label.id.with("unchecked_files");
+        let tooltip_hovered = label.is_tooltip_open()
+            && ui
+                .data(|data| data.get_temp::<egui::Rect>(region_id))
+                .is_some_and(|region| {
+                    ui.input(|input| {
+                        input
+                            .pointer
+                            .hover_pos()
+                            .is_some_and(|pos| region.contains(pos))
+                    })
+                });
+        if label.hovered() || tooltip_hovered {
+            let entries: Vec<_> = unchecked().collect();
+            if let Some(tooltip) = egui::Tooltip::for_widget(&label)
+                .gap(0.0)
+                .width(460.0)
+                .show(|ui| show_unchecked_files(ui, &entries))
+            {
+                ui.data_mut(|data| data.insert_temp(region_id, tooltip.response.rect));
+            }
+        }
     }
 
     pub(crate) fn show_unavailable(&mut self, ctx: &egui::Context) -> Option<String> {
@@ -1269,6 +1357,9 @@ impl Recovery {
     }
 
     fn remove_pending(&self, entry: &PendingJournal) -> bool {
+        if matches!(entry.state, PendingState::Unchecked(_)) {
+            return false;
+        }
         let result = (|| -> Result<(), String> {
             use std::io::Read as _;
             let project = entry.project_path.as_deref();
@@ -1459,10 +1550,7 @@ fn scan_directory(directory: &Path) -> Vec<PendingJournal> {
                     inspect_bytes(&bytes),
                     Some(kinewright_media::sha256_bytes(&bytes)),
                 ),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    (Inspection::Missing, None)
-                }
-                Err(_) => (Inspection::Unusable, None),
+                Err(error) => (inspect_read_error(&error), None),
             };
             let journal_path = directory.join(name);
             match inspection {
@@ -1481,9 +1569,45 @@ fn scan_directory(directory: &Path) -> Vec<PendingJournal> {
                     journal_path,
                     state: PendingState::Unusable,
                 }),
+                Inspection::Unchecked(reason) => Some(PendingJournal {
+                    directory: None,
+                    sha256: None,
+                    project_path: None,
+                    journal_path,
+                    state: PendingState::Unchecked(reason),
+                }),
             }
         })
         .collect()
+}
+
+fn show_unchecked_files(ui: &mut egui::Ui, entries: &[(&Path, &str)]) {
+    let folder = entries[0].0.parent().unwrap_or(Path::new("."));
+    let row_height = ui.text_style_height(&egui::TextStyle::Body);
+    ui.style_mut().interaction.selectable_labels = true;
+    egui::ScrollArea::both()
+        .max_width(460.0)
+        .max_height(180.0)
+        .show_rows(ui, row_height, entries.len() + 1, |ui, rows| {
+            for row in rows {
+                let text = if row == 0 {
+                    format!("Recovery folder  {}", folder.display())
+                } else {
+                    let (path, reason) = entries[row - 1];
+                    let name = if path.parent() == Some(folder) {
+                        path.file_name().unwrap_or(path.as_os_str())
+                    } else {
+                        path.as_os_str()
+                    };
+                    let name = name
+                        .to_string_lossy()
+                        .replace('\n', "\\n")
+                        .replace('\r', "\\r");
+                    format!("{name}  {}", reason.replace(['\n', '\r'], " "))
+                };
+                ui.add(egui::Label::new(text).extend());
+            }
+        });
 }
 
 fn pending_project_label(project_path: Option<&Path>) -> String {
@@ -2354,63 +2478,72 @@ mod tests {
         assert!(!journal_path.exists());
     }
 
-    #[test]
-    fn the_recovery_prompt_groups_and_discards_only_unreadable_journals() {
-        fn button_center(shape: &egui::epaint::Shape) -> Option<egui::Pos2> {
+    fn recovery_frame(
+        ctx: &egui::Context,
+        recovery: &mut Recovery,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 700.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                recovery.show_dialog(ui.ctx());
+            },
+        )
+    }
+
+    fn painted_label_center(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
+        fn center(shape: &egui::epaint::Shape, label: &str) -> Option<egui::Pos2> {
             match shape {
-                egui::epaint::Shape::Text(text)
-                    if text.galley.text() == "Discard unreadable files" =>
-                {
+                egui::epaint::Shape::Text(text) if text.galley.text() == label => {
                     Some(text.pos + text.galley.size() * 0.5)
                 }
-                egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(button_center),
+                egui::epaint::Shape::Vec(shapes) => {
+                    shapes.iter().find_map(|shape| center(shape, label))
+                }
                 _ => None,
             }
         }
+        output
+            .shapes
+            .iter()
+            .find_map(|shape| center(&shape.shape, label))
+            .unwrap_or_else(|| panic!("missing painted label {label:?}"))
+    }
 
+    #[test]
+    fn spawn_refused_journal_survives_bulk_discard() {
         let dir = TestDirectory::new("unreadable-group");
         let readable = dir.0.join("readable.journal");
         let good = encoded_journal(&Document::default(), &[]);
         fs::write(&readable, &good).unwrap();
+        // Scan this valid journal before the readable control so only its Core spawn is refused.
+        let unchecked = dir.0.join("a-unchecked.journal");
+        let unchecked_bytes = encoded_journal(&Document::default(), &representative_commands());
+        fs::write(&unchecked, &unchecked_bytes).unwrap();
         let unreadable =
             ["old.journal", "empty.journal", "bad.journal"].map(|name| dir.0.join(name));
         for (path, bytes) in unreadable.iter().zip([b"OLD\n".as_slice(), b"", b"bad\n"]) {
             fs::write(path, bytes).unwrap();
         }
         let mut recovery = Recovery::read_only();
+        REFUSE_NEXT_REPLAY_SPAWN.set(true);
         recovery.pending = scan_directory(&dir.0);
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
-        let mut frame = |events| {
-            ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(1000.0, 700.0),
-                    )),
-                    events,
-                    ..Default::default()
-                },
-                |ui| {
-                    recovery.show_dialog(ui.ctx());
-                },
-            )
-        };
+        let mut frame = |events| recovery_frame(&ctx, &mut recovery, events);
         let _ = frame(vec![]);
         let _ = frame(vec![]);
         let output = frame(vec![]);
         let labels = crate::theme::painted_text(&output);
         let count = |label| labels.iter().filter(|item| item.as_str() == label).count();
-        assert_eq!(count("Unsaved project"), 1);
-        assert_eq!(count("3 recovery files can't be read."), 1);
-        assert_eq!(count("Restore"), 1);
-        assert_eq!(count("Discard"), 1);
-        assert_eq!(count("Discard unreadable files"), 1);
-        let target = output
-            .shapes
-            .iter()
-            .find_map(|shape| button_center(&shape.shape))
-            .expect("the bulk discard button was painted");
+        let target = painted_label_center(&output, "Discard unreadable files");
         let click = |pressed| egui::Event::PointerButton {
             pos: target,
             button: egui::PointerButton::Primary,
@@ -2419,10 +2552,116 @@ mod tests {
         };
         let _ = frame(vec![egui::Event::PointerMoved(target), click(true)]);
         let _ = frame(vec![click(false)]);
-        assert_eq!(recovery.pending.len(), 1);
-        assert_eq!(recovery.pending[0].journal_path, readable);
+        assert_eq!(
+            fs::read(&unchecked).ok().as_deref(),
+            Some(unchecked_bytes.as_slice()),
+            "HX_T5_UNCHECKED_SURVIVES_BULK_DISCARD"
+        );
+        assert_eq!(count("Unsaved project"), 1);
+        assert_eq!(count("3 recovery files can't be read."), 1);
+        assert_eq!(
+            count(
+                "1 recovery file couldn't be checked this time. It is kept and will be checked again when Kinewright next starts."
+            ),
+            1
+        );
+        assert_eq!(count("Restore"), 1);
+        assert_eq!(count("Discard"), 1);
+        assert_eq!(count("Discard unreadable files"), 1);
+        assert_eq!(recovery.pending.len(), 2);
+        assert!(recovery.pending.iter().any(|entry| {
+            entry.journal_path == unchecked
+                && matches!(&entry.state, PendingState::Unchecked(reason)
+                if reason.starts_with("Couldn't start replaying the recovery file: "))
+        }));
         assert_eq!(fs::read(&readable).unwrap(), good);
         assert!(unreadable.iter().all(|path| !path.exists()));
+    }
+
+    #[test]
+    fn unchecked_hover_lists_files_and_reasons_in_the_recovery_folder() {
+        let dir = TestDirectory::new("unchecked-hover");
+        let mut recovery = Recovery::read_only();
+        recovery.pending = (1..=16)
+            .map(|n| PendingJournal {
+                directory: None,
+                sha256: None,
+                journal_path: dir.0.join(format!("edit-{n:02}.journal")),
+                project_path: None,
+                state: PendingState::Unchecked(format!("Read failed ({n})")),
+            })
+            .collect();
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut frame = |events| recovery_frame(&ctx, &mut recovery, events);
+        let _ = frame(vec![]);
+        let _ = frame(vec![]);
+        let output = frame(vec![]);
+        let row = painted_label_center(
+            &output,
+            "16 recovery files couldn't be checked this time. They are kept and will be checked again when Kinewright next starts.",
+        );
+        let _ = frame(vec![egui::Event::PointerMoved(row)]);
+        let output = frame(vec![]);
+        let labels = crate::theme::painted_text(&output);
+        assert!(labels.contains(&format!("Recovery folder  {}", dir.0.display())));
+        assert!(
+            labels
+                .iter()
+                .any(|label| label == "edit-01.journal  Read failed (1)")
+        );
+        assert!(
+            labels
+                .iter()
+                .all(|label| label != "edit-16.journal  Read failed (16)")
+        );
+
+        let first_file = painted_label_center(&output, "edit-01.journal  Read failed (1)");
+        let _ = frame(vec![egui::Event::PointerMoved(first_file)]);
+        for _ in 0..6 {
+            let _ = frame(vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -350.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        let labels = crate::theme::painted_text(&frame(vec![]));
+        assert!(
+            labels
+                .iter()
+                .any(|label| label == "edit-16.journal  Read failed (16)"),
+            "scroll did not reach the last unchecked file: {labels:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_refused_journal_is_unchecked_and_kept() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = TestDirectory::new("read-refused");
+        let journal = dir.journal();
+        let bytes = encoded_journal(&Document::default(), &[]);
+        fs::write(&journal, &bytes).unwrap();
+        fs::set_permissions(&journal, fs::Permissions::from_mode(0o000)).unwrap();
+        let Err(error) = fs::read(&journal) else {
+            eprintln!("NOT RUN: this process can read a recovery file with mode 000");
+            return;
+        };
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let mut recovery = Recovery::read_only();
+        recovery.pending = scan_directory(&dir.0);
+        let [entry] = recovery.pending.as_slice() else {
+            panic!("expected one pending journal");
+        };
+        assert_eq!(entry.journal_path, journal);
+        assert!(matches!(&entry.state, PendingState::Unchecked(reason)
+            if reason.starts_with("Couldn't read the recovery file: ")));
+        assert!(!recovery.remove_pending(entry));
+        assert!(lock_unpoisoned(&recovery.runtime_error).is_none());
+        fs::set_permissions(&journal, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(fs::read(&journal).unwrap(), bytes);
     }
 
     /// Item 23: both recovery modals note damage-only. The constructors
