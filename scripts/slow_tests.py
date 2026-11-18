@@ -359,8 +359,9 @@ def lint() -> int:
         problems.append(f"marked slow for {scope} but not in {MANIFEST.relative_to(ROOT)}: {name} ({file})")
     for crate in sorted({crate_of(f) for _, _, f, _ in entries} | {crate_of(f) for f, _, _ in marked}):
         manifest_toml = (ROOT / "crates" / crate / "Cargo.toml").read_text(encoding="utf-8")
-        if not re.search(r"^slow-tests\s*=\s*\[\s*\]", manifest_toml, re.M):
-            problems.append(f"crates/{crate}/Cargo.toml has no `slow-tests = []` feature")
+        # The feature may forward to a dependency's slow-tier witness seams.
+        if not re.search(r'^slow-tests\s*=\s*\[(\s*"[\w-]+/slow-tests"\s*,?)*\s*\]', manifest_toml, re.M):
+            problems.append(f"crates/{crate}/Cargo.toml has no `slow-tests` feature")
     for file, name, _ in sorted(marked):
         text = (ROOT / file).read_text(encoding="utf-8")
         if not re.search(rf"\bfn\s+{re.escape(name)}\b|\b{re.escape(name)}\s*=>", text):

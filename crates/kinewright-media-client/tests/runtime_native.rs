@@ -96,7 +96,7 @@ fn runtime_fixture() {
         return;
     }
     ms2_diag::fixture(kinewright_media_client::diagnostics);
-    let runtime = Runtime::start(Config::new(
+    let config = Config::new(
         ms2_diag::wrap(
             &directory.0,
             &binaries.join("kinewright-media-helper"),
@@ -110,8 +110,14 @@ fn runtime_fixture() {
             &[],
         ),
         Limits::PROBE,
-    ))
-    .unwrap();
+    );
+    #[cfg(feature = "slow-tests")]
+    let config = if case == "hosted-kernel" {
+        config.scope_seam(kinewright_media_client::ScopeSeam::HostedKernel)
+    } else {
+        config
+    };
+    let runtime = Runtime::start(config).unwrap();
     let sampler = ms2_diag::sample("runtime_native");
     let result = runtime.probe(Request {
         source: Box::new(Input(File::open(&png).unwrap())),
@@ -145,7 +151,8 @@ fn runtime_fixture() {
         (0, 0)
     );
 }
-fn run_case(case: &str) {
+/// Runs one fixture case in a child and returns its relayed `MS2_` lines.
+fn run_case(case: &str) -> String {
     let degraded = case == "degraded";
     // `automatic` must select primary whenever a user manager is reachable.
     let expected = if degraded || !ms2_diag::user_manager() {
@@ -203,14 +210,18 @@ fn run_case(case: &str) {
                 .unwrap()
                 .read_to_string(&mut output)
                 .unwrap();
+            let mut relayed = String::new();
             for line in output.lines().filter(|line| line.contains("MS2_")) {
-                println!("{}", &line[line.find("MS2_").unwrap_or(0)..]);
+                let line = &line[line.find("MS2_").unwrap_or(0)..];
+                println!("{line}");
+                relayed.push_str(line);
+                relayed.push('\n');
             }
             assert!(status.success(), "runtime fixture: {status}");
             deadline::announce(&format!(
                 "MS2_MODES_RAN binary=runtime_native case={case} modes={expected}"
             ));
-            break;
+            return relayed;
         }
         assert!(
             Instant::now() < end,
@@ -256,4 +267,31 @@ fn runtime_releases_both_slots_during_bus_disconnect() {
     }
     run_case("bus-cleanup");
     run_case("bus-restart");
+}
+
+/// The hosted-kernel shape (`6.17` azure, `7.0` aws): a removed scope
+/// cgroup keeps two links. The seam reports two links for the helper scope's
+/// retained directory; cleanup waits for the manager to remove the scope and
+/// must then prove it deleted through ENODEV on the retained events
+/// descriptor, prove it empty, and return.
+#[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn runtime_scope_proof_holds_when_a_removed_scope_keeps_two_links() {
+    let _deadline = deadline::test();
+    ms2_diag::install(kinewright_media_client::diagnostics);
+    if !ms2_diag::user_manager() {
+        println!(
+            "MS2_NATIVE_NOT_RUN binary=runtime_native test=runtime_scope_proof_holds_when_a_removed_scope_keeps_two_links reason=no_user_manager"
+        );
+        return;
+    }
+    let relayed = run_case("hosted-kernel");
+    assert!(
+        relayed
+            .contains("MS2_SCOPE_PROOF seam=hosted_kernel nlink=2 events=ENODEV deleted=Ok(true)"),
+        "cleanup did not prove the removed two-link scope deleted through ENODEV:\n{relayed}"
+    );
 }

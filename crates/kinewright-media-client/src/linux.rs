@@ -70,6 +70,17 @@ pub struct Config {
     observer: Option<Arc<ProbeObserver>>,
     #[cfg(feature = "slow-tests")]
     held_cleanup: Option<Arc<std::sync::atomic::AtomicBool>>,
+    #[cfg(feature = "slow-tests")]
+    scope_seam: Option<ScopeSeam>,
+}
+/// Witness seams on the helper scope's native cleanup proof.
+#[cfg(feature = "slow-tests")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScopeSeam {
+    /// The retained scope cgroup reports two links after removal, as the
+    /// hosted kernels do. Cleanup waits for the removal, prints
+    /// `MS2_SCOPE_PROOF` with both readings, then proves emptiness.
+    HostedKernel,
 }
 impl Config {
     #[must_use]
@@ -82,7 +93,15 @@ impl Config {
             observer: None,
             #[cfg(feature = "slow-tests")]
             held_cleanup: None,
+            #[cfg(feature = "slow-tests")]
+            scope_seam: None,
         }
+    }
+    #[cfg(feature = "slow-tests")]
+    #[must_use]
+    pub fn scope_seam(mut self, seam: ScopeSeam) -> Self {
+        self.scope_seam = Some(seam);
+        self
     }
     #[cfg(feature = "slow-tests")]
     #[must_use]

@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-slow-tests = []
+slow-tests = ["kinewright-job-sys/slow-tests"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 kinewright-core = { path = "../kinewright-core" }

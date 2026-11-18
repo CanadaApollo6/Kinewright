@@ -399,6 +399,8 @@ impl Actor {
                 observer: self.config.observer.as_ref().map(Arc::clone),
                 #[cfg(feature = "slow-tests")]
                 held_cleanup: self.config.held_cleanup.as_ref().map(Arc::clone),
+                #[cfg(feature = "slow-tests")]
+                scope_seam: self.config.scope_seam,
             };
             if let Ok(running) = worker::start(launch) {
                 self.active.push(Job::launched(item, running, now));

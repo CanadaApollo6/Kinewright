@@ -143,6 +143,8 @@ pub(super) struct Launch<'a> {
     pub observer: Option<Arc<super::ProbeObserver>>,
     #[cfg(feature = "slow-tests")]
     pub held_cleanup: Option<Arc<AtomicBool>>,
+    #[cfg(feature = "slow-tests")]
+    pub scope_seam: Option<super::ScopeSeam>,
 }
 struct Root(PathBuf);
 impl Drop for Root {
@@ -164,7 +166,22 @@ struct Lease {
     #[cfg(feature = "slow-tests")]
     shim_smaps: Option<File>,
     #[cfg(feature = "slow-tests")]
+    seams: Seams,
+}
+/// Test-only cleanup and scope fault hooks a lease carries.
+#[cfg(feature = "slow-tests")]
+struct Seams {
     held_cleanup: Option<Arc<AtomicBool>>,
+    scope: Option<super::ScopeSeam>,
+}
+#[cfg(feature = "slow-tests")]
+impl Seams {
+    fn new(held_cleanup: Option<Arc<AtomicBool>>, scope: Option<super::ScopeSeam>) -> Self {
+        Self {
+            held_cleanup,
+            scope,
+        }
+    }
 }
 
 fn pin_child(child: Child) -> io::Result<(Child, Arc<ProcessHandle>)> {
@@ -231,7 +248,7 @@ pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
         #[cfg(feature = "slow-tests")]
         shim_smaps: None,
         #[cfg(feature = "slow-tests")]
-        held_cleanup: launch.held_cleanup,
+        seams: Seams::new(launch.held_cleanup, launch.scope_seam),
     };
     #[cfg(feature = "slow-tests")]
     if launch.observer.is_some() {
@@ -302,6 +319,12 @@ impl Lease {
                 return Err(io::Error::other("supervisor entered helper scope"));
             }
             self.group = Some(Cgroup::open(&group)?);
+            #[cfg(feature = "slow-tests")]
+            if self.seams.scope == Some(super::ScopeSeam::HostedKernel)
+                && let Some(group) = self.group.as_mut()
+            {
+                group.hosted_link_count(2);
+            }
         }
         Ok(())
     }
@@ -507,6 +530,7 @@ impl Lease {
         }
         #[cfg(feature = "slow-tests")]
         while self
+            .seams
             .held_cleanup
             .as_ref()
             .is_some_and(|held| held.load(Ordering::Acquire))
@@ -546,6 +570,8 @@ impl Lease {
             }
         }
         self.trace.set(Phase::ScopeEmpty);
+        #[cfg(feature = "slow-tests")]
+        self.await_hosted_removal();
         if let Some(group) = self.group.as_mut() {
             while !group.empty().unwrap_or(false) {
                 std::thread::sleep(Duration::from_millis(10));
@@ -553,6 +579,37 @@ impl Lease {
         }
         self.complete = self.reaped;
         success
+    }
+
+    /// Hosted-kernel seam: wait (bounded) until the manager has removed the
+    /// empty scope, so the proof below must go through the removed cgroup's
+    /// readings, and print them.
+    #[cfg(feature = "slow-tests")]
+    fn await_hosted_removal(&self) {
+        let (Some(group), Some(super::ScopeSeam::HostedKernel)) = (&self.group, self.seams.scope)
+        else {
+            return;
+        };
+        let end = Instant::now() + Duration::from_secs(5);
+        loop {
+            match group.deletion_reading() {
+                Ok(reading)
+                    if matches!(reading.events, kinewright_job_sys::CgroupEvents::Removed) =>
+                {
+                    let text = reading.to_string();
+                    println!(
+                        "MS2_SCOPE_PROOF seam=hosted_kernel {text} deleted={:?}",
+                        reading.deleted()
+                    );
+                    return;
+                }
+                Ok(_) if Instant::now() < end => std::thread::sleep(Duration::from_millis(10)),
+                other => {
+                    println!("MS2_SCOPE_PROOF seam=hosted_kernel not_removed={other:?}");
+                    return;
+                }
+            }
+        }
     }
 
     fn release_scope(&mut self) {

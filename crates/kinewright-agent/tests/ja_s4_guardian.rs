@@ -760,20 +760,22 @@ fn s4_retained_inode_deletion_signal() {
         },
         "a live retained inode must not prove deletion"
     );
+    let live = empty.deletion_reading().unwrap().to_string();
     empty.try_remove().unwrap();
-    let deleted_links = empty.link_count();
-    if live_links == 0 || !deleted_links.as_ref().is_ok_and(|links| *links == 0) {
-        let reason = format!("live_nlink={live_links}, deleted_nlink={deleted_links:?}");
-        skip_kernel_signal(&reason);
+    let removed = empty.deletion_reading().unwrap();
+    let removed_text = removed.to_string();
+    // Either accepted form proves deletion: zero links, or ENODEV from the
+    // retained events descriptor (hosted kernels keep two links).
+    if !matches!(removed.deleted(), Ok(true)) {
+        skip_kernel_signal(&format!("live {live}, deleted {removed_text}"));
         session.close_lifetime();
         return;
     }
     assert!(empty.kernel_deleted().unwrap());
     let kernel = Command::new("uname").arg("-r").output().unwrap();
     println!(
-        "C2 kernel={} live_nlink={live_links} removed_nlink={} nonempty_rmdir=refused",
+        "C2 kernel={} live_nlink={live_links} live=[{live}] removed=[{removed_text}] nonempty_rmdir=refused",
         String::from_utf8_lossy(&kernel.stdout).trim(),
-        deleted_links.unwrap()
     );
     session.close_lifetime();
     let proof = session.cleanup().unwrap();

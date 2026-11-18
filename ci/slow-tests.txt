@@ -201,3 +201,4 @@ witness_native a_silent_helper_fails_typed_within_the_probe_bound crates/kinewri
 escape_native full_stack_escapes_are_killed_and_canaries_unchanged crates/kinewright-media-client/tests/escape_native.rs linux-only # MS2 full-stack malicious-helper escapes
 rss_native degraded_rss_polling_records_overshoot_and_quarantines_source crates/kinewright-media-client/tests/rss_native.rs linux-only
 runtime_native runtime_releases_both_slots_during_bus_disconnect crates/kinewright-media-client/tests/runtime_native.rs linux-only # Native scope cleanup and supervisor reconnect/restart
+runtime_native runtime_scope_proof_holds_when_a_removed_scope_keeps_two_links crates/kinewright-media-client/tests/runtime_native.rs linux-only # Hosted-kernel deletion shape: ENODEV proves a two-link removed scope
