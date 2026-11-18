@@ -74,10 +74,10 @@ pub use project::{
     serialize_project_document, write_file_atomic, write_project_bytes, write_project_document,
 };
 pub use recovery::{
-    FeedbackStateLock, FeedbackStateRefusal, JOURNAL_MAGIC, allocate_journal_path,
-    default_recovery_directory, feedback_state_directory, feedback_state_directory_with, fnv1a_64,
-    journal_file_name, lock_feedback_state, pending_journal_for_project, restore_status,
-    retire_journal_for_project,
+    FeedbackStateLock, FeedbackStateRefusal, JOURNAL_MAGIC, RecoveryDirectoryRefusal,
+    allocate_journal_path, default_recovery_directory, default_recovery_directory_with,
+    feedback_state_directory, feedback_state_directory_with, fnv1a_64, journal_file_name,
+    lock_feedback_state, pending_journal_for_project, restore_status, retire_journal_for_project,
 };
 pub use session::{
     IncidentLogHandle, LoadedSidecarSession, SidecarRollback, SidecarSession,

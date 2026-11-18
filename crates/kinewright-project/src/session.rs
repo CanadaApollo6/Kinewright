@@ -92,12 +92,9 @@ fn refuse_loaded_sidecar(
     let writer = if let Some(writer) = authority {
         writer
     } else {
-        acquired = crate::lockfile::acquire_gui_project_lock(
-            project,
-            &crate::default_recovery_directory(),
-        )
-        .map_err(std::io::Error::other)?
-        .handle;
+        acquired = crate::lockfile::acquire_gui_project_lock(project)
+            .map_err(std::io::Error::other)?
+            .handle;
         &acquired
     };
     writer.verify().map_err(std::io::Error::other)?;

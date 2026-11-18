@@ -585,8 +585,7 @@ fn g04_sidecar_refuses_lost_authority_and_preserves_pending_journal() {
     {
         let before = fs::read(path.with_extension("kinewright-incidents")).unwrap();
         fs::remove_file(&owner.handle.path).unwrap();
-        let successor =
-            kinewright_project::lockfile::acquire_gui_project_lock(&path, &recovery).unwrap();
+        let successor = kinewright_project::lockfile::acquire_gui_project_lock(&path).unwrap();
         let discovery = fs::read(&successor.handle.discovery).unwrap();
         assert!(
             session

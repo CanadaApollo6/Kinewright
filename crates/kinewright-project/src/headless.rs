@@ -43,7 +43,7 @@ pub fn save_headless(
     sidecar: &mut SidecarSession,
     previous_digest: &str,
     revision: TimelineRevision,
-    recovery_dir: &Path,
+    _recovery_dir: &Path,
     lock: Option<&LockfileHandle>,
 ) -> Result<HeadlessSaveReport, ProjectSaveError> {
     if lock.is_some_and(|writer| writer.verify().is_err()) {
@@ -62,7 +62,7 @@ pub fn save_headless(
     let writer = match lock.or(existing) {
         Some(writer) => writer.clone(),
         None => {
-            crate::lockfile::acquire_gui_project_lock(path, recovery_dir)
+            crate::lockfile::acquire_gui_project_lock(path)
                 .map_err(|e| ProjectSaveError::Write(e.to_string()))?
                 .handle
         }

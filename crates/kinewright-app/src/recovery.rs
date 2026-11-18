@@ -1,8 +1,6 @@
 //! Crash recovery for the operation spine.
 //!
-//! Journals live under `%LOCALAPPDATA%/Kinewright/recovery/` (with the system
-//! temporary directory as a fallback when `LOCALAPPDATA` is unavailable),
-//! ONE FILE PER PROJECT: saved projects journal to a name derived from their
+//! Journals live in persistent per-user state. Saved projects journal to a name derived from their
 //! path (`<stem>-<fnv64>.journal`, stable across builds so a crashed project
 //! finds its journal again), unsaved projects to `unsaved-N.journal`. Each
 //! file is a versioned preamble, a complete initial `Document` JSON line
@@ -42,7 +40,8 @@ use kinewright_core::{
 use kinewright_project::canonical_project_identity;
 use kinewright_project::operation_actor::Core;
 use kinewright_project::{
-    JOURNAL_MAGIC as MAGIC, allocate_journal_path, default_recovery_directory,
+    JOURNAL_MAGIC as MAGIC, RecoveryDirectoryRefusal, allocate_journal_path,
+    default_recovery_directory,
 };
 use serde::{Deserialize, Serialize};
 
@@ -52,13 +51,21 @@ const CORE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[cfg(test)]
 thread_local! {
-    static JA_DIRECTORY: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    static JA_DIRECTORY: std::cell::RefCell<Option<Result<PathBuf, RecoveryDirectoryRefusal>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Bind the real GUI recorder to the fixture's private directory, on this
 /// constructor thread only. No shipping path reads this override.
 #[cfg(test)]
 pub(crate) fn with_ja_directory<T>(directory: PathBuf, run: impl FnOnce() -> T) -> T {
+    with_directory_result(Ok(directory), run)
+}
+
+#[cfg(test)]
+pub(crate) fn with_directory_result<T>(
+    directory: Result<PathBuf, RecoveryDirectoryRefusal>,
+    run: impl FnOnce() -> T,
+) -> T {
     struct Reset;
     impl Drop for Reset {
         fn drop(&mut self) {
@@ -74,12 +81,34 @@ pub(crate) fn with_ja_directory<T>(directory: PathBuf, run: impl FnOnce() -> T) 
 }
 
 /// Use the same recovery root for the GUI recorder and Studio activation.
-pub(crate) fn directory() -> PathBuf {
+pub(crate) fn directory() -> Result<PathBuf, RecoveryDirectoryRefusal> {
     #[cfg(test)]
-    if let Some(directory) = JA_DIRECTORY.with_borrow(Clone::clone) {
+    if let Some(directory) = JA_DIRECTORY.with_borrow_mut(|slot| match slot {
+        Some(Ok(path)) => Some(Ok(path.clone())),
+        Some(Err(_)) => slot.take(),
+        None => None,
+    }) {
         return directory;
     }
     default_recovery_directory()
+}
+
+fn create_recovery_directory(directory: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    let missing = directory
+        .ancestors()
+        .take_while(|path| !path.exists())
+        .count();
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(directory)?;
+    #[cfg(unix)]
+    for parent in directory.ancestors().skip(1).take(missing) {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -157,11 +186,8 @@ impl JournalWriter {
     ) -> Result<Self, String> {
         let authority = project_path
             .map(|project| {
-                kinewright_project::lockfile::acquire_gui_project_lock(
-                    project,
-                    path.parent().unwrap_or(Path::new(".")),
-                )
-                .map(|owner| owner.handle)
+                kinewright_project::lockfile::acquire_gui_project_lock(project)
+                    .map(|owner| owner.handle)
             })
             .transpose()
             .map_err(|e| e.to_string())?;
@@ -193,7 +219,7 @@ impl JournalWriter {
             directory
         } else {
             let parent = path.parent().unwrap_or(Path::new("."));
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            create_recovery_directory(parent).map_err(|e| e.to_string())?;
             kinewright_project::legacy_io::PinnedDirectory::open(parent)
                 .map_err(|e| e.to_string())?
         };
@@ -202,6 +228,8 @@ impl JournalWriter {
             .join(path.file_name().ok_or("journal filename")?);
         let mut options = OpenOptions::new();
         options.create_new(true).write(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
         // LockFileEx would prevent read-only journal inspection on Windows.
         // Deny deletion while the recorder lives; named writes also hold the project lock.
         #[cfg(windows)]
@@ -231,6 +259,10 @@ impl JournalWriter {
             .and_then(|()| file.flush())
             .and_then(|()| file.sync_all())
             .map_err(|error| format!("could not initialize recovery journal: {error}"))?;
+        #[cfg(unix)]
+        File::open(directory.io_path())
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("could not sync recovery directory: {error}"))?;
         Ok(Self {
             #[cfg(all(test, target_os = "linux"))]
             append_hook: None,
@@ -524,11 +556,8 @@ impl Recorder {
     ) -> Result<Self, String> {
         let authority = project_path
             .map(|project| {
-                kinewright_project::lockfile::acquire_gui_project_lock(
-                    project,
-                    path.parent().unwrap_or(Path::new(".")),
-                )
-                .map(|owner| owner.handle)
+                kinewright_project::lockfile::acquire_gui_project_lock(project)
+                    .map(|owner| owner.handle)
             })
             .transpose()
             .map_err(|e| e.to_string())?;
@@ -772,7 +801,7 @@ pub(crate) struct RestoreRequest {
 pub(crate) struct Recovery {
     authority: Option<kinewright_project::LockfileHandle>,
     directory_owner: Option<kinewright_project::legacy_io::PinnedDirectory>,
-    directory: PathBuf,
+    directory: Option<PathBuf>,
     path: PathBuf,
     recorder: Option<Recorder>,
     pending: Vec<PendingJournal>,
@@ -808,7 +837,7 @@ impl Recovery {
         Self {
             authority: None,
             directory_owner: None,
-            directory: PathBuf::new(),
+            directory: None,
             path: PathBuf::new(),
             recorder: None,
             pending: vec![],
@@ -817,13 +846,32 @@ impl Recovery {
     }
 
     pub(crate) fn start(core: &Core, project_path: Option<&Path>) -> Self {
-        Self::start_in(directory(), core, project_path)
+        Self::start_resolved(core, project_path, true)
     }
 
     /// Start a per-project recorder without repeating the process-startup
     /// recovery scan. Only the startup session owns restore decisions.
     pub(crate) fn start_attached(core: &Core, project_path: Option<&Path>) -> Self {
-        Self::start_attached_in(directory(), core, project_path)
+        Self::start_resolved(core, project_path, false)
+    }
+
+    fn start_resolved(core: &Core, project_path: Option<&Path>, scan: bool) -> Self {
+        match directory() {
+            Ok(directory) if scan => Self::start_in(directory, core, project_path),
+            Ok(directory) => Self::start_attached_in(directory, core, project_path),
+            Err(reason) => {
+                let mut recovery = Self::read_only();
+                recovery.attach(core, project_path);
+                let mut message = lock_unpoisoned(&recovery.runtime_error);
+                let refusal = format!("Unsaved work will not survive a crash: {reason}.");
+                *message = Some(match message.take() {
+                    Some(lock_error) => format!("{refusal} {lock_error}"),
+                    None => refusal,
+                });
+                drop(message);
+                recovery
+            }
+        }
     }
 
     #[cfg(test)]
@@ -871,7 +919,7 @@ impl Recovery {
             authority: None,
             directory_owner: None,
             path: directory.join("uninitialized.journal"),
-            directory,
+            directory: Some(directory),
             recorder: None,
             pending,
             runtime_error,
@@ -911,7 +959,7 @@ impl Recovery {
             writer.verify().map_err(|e| e.to_string())?;
             return Ok(Some(writer.clone()));
         }
-        kinewright_project::lockfile::acquire_gui_project_lock(path, &self.directory)
+        kinewright_project::lockfile::acquire_gui_project_lock(path)
             .map(|owner| Some(owner.handle))
             .map_err(|e| e.to_string())
     }
@@ -944,6 +992,10 @@ impl Recovery {
                 Some("journal writer authority was lost".into());
             return;
         }
+        let Some(directory_path) = &self.directory else {
+            self.authority = writer;
+            return;
+        };
         #[cfg(test)]
         if let Some(path) = project_path {
             kinewright_project::io_observer::mutation_attempt("journal_attach_enter", path);
@@ -953,21 +1005,19 @@ impl Recovery {
             .map(|writer| writer.resolved_identity().to_path_buf());
         let project_path = identity.as_deref().or(project_path);
         if self.directory_owner.is_none() {
-            if let Err(error) = fs::create_dir_all(&self.directory) {
-                *lock_unpoisoned(&self.runtime_error) = Some(error.to_string());
-                return;
-            }
-            match fs::canonicalize(&self.directory)
+            match create_recovery_directory(directory_path)
+                .and_then(|()| fs::canonicalize(directory_path))
                 .and_then(|path| kinewright_project::legacy_io::PinnedDirectory::open(&path))
             {
                 Ok(directory) => self.directory_owner = Some(directory),
                 Err(error) => {
-                    *lock_unpoisoned(&self.runtime_error) = Some(error.to_string());
+                    self.authority = writer;
+                    *lock_unpoisoned(&self.runtime_error) =
+                        Some(format!("Unsaved work will not survive a crash: {error}."));
                     return;
                 }
             }
         }
-        self.stop_active();
         let directory = self
             .directory_owner
             .as_ref()
@@ -992,9 +1042,8 @@ impl Recovery {
             .file_name()
             .map_or_else(PathBuf::new, |name| io_directory.join(name));
         let target = allocate_journal_path(&io_directory, project_path, &current, &reserved);
-        let target = self
-            .directory
-            .join(target.file_name().expect("allocated journal filename"));
+        let target = directory_path.join(target.file_name().expect("allocated journal filename"));
+        self.stop_active();
         self.remove_journal();
         self.path = target;
         self.authority = writer;
@@ -1109,24 +1158,7 @@ impl Recovery {
                 });
         }
 
-        let runtime_message = lock_unpoisoned(&self.runtime_error).clone();
-        let mut dismiss_runtime_error = false;
-        if let Some(message) = runtime_message {
-            outcome.unavailable_rendered = Some(message.clone());
-            egui::Window::new("Crash recovery unavailable")
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.label(message);
-                    ui.label("Edits made while this warning is present may not survive a crash.");
-                    if ui.button("Dismiss").clicked() {
-                        dismiss_runtime_error = true;
-                    }
-                });
-        }
-        if dismiss_runtime_error {
-            *lock_unpoisoned(&self.runtime_error) = None;
-        }
+        outcome.unavailable_rendered = self.show_unavailable(ctx);
 
         if let Some(index) = discard {
             if self.remove_pending(&self.pending[index]) {
@@ -1138,6 +1170,28 @@ impl Recovery {
             outcome.restore = pending_restore_request(&self.pending[index]);
         }
         outcome
+    }
+
+    pub(crate) fn show_unavailable(&mut self, ctx: &egui::Context) -> Option<String> {
+        let runtime_message = lock_unpoisoned(&self.runtime_error).clone();
+        let mut dismiss_runtime_error = false;
+        if let Some(message) = &runtime_message {
+            egui::Window::new("Crash recovery unavailable")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label(message);
+                    ui.label("Save your project to keep your edits.");
+                    if ui.button("Dismiss").clicked() {
+                        dismiss_runtime_error = true;
+                    }
+                });
+        }
+        if dismiss_runtime_error {
+            *lock_unpoisoned(&self.runtime_error) = None;
+        }
+
+        runtime_message
     }
 
     /// A chosen restore landed. Keep a damaged journal, including its unreplayed suffix.
@@ -2262,7 +2316,7 @@ mod tests {
         let idle = || Recovery {
             authority: None,
             directory_owner: None,
-            directory: PathBuf::from("recovery"),
+            directory: Some(PathBuf::from("recovery")),
             path: PathBuf::from("recovery").join("active.journal"),
             recorder: None,
             pending: Vec::new(),
@@ -2462,9 +2516,7 @@ pub(crate) fn g04_gui_lost_authority() {
     let before = fs::read(&journal).unwrap();
     let lost = recovery.writer().unwrap();
     fs::remove_file(&lost.path).unwrap();
-    let successor =
-        kinewright_project::lockfile::acquire_gui_project_lock(&project, &recovery.directory)
-            .unwrap();
+    let successor = kinewright_project::lockfile::acquire_gui_project_lock(&project).unwrap();
     let discovery = fs::read(&successor.handle.discovery).unwrap();
     core.request(kinewright_core::Command::Undo).unwrap();
     let _ = recovery.recorder.as_ref().unwrap().flush();
@@ -2483,7 +2535,7 @@ pub(crate) fn g04_gui_lost_authority() {
         files.sort();
         files
     };
-    let original = files(&recovery.directory);
+    let original = files(recovery.directory.as_deref().unwrap());
     recovery.pending.push(PendingJournal {
         directory: recovery.directory_owner.clone(),
         sha256: Some(kinewright_media::sha256_bytes(&before)),
@@ -2497,7 +2549,7 @@ pub(crate) fn g04_gui_lost_authority() {
     });
     recovery.checkpoint_owned(&core, Some(&project), Some(lost));
     assert_eq!(
-        files(&recovery.directory),
+        files(recovery.directory.as_deref().unwrap()),
         original,
         "lost authority cannot create a successor journal"
     );

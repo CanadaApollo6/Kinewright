@@ -970,7 +970,7 @@ impl KinewrightApp {
                     )
                 } else {
                     kinewright_project::editing_session::Ja1EditingSession::new(
-                        &crate::recovery::directory(),
+                        &crate::recovery::directory().map_err(|error| error.to_string())?,
                         &session.core,
                         kinewright_project::storage_budget::StorageLimits::default(),
                     )
@@ -4276,6 +4276,36 @@ impl Drop for KinewrightApp {
     }
 }
 
+impl KinewrightApp {
+    fn show_recovery_dialogs(&mut self, ctx: &egui::Context) {
+        let Some(first) = self.projects.first_mut() else {
+            return;
+        };
+        let mut outcome = first.recovery.show_dialog(ctx);
+        if self.focused_project != 0 && outcome.unavailable_rendered.is_none() {
+            outcome.unavailable_rendered = self.focused_mut().recovery.show_unavailable(ctx);
+        }
+        // Each modal notes its first damage or refusal render per run (IN2B §7 rule 6).
+        if let Some(damage) = outcome.damage_rendered.as_deref()
+            && !self.recovery_damage_noted
+        {
+            self.recovery_damage_noted = true;
+            let revision = self.focused().revision;
+            self.note_observation(recovery_damage_observation(damage, revision));
+        }
+        if let Some(message) = outcome.unavailable_rendered.as_deref()
+            && !self.recovery_unavailable_noted
+        {
+            self.recovery_unavailable_noted = true;
+            let revision = self.focused().revision;
+            self.note_observation(recovery_unavailable_observation(message, revision));
+        }
+        if let Some(request) = outcome.restore {
+            self.apply_restore_request(request);
+        }
+    }
+}
+
 impl eframe::App for KinewrightApp {
     fn on_exit(&mut self) {
         self.join_native_owners();
@@ -4307,32 +4337,7 @@ impl eframe::App for KinewrightApp {
         self.poll_background(ui.ctx());
         self.keyboard_shortcuts(ui.ctx());
         self.import_dropped_files(ui.ctx());
-        let outcome = self.projects.first_mut().map(|project| {
-            let ctx = ui.ctx().clone();
-            project.recovery.show_dialog(&ctx)
-        });
-        if let Some(outcome) = outcome {
-            // Modal damage notes (`IN2B` §7 rule 6): each modal's first
-            // damage render per run notes once — the bools edge, the
-            // outcome carries the rendered strings.
-            if let Some(damage) = outcome.damage_rendered.as_deref()
-                && !self.recovery_damage_noted
-            {
-                self.recovery_damage_noted = true;
-                let revision = self.focused().revision;
-                self.note_observation(recovery_damage_observation(damage, revision));
-            }
-            if let Some(message) = outcome.unavailable_rendered.as_deref()
-                && !self.recovery_unavailable_noted
-            {
-                self.recovery_unavailable_noted = true;
-                let revision = self.focused().revision;
-                self.note_observation(recovery_unavailable_observation(message, revision));
-            }
-            if let Some(request) = outcome.restore {
-                self.apply_restore_request(request);
-            }
-        }
+        self.show_recovery_dialogs(ui.ctx());
 
         self.sync_studio_selection();
         if self.focused().is_owned()
