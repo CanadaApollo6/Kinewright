@@ -20,7 +20,7 @@
 //! device honoring `sync_data`.
 
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -121,7 +121,7 @@ fn create_recovery_directory(directory: &Path) -> io::Result<()> {
     builder.create(directory)?;
     #[cfg(unix)]
     for parent in directory.ancestors().skip(1).take(missing) {
-        File::open(parent)?.sync_all()?;
+        fs::File::open(parent)?.sync_all()?;
     }
     Ok(())
 }
@@ -241,7 +241,7 @@ impl JournalWriter {
             .and_then(|()| file.sync_all())
             .map_err(|error| format!("could not initialize recovery journal: {error}"))?;
         #[cfg(unix)]
-        File::open(directory.io_path())
+        fs::File::open(directory.io_path())
             .and_then(|directory| directory.sync_all())
             .map_err(|error| format!("could not sync recovery directory: {error}"))?;
         Ok(Self {
@@ -2280,7 +2280,7 @@ mod tests {
         let writer = JournalWriter::create(&path, None, &Document::default()).unwrap();
         let copy = writer.file.try_clone().unwrap();
         drop(writer);
-        let next = kinewright_project::legacy_io::lock_journal(&File::open(&path).unwrap());
+        let next = kinewright_project::legacy_io::lock_journal(&fs::File::open(&path).unwrap());
         drop(copy);
         assert!(next.is_ok(), "C6_JOURNAL_HELD_BY_COPY: {next:?}");
     }
@@ -2514,13 +2514,11 @@ mod tests {
             .unwrap_or_else(|| panic!("missing painted label {label:?}"))
     }
 
-    #[cfg(target_os = "linux")]
     struct JournalPause {
         entered: Receiver<()>,
         release: Sender<()>,
     }
 
-    #[cfg(target_os = "linux")]
     impl JournalPause {
         const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -2550,7 +2548,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
     fn click_journal_discard(recovery: &mut Recovery) {
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
@@ -2623,7 +2620,6 @@ mod tests {
         });
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn discard_keeps_its_row_while_recorder_cleanup_holds_the_journal() {
         let dir = TestDirectory::new("cleanup-holds-journal");

@@ -160,6 +160,15 @@ impl LockedJournal {
             &mut options,
             libc::O_NOFOLLOW | libc::O_NONBLOCK,
         );
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            const FILE_SHARE_READ: u32 = 1;
+            const FILE_SHARE_DELETE: u32 = 4;
+
+            // Hold the file against writers from the digest check through unlink.
+            options.share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE);
+        }
         let file = options.open(path)?;
         require_regular(&file.metadata()?)?;
         Self::lock(file)
@@ -240,4 +249,47 @@ pub fn journal_removal_contended(error: &io::Error) -> bool {
         return true;
     }
     error.kind() == io::ErrorKind::WouldBlock
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use std::{io::Write as _, os::windows::fs::OpenOptionsExt as _};
+
+    use kinewright_media::test_support::TempDirectory;
+
+    use super::*;
+
+    #[test]
+    fn journal_removal_and_recording_exclude_each_other_on_windows() {
+        let directory = TempDirectory::new("journal-removal-share-mode");
+        let path = directory.path("recorded.journal");
+        let original = b"recorded edits";
+        let mut recorder = File::options()
+            .create_new(true)
+            .write(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
+        recorder.write_all(original).unwrap();
+        recorder.sync_all().unwrap();
+
+        let Err(error) = LockedJournal::open_for_removal(&path) else {
+            panic!("a live recorder must refuse removal");
+        };
+        assert!(journal_removal_contended(&error), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), original);
+        drop(recorder);
+
+        let remover = LockedJournal::open_for_removal(&path).unwrap();
+        let Err(error) = File::options().append(true).open(&path) else {
+            panic!("the removal handle must refuse an append");
+        };
+        assert!(journal_removal_contended(&error), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(remover.unlink(&path).unwrap());
+        assert_eq!(
+            fs::symlink_metadata(&path).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
 }
