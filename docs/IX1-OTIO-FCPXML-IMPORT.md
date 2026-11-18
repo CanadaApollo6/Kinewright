@@ -573,7 +573,11 @@ treated as local. They are the person's own configuration, and the deadlines bou
 Under the open-a-project model, a timeline can name absolute local paths that the importer
 probes and hashes without confirmation.
 
-*No network code.* Neither IX crate links network code, and a test asserts it.
+*No network code (ruling 26).* The dependency closure of the pure interchange crate contains
+no network crate. The project interchange module uses only the `LocatorFs` seam for files and
+`Analysis` for media. A recording double verifies that remote locators reach no call. This
+claim covers the import path. An explicit Allow workflow for shares needs an authorization seam
+consistent with this boundary.
 
 *Bundles.* `.otiod` is `content.otio` plus `media/`. `.fcpxmld` holds `Info.fcpxml` and locator
 data (tracking shapes, drawings), which is dropped and named. Bundle media is used in place, never
@@ -595,6 +599,7 @@ hashed bytes and the start of metadata. Either checkpoint can cancel the probe.
 
 These deadlines are configurable with the stated defaults. The same probe events drive hashing
 progress and cancellation. After abandonment the next observer checkpoint stops the probe.
+Metadata packet reads also check cancellation without restarting the metadata deadline.
 
 A worker past its deadline is abandoned, and its result is discarded. The thread itself
 ends when the call returns. Replace an abandoned stat worker so other locators can still
@@ -916,6 +921,8 @@ Lead rulings (2026-11-17):
 15. **Anchors beside nests.** Size lane blocks for concurrent anchors (§5.1).
 16. **Stuck stats.** Replace expired stat workers up to the abandonment cap (§8.2).
 
+26. **Network boundary.** The pure crate's dependency closure and the project module's
+    locator seam are independently checked (§8.1).
 27. **Shared probe phases.** The existing probe reports cumulative hashed bytes and metadata
     start, with cancellation at either checkpoint. Hashing precedes metadata (§8.2).
 

@@ -2233,6 +2233,11 @@ pub enum ProbeEvent {
 /// A probe calls the observer synchronously. Returning false requests cancellation.
 pub trait ProbeObserver {
     fn observe(&self, event: ProbeEvent) -> bool;
+
+    /// Check cancellation while reading metadata without starting a new phase.
+    fn cancelled(&self) -> bool {
+        false
+    }
 }
 
 impl ProbeObserver for () {

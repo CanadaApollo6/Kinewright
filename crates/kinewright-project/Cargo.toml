@@ -20,6 +20,7 @@ gethostname.workspace = true
 getrandom.workspace = true
 kinewright-core = { path = "../kinewright-core" }
 kinewright-hash = { path = "../kinewright-hash" }
+kinewright-interchange = { path = "../kinewright-interchange" }
 kinewright-media = { path = "../kinewright-media" }
 serde.workspace = true
 serde_json.workspace = true

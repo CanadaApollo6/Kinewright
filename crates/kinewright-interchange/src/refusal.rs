@@ -22,6 +22,7 @@ pub enum RefusalCode {
     NothingToImport,
     OutsideRoots,
     LoweringFailed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

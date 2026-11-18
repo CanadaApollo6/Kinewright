@@ -1924,7 +1924,12 @@ fn relink_asset(
     }
 
     let current = &doc.media_pool[index];
-    if current.kind != candidate.kind {
+    let estimated = !current.source_fingerprint.is_verified()
+        && doc
+            .imported_from
+            .iter()
+            .any(|record| record.estimated_asset(asset_id));
+    if !estimated && current.kind != candidate.kind {
         return Err(OpError::RelinkMetadataMismatch {
             asset: asset_id,
             field: "kind",
@@ -1944,7 +1949,7 @@ fn relink_asset(
             ),
         });
     }
-    if current.duration != candidate.duration {
+    if !estimated && current.duration != candidate.duration {
         return Err(OpError::RelinkMetadataMismatch {
             asset: asset_id,
             field: "duration",
@@ -1952,7 +1957,7 @@ fn relink_asset(
             actual: candidate.duration.to_string(),
         });
     }
-    if current.resolution != candidate.resolution {
+    if !estimated && current.resolution != candidate.resolution {
         return Err(OpError::RelinkMetadataMismatch {
             asset: asset_id,
             field: "resolution",
@@ -1969,6 +1974,17 @@ fn relink_asset(
         return Err(OpError::RelinkRequiresExplicitUnverifiedSource { asset: asset_id });
     }
 
+    if estimated {
+        validate_estimated_relink(doc, asset_id, candidate)?;
+        let asset = &mut doc.media_pool[index];
+        asset.path.clone_from(&candidate.path);
+        asset.source_fingerprint.clone_from(&candidate.fingerprint);
+        asset.kind = candidate.kind;
+        asset.duration = candidate.duration;
+        asset.resolution = candidate.resolution;
+        return Ok(());
+    }
+
     let before = clip_durations_for_asset(doc, asset_id)?;
     doc.media_pool[index].path.clone_from(&candidate.path);
     doc.media_pool[index]
@@ -1980,6 +1996,41 @@ fn relink_asset(
             continue;
         }
         survive_clip_edit(doc, track_index, clip_index, TimeCode::ZERO)?;
+    }
+    Ok(())
+}
+
+fn validate_estimated_relink(
+    doc: &Document,
+    asset: AssetId,
+    candidate: &RelinkCandidate,
+) -> Result<(), OpError> {
+    for track in &doc.tracks {
+        for clip in track
+            .clips
+            .iter()
+            .filter(|clip| clip.asset == asset && clip.content.references_asset())
+        {
+            if !candidate.kind.supports(track.kind) {
+                return Err(OpError::RelinkMetadataMismatch {
+                    asset,
+                    field: "kind",
+                    expected: format!("compatible with {:?} track", track.kind),
+                    actual: format!("{:?}", candidate.kind),
+                });
+            }
+            let end = match &clip.content {
+                ClipContent::Freeze(freeze) => TimeCode(freeze.source_frame.0.saturating_add(1)),
+                _ => clip.source_range.end,
+            };
+            if end > candidate.duration {
+                return Err(OpError::SourceOutOfBounds {
+                    asset,
+                    end,
+                    duration: candidate.duration,
+                });
+            }
+        }
     }
     Ok(())
 }

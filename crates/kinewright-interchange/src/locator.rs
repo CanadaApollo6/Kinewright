@@ -1,5 +1,7 @@
 use std::{io, path::Path};
 
+use kinewright_core::{MediaError, ProbeObserver};
+
 use crate::{Refusal, RefusalCode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,8 +205,8 @@ pub trait LocatorFs {
     /// Returns an I/O error when the document cannot be opened.
     fn open(&self, path: &Path) -> io::Result<Self::Reader>;
     /// # Errors
-    /// Returns an I/O error when the media cannot be probed.
-    fn probe(&self, path: &Path) -> io::Result<Self::Probe>;
+    /// Returns a media error when the media cannot be probed or is cancelled.
+    fn probe(&self, path: &Path, observer: &dyn ProbeObserver) -> Result<Self::Probe, MediaError>;
     /// # Errors
     /// Returns an I/O error when the search directory cannot be read.
     fn read_dir(&self, path: &Path) -> io::Result<Self::Directory>;
@@ -255,7 +257,7 @@ mod tests {
             Ok(io::empty())
         }
 
-        fn probe(&self, _: &Path) -> io::Result<()> {
+        fn probe(&self, _: &Path, _: &dyn ProbeObserver) -> Result<(), MediaError> {
             self.0.borrow_mut().push("probe");
             Ok(())
         }
@@ -289,7 +291,7 @@ mod tests {
                     let path = Path::new(path.as_str());
                     fs.stat(path).unwrap();
                     fs.open(path).unwrap();
-                    fs.probe(path).unwrap();
+                    fs.probe(path, &()).unwrap();
                     assert_eq!(fs.read_dir(path).unwrap().count(), 0);
                 });
                 assert_eq!(access.unwrap_err().code, RefusalCode::RemotePath, "{path}");

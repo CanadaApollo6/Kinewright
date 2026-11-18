@@ -39,6 +39,7 @@ pub mod voice_ingress;
 pub mod voice_store;
 
 pub mod headless;
+pub mod interchange;
 #[cfg(any(test, feature = "test-util"))]
 pub mod io_observer;
 pub mod legacy_io;

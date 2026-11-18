@@ -81,8 +81,12 @@ pub(crate) fn probe_path_observed(
     };
 
     let (fps, resolution, duration, color_description, kind) = if let Some(stream) = video {
-        let timing =
-            analyze_video_packets(path, stream.index(), normalized_start(stream.start_time()))?;
+        let timing = analyze_video_packets(
+            path,
+            stream.index(),
+            normalized_start(stream.start_time()),
+            observer,
+        )?;
         let rate = select_video_rate(path, &stream, &timing)?;
         let rotation = stream_rotation(&stream).map_err(|error| {
             MediaError::Backend(format!(
@@ -128,7 +132,7 @@ pub(crate) fn probe_path_observed(
             // of crushing full-range stills with a limited expansion.
             let color_description = color_description_from_decoder(
                 &decoder,
-                negotiated_pixel_format(path, stream.index()),
+                negotiated_pixel_format(path, stream.index(), observer),
             );
             (
                 Rational::default(),
@@ -138,7 +142,7 @@ pub(crate) fn probe_path_observed(
                 MediaKind::Image,
             )
         } else {
-            let negotiated_pixel_format = negotiated_pixel_format(path, stream.index());
+            let negotiated_pixel_format = negotiated_pixel_format(path, stream.index(), observer);
             let color_description =
                 color_description_from_decoder(&decoder, negotiated_pixel_format);
             let stream_duration =
@@ -167,6 +171,9 @@ pub(crate) fn probe_path_observed(
         )
     };
 
+    if observer.cancelled() {
+        return Err(MediaError::Cancelled);
+    }
     if duration <= TimeCode::ZERO {
         return Err(MediaError::Backend(format!(
             "media duration is missing or zero for {}; the file may be truncated",
@@ -225,7 +232,14 @@ pub(crate) fn color_description_from_decoder(
 /// first decoded frame. Probe-time color metadata uses the negotiated frame
 /// format when available and preserves `Unknown` when the stream never yields
 /// one.
-fn negotiated_pixel_format(path: &Path, stream_index: usize) -> Option<ffmpeg::format::Pixel> {
+fn negotiated_pixel_format(
+    path: &Path,
+    stream_index: usize,
+    observer: &dyn ProbeObserver,
+) -> Option<ffmpeg::format::Pixel> {
+    if observer.cancelled() {
+        return None;
+    }
     let mut input = media_input(path).ok()?;
     let mut decoder = {
         let stream = input
@@ -237,6 +251,9 @@ fn negotiated_pixel_format(path: &Path, stream_index: usize) -> Option<ffmpeg::f
 
     let mut frame = ffmpeg::frame::Video::empty();
     for (stream, packet) in input.packets() {
+        if observer.cancelled() {
+            return None;
+        }
         if stream.index() != stream_index {
             continue;
         }
@@ -694,13 +711,20 @@ fn analyze_video_packets(
     path: &Path,
     stream_index: usize,
     stream_start: i64,
+    observer: &dyn ProbeObserver,
 ) -> Result<VideoPacketTiming, MediaError> {
+    if observer.cancelled() {
+        return Err(MediaError::Cancelled);
+    }
     let mut input = media_input(path)?;
     let mut reference_duration = None;
     let mut duration_variable = false;
     let mut pictures = Vec::new();
     let mut packet_count = 0_u64;
     for (stream, packet) in input.packets() {
+        if observer.cancelled() {
+            return Err(MediaError::Cancelled);
+        }
         if stream.index() != stream_index {
             continue;
         }
