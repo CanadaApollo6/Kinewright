@@ -288,6 +288,7 @@ class Workflow(unittest.TestCase):
             'cargo build -p kinewright-agent --no-default-features --lib',
             'cargo build -p kinewright-app --no-default-features --bin kinewright-app',
             'cargo build -p kinewright-agent --no-default-features --bin kinewright',
+            'cargo build -p kinewright-media-helper -p kinewright-media-supervisor --bins',
         ])
         self.assertLess(text.index('name: Linux shipping builds'), text.index('cargo clippy --workspace'))
 
