@@ -5,8 +5,8 @@
   "source_sha256": "0bbbac0cfe33e5cf90fcbe77706bdba598bdc1560905fb1a04660297835318df",
   "start_offset_frames": 0,
   "items": 3,
-  "exact": 3,
-  "approximated": 0,
+  "exact": 2,
+  "approximated": 1,
   "dropped": 0,
   "media": {
     "assets": 1,
@@ -28,6 +28,18 @@
       "count": 1,
       "names": [],
       "at": []
+    },
+    {
+      "code": "fade_shape_linear",
+      "fidelity": "approximated",
+      "count": 1,
+      "names": [],
+      "at": [
+        {
+          "source": "/tracks/children/0/children/1",
+          "frame": 24
+        }
+      ]
     },
     {
       "code": "resolution_inferred",

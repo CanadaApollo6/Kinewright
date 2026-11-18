@@ -356,6 +356,7 @@ clamped the same way.
 - Kinewright's ramp is `k/(n−1)`, within `1/(n−1)` of the mix per frame of a linear dissolve.
 - Gap → B is a `crossfade` on B in place.
 - A → gap is `opacity` keys from 100 to 0.
+- Each video ramp into or out of a gap counts once as `fade_shape_linear` (A).
 - Short handles shrink the window, counted in `transition_handles_short`.
 
 **5.4 OTIO A/V pairing and dual-mono.** OTIO carries no links. A video clip and an audio clip are

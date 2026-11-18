@@ -198,6 +198,7 @@ fn fade_in(
         entering.clip.audio_fade_in_frames = TimeCode(length);
         clamp_fades(entering, notes);
     } else if kind == TrackKind::Video {
+        notes.push(Loss::approximation(LossCode::FadeShapeLinear));
         entering.clip.transition_in = Some(Transition {
             name: descriptor.into(),
             duration: TimeCode(length),
@@ -223,6 +224,7 @@ fn fade_out(
         outgoing.clip.audio_fade_out_frames = TimeCode(length);
         clamp_fades(outgoing, notes);
     } else if kind == TrackKind::Video && length > 0 {
+        notes.push(Loss::approximation(LossCode::FadeShapeLinear));
         let last = (span - 1).min(MAX_KEY_FRAME_OFFSET);
         let first = (span - length).min(last);
         let mut keyframes = Vec::with_capacity(2);

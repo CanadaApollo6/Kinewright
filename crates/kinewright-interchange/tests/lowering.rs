@@ -638,3 +638,47 @@ fn fcpxml_dissolve_preserves_gain_curves_on_the_head_and_body() {
     assert_eq!(body.keyframes.last().unwrap().at, TimeCode(21));
     assert_eq!(body.value_at(TimeCode(21)), Some(0));
 }
+
+#[test]
+fn transition_fade_from_gap_is_counted_as_approximated() {
+    assert_video_fade_counts(
+        include_bytes!("fixtures/fade-from-gap.otio"),
+        "fade-from-gap.otio",
+        2,
+    );
+}
+
+#[test]
+fn transition_fade_to_gap_is_counted_as_approximated() {
+    assert_video_fade_counts(
+        include_bytes!("fixtures/fade-to-gap.otio"),
+        "fade-to-gap.otio",
+        1,
+    );
+}
+
+fn assert_video_fade_counts(bytes: &[u8], name: &str, exact: u32) {
+    let timeline = otio::parse(bytes, name, ParseOptions::default()).unwrap();
+    let (_, record) = lower(&timeline, &MediaTable::default()).unwrap();
+    assert_eq!(
+        (
+            record.items,
+            record.exact,
+            record.approximated,
+            record.dropped
+        ),
+        (exact + 1, exact, 1, 0),
+        "{name}"
+    );
+    let fade = record
+        .rows
+        .iter()
+        .find(|row| row.code == LossCode::FadeShapeLinear)
+        .unwrap();
+    assert_eq!(fade.count, 1, "{name}");
+    assert_eq!(
+        fade.fidelity,
+        kinewright_core::Fidelity::Approximated,
+        "{name}"
+    );
+}
