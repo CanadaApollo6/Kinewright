@@ -682,3 +682,104 @@ fn assert_video_fade_counts(bytes: &[u8], name: &str, exact: u32) {
         "{name}"
     );
 }
+
+#[test]
+fn otio_unrelated_music_dissolve_survives_a_simultaneous_nest_cut() {
+    use serde_json::{Value, json};
+
+    let mut input: Value =
+        serde_json::from_slice(include_bytes!("fixtures/transition-at-nest.otio")).unwrap();
+    let tracks = input["tracks"]["children"].as_array_mut().unwrap();
+    let mut music = tracks[1].clone();
+    music["name"] = json!("Music");
+    for (index, source) in [(0, "music-a.wav"), (2, "music-b.wav")] {
+        music["children"][index]["name"] = json!(source);
+        music["children"][index]["media_reference"]["target_url"] =
+            json!(format!("file:///media/{source}"));
+    }
+    tracks.insert(0, music);
+    let bytes = serde_json::to_vec(&input).unwrap();
+    let timeline = otio::parse(&bytes, "music-at-nest.otio", ParseOptions::default()).unwrap();
+    assert_music_dissolve_and_picture_cut(&timeline, 2);
+}
+
+#[test]
+fn fcpxml_unrelated_music_dissolve_survives_a_simultaneous_nest_cut() {
+    let input = include_str!("fixtures/av-transition-at-nest.fcpxml")
+        .replace("</resources>", r#"
+          <asset id="musicA" format="fmt" start="0s" duration="4s" hasVideo="0" hasAudio="1">
+            <media-rep kind="original-media" src="file:///media/music-a.wav"/>
+          </asset>
+          <asset id="musicB" format="fmt" start="0s" duration="4s" hasVideo="0" hasAudio="1">
+            <media-rep kind="original-media" src="file:///media/music-b.wav"/>
+          </asset>
+          <effect id="cross" name="Cross Dissolve"/>
+        </resources>"#)
+        .replace("    </spine>", r#"
+          <audio ref="musicA" lane="-1" offset="0s" start="1s" duration="1s"/>
+          <transition lane="-1" offset="21/24s" duration="6/24s"><filter-audio ref="cross"/></transition>
+          <audio ref="musicB" lane="-1" offset="1s" start="1s" duration="1s"/>
+        </spine>"#);
+    let timeline = fcpxml::parse(
+        input.as_bytes(),
+        "music-at-nest.fcpxml",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    assert_music_dissolve_and_picture_cut(&timeline, 3);
+}
+
+fn assert_music_dissolve_and_picture_cut(timeline: &Timeline, before_cut: i64) {
+    let (document, record) = lower(timeline, &MediaTable::default()).unwrap();
+    let mut music: Vec<_> = document
+        .tracks
+        .iter()
+        .filter(|track| track.kind == TrackKind::Audio)
+        .flat_map(|track| &track.clips)
+        .filter(|clip| {
+            document.asset(clip.asset).is_some_and(|asset| {
+                asset
+                    .path
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .is_some_and(|name| name.starts_with("music-"))
+            })
+        })
+        .collect();
+    music.sort_by_key(|clip| clip.timeline_start);
+    let [outgoing, head, body] = music.as_slice() else {
+        panic!(
+            "expected original music clips and a dissolve head, got {}",
+            music.len()
+        );
+    };
+    let end = TimeCode(24 - before_cut + 6);
+    assert_eq!(head.timeline_start, TimeCode(24 - before_cut));
+    assert_eq!(body.timeline_start, end);
+    assert_eq!(clip_end(&document, outgoing), end);
+    assert_eq!(clip_end(&document, head), end);
+    assert_eq!(outgoing.audio_fade_out_frames, TimeCode(6));
+    assert_eq!(head.audio_fade_in_frames, TimeCode(6));
+
+    assert!(
+        document
+            .tracks
+            .iter()
+            .filter(|track| track.kind == TrackKind::Video)
+            .flat_map(|track| &track.clips)
+            .all(|clip| clip.transition_in.is_none())
+    );
+    let row = record
+        .rows
+        .iter()
+        .find(|row| row.code == LossCode::TransitionAtNestCut)
+        .unwrap();
+    assert_eq!(row.count, 1);
+    assert_eq!(row.at[0].frame, 24);
+    let row = record
+        .rows
+        .iter()
+        .find(|row| row.code == LossCode::AudioCrossfadeLinear)
+        .unwrap();
+    assert_eq!(row.count, 1);
+}

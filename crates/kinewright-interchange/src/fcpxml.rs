@@ -384,7 +384,7 @@ impl<'a, 'input> Parser<'a, 'input> {
                 vec![(TrackKind::Video, Placed::new(offset, item, source))]
             }
             "transition" => vec![(
-                TrackKind::Video,
+                transition_track_kind(node),
                 self.transition(node, offset, span, cut, &source)?,
             )],
             name => {
@@ -461,6 +461,7 @@ impl<'a, 'input> Parser<'a, 'input> {
             .attribute("name")
             .or_else(|| {
                 child(node, "filter-video")
+                    .or_else(|| child(node, "filter-audio"))
                     .and_then(|filter| filter.attribute("ref"))
                     .and_then(|id| self.resources.get(id))
                     .and_then(|effect| effect.attribute("name"))
@@ -988,6 +989,14 @@ fn prefix_decoration_sites(prefix: &str, decorations: &mut Decorations) {
     }
 }
 
+fn transition_track_kind(node: Xml<'_, '_>) -> TrackKind {
+    if child(node, "filter-audio").is_some() && child(node, "filter-video").is_none() {
+        TrackKind::Audio
+    } else {
+        TrackKind::Video
+    }
+}
+
 fn mirror_audio_transitions(tracks: &mut BTreeMap<(bool, bool, i64), Track>) {
     let mut pairs = Vec::new();
     for ((audio, _, lane), track) in &*tracks {
@@ -1023,11 +1032,15 @@ fn mirror_audio_transitions(tracks: &mut BTreeMap<(bool, bool, i64), Track>) {
             })
             .flatten()
             .collect();
-        audio.items.extend(
-            transitions
-                .into_iter()
-                .filter(|placed| boundaries.contains(&placed.at)),
-        );
+        let explicit_cuts: BTreeSet<_> = audio
+            .items
+            .iter()
+            .filter(|placed| matches!(placed.item, Item::Transition { .. }))
+            .map(|placed| placed.at)
+            .collect();
+        audio.items.extend(transitions.into_iter().filter(|placed| {
+            boundaries.contains(&placed.at) && !explicit_cuts.contains(&placed.at)
+        }));
         audio
             .items
             .sort_by_key(|placed| (placed.at, !matches!(placed.item, Item::Transition { .. })));

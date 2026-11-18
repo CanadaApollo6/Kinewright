@@ -1,6 +1,7 @@
 mod clips;
 mod grid;
 mod layout;
+mod nest_transitions;
 mod transition;
 
 use std::{
@@ -174,36 +175,7 @@ struct Overlay {
 #[derive(Default)]
 struct StackTransitions<'a> {
     applied_video: BTreeSet<&'a str>,
-    otio_nest_cuts: BTreeMap<Time, NestCut<'a>>,
-}
-
-struct NestCut<'a> {
-    site: &'a str,
-    frames: u64,
-}
-
-fn otio_nest_cuts(stack: &Stack) -> Result<BTreeMap<Time, NestCut<'_>>, Refusal> {
-    let mut cuts = BTreeMap::new();
-    for track in &stack.tracks {
-        let mut boundaries = BTreeSet::new();
-        for placed in &track.items {
-            if let Item::Nested { duration, .. } = placed.item
-                && duration > Time::ZERO
-            {
-                boundaries.insert(placed.at);
-                boundaries.insert(placed.at.checked_add(duration)?);
-            }
-        }
-        for placed in &track.items {
-            if matches!(placed.item, Item::Transition { .. }) && boundaries.contains(&placed.at) {
-                cuts.entry(placed.at).or_insert(NestCut {
-                    site: &placed.site,
-                    frames: 0,
-                });
-            }
-        }
-    }
-    Ok(cuts)
+    otio: nest_transitions::SharedCuts<'a>,
 }
 
 impl State {
@@ -223,19 +195,22 @@ impl State {
         self.decorations(&stack.decorations, map, None)?;
         let mut transitions = StackTransitions::default();
         if self.format == InterchangeFormat::Otio {
-            transitions.otio_nest_cuts = otio_nest_cuts(stack)?;
+            transitions.otio = nest_transitions::SharedCuts::for_stack(stack)?;
         }
         for track in &stack.tracks {
             block.append(self.track(track, map, window, depth, &mut transitions)?)?;
         }
-        for (at, cut) in transitions.otio_nest_cuts {
-            self.report.loss(
-                &Loss::approximation(LossCode::TransitionAtNestCut)
-                    .bounded(LossBound::Frames(cut.frames)),
-                cut.site,
-                map.to_parent(at)?.frame(self.project)?.0,
-                None,
-            );
+        for (at, cuts) in transitions.otio.frames {
+            let frame = map.to_parent(at)?.frame(self.project)?.0;
+            for (site, frames) in cuts {
+                self.report.loss(
+                    &Loss::approximation(LossCode::TransitionAtNestCut)
+                        .bounded(LossBound::Frames(frames)),
+                    site,
+                    frame,
+                    None,
+                );
+            }
         }
         Ok(block)
     }
@@ -680,9 +655,8 @@ impl State {
                 || b.as_ref()
                     .is_some_and(|b| matches!(b.location.placed.item, Item::Nested { .. }));
             let frames = before.saturating_add(after).unsigned_abs();
-            if let Some(nest_cut) = transitions.otio_nest_cuts.get_mut(&placed.at) {
+            if transitions.otio.record(placed, frames) {
                 self.report.mark_item(&placed.site, Fidelity::Approximated);
-                nest_cut.frames = nest_cut.frames.max(frames);
             } else if nesting {
                 losses.push(
                     Loss::approximation(LossCode::TransitionAtNestCut)
