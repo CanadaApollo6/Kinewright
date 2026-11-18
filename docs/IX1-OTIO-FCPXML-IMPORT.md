@@ -165,8 +165,9 @@ N = faithful, A = approximated (bound stated), Ø = dropped.
 | Clip names, metadata, item colour | `name`, `metadata`, `color` | `@name`, `metadata`, `note` | assets keep names | Ø, counted outside the item identity (§7.2) |
 
 A Final Cut `video` whose resource is an `effect` keeps its span and lane as a gap. The report
-names the dropped generator and anchored children retain their timing. A dangling reference or
-a reference to a different resource type still yields `malformed` (ruling 32).
+names the dropped generator. Its time map or conform rate governs the timing of attached
+items and decorations. A dangling reference or a reference to a different resource type still
+yields `malformed` (rulings 32 and 37).
 
 ## 4. Time and rates
 
@@ -1029,6 +1030,8 @@ Lead rulings (2026-11-17):
     positive spans (§4.2).
 36. **Bounded display text.** Escape and shorten file text for display and keep the stored values.
     Only shares within the host and share name limits can be offered for approval (§8.1, §9).
+37. **Retimed generator anchors.** Map the timing of attached items and decorations while
+    keeping the generator's timeline span as a gap (§3).
 
 Open questions:
 1. **Marker colour switch.** Should `MARKER_COLOR_POLICY` ship as `LabelPrefix` or `Drop`? This is

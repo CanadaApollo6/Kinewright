@@ -1,0 +1,14 @@
+<fcpxml version="1.13">
+  <resources>
+    <format id="f" frameDuration="1/24s" width="1920" height="1080"/>
+    <effect id="background" name="Solid Color" uid="Generators.localized/Solids.localized/Solid.motn"/>
+  </resources>
+  <library><event><project name="Retimed generator">
+    <sequence format="f"><spine>
+      <video ref="background" offset="10s" start="0s" duration="4s">
+        <timeMap><timept time="0s" value="0s"/><timept time="4s" value="8s"/></timeMap>
+        <title lane="1" offset="2s" duration="1s"><text><text-style>Caption</text-style></text></title>
+      </video>
+    </spine></sequence>
+  </project></event></library>
+</fcpxml>

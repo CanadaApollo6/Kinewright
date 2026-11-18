@@ -390,6 +390,8 @@ impl<'a, 'input> Parser<'a, 'input> {
         let generator = self.video_generator(node);
         let mut parts = match name {
             "video" if generator.is_some() => {
+                let (in_point, playback) = source_map(node, start, span, None, self.project_rate)?;
+                (frame_origin, speed) = (in_point, playback.average()?);
                 notes.push(
                     Loss::dropped(LossCode::GeneratorDropped).named(generator.unwrap_or("video")),
                 );
@@ -408,8 +410,7 @@ impl<'a, 'input> Parser<'a, 'input> {
                 let span = duration(node, source_media.duration.unwrap_or(Time::ZERO))?;
                 let (in_point, playback) =
                     source_map(node, start, span, source_media.fps, self.project_rate)?;
-                frame_origin = in_point;
-                speed = playback.average()?;
+                (frame_origin, speed) = (in_point, playback.average()?);
                 if matches!(playback, Playback::Freeze(_)) {
                     notes.push(Loss::approximation(LossCode::HoldReading));
                 }
@@ -417,8 +418,7 @@ impl<'a, 'input> Parser<'a, 'input> {
             }
             "ref-clip" | "sync-clip" | "mc-clip" | "audition" | "spine" | "clip" => {
                 let (in_point, playback) = source_map(node, start, span, None, self.project_rate)?;
-                frame_origin = in_point;
-                speed = playback.average()?;
+                (frame_origin, speed) = (in_point, playback.average()?);
                 let item = self.nested(node, span, in_point, &playback, depth, &mut notes)?;
                 vec![(TrackKind::Video, Placed::new(offset, item, source))]
             }

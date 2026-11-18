@@ -282,6 +282,43 @@ fn fx_video_generator_keeps_an_anchored_title() {
 }
 
 #[test]
+fn fx_retimed_generator_maps_its_anchored_title() {
+    use kinewright_core::{ClipContent, TimeCode};
+    use kinewright_interchange::{MediaTable, lower};
+    let timeline = fcpxml::parse(
+        include_bytes!("fixtures/fcpxml-generators/retimed-generator-with-title.fcpxml"),
+        "retimed-generator.fcpxml",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    let placed = &timeline.root.tracks[0].items[0];
+    assert_eq!(placed.at, Time::new(10, 1).unwrap());
+    assert_eq!(placed.item.span(), Time::new(4, 1).unwrap());
+
+    let (document, record) = lower(&timeline, &MediaTable::default()).unwrap();
+    let clips: Vec<_> = document
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .collect();
+    let [title] = clips.as_slice() else {
+        panic!("only the anchored title should be rendered");
+    };
+    assert!(matches!(&title.content, ClipContent::Title(title) if title.text == "Caption"));
+    // The generator runs at 2×. The title starts at 10 + 2/2 seconds and lasts 1/2 second.
+    assert_eq!(title.timeline_start, TimeCode(264));
+    assert_eq!(document.clip_duration(title).unwrap(), TimeCode(12));
+    let loss = record
+        .rows
+        .iter()
+        .find(|row| row.code == LossCode::GeneratorDropped)
+        .unwrap();
+    assert_eq!(loss.count, 1);
+    assert_eq!(loss.names, ["Solid Color"]);
+    document.validate().unwrap();
+}
+
+#[test]
 fn fx_video_generator_reserves_its_span_between_media_clips() {
     use kinewright_core::TimeCode;
     use kinewright_interchange::{MediaTable, lower};
