@@ -526,16 +526,18 @@ impl Protocol<'_> {
             generation: self.generation,
             cancelled: &mut self.cancelled,
         };
-        self.traffic
-            .read(&mut reader, Instant::now())
-            .map_err(|error| {
-                Failure::Sandbox(match error.kind() {
-                    io::ErrorKind::InvalidData => Error::ProtocolViolation,
-                    io::ErrorKind::TimedOut => Error::TimedOut,
-                    _ if !self.shared.ready.load(Ordering::Acquire) => Error::SandboxUnavailable,
-                    _ => Error::Crashed,
-                })
+        let frame = self.traffic.read(&mut reader, Instant::now());
+        if self.cancelled {
+            self.traffic.cancel_sent();
+        }
+        frame.map_err(|error| {
+            Failure::Sandbox(match error.kind() {
+                io::ErrorKind::InvalidData => Error::ProtocolViolation,
+                io::ErrorKind::TimedOut => Error::TimedOut,
+                _ if !self.shared.ready.load(Ordering::Acquire) => Error::SandboxUnavailable,
+                _ => Error::Crashed,
             })
+        })
     }
     fn close(&mut self) -> Result<(), Failure> {
         self.send(Message::Close {})?;

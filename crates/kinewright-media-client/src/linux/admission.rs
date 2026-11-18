@@ -53,6 +53,19 @@ impl Health {
     }
 }
 
+/// The outcome a finished launch stands for. A host-owned cause wins. Without
+/// one, a `Cancelled` came from the helper or its supervisor, not the caller:
+/// it is a protocol violation and spends a token (F1).
+pub(super) fn attribute(cause: Option<Failure>, result: Outcome) -> Outcome {
+    match (cause, result) {
+        (Some(cause), _) => Err(cause),
+        (None, Err(Failure::Sandbox(Error::Cancelled))) => {
+            Err(Failure::Sandbox(Error::ProtocolViolation))
+        }
+        (None, result) => result,
+    }
+}
+
 struct History {
     identity: [u8; 32],
     crashes: u8,
@@ -574,6 +587,49 @@ mod tests {
             Err(Failure::Busy(Busy::QueueFull)),
         ] {
             for n in 0..10 {
+                assert_eq!(
+                    circuit.record([n; 32], Health::of(&outcome), now),
+                    Recorded::default()
+                );
+            }
+        }
+        assert!(!circuit.paused());
+    }
+    /// F1: a helper can answer every launch with `Failed { Cancelled }`. With
+    /// no host cancellation behind it, that is a protocol violation, and it
+    /// spends a token like any other.
+    #[test]
+    fn forged_cancellations_trip_the_breaker() {
+        let now = Instant::now();
+        let mut circuit = Circuit::new(now);
+        let mut paused = false;
+        for n in 0..5 {
+            let outcome = attribute(None, Err(Failure::Sandbox(Error::Cancelled)));
+            assert!(
+                matches!(outcome, Err(Failure::Sandbox(Error::ProtocolViolation))),
+                "launch {n}: {outcome:?}"
+            );
+            paused = circuit.record([n; 32], Health::of(&outcome), now).paused;
+        }
+        assert!(
+            paused,
+            "five forged cancellations in one burst pause admission"
+        );
+    }
+    #[test]
+    fn a_caller_cancellation_stays_exempt() {
+        let now = Instant::now();
+        let mut circuit = Circuit::new(now);
+        let cancelled = || Some(Failure::Sandbox(Error::Cancelled));
+        for n in 0..10 {
+            for helper in [
+                Err(Failure::Sandbox(Error::Cancelled)),
+                Err(Failure::Sandbox(Error::Crashed)),
+                Ok(fixture_probe()),
+            ] {
+                let outcome = attribute(cancelled(), helper);
+                assert!(matches!(outcome, Err(Failure::Sandbox(Error::Cancelled))));
+                assert_eq!(Health::of(&outcome), Health::Neutral);
                 assert_eq!(
                     circuit.record([n; 32], Health::of(&outcome), now),
                     Recorded::default()

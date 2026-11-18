@@ -147,6 +147,7 @@ pub struct ProbeSession {
     epoch: Instant,
     frames: u32,
     bytes: usize,
+    cancel_sent: bool,
 }
 impl ProbeSession {
     #[must_use]
@@ -159,6 +160,7 @@ impl ProbeSession {
             epoch: Instant::now(),
             frames: 0,
             bytes: 0,
+            cancel_sent: false,
         }
     }
     pub fn read(
@@ -169,6 +171,11 @@ impl ProbeSession {
         crate::read_charged(reader, |bytes| {
             self.charge(bytes, now).map_err(|_| crate::invalid())
         })
+    }
+    /// Records that the host sent `Cancel`. Only then may the helper answer
+    /// `Cancelled`; an unsolicited one is a protocol violation (F1).
+    pub fn cancel_sent(&mut self) {
+        self.cancel_sent = true;
     }
     pub fn charge(&mut self, bytes: usize, now: Instant) -> Result<(), MediaSandboxError> {
         if now.saturating_duration_since(self.epoch) >= Duration::from_secs(1) {
@@ -214,6 +221,12 @@ impl ProbeSession {
                 Ok(Some(result))
             }
             (State::Complete, Message::Complete {}) => Ok(None),
+            (
+                State::Ready | State::Result,
+                Message::Failed {
+                    error: MediaSandboxError::Cancelled,
+                },
+            ) if !self.cancel_sent => Err(bad),
             (State::Ready | State::Result, Message::Failed { error }) => Err(error),
             _ => Err(bad),
         }

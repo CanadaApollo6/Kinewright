@@ -1,7 +1,7 @@
 //! Sole process spawner and admission owner. No media parsing or scope RPC here.
 use super::{
     ACTIVE_PROBES, CANCEL_GRACE, Config, Failure, Outcome, Request, Status, TICK,
-    admission::{Health, Pending, Queue},
+    admission::{Health, Pending, Queue, attribute},
     controller::Controller,
     worker,
 };
@@ -212,7 +212,7 @@ impl Actor {
                         self.queue.continue_with(request, &self.status, now);
                         continue;
                     }
-                    Ok(done) => job.cause.map_or(done.result, Err),
+                    Ok(done) => attribute(job.cause, done.result),
                     Err(_) => Err(job.cause.unwrap_or(Failure::Sandbox(Error::Crashed))),
                 };
                 // This host-owned worker cannot finish until its cleanup guard

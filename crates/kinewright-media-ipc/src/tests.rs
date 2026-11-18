@@ -84,6 +84,39 @@ fn state_rejects_stale_out_of_order_and_flooded_traffic() {
     }
     assert!(session.charge(40, now).is_err());
 }
+/// F1: only a cancellation the host sent may come back as `Cancelled`.
+#[test]
+fn unsolicited_cancellation_is_a_protocol_violation() {
+    let failed = |request| Frame {
+        request,
+        generation: 2,
+        message: Message::Failed {
+            error: MediaSandboxError::Cancelled,
+        },
+    };
+    let ready = || read_frame(&mut &encoded(Message::Ready {})[..]).unwrap();
+    for answered in [false, true] {
+        let mut session = ProbeSession::new(1, 2, [None, None]);
+        if answered {
+            assert!(session.accept(ready()).unwrap().is_none());
+        }
+        assert_eq!(
+            session.accept(failed(1)).unwrap_err(),
+            MediaSandboxError::ProtocolViolation,
+            "forged after ready={answered}"
+        );
+        let mut session = ProbeSession::new(1, 2, [None, None]);
+        if answered {
+            assert!(session.accept(ready()).unwrap().is_none());
+        }
+        session.cancel_sent();
+        assert_eq!(
+            session.accept(failed(1)).unwrap_err(),
+            MediaSandboxError::Cancelled,
+            "solicited after ready={answered}"
+        );
+    }
+}
 #[test]
 fn bounded_arbitrary_bytes_never_panic() {
     let mut state = 42_u64;
