@@ -26,12 +26,13 @@ jobs:
       - name: Source admission witnesses
         run: python -B scripts/test_ffmpeg_build.py
   windows:
-    name: Minimal FFmpeg (windows-2022)
-    # windows-2022 keeps Visual Studio 2022 (MSVC 14.44). The Windows Server
-    # 2025 images moved to Visual Studio 2026, whose compiler rejects the
-    # pinned dav1d 1.5.4 (C7780 in compat/msvc/stdatomic.h). ci.yml and
-    # release.yml use the same image so every Windows binary shares one toolset.
-    runs-on: windows-2022
+    name: Minimal FFmpeg (windows-2025)
+    # windows-2025, not windows-2022: the Server 2022 software renderer returns
+    # non-finite half-float pixels and fails the GPU tests. This image carries
+    # Visual Studio 2026, whose compiler rejects the pinned dav1d 1.5.4, so
+    # setup-ffmpeg.ps1 and prepare-ffmpeg-windows.ps1 select the Visual Studio
+    # 2022 toolset (14.4x) that the image also carries.
+    runs-on: windows-2025
     timeout-minutes: 90
     outputs:
       key: ${{ steps.profiles.outputs.key }}

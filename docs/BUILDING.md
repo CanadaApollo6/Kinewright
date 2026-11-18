@@ -198,6 +198,10 @@ python scripts/build-ffmpeg.py --profile testgen
 This builds the explicit static MSVC dependencies using pinned vcpkg, then the
 same verified FFmpeg source and profile as Linux. Python 3.12+ is required.
 `setup-ffmpeg.ps1` provisions the pinned pkgconf and libclang helpers locally.
+Both scripts build with the Visual Studio 2022 C++ toolset (14.3x or 14.4x) when the
+newest Visual Studio installation carries one. Visual Studio 2026 without that
+toolset is not supported yet: its compiler stops on the pinned dav1d. In the
+Visual Studio Installer, add "MSVC v143 build tools".
 See [MS1 minimal FFmpeg](MS1-MINIMAL-FFMPEG.md) for the complete build contract.
 
 ### Environment variables

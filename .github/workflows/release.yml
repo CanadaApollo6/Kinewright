@@ -11,7 +11,7 @@ permissions:
 jobs:
   windows-installer:
     name: Windows installer
-    runs-on: windows-2022
+    runs-on: windows-2025
     timeout-minutes: 150
 
     defaults:
@@ -55,7 +55,7 @@ jobs:
             ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
           }
           if (-not $iscc) {
-            throw 'The windows-2022 image does not contain ISCC.exe.'
+            throw 'The windows-2025 image does not contain ISCC.exe.'
           }
           $innoVersion = (Get-Item -LiteralPath $iscc).VersionInfo.ProductVersion
           Write-Host "Selected toolchain: Inno Setup $innoVersion at $iscc"

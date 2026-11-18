@@ -62,8 +62,24 @@ if (-not $vcvars) {
     throw 'Visual Studio C++ Build Tools were not found. Install Desktop development with C++.'
 }
 
+# Visual Studio 2026 (toolset 14.5x) rejects the pinned dav1d, and the Windows
+# test pins were measured with the 2022 toolset. When the installation also
+# carries a 2022 toolset (14.3x or 14.4x), every C and Rust build uses the
+# newest one. prepare-ffmpeg-windows.ps1 makes the same choice for vcpkg.
+$vcvarsToolset = ''
+$toolsRoot = Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $vcvars))) 'Tools\MSVC'
+if (Test-Path -LiteralPath $toolsRoot -PathType Container) {
+    $toolset2022 = Get-ChildItem -LiteralPath $toolsRoot -Directory |
+        Where-Object { $_.Name -match '^14\.[34]\d\.\d+$' -and (Test-Path -LiteralPath (Join-Path $_.FullName 'bin\Hostx64\x64\cl.exe')) } |
+        Sort-Object { [version]$_.Name } |
+        Select-Object -Last 1
+    if ($toolset2022) {
+        $vcvarsToolset = " -vcvars_ver=$($toolset2022.Name)"
+    }
+}
+
 # Import the environment emitted by vcvars64.bat into this PowerShell process.
-$vcvarsCommand = "call `"$vcvars`" >nul 2>nul && set"
+$vcvarsCommand = "call `"$vcvars`"$vcvarsToolset >nul 2>nul && set"
 $vcvarsPath = $null
 foreach ($line in (& $env:ComSpec /d /c $vcvarsCommand)) {
     if ($line -match '^([^=]+)=(.*)$') {
@@ -78,7 +94,7 @@ foreach ($line in (& $env:ComSpec /d /c $vcvarsCommand)) {
 }
 $env:Path = "$vcvarsPath;$originalPath"
 if (-not $vcvarsPath -or -not $env:INCLUDE -or -not $env:LIB) {
-    throw "Failed to import the MSVC build environment from $vcvars"
+    throw "Failed to import the MSVC build environment from $vcvars$vcvarsToolset"
 }
 
 if ($NemoCacheKeyOnly) {
