@@ -4864,6 +4864,12 @@ pub(crate) fn run() -> eframe::Result {
                 picture: None,
             });
             if std::env::var_os("KINEWRIGHT_SCREENSHOT_TO").is_some()
+                && std::env::var("KINEWRIGHT_SCREENSHOT_SHOW").as_deref() == Ok("import")
+                && let Some(path) = std::env::var_os("KINEWRIGHT_SCREENSHOT_IMPORT")
+            {
+                app.open_interchange(PathBuf::from(path), &creation_context.egui_ctx);
+            }
+            if std::env::var_os("KINEWRIGHT_SCREENSHOT_TO").is_some()
                 && let Some(path) = std::env::var_os("KINEWRIGHT_SCREENSHOT_STUDIO_BUNDLE")
                 && let Err(error) = app.prepare_studio_screenshot(std::path::Path::new(&path))
             {
