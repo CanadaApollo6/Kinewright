@@ -12,6 +12,7 @@ mod export_ui;
 mod icons;
 mod incident_ui;
 mod inspector_ui;
+mod interchange_ui;
 mod investigator;
 #[cfg(test)]
 mod ix1_tests;

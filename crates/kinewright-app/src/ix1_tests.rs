@@ -24,19 +24,40 @@ enum Call {
     Waveform(PathBuf),
 }
 
-struct ProbeHold {
+pub(crate) struct ProbeHold {
     started: mpsc::SyncSender<()>,
     release: Mutex<mpsc::Receiver<()>>,
     finished: mpsc::SyncSender<bool>,
 }
 
+impl ProbeHold {
+    pub(crate) fn new(
+        started: mpsc::SyncSender<()>,
+        release: mpsc::Receiver<()>,
+        finished: mpsc::SyncSender<bool>,
+    ) -> Self {
+        Self {
+            started,
+            release: Mutex::new(release),
+            finished,
+        }
+    }
+}
+
 #[derive(Default)]
-struct RecordingMedia {
+pub(crate) struct RecordingMedia {
     calls: Mutex<Vec<Call>>,
     probe_hold: Option<ProbeHold>,
 }
 
 impl RecordingMedia {
+    pub(crate) fn holding(hold: ProbeHold) -> Self {
+        Self {
+            calls: Mutex::default(),
+            probe_hold: Some(hold),
+        }
+    }
+
     fn record(&self, call: Call) {
         self.calls.lock().unwrap().push(call);
     }
@@ -202,7 +223,7 @@ impl Analysis for RecordingMedia {
     }
 }
 
-fn write_edit(path: &Path, reference: &str) {
+pub(crate) fn write_edit(path: &Path, reference: &str) {
     let timeline = json!({
         "OTIO_SCHEMA": "Timeline.1",
         "name": "Reel Two",
@@ -218,7 +239,7 @@ fn write_edit(path: &Path, reference: &str) {
     std::fs::write(path, serde_json::to_vec(&timeline).unwrap()).unwrap();
 }
 
-fn prepare_edit(path: &Path, analysis: Arc<dyn Analysis>) -> PreparedImport {
+pub(crate) fn prepare_edit(path: &Path, analysis: Arc<dyn Analysis>) -> PreparedImport {
     prepare(
         path.to_str().unwrap(),
         PrepareOptions {
@@ -313,4 +334,53 @@ fn unapproved_remote_import_reaches_editor_media_ports_only_with_an_empty_path()
             Call::Status(PathBuf::new()),
         ]
     );
+}
+
+#[test]
+fn estimated_import_uses_the_editors_confirmed_relink_with_new_metadata() {
+    use crate::media_workflow::{RelinkPreflight, build_relink_candidate, preflight_relink};
+    use kinewright_core::{OpError, Operation};
+
+    let directory = TempDirectory::new("ix1-ui-relink");
+    let input = directory.path("edit.otio");
+    write_edit(&input, "file://unapproved.invalid/Camera/first.mov");
+    let analysis = Arc::new(RecordingMedia::default());
+    let prepared = prepare_edit(&input, analysis.clone());
+    let mut document =
+        kinewright_project::interchange::commit(prepared, |_, document, _| Ok::<_, ()>(document))
+            .unwrap();
+    let asset = &document.media_pool[0];
+    let id = asset.id;
+    let replacement = directory.path("replacement.mov");
+    let probed = analysis.probe(&replacement).unwrap();
+    let candidate = build_relink_candidate(replacement, &probed);
+    assert_ne!(asset.duration, candidate.duration);
+    assert_ne!(asset.resolution, candidate.resolution);
+    assert_eq!(
+        preflight_relink(asset, &candidate),
+        Ok(RelinkPreflight::NeedsLegacyConfirmation)
+    );
+    let without_consent = Operation::RelinkAsset {
+        asset: id,
+        candidate: candidate.clone(),
+        allow_unverified_source: false,
+    };
+    assert_eq!(
+        without_consent.apply(&mut document),
+        Err(OpError::RelinkRequiresExplicitUnverifiedSource { asset: id }),
+    );
+    assert!(document.asset(id).unwrap().remote_locator.is_some());
+    Operation::RelinkAsset {
+        asset: id,
+        candidate,
+        allow_unverified_source: true,
+    }
+    .apply(&mut document)
+    .unwrap();
+    let relinked = document.asset(id).unwrap();
+    assert_eq!(relinked.path, probed.path);
+    assert_eq!(relinked.duration, probed.duration);
+    assert_eq!(relinked.resolution, probed.resolution);
+    assert!(relinked.remote_locator.is_none());
+    document.validate().unwrap();
 }

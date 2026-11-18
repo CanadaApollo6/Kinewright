@@ -1517,7 +1517,7 @@ impl KinewrightApp {
     }
 
     pub(crate) fn show_legacy_relink_confirmation(&mut self, ctx: &egui::Context) {
-        let Some(pending) = self.pending_legacy_relink.clone() else {
+        let Some(pending) = self.pending_legacy_relink.as_ref() else {
             return;
         };
         let mut confirm = false;
@@ -1531,10 +1531,14 @@ impl KinewrightApp {
                     "SOURCE IDENTITY UNKNOWN",
                     color::STATUS_WARNING,
                 ));
-                ui.label(format!(
-                    "{} is a legacy asset without a stored source fingerprint.",
-                    pending.asset_name
-                ));
+                let estimated = session_index_by_id(pending.session_id, &self.projects)
+                    .is_some_and(|index| self.projects[index].document.imported_from.iter()
+                        .any(|record| record.estimated_asset(pending.asset_id)));
+                ui.label(if estimated {
+                    format!("{} was imported without checking its original file.", pending.asset_name)
+                } else {
+                    format!("{} is a legacy asset without a stored source fingerprint.", pending.asset_name)
+                });
                 ui.label("The replacement was probed successfully, but the original bytes cannot be verified.");
                 ui.add_space(space::TWO);
                 ui.label(format!("Use {}?", pending.candidate.path.display()));
@@ -1555,8 +1559,7 @@ impl KinewrightApp {
                     }
                 });
             });
-        if confirm {
-            self.pending_legacy_relink = None;
+        if confirm && let Some(pending) = self.pending_legacy_relink.take() {
             if let Some(project_index) = session_index_by_id(pending.session_id, &self.projects) {
                 if let Err(conflict) = validate_relink_revision(
                     pending.expected_revision,

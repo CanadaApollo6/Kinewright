@@ -405,6 +405,8 @@ pub(crate) struct KinewrightApp {
     /// another edit before the original request resolves fail-closed.
     pub(crate) pending_source_edit: Option<crate::media_workflow::PendingSourceEdit>,
     pub(crate) pending_legacy_relink: Option<crate::media_workflow::PendingLegacyRelink>,
+    pub(crate) interchange_dialog: Option<crate::interchange_ui::ImportDialog>,
+    import_report_open: bool,
     /// MO1 R25: the copy-attributes source clip, until the next copy.
     pub(crate) clip_attributes_clipboard: Option<ClipId>,
     /// MO1 R25: the open plan-a-move dialog, if any.
@@ -712,6 +714,8 @@ impl KinewrightApp {
             media_statuses: crate::media_workflow::MediaStatusStore::default(),
             pending_source_edit: None,
             pending_legacy_relink: None,
+            interchange_dialog: None,
+            import_report_open: false,
             clip_attributes_clipboard: None,
             motion_plan_dialog: None,
             solo_dialog: None,
@@ -1833,17 +1837,97 @@ impl KinewrightApp {
         );
     }
 
-    fn choose_project(&mut self) {
+    fn choose_project(&mut self, ctx: &egui::Context) {
         if !self.ja1_destination_change() {
             return;
         }
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Kinewright project", &["kinewright", "json"])
+            .add_filter(
+                crate::interchange_ui::OPEN_FILTER.0,
+                crate::interchange_ui::OPEN_FILTER.1,
+            )
             .pick_file()
         else {
             return;
         };
-        self.open_project(&path);
+        match crate::interchange_ui::classify_open_path(&path) {
+            crate::interchange_ui::OpenPath::Project => self.open_project(&path),
+            crate::interchange_ui::OpenPath::Timeline { otio } => {
+                self.open_interchange(path, otio, ctx);
+            }
+        }
+    }
+
+    pub(crate) fn open_interchange(&mut self, path: PathBuf, otio: bool, ctx: &egui::Context) {
+        if self.interchange_dialog.is_some() || !self.ja1_destination_change() {
+            return;
+        }
+        let admission = kinewright_project::bundle::BundleWriteAdmission::new_document();
+        let grant = admission
+            .legacy_media()
+            .expect("new projects admit local media");
+        let analysis = self
+            .lut_publisher
+            .legacy_media(grant, Arc::new(Document::default()));
+        self.interchange_dialog = Some(crate::interchange_ui::ImportDialog::new(
+            path, otio, analysis, ctx,
+        ));
+    }
+
+    fn show_interchange(&mut self, ctx: &egui::Context) {
+        use crate::interchange_ui::{ImportAction, import_status, show_report};
+        use kinewright_project::interchange::{CommitImportError, commit};
+        if let Some(dialog) = &mut self.interchange_dialog {
+            match dialog.show(ctx) {
+                ImportAction::Wait => {}
+                ImportAction::Cancel => self.interchange_dialog = None,
+                ImportAction::Open(prepared) => {
+                    self.interchange_dialog = None;
+                    let status = import_status(prepared.name(), prepared.record());
+                    match commit(*prepared, |name, document, admission| {
+                        self.create_project_session(
+                            name,
+                            document,
+                            admission,
+                            None,
+                            &SidecarMode::None,
+                            PROJECT_FORMAT_VERSION,
+                        )
+                    }) {
+                        Ok(session) => {
+                            self.projects.push(session);
+                            self.focus_project(self.projects.len() - 1);
+                            self.status = status;
+                        }
+                        Err(CommitImportError::Cancelled) => {
+                            self.status = "Import cancelled".into();
+                        }
+                        Err(CommitImportError::Session(error)) => self.note_label(
+                            LabelIncident::Project,
+                            IncidentSubject::Project,
+                            format!("Could not open timeline: {error}"),
+                        ),
+                    }
+                }
+            }
+        }
+        if self.import_report_open && show_report(ctx, &self.focused().document) {
+            self.import_report_open = false;
+        }
+    }
+
+    pub(crate) fn import_report_menu_item(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .add_enabled(
+                !self.focused().document.imported_from.is_empty(),
+                egui::Button::new("Import report"),
+            )
+            .clicked()
+        {
+            self.import_report_open = true;
+            ui.close();
+        }
     }
 
     pub(crate) fn new_project(&mut self) {
@@ -3780,7 +3864,7 @@ impl KinewrightApp {
             }
             if ui.button("Open…").clicked() {
                 ui.close();
-                self.choose_project();
+                self.choose_project(ui.ctx());
             }
             if ui.button("Studio recovery and rescue…").clicked() {
                 ui.close();
@@ -3947,8 +4031,10 @@ impl eframe::App for KinewrightApp {
         self.update_window_title(ui.ctx());
         self.handle_close_request(ui.ctx());
         self.poll_background(ui.ctx());
-        self.keyboard_shortcuts(ui.ctx());
-        self.import_dropped_files(ui.ctx());
+        if self.interchange_dialog.is_none() && !self.import_report_open {
+            self.keyboard_shortcuts(ui.ctx());
+            self.import_dropped_files(ui.ctx());
+        }
         let outcome = self.projects.first_mut().map(|project| {
             let ctx = ui.ctx().clone();
             project.recovery.show_dialog(&ctx)
@@ -3999,6 +4085,7 @@ impl eframe::App for KinewrightApp {
         self.show_color_qc_window(ui.ctx());
         self.look_browser(ui.ctx());
         self.show_legacy_relink_confirmation(ui.ctx());
+        self.show_interchange(ui.ctx());
         self.show_help(ui.ctx());
         self.show_error_log(ui.ctx());
         // `IN1b` §5.5 rule 31: the badge's own panel, drawn beside the audit
@@ -4054,6 +4141,7 @@ impl KinewrightApp {
                         self.focused_mut().studio.mode = crate::studio::Mode::Studio;
                     }
                     self.file_menu(ui);
+                    ui.menu_button("Project", |ui| self.import_report_menu_item(ui));
                     self.view_menu(ui);
                     self.look_menu(ui);
                     if ui
@@ -6640,6 +6728,8 @@ pub(crate) mod in1_tests {
             media_statuses: crate::media_workflow::MediaStatusStore::default(),
             pending_source_edit: None,
             pending_legacy_relink: None,
+            interchange_dialog: None,
+            import_report_open: false,
             clip_attributes_clipboard: None,
             motion_plan_dialog: None,
             solo_dialog: None,
@@ -11806,6 +11896,8 @@ mod in2b_tests {
             media_statuses: crate::media_workflow::MediaStatusStore::default(),
             pending_source_edit: None,
             pending_legacy_relink: None,
+            interchange_dialog: None,
+            import_report_open: false,
             clip_attributes_clipboard: None,
             motion_plan_dialog: None,
             solo_dialog: None,
@@ -17178,7 +17270,7 @@ pub(crate) fn ja1_destination_witness() {
                     assert!(!app.save_project(true));
                 }
                 1 => app.open_project(&temp.path("elsewhere.kinewright")),
-                2 => app.choose_project(),
+                2 => app.choose_project(&egui::Context::default()),
                 3 => app.new_project(),
                 _ => {
                     app.status = app

@@ -2575,13 +2575,27 @@ fn paint_track_labels(
             egui::Stroke::new(1.0, color::BORDER_SUBTLE),
         );
         let (label, icon) = track_caption_and_icon(track.kind, index);
-        painter.text(
-            egui::pos2(lane.left() + space::TWO, lane.center().y - 8.0),
-            egui::Align2::LEFT_CENTER,
-            label,
+        let label = track.name.as_deref().unwrap_or(&label);
+        let left = lane.left() + space::TWO;
+        let width = mix_toggle_column_x(lane) - left - space::ONE;
+        let mut job = egui::text::LayoutJob::simple(
+            label.to_owned(),
             egui::FontId::new(type_size::CAPTION, egui::FontFamily::Proportional),
             color::TEXT_PRIMARY,
+            width,
         );
+        job.wrap.max_rows = 1;
+        let galley = painter.layout_job(job);
+        let top_left = egui::pos2(left, lane.center().y - 8.0 - galley.size().y / 2.0);
+        if galley.elided {
+            ui.interact(
+                egui::Rect::from_min_size(top_left, galley.size()),
+                ui.make_persistent_id(("track-caption", track.id)),
+                egui::Sense::hover(),
+            )
+            .on_hover_text(label);
+        }
+        painter.galley(top_left, galley, color::TEXT_PRIMARY);
         let icon_rect = egui::Rect::from_min_size(
             egui::pos2(lane.left() + space::TWO, lane.center().y + 2.0),
             egui::vec2(size::ICON_SM, size::ICON_SM),
@@ -4512,6 +4526,117 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn ix1_imported_dissolve_body_trims_and_moves_with_its_audio() {
+        use kinewright_core::{LossCode, RefusedMedia, apply_batch};
+        use kinewright_media::test_support::TempDirectory;
+
+        let temp = TempDirectory::new("ix1-ui-dissolve");
+        let path = temp.path("dissolve.fcpxml");
+        std::fs::write(
+            &path,
+            br#"<fcpxml version="1.13">
+              <resources>
+                <format id="f" frameDuration="1/25s" width="1920" height="1080"/>
+                <asset id="a" format="f" start="0s" duration="6s" hasVideo="1" hasAudio="1" name="First">
+                  <media-rep kind="original-media" src="before.mov"/>
+                </asset>
+                <asset id="b" format="f" start="0s" duration="6s" hasVideo="1" hasAudio="1" name="Incoming">
+                  <media-rep kind="original-media" src="after.mov"/>
+                </asset>
+              </resources>
+              <project><sequence format="f"><spine>
+                <asset-clip ref="a" start="1s" duration="1s"/>
+                <transition offset="23/25s" duration="6/25s"/>
+                <asset-clip ref="b" offset="1s" start="1s" duration="2s"/>
+              </spine></sequence></project>
+            </fcpxml>"#,
+        ).unwrap();
+        let prepared = crate::ix1_tests::prepare_edit(&path, std::sync::Arc::new(RefusedMedia));
+        assert!(
+            prepared
+                .record()
+                .rows
+                .iter()
+                .any(|row| row.code == LossCode::TransitionLane)
+        );
+        let mut document = kinewright_project::interchange::commit(prepared, |_, document, _| {
+            Ok::<_, ()>(document)
+        })
+        .unwrap();
+        let incoming = document
+            .media_pool
+            .iter()
+            .find(|asset| asset.name == "Incoming")
+            .unwrap()
+            .id;
+        let part = |kind, start| {
+            let (track, clip) = document
+                .tracks
+                .iter()
+                .filter(|track| track.kind == kind)
+                .flat_map(|track| track.clips.iter().map(move |clip| (track, clip)))
+                .find(|(_, clip)| clip.asset == incoming && clip.timeline_start == TimeCode(start))
+                .expect("imported dissolve part exists");
+            (track.id, clip.id)
+        };
+        let (_, video_head) = part(TrackKind::Video, 23);
+        let (_, audio_head) = part(TrackKind::Audio, 23);
+        let (video_track, video_body) = part(TrackKind::Video, 29);
+        let (_, audio_body) = part(TrackKind::Audio, 29);
+        let clip = |d: &Document, id| d.clip(id).unwrap().clone();
+        let video_head_before = clip(&document, video_head);
+        let audio_head_before = clip(&document, audio_head);
+        let video_before = clip(&document, video_body);
+        let audio_before = clip(&document, audio_body);
+        assert!(video_before.link.is_some());
+        assert_eq!(video_before.link, audio_before.link);
+        assert_ne!(video_before.link, video_head_before.link);
+        assert_ne!(audio_before.link, audio_head_before.link);
+
+        let shorten =
+            video_before.source_range.start..TimeCode(video_before.source_range.end.0 - 3);
+        let trims =
+            linked_trim_operations(&document, video_body, shorten, TrimEdge::Right).unwrap();
+        assert_eq!(trims.len(), 2);
+        apply_batch(&mut document, &trims).unwrap();
+        assert_eq!(
+            clip(&document, video_body).source_range.end.0,
+            video_before.source_range.end.0 - 3
+        );
+        assert_eq!(
+            clip(&document, audio_body).source_range.end.0,
+            audio_before.source_range.end.0 - 3
+        );
+        assert_eq!(clip(&document, video_head), video_head_before);
+        assert_eq!(clip(&document, audio_head), audio_head_before);
+        document.validate().unwrap();
+
+        let moves = linked_move_operations(&document, video_body, video_track, TimeCode(84));
+        assert_eq!(moves.len(), 2);
+        apply_batch(&mut document, &moves).unwrap();
+        assert_eq!(clip(&document, video_body).timeline_start, TimeCode(84));
+        assert_eq!(clip(&document, audio_body).timeline_start, TimeCode(84));
+        assert_eq!(clip(&document, video_head), video_head_before);
+        assert_eq!(clip(&document, audio_head), audio_head_before);
+        document.validate().unwrap();
+    }
+
+    #[test]
+    fn ix1_named_track_paints_its_name_in_the_track_header() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut document = linked_fixture();
+        document.tracks[1].name = Some("VO".into());
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert!(paint_track_labels(ui, &document, 200.0, size::TRACK_HEIGHT).is_none());
+        });
+        let text = crate::theme::painted_text(&output);
+        assert!(text.iter().any(|text| text == "VO"), "{text:?}");
+        assert!(text.iter().any(|text| text == "V1"), "{text:?}");
+        assert!(!text.iter().any(|text| text == "A2"), "{text:?}");
+    }
 
     /// AU1 §7 item 24: the header paints its mix toggles, and a frame of
     /// painting writes nothing.

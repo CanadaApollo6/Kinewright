@@ -24,6 +24,17 @@ use crate::{
     timeline_ui::format_timecode,
 };
 
+pub(crate) fn dropped_paths(ctx: &egui::Context) -> Vec<std::path::PathBuf> {
+    ctx.input(|input| {
+        input
+            .raw
+            .dropped_files
+            .iter()
+            .filter_map(|file| file.path.clone())
+            .collect()
+    })
+}
+
 impl KinewrightApp {
     pub(crate) fn choose_media(&mut self) {
         let Some(path) = rfd::FileDialog::new()
@@ -67,15 +78,13 @@ impl KinewrightApp {
     /// Files dropped anywhere on the window import into the focused project -
     /// the media column is optional, not a prerequisite for getting footage in.
     pub(crate) fn import_dropped_files(&mut self, ctx: &egui::Context) {
-        let dropped: Vec<std::path::PathBuf> = ctx.input(|input| {
-            input
-                .raw
-                .dropped_files
-                .iter()
-                .filter_map(|file| file.path.clone())
-                .collect()
-        });
-        for path in dropped {
+        for path in dropped_paths(ctx) {
+            if let crate::interchange_ui::OpenPath::Timeline { otio } =
+                crate::interchange_ui::classify_open_path(&path)
+            {
+                self.open_interchange(path, otio, ctx);
+                continue;
+            }
             if crate::media_workflow::is_cube_lut_path(&path) {
                 let clip = self.selected_media_clip();
                 self.start_lut_import(
