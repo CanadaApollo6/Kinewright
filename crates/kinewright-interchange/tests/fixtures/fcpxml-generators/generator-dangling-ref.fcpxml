@@ -1,0 +1,10 @@
+<fcpxml version="1.13">
+  <resources>
+    <format id="f" frameDuration="1/24s" width="1920" height="1080"/>
+  </resources>
+  <library><event><project name="Missing resource">
+    <sequence format="f"><spine>
+      <video ref="background" duration="1s"/>
+    </spine></sequence>
+  </project></event></library>
+</fcpxml>

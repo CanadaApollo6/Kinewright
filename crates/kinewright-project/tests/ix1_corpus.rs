@@ -76,6 +76,7 @@ fn imported_timeline_corpus_prints_item_and_media_counts() {
             }
         }
     }
+    println!("counts\t{counts:?}");
     assert!(
         counts[0] > 0 && counts[1] > 0 && counts.iter().sum::<u32>() >= 20,
         "{counts:?}"

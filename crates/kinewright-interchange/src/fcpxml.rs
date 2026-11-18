@@ -358,7 +358,17 @@ impl<'a, 'input> Parser<'a, 'input> {
         let mut notes = Vec::new();
         let mut frame_origin = start;
         let mut speed = Time::ONE;
+        let generator = self.video_generator(node);
         let mut parts = match name {
+            "video" if generator.is_some() => {
+                notes.push(
+                    Loss::dropped(LossCode::GeneratorDropped).named(generator.unwrap_or("video")),
+                );
+                vec![(
+                    TrackKind::Video,
+                    Placed::new(offset, Item::Gap { duration: span }, source),
+                )]
+            }
             "asset-clip" | "clip" | "video" | "audio" if node.attribute("ref").is_some() => {
                 let media_ref = node.attribute("ref").unwrap_or_default();
                 let id = self.asset(media_ref, node)?;
@@ -440,6 +450,20 @@ impl<'a, 'input> Parser<'a, 'input> {
             }
         }
         Ok(parts)
+    }
+
+    fn video_generator(&self, node: Xml<'a, 'input>) -> Option<&'a str> {
+        if !node.has_tag_name("video") {
+            return None;
+        }
+        let id = node.attribute("ref")?;
+        let resource = self.resources.get(id)?;
+        resource.has_tag_name("effect").then(|| {
+            resource
+                .attribute("name")
+                .or_else(|| node.attribute("name"))
+                .unwrap_or(id)
+        })
     }
 
     fn transition(

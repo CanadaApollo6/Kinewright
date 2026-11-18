@@ -245,3 +245,82 @@ fn fcpxml_retimed_parent_maps_anchor_start_end_and_speed() {
     );
     assert_eq!(connected.speed_percent, 200);
 }
+
+#[test]
+fn fx_video_generator_keeps_an_anchored_title() {
+    use kinewright_core::{ClipContent, TimeCode};
+    use kinewright_interchange::{MediaTable, lower};
+    let timeline = fcpxml::parse(
+        include_bytes!("fixtures/fcpxml-generators/generator-with-title.fcpxml"),
+        "anchor.fcpxml",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    let placed = &timeline.root.tracks[0].items[0];
+    assert_eq!(placed.at, Time::ONE);
+    assert_eq!(placed.item.span(), Time::ONE);
+    assert_eq!(placed.anchors[0].lane, 1);
+    let (document, record) = lower(&timeline, &MediaTable::default()).unwrap();
+    let title = document
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .next()
+        .unwrap();
+    assert!(matches!(&title.content, ClipContent::Title(title) if title.text == "Caption"));
+    assert_eq!(title.timeline_start, TimeCode(36));
+    assert_eq!(document.clip_duration(title).unwrap(), TimeCode(12));
+    let loss = record
+        .rows
+        .iter()
+        .find(|row| row.code == LossCode::GeneratorDropped)
+        .unwrap();
+    assert_eq!(loss.count, 1);
+    assert_eq!(loss.names, ["Solid Color"]);
+    assert_eq!(record.dropped, 1);
+    document.validate().unwrap();
+}
+
+#[test]
+fn fx_video_generator_reserves_its_span_between_media_clips() {
+    use kinewright_core::TimeCode;
+    use kinewright_interchange::{MediaTable, lower};
+    let timeline = fcpxml::parse(
+        include_bytes!("fixtures/fcpxml-generators/generator-between-clips.fcpxml"),
+        "gap.fcpxml",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    let track = &timeline.root.tracks[0];
+    assert_eq!(track.items.len(), 3);
+    assert_eq!(track.items[1].at, Time::ONE);
+    assert_eq!(track.items[1].item.span(), Time::ONE);
+    let (document, record) = lower(&timeline, &MediaTable::default()).unwrap();
+    let [first, second] = document.tracks[0].clips.as_slice() else {
+        panic!("expected the two media clips");
+    };
+    assert_eq!(first.timeline_start, TimeCode::ZERO);
+    assert_eq!(document.clip_duration(first).unwrap(), TimeCode(24));
+    assert_eq!(second.timeline_start, TimeCode(48));
+    let loss = record
+        .rows
+        .iter()
+        .find(|row| row.code == LossCode::GeneratorDropped)
+        .unwrap();
+    assert_eq!(loss.names, ["Solid Color"]);
+    assert_eq!(record.dropped, 1);
+    document.validate().unwrap();
+}
+
+#[test]
+fn fx_video_missing_or_wrong_resource_is_still_malformed() {
+    let missing = include_str!("fixtures/fcpxml-generators/generator-dangling-ref.fcpxml");
+    let wrong_kind = missing.replace("ref=\"background\"", "ref=\"f\"");
+    for source in [missing, &wrong_kind] {
+        let refusal = fcpxml::parse(source.as_bytes(), "bad-ref.fcpxml", ParseOptions::default())
+            .unwrap_err();
+        assert_eq!(refusal.code, RefusalCode::Malformed);
+        assert_eq!(refusal.message, "A clip references an unknown asset.");
+        assert!(refusal.at.is_some());
+    }
+}

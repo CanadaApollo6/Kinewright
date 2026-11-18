@@ -163,6 +163,10 @@ N = faithful, A = approximated (bound stated), Ø = dropped.
 | Generators, image sequences, effects, colour | `GeneratorReference`, `ImageSequenceReference`, `Effect.1` | generator `video`, `filter-video`, `adjust-*` except volume, `colorSpace` | none in IX1 | Ø: named, counted; generators leave a gap |
 | Clip names, metadata, item colour | `name`, `metadata`, `color` | `@name`, `metadata`, `note` | assets keep names | Ø, counted outside the item identity (§7.2) |
 
+A Final Cut `video` whose resource is an `effect` keeps its span and lane as a gap. The report
+names the dropped generator and anchored children retain their timing. A dangling reference or
+a reference to a different resource type still yields `malformed` (ruling 32).
+
 ## 4. Time and rates
 
 **4.1 Exact until the grid.** FCPXML times (`"1001/24000s"`, `"3600s"`) parse to exact rationals,
@@ -888,7 +892,7 @@ indexed first if it takes over 200 ms.
 **Laptop release reading (2026-11-17).** Run the `kinewright-project` example `ix1_limits` in
 release with a format and clip count. Each invocation generates the timeline outside the measured
 interval. Media is offline for the measurement. The input digest is included. The initial
-one-minute load was 2.70 for all runs. No desktop measurement has been taken here.
+one-minute load was 2.70 for all runs.
 
 | Case | Input bytes | Time (ms) | Peak heap (bytes) | Heap pin (bytes) |
 |---|---:|---:|---:|---:|
@@ -901,6 +905,20 @@ one-minute load was 2.70 for all runs. No desktop measurement has been taken her
 | Validate 10,000 | 27,242,244 | 10.654 | 258,148 | 322,685 |
 
 All measured thresholds held. The validation case has 2,000 assets.
+
+**Desktop release reading (2026-11-17, `cdf81afd`).** Input bytes and peak heap matched the
+laptop in all seven cases. All budgets held. The one-minute load ranged from 11.0 to 12.0 during
+other builds and is recorded as measurement context.
+
+| Case | Time (ms) |
+|---|---:|
+| OTIO 1,000 | 45.739 |
+| OTIO 10,000 | 594.741 |
+| OTIO 50,000 | 2186.891 |
+| FCPXML 1,000 | 48.495 |
+| FCPXML 10,000 | 464.942 |
+| FCPXML 50,000 | 1548.044 |
+| Validate 10,000 | 22.383 |
 
 **Exit gates.**
 - Every §3 row and named case has a golden fixture.
@@ -965,6 +983,8 @@ Lead rulings (2026-11-17):
 30. **Probe interruption.** Observed probes use the reader interrupt callback for FFmpeg
     input and check cancellation between packet retries (§8.2).
 31. **Report paging.** Each call returns one persisted import record, within 6 KiB (§10).
+32. **Final Cut generators.** A referenced generator leaves a gap and keeps its anchors. A
+    dangling reference remains a typed refusal (§3).
 
 Open questions:
 1. **Marker colour switch.** Should `MARKER_COLOR_POLICY` ship as `LabelPrefix` or `Drop`? This is
