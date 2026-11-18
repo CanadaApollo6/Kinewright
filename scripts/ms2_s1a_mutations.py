@@ -10,15 +10,26 @@ in degraded mode. Each removal must fail that test with the intended result
 in both modes, and the restored controls must pass.
 Probe-bound removals run the silent-helper witness in both modes; each must
 end at that witness's named outer deadline.
+
+Interruption: SIGINT, SIGTERM and SIGHUP stop the running cargo/test process
+group, restore every audited file with those signals blocked, verify the files
+against git and exit non-zero. SIGKILL cannot be handled: after a killed run,
+check `git status`. The script refuses to start while an audited file differs
+from git, so such a leftover is caught at the next run.
+`scripts/ms2_s1a_mutations_selftest.py` witnesses the SIGTERM/SIGHUP path.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import contextlib
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
+import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "target/ms2-s1a/kill-mutations"
@@ -91,6 +102,82 @@ KILLED = "Err(Sandbox(Crashed))"
 ESCAPED = "Err(Sandbox(ProtocolViolation))"
 
 
+# Test hook for the interruption self-test: every cargo step becomes a long
+# shell step with a grandchild in the same process group.
+SELFTEST_STEP = "KW_MS2_MUTATIONS_SELFTEST_STEP"
+HANDLED = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+class Interrupted(BaseException):
+    """SIGTERM or SIGHUP, raised so every `finally` restore runs."""
+
+    def __init__(self, signum: int):
+        super().__init__(signal.Signals(signum).name)
+        self.signum = signum
+
+
+def interrupt(signum: int, _frame) -> None:
+    raise Interrupted(signum)
+
+
+@contextlib.contextmanager
+def uninterruptible():
+    """Hold SIGINT/SIGTERM/SIGHUP pending; a second signal waits until the end."""
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, HANDLED)
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+def dirty(paths) -> list[str]:
+    result = subprocess.run(["git", "diff", "--name-only", "--", *map(str, paths)],
+                            cwd=ROOT, capture_output=True, text=True, check=True)
+    return result.stdout.split()
+
+
+def restore(originals: dict[Path, bytes]) -> None:
+    with uninterruptible():
+        for path, data in originals.items():
+            path.write_bytes(data)
+
+
+def stop_group(process: subprocess.Popen, command: list[str]) -> None:
+    """Stop and reap the step's own process group (its leader is `process`)."""
+    group = process.pid
+    if process.poll() is None:
+        # Signal only the group this script created: the leader must still be
+        # the process it started, running the command it launched.
+        cmdline = (Path(f"/proc/{group}/cmdline").read_bytes().split(b"\0")[:-1])
+        if os.getpgid(group) != group or cmdline != [part.encode() for part in command]:
+            print(f"MS2_MUTATIONS_GROUP_UNVERIFIED pid={group}", flush=True)
+            process.wait()
+            return
+    # After the leader is reaped, Linux never reuses its PID while the group it
+    # leads still has members, so the group ID still names only this step.
+    for sig, wait in ((signal.SIGTERM, 10), (signal.SIGKILL, 10)):
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(group, sig)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=wait)
+        if process.poll() is not None and not group_alive(group):
+            break
+    process.wait()
+    end = time.monotonic() + 10
+    while group_alive(group) and time.monotonic() < end:
+        time.sleep(0.05)
+    print(f"MS2_MUTATIONS_GROUP_STOPPED pgid={group} gone={not group_alive(group)}",
+          flush=True)
+
+
+def group_alive(group: int) -> bool:
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -100,11 +187,23 @@ def cargo(label: str, args: list[str], extra: tuple[str, ...] = ()) -> tuple[int
     command = ["flock", "-o", "/tmp/kinewright-cargo-heavy.lock", "env", *extra,
                "CARGO_BUILD_JOBS=4", "RUST_TEST_THREADS=1", "nice", "-n", "10",
                "cargo", "+1.99.1", *args]
+    if os.environ.get(SELFTEST_STEP):
+        command = ["sh", "-c", "sleep 600 & wait"]
     with log.open("w") as output:
-        result = subprocess.run(command, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT,
-                                check=False)
-    print(f"{label}: exit={result.returncode}, log={log.relative_to(ROOT)}", flush=True)
-    return result.returncode, log
+        # Its own process group, so an interruption stops cargo, rustc and the
+        # test binaries together.
+        process = subprocess.Popen(command, cwd=ROOT, stdout=output,
+                                   stderr=subprocess.STDOUT, process_group=0)
+        print(f"MS2_MUTATIONS_STEP label={label} pid={process.pid} pgid={process.pid}",
+              flush=True)
+        try:
+            code = process.wait()
+        except BaseException:
+            with uninterruptible():
+                stop_group(process, command)
+            raise
+    print(f"{label}: exit={code}, log={log.relative_to(ROOT)}", flush=True)
+    return code, log
 
 
 def build(label: str) -> None:
@@ -232,14 +331,21 @@ def apply(edits: list[tuple[Path, str, str]], originals: dict[Path, bytes], name
 
 
 def main() -> None:
-    if not os.environ.get("FFMPEG_DIR"):
+    if not os.environ.get("FFMPEG_DIR") and not os.environ.get(SELFTEST_STEP):
         raise SystemExit("source scripts/setup-ffmpeg.sh first; do not add an outer flock")
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, interrupt)
+    left = dirty(AUDITED)
+    if left:
+        print(f"MS2_MUTATIONS_REFUSED dirty audited source: {' '.join(left)}", flush=True)
+        raise SystemExit(2)
     OUT.mkdir(parents=True, exist_ok=True)
     originals = {path: path.read_bytes() for path in AUDITED}
     rows: list[dict] = []
     escapes: list[dict] = []
     controls = None
     escape_controls = None
+    interrupted = False
     try:
         for name, path, before, after, test, kind in CASES:
             source = originals[path].decode()
@@ -260,7 +366,7 @@ def main() -> None:
                 if not rejected:
                     raise RuntimeError(f"{name}: mutation did not fail at its intended assertion")
             finally:
-                path.write_bytes(originals[path])
+                restore(originals)
         source = originals[ACTOR].decode()
         for name, before, after in BOUNDS:
             if source.count(before) != 1:
@@ -276,7 +382,7 @@ def main() -> None:
                     if not rejected:
                         raise RuntimeError(f"{name} {mode}: did not fail at its outer deadline")
             finally:
-                ACTOR.write_bytes(originals[ACTOR])
+                restore(originals)
         for name, edits, kind in ESCAPES:
             try:
                 apply(edits, originals, name)
@@ -297,37 +403,45 @@ def main() -> None:
                     raise RuntimeError(f"{name}: escape removal did not fail as intended: "
                                        f"{problems}")
             finally:
-                for path, data in originals.items():
-                    path.write_bytes(data)
+                restore(originals)
+    except (Interrupted, KeyboardInterrupt):
+        interrupted = True
+        raise
     finally:
-        for path, data in originals.items():
-            path.write_bytes(data)
-        # Never leave a mutant executable as the checkout's helper, including
-        # after an unexpected red result or interruption.
-        build("restored-build")
-        code, log = cargo("restored-controls", ["test", "-p", "kinewright-media-client",
-            "--features", "slow-tests", "--test", "witness_native", "--", "--show-output"])
-        controls = {"exit": code, "log": str(log.relative_to(ROOT)),
-                    "log_sha256": digest(log)}
-        bound_controls = []
-        for mode in MODES:
-            code, log = silent_test(f"restored-bound-{mode}", mode)
-            text = log.read_text()
-            bound_controls.append({
-                "mode": mode, "exit": code, "log": str(log.relative_to(ROOT)),
-                "log_sha256": digest(log),
-                "mode_matches": ("MS2_RESOURCE_MODE degraded" in text) == (mode == "degraded")})
-        code, log = escape_test("restored-escape-controls")
-        results = escape_results(log.read_text())
-        escape_controls = {"exit": code, "log": str(log.relative_to(ROOT)),
-                           "log_sha256": digest(log),
-                           "modes": sorted({actual for actual, _ in results.values()}),
-                           "results": len(results)}
-        report = {"mutations": rows, "restored_controls": controls,
-                  "restored_bound_controls": bound_controls,
-                  "escape_mutations": escapes, "restored_escape_controls": escape_controls,
-                  "source_restored": all(path.read_bytes() == data for path, data in originals.items())}
-        (OUT / "results.json").write_text(json.dumps(report, indent=2) + "\n")
+        restore(originals)
+        left = dirty(AUDITED)
+        if left:
+            print(f"MS2_MUTATIONS_RESTORE_FAILED differs from git: {' '.join(left)}",
+                  flush=True)
+            raise SystemExit(3)
+        print(f"MS2_MUTATIONS_RESTORED files={len(AUDITED)}", flush=True)
+        if not interrupted:
+            # Never leave a mutant executable as the checkout's helper, including
+            # after an unexpected red result (an interruption skips the controls).
+            build("restored-build")
+            code, log = cargo("restored-controls", ["test", "-p", "kinewright-media-client",
+                "--features", "slow-tests", "--test", "witness_native", "--", "--show-output"])
+            controls = {"exit": code, "log": str(log.relative_to(ROOT)),
+                        "log_sha256": digest(log)}
+            bound_controls = []
+            for mode in MODES:
+                code, log = silent_test(f"restored-bound-{mode}", mode)
+                text = log.read_text()
+                bound_controls.append({
+                    "mode": mode, "exit": code, "log": str(log.relative_to(ROOT)),
+                    "log_sha256": digest(log),
+                    "mode_matches": ("MS2_RESOURCE_MODE degraded" in text) == (mode == "degraded")})
+            code, log = escape_test("restored-escape-controls")
+            results = escape_results(log.read_text())
+            escape_controls = {"exit": code, "log": str(log.relative_to(ROOT)),
+                               "log_sha256": digest(log),
+                               "modes": sorted({actual for actual, _ in results.values()}),
+                               "results": len(results)}
+            report = {"mutations": rows, "restored_controls": controls,
+                      "restored_bound_controls": bound_controls,
+                      "escape_mutations": escapes, "restored_escape_controls": escape_controls,
+                      "source_restored": all(path.read_bytes() == data for path, data in originals.items())}
+            (OUT / "results.json").write_text(json.dumps(report, indent=2) + "\n")
     if controls["exit"] != 0:
         raise SystemExit("restored native controls failed")
     if any(row["exit"] != 0 or not row["mode_matches"] for row in bound_controls):
@@ -338,4 +452,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Interrupted as stop:
+        # The source is restored and verified by now; the controls did not run,
+        # so the next cargo build rebuilds the helper from the restored files.
+        print(f"MS2_MUTATIONS_INTERRUPTED signal={stop} source_restored=yes", flush=True)
+        sys.exit(128 + stop.signum)
