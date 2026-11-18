@@ -476,6 +476,76 @@ fn hx_h4_full_distinct_window_displays_accepted_solid_color() {
     assert_eq!(*f.app.focused().document, expected);
 }
 
+#[test]
+fn hx_h4_pre_rename_error_retries_original_manual_packets() {
+    ambiguous_root_retries_original_manual_packets("root_rename_io");
+}
+
+#[test]
+fn hx_h4_parent_sync_error_retries_original_manual_packets() {
+    ambiguous_root_retries_original_manual_packets("root_parent_sync");
+}
+
+fn ambiguous_root_retries_original_manual_packets(point: &'static str) {
+    let mut f = Fixture::new();
+    let path = f.temp.path("p.kinewright");
+    let before = root_generation(&path);
+    for value in [1, 119] {
+        f.app
+            .send_operations_coalesced(vec![param(value)], f.key.clone());
+        f.attempt();
+    }
+    assert_eq!(f.gate().permit.pending_count().unwrap(), 1);
+    f.attachment()
+        .fixture_host
+        .as_ref()
+        .unwrap()
+        .fail_manual_root_for_test(point, 1);
+    f.release();
+    f.until(|f| f.attachment().read_only() || f.gate().permit.pending_count().unwrap() == 0);
+    assert!(
+        !f.attachment().read_only(),
+        "{point}: {}",
+        f.attachment().message
+    );
+    f.finish();
+    assert_eq!(f.gate().permit.pending_count().unwrap(), 0);
+    assert_eq!(root_generation(&path), before + 1);
+    let mut loaded = LoadedBundle::read(
+        &path,
+        &kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        loaded.open_manual().unwrap().snapshot_identity().unwrap(),
+        f.attachment().owner.core().snapshot_identity().unwrap()
+    );
+    assert_eq!(f.scalar(), 119);
+    println!("HX_H4_ROOT_RETRY {point} saved=119 publications=1 pending=0");
+}
+
+#[test]
+fn hx_h4_ambiguous_root_retry_exhaustion_keeps_edits_read_only() {
+    let mut f = Fixture::new();
+    let path = f.temp.path("p.kinewright");
+    let before = root_generation(&path);
+    f.send_value(119);
+    f.attachment()
+        .fixture_host
+        .as_ref()
+        .unwrap()
+        .fail_manual_root_for_test("root_rename_io", 2);
+    f.release();
+    f.until(|f| f.attachment().read_only());
+    assert_eq!(f.attachment().message, "durability_unknown");
+    assert_eq!(f.value(), 119);
+    assert_eq!(f.gate().permit.pending_count().unwrap(), 1);
+    assert!(f.attachment().is_dirty());
+    assert_eq!(root_generation(&path), before);
+}
+
 fn strict_drag(control: &str, operation: impl Fn(i64) -> Operation) -> usize {
     let mut f = Fixture::with_document(undo_fixture::heavy());
     f.release();

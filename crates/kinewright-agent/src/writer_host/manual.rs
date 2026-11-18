@@ -276,11 +276,27 @@ impl HostCommandOwner {
                 HostRefusal::new("manual_lease", "this client has no manual editor lease")
             })?;
         let authority = self.manual.take().expect("verified manual client");
-        let outcome = self.owner_mut().and_then(|owner| {
-            owner
-                .commit_manual_history_group(&authority, messages)
-                .map_err(HostError::from)
+        #[cfg(all(target_os = "linux", feature = "test-util"))]
+        let fault = self.manual_root_fault.take().map(|(point, attempts)| {
+            if attempts > 1 {
+                self.manual_root_fault = Some((point, attempts - 1));
+            }
+            point
         });
+        let mut commit = || {
+            self.owner_mut().and_then(|owner| {
+                owner
+                    .commit_manual_history_group(&authority, messages)
+                    .map_err(HostError::from)
+            })
+        };
+        #[cfg(all(target_os = "linux", feature = "test-util"))]
+        let outcome = match fault {
+            Some(point) => kinewright_project::io_observer::fail_once(point, commit),
+            None => commit(),
+        };
+        #[cfg(not(all(target_os = "linux", feature = "test-util")))]
+        let outcome = commit();
         self.manual = Some(authority);
         let outcome = outcome?;
         if let Some(report) = outcome.report {

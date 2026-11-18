@@ -1439,23 +1439,40 @@ fn request_manual_history(
     identity: String,
     messages: Vec<EncodedMessage>,
 ) -> Result<HostReply, HostError> {
-    let sent = messages.len();
-    let reply = client.request(HostCommand::CommitHistory {
+    let packet_count = messages.len();
+    let send = |command| {
+        let reply = client.request(command)?;
+        let acknowledged = reply.manual_ack.len();
+        let valid = match (reply.error.is_some(), reply.manual_unattempted) {
+            (false, None) => acknowledged == packet_count,
+            (true, Some(unattempted)) => {
+                packet_count.checked_sub(acknowledged + 1) == Some(unattempted)
+            }
+            (true, None) => acknowledged == 0,
+            (false, Some(_)) => false,
+        };
+        if !valid {
+            return Err(HostError::Protocol("invalid manual history reply".into()));
+        }
+        Ok(reply)
+    };
+    let command = HostCommand::CommitHistory {
         client: identity,
         messages,
-    })?;
-    let acknowledged = reply.manual_ack.len();
-    let valid = match (reply.error.is_some(), reply.manual_unattempted) {
-        (false, None) => acknowledged == sent,
-        (true, Some(unattempted)) => sent.checked_sub(acknowledged + 1) == Some(unattempted),
-        (true, None) => acknowledged == 0,
-        (false, Some(_)) => false,
     };
-    if !valid {
-        return Err(HostError::Protocol("invalid manual history reply".into()));
+    let reply = send(command.clone())?;
+    if reply.status.retention_proven
+        && reply.manual_unattempted.is_none()
+        && reply
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == "durability_unknown")
+    {
+        // Only this publication door can settle the live writer's candidate.
+        // Resend the same immutable packets once before exposing recovery.
+        return send(command);
     }
-    // Only the receipt prefix is removed by acknowledge_manual. The refused
-    // command and its original suffix stay in the outbox for Retry/recovery.
+    // A refused command and its original suffix stay in the outbox for recovery.
     Ok(reply)
 }
 

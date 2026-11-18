@@ -599,6 +599,18 @@ impl WriterHost {
         let capability = HostIssuer::new(host.endpoint.clone(), issuer, host.roots.clone())?;
         Ok((host, capability))
     }
+    /// Inject one root operation failure per upcoming manual commit.
+    ///
+    /// # Panics
+    /// If the fixture has stopped, a fault is already armed, or attempts is zero.
+    #[cfg(all(target_os = "linux", feature = "test-util"))]
+    pub fn fail_manual_root_for_test(&self, point: &'static str, attempts: usize) {
+        assert!(attempts > 0);
+        let owner = self.owner.upgrade().expect("live fixture owner");
+        let mut owner = owner.lock().expect("fixture owner");
+        assert!(owner.manual_root_fault.is_none());
+        owner.manual_root_fault = Some((point, attempts));
+    }
     /// Trusted local issuance. This method is never exposed as an HTTP or MCP command.
     pub fn attach(
         &self,
@@ -1450,6 +1462,8 @@ pub struct HostCommandOwner {
     sessions: BTreeMap<u64, HostOwnedSession>,
     next_session: u64,
     manual: Option<kinewright_project::editing_session::ManualAuthority>,
+    #[cfg(all(target_os = "linux", feature = "test-util"))]
+    manual_root_fault: Option<(&'static str, usize)>,
     next_manual_generation: u64,
     recovering: bool,
     recovery: Option<RecoveryBarrier>,
@@ -1645,6 +1659,8 @@ impl HostCommandOwner {
             sessions: BTreeMap::new(),
             next_session: 1,
             manual: None,
+            #[cfg(all(target_os = "linux", feature = "test-util"))]
+            manual_root_fault: None,
             next_manual_generation: 1,
             recovering: false,
             recovery: None,
