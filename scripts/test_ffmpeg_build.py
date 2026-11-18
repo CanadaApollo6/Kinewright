@@ -335,25 +335,35 @@ class BuildIdentity(unittest.TestCase):
                     builder.build('libraries', no_binary_cache=True)
                 download.assert_called_once()
 
-    def test_ci_consumer_reuses_only_the_exact_producer_key(self):
+    def test_ci_consumer_reuses_only_an_exactly_restored_producer_cache(self):
         import os
         with tempfile.TemporaryDirectory(dir=builder.ROOT/'target') as directory:
             root = Path(directory)
             prefix = root/'third_party/ffmpeg'
             prefix.mkdir(parents=True)
-            (prefix/'.build-key').write_text('producer-key')
+            (prefix/'.build-key').write_text('key-written-by-the-producer-build')
             with patch.object(builder, 'ROOT', root), \
                  patch.object(builder, 'fingerprint', return_value=('newer-image-key', {})), \
                  patch.object(builder.urllib.request, 'urlopen', side_effect=RuntimeError('fresh verified-source download')) as download:
-                with patch.dict(os.environ, {'KINEWRIGHT_FFMPEG_PRODUCER_KEY': 'producer-key'}):
+                with patch.dict(os.environ, {'KINEWRIGHT_FFMPEG_RESTORED_PRODUCER_CACHE': 'true'}):
                     builder.build('libraries')
                     download.assert_not_called()
                     with self.assertRaisesRegex(RuntimeError, 'fresh verified-source download'):
                         builder.build('libraries', no_binary_cache=True)
-                for other in ['another-producer-key', '']:
-                    with patch.dict(os.environ, {'KINEWRIGHT_FFMPEG_PRODUCER_KEY': other}):
+                    (prefix/'.build-key').write_text('')
+                    with self.assertRaisesRegex(RuntimeError, 'fresh verified-source download'):
+                        builder.build('libraries')
+                    (prefix/'.build-key').write_text('key-written-by-the-producer-build')
+                for other in ['false', '', 'True', '1']:
+                    with patch.dict(os.environ, {'KINEWRIGHT_FFMPEG_RESTORED_PRODUCER_CACHE': other}):
                         with self.assertRaisesRegex(RuntimeError, 'fresh verified-source download'):
                             builder.build('libraries')
+
+    def test_ci_consumers_take_the_restore_flag_from_the_exact_cache_hit(self):
+        action = (builder.ROOT/'.github/actions/ffmpeg/action.yml').read_text()
+        flag = "KINEWRIGHT_FFMPEG_RESTORED_PRODUCER_CACHE: ${{ inputs.producer != 'true' && steps.cache.outputs.cache-hit == 'true' }}"
+        self.assertEqual(action.count(flag), 2)
+        self.assertNotIn('restore-keys', action)
 
     def test_fingerprint_changes_with_tool_dependency_flag_or_setup_changes(self):
         from types import SimpleNamespace
