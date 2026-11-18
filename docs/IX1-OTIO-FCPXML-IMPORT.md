@@ -577,7 +577,8 @@ hash. A remote locator's asset is offline with `remote_url`.
 
 *Allowing a share (ruling 28).* The import dialog shows supported Windows file shares after the
 first preparation. A person may tick Allow for a share root of the form `\\host\share` and run
-preparation again. Its files use the ordinary stat and probe deadlines. Linux presents remote
+preparation again. Its files use the ordinary stat and probe deadlines. Hosts over 253 bytes
+and shares over 80 characters stay offline without an Allow control. Linux presents remote
 rows without an Allow control. Agent inspection never accepts share approval. It refuses remote
 input paths or roots with `remote_path` and reports remote media without touching it.
 
@@ -700,6 +701,11 @@ as it already routes `.cube` (`media_bin.rs:79`).
 - the media table: online, missing, timed-out, and remote shares with an **Allow** tick;
 - **Locate folder…**, which fills `media_roots`;
 - hashing progress, **Open** and **Cancel**.
+
+The dialog and saved report render file text on a single line, with controls and bidirectional
+marks visibly escaped. They keep both ends of text longer than 160 characters in rows or 1,024 in
+tooltips and details. For a share too long for its row, **Review share…** shows the full share root
+with its **Allow** control.
 
 *After opening.* Open adds a tab named after the timeline, with the status "Imported reel2: 1702
 exact, 121 approximated, 17 dropped". Project > Import report shows the stored records. Track
@@ -1021,6 +1027,8 @@ Lead rulings (2026-11-17):
     same locator, including all written clip ranges (§8.3).
 35. **Written zero durations.** Report `clip_too_short` before layout. Cuts keep ruling 6 for
     positive spans (§4.2).
+36. **Bounded display text.** Escape and shorten file text for display and keep the stored values.
+    Only shares within the host and share name limits can be offered for approval (§8.1, §9).
 
 Open questions:
 1. **Marker colour switch.** Should `MARKER_COLOR_POLICY` ship as `LabelPrefix` or `Drop`? This is

@@ -1876,7 +1876,9 @@ impl KinewrightApp {
     }
 
     fn show_interchange(&mut self, ctx: &egui::Context) {
-        use crate::interchange_ui::{ImportAction, import_status, show_report};
+        use crate::interchange_ui::{
+            ImportAction, ROW_CHARS, display_text, import_status, show_report,
+        };
         use kinewright_project::interchange::{CommitImportError, commit};
         if let Some(dialog) = &mut self.interchange_dialog {
             match dialog.show(ctx) {
@@ -1906,7 +1908,7 @@ impl KinewrightApp {
                         Err(CommitImportError::Session(error)) => self.note_label(
                             LabelIncident::Project,
                             IncidentSubject::Project,
-                            format!("Could not open timeline: {error}"),
+                            display_text(&["Could not open timeline: ", &error], ROW_CHARS),
                         ),
                     }
                 }

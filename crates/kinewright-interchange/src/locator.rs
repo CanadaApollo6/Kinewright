@@ -214,18 +214,16 @@ pub fn share_path(locator: &str, platform: Platform) -> Option<SharePath> {
     if platform != Platform::Windows {
         return None;
     }
-    let (host, tail) = if let Some((scheme, rest)) = locator.split_once(':')
-        && scheme.eq_ignore_ascii_case("file")
-    {
-        let rest = rest.strip_prefix("//")?;
+    let is_url = locator
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file:"));
+    let (host, tail) = if is_url {
+        let rest = locator[5..].strip_prefix("//")?;
         let (host, tail) = rest.split_once('/')?;
-        if host.eq_ignore_ascii_case("localhost") || tail.contains(['?', '#', '\\']) {
+        if host.eq_ignore_ascii_case("localhost") {
             return None;
         }
-        let LocatorDecode::Path(tail) = decode_path(tail) else {
-            return None;
-        };
-        (host, std::borrow::Cow::Owned(tail))
+        (host, tail)
     } else {
         let rest = if let Some(head) = locator.get(..8)
             && head.eq_ignore_ascii_case(r"\\?\UNC\")
@@ -236,10 +234,10 @@ pub fn share_path(locator: &str, platform: Platform) -> Option<SharePath> {
                 .strip_prefix(r"\\")
                 .or_else(|| locator.strip_prefix("//"))?
         };
-        let (host, tail) = rest.split_once(['/', '\\'])?;
-        (host, std::borrow::Cow::Borrowed(tail))
+        rest.split_once(['/', '\\'])?
     };
     if host.is_empty()
+        || host.len() > 253
         || host.starts_with('.')
         || host.ends_with('.')
         || !host
@@ -248,11 +246,41 @@ pub fn share_path(locator: &str, platform: Platform) -> Option<SharePath> {
     {
         return None;
     }
-    let (share, file) = tail.split_once(['/', '\\'])?;
+    let (share, file) = if is_url {
+        tail.split_once('/')?
+    } else {
+        tail.split_once(['/', '\\'])?
+    };
+    let share = if is_url {
+        // A Unicode scalar takes at most four UTF-8 bytes, each possibly escaped.
+        if share.len() > 80 * 4 * 3 || share.contains(['?', '#', '\\']) {
+            return None;
+        }
+        let LocatorDecode::Path(share) = decode_path(share) else {
+            return None;
+        };
+        std::borrow::Cow::Owned(share)
+    } else {
+        std::borrow::Cow::Borrowed(share)
+    };
+    if share.chars().nth(80).is_some() {
+        return None;
+    }
+    let file = if is_url {
+        if file.contains(['?', '#', '\\']) {
+            return None;
+        }
+        let LocatorDecode::Path(file) = decode_path(file) else {
+            return None;
+        };
+        std::borrow::Cow::Owned(file)
+    } else {
+        std::borrow::Cow::Borrowed(file)
+    };
     if ["IPC$", "PIPE", "MAILSLOT"]
         .iter()
         .any(|name| share.eq_ignore_ascii_case(name))
-        || !valid_share_component(share)
+        || !valid_share_component(&share)
         || !file.split(['/', '\\']).all(valid_share_component)
     {
         return None;
@@ -318,6 +346,24 @@ pub fn with_local<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_share_authorization_has_host_and_share_length_bounds() {
+        for (host, share, allowed) in [
+            ("h".repeat(253), "é".repeat(80), true),
+            ("h".repeat(254), "share".into(), false),
+            ("host".into(), "é".repeat(81), false),
+        ] {
+            let native = format!(r"\\{host}\{share}\take.mov");
+            let url_share = share.replace('é', "%C3%A9");
+            let url = format!("file://{host}/{url_share}/take.mov");
+            for locator in [native, url] {
+                assert_eq!(classify(&locator, Platform::Windows), Locator::Remote);
+                assert_eq!(share_path(&locator, Platform::Windows).is_some(), allowed);
+            }
+        }
+    }
+
     use std::cell::RefCell;
 
     #[derive(Default)]

@@ -17,6 +17,64 @@ use crate::theme::{self, color, space, type_size};
 
 pub(crate) const OPEN_FILTER: (&str, &[&str]) = ("Timeline (OTIO, FCPXML)", &["otio", "fcpxml"]);
 
+pub(crate) const ROW_CHARS: usize = 160;
+const DETAIL_CHARS: usize = 1024;
+
+fn display_escape(value: char) -> Option<std::char::EscapeUnicode> {
+    (value.is_control()
+        || matches!(
+            value,
+            '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{206f}'
+        ))
+    .then(|| value.escape_unicode())
+}
+
+pub(crate) fn display_text(parts: &[&str], limit: usize) -> String {
+    fn append(output: &mut String, input: impl Iterator<Item = char>, limit: usize) -> bool {
+        let mut remaining = limit;
+        for value in input {
+            let escape = display_escape(value);
+            let width = escape.as_ref().map_or(1, ExactSizeIterator::len);
+            if width > remaining {
+                return false;
+            }
+            remaining -= width;
+            if let Some(escape) = escape {
+                output.extend(escape);
+            } else {
+                output.push(value);
+            }
+        }
+        true
+    }
+
+    let chars = || parts.iter().flat_map(|part| part.chars());
+    let mut output = String::new();
+    if append(&mut output, chars(), limit) {
+        return output;
+    }
+    let head = (limit - 1) / 2;
+    let tail = limit - 1 - head;
+    output.clear();
+    append(&mut output, chars(), head);
+    output.push('…');
+
+    let mut remaining = tail;
+    let suffix: Vec<_> = chars()
+        .rev()
+        .take_while(|&value| {
+            let width = display_escape(value).map_or(1, |escape| escape.len());
+            if width > remaining {
+                return false;
+            }
+            remaining -= width;
+            true
+        })
+        .collect();
+    append(&mut output, suffix.into_iter().rev(), tail);
+    output
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum OpenPath {
     Project,
@@ -229,8 +287,11 @@ impl ImportDialog {
         let response = egui::Modal::new(egui::Id::new("import-timeline")).show(ctx, |ui| {
             let height = dialog_width_and_height(ui);
             ui.heading("Import timeline");
-            ui.add(egui::Label::new(self.source.to_string_lossy()).truncate())
-                .on_hover_text(self.source.to_string_lossy());
+            let source = self.source.to_string_lossy();
+            ui.add(egui::Label::new(display_text(&[&source], ROW_CHARS)).truncate())
+                .on_hover_ui(|ui| {
+                    ui.label(display_text(&[&source], DETAIL_CHARS));
+                });
             ui.separator();
             egui::ScrollArea::vertical()
                 .max_height(height)
@@ -305,7 +366,10 @@ impl ImportDialog {
         if !self.options.media_roots.is_empty() {
             ui.collapsing("Folders searched", |ui| {
                 for root in &self.options.media_roots {
-                    ui.label(root);
+                    ui.label(display_text(&[root], ROW_CHARS))
+                        .on_hover_ui(|ui| {
+                            ui.label(display_text(&[root], DETAIL_CHARS));
+                        });
                 }
             });
         }
@@ -340,10 +404,18 @@ impl ImportDialog {
                 |ui, range| {
                     for share in &self.share_choices[range] {
                         let mut allowed = self.allowed.contains(share);
-                        if ui
-                            .checkbox(&mut allowed, format!("Allow {}", share.as_str()))
-                            .changed()
-                        {
+                        let label = display_text(&["Allow ", share.as_str()], DETAIL_CHARS);
+                        let toggled = if label.chars().count() <= ROW_CHARS {
+                            ui.checkbox(&mut allowed, label).changed()
+                        } else {
+                            ui.menu_button("Review share…", |ui| {
+                                ui.label(display_text(&[share.as_str()], DETAIL_CHARS));
+                                ui.checkbox(&mut allowed, "Allow").changed()
+                            })
+                            .inner
+                            .unwrap_or(false)
+                        };
+                        if toggled {
                             if allowed {
                                 self.allowed.insert(share.clone());
                             } else {
@@ -361,20 +433,31 @@ impl ImportDialog {
         let mut restart = false;
         if self.timeline_choices.is_empty() {
             if let Preparation::Ready(prepared) = &self.state {
-                ui.label(format!("Timeline · {}", prepared.name()));
+                ui.label(display_text(&["Timeline · ", prepared.name()], ROW_CHARS))
+                    .on_hover_ui(|ui| {
+                        ui.label(display_text(&[prepared.name()], DETAIL_CHARS));
+                    });
             }
         } else {
             egui::ComboBox::from_id_salt("interchange-timeline")
-                .selected_text(
-                    self.options
+                .selected_text(display_text(
+                    &[self
+                        .options
                         .timeline
                         .as_deref()
-                        .unwrap_or("Choose a timeline"),
-                )
+                        .unwrap_or("Choose a timeline")],
+                    ROW_CHARS,
+                ))
                 .show_ui(ui, |ui| {
                     for name in &self.timeline_choices {
                         if ui
-                            .selectable_label(self.options.timeline.as_ref() == Some(name), name)
+                            .selectable_label(
+                                self.options.timeline.as_ref() == Some(name),
+                                display_text(&[name], ROW_CHARS),
+                            )
+                            .on_hover_ui(|ui| {
+                                ui.label(display_text(&[name], DETAIL_CHARS));
+                            })
                             .clicked()
                         {
                             self.options.timeline = Some(name.clone());
@@ -435,15 +518,24 @@ fn technical_name(value: impl serde::Serialize) -> String {
 }
 
 fn show_refusal(ui: &mut egui::Ui, refusal: &Refusal) {
-    ui.colored_label(color::STATUS_WARNING, refusal.to_string());
+    let parts = if let Some(at) = &refusal.at {
+        [at.as_str(), ": ", &refusal.message]
+    } else {
+        ["", "", &refusal.message]
+    };
+    ui.colored_label(color::STATUS_WARNING, display_text(&parts, ROW_CHARS))
+        .on_hover_ui(|ui| {
+            ui.label(display_text(&parts, DETAIL_CHARS));
+        });
     ui.small(technical_name(refusal.code));
 }
 
 pub(crate) fn import_status(timeline: &str, record: &ImportRecord) -> String {
-    format!(
-        "Imported {timeline}: {} exact, {} approximated, {} dropped",
+    let counts = format!(
+        ": {} exact, {} approximated, {} dropped",
         record.exact, record.approximated, record.dropped,
-    )
+    );
+    display_text(&["Imported ", timeline, &counts], ROW_CHARS)
 }
 
 fn show_totals(ui: &mut egui::Ui, record: &ImportRecord) {
@@ -489,13 +581,20 @@ fn show_record_notes(ui: &mut egui::Ui, record: &ImportRecord) {
                 ui.small(text);
             }
             for name in &row.names {
-                ui.small(name);
+                ui.small(display_text(&[name], ROW_CHARS))
+                    .on_hover_ui(|ui| {
+                        ui.label(display_text(&[name], DETAIL_CHARS));
+                    });
             }
             if !row.at.is_empty() {
                 ui.push_id(&code, |ui| {
                     ui.collapsing("Examples", |ui| {
                         for site in &row.at {
-                            ui.label(format!("Frame {} · {}", site.frame, site.source));
+                            let prefix = format!("Frame {} · ", site.frame);
+                            let parts = [prefix.as_str(), &site.source];
+                            ui.label(display_text(&parts, ROW_CHARS)).on_hover_ui(|ui| {
+                                ui.label(display_text(&parts, DETAIL_CHARS));
+                            });
                         }
                     });
                 });
@@ -603,10 +702,15 @@ fn show_media(ui: &mut egui::Ui, media: &[MediaEntry], selection: &mut Option<us
                         MediaStatus::Remote => "Remote · offline",
                         MediaStatus::TimedOut => "Timed out",
                     };
-                    let text = format!("{status} · {} · {}", entry.name, entry.locator);
+                    let text = display_text(
+                        &[status, " · ", &entry.name, " · ", &entry.locator],
+                        ROW_CHARS,
+                    );
                     if ui
                         .add(egui::Button::selectable(*selection == Some(index), text).truncate())
-                        .on_hover_text(&entry.locator)
+                        .on_hover_ui(|ui| {
+                            ui.label(display_text(&[&entry.locator], DETAIL_CHARS));
+                        })
                         .clicked()
                     {
                         *selection = Some(index);
@@ -615,9 +719,12 @@ fn show_media(ui: &mut egui::Ui, media: &[MediaEntry], selection: &mut Option<us
             },
         );
     if let Some(entry) = selection.and_then(|index| media.get(index)) {
-        ui.label(&entry.locator);
+        ui.label(display_text(&[&entry.locator], DETAIL_CHARS));
         if let Some(path) = &entry.resolved_path {
-            ui.label(format!("Found at {}", path.display()));
+            ui.label(display_text(
+                &["Found at ", &path.to_string_lossy()],
+                DETAIL_CHARS,
+            ));
         }
         if let Some(matches) = &entry.matches {
             ui.label("Several files have this name. The source stays offline until you pick one.");
@@ -631,8 +738,10 @@ fn show_media(ui: &mut egui::Ui, media: &[MediaEntry], selection: &mut Option<us
                     |ui, range| {
                         for path in &matches[range] {
                             let path = path.to_string_lossy();
-                            ui.add(egui::Label::new(path.as_ref()).truncate())
-                                .on_hover_text(path.as_ref());
+                            ui.add(egui::Label::new(display_text(&[&path], ROW_CHARS)).truncate())
+                                .on_hover_ui(|ui| {
+                                    ui.label(display_text(&[&path], DETAIL_CHARS));
+                                });
                         }
                     },
                 );
@@ -652,9 +761,12 @@ pub(crate) fn show_report(ctx: &egui::Context, document: &Document) -> bool {
                     ui.push_id(index, |ui| {
                         ui.separator();
                         ui.label(
-                            egui::RichText::new(&record.source_name)
+                            egui::RichText::new(display_text(&[&record.source_name], ROW_CHARS))
                                 .font(theme::semibold(type_size::BODY)),
-                        );
+                        )
+                        .on_hover_ui(|ui| {
+                            ui.label(display_text(&[&record.source_name], DETAIL_CHARS));
+                        });
                         show_totals(ui, record);
                         show_remote_locations(ui, document, record);
                         show_record_notes(ui, record);
@@ -663,12 +775,16 @@ pub(crate) fn show_report(ctx: &egui::Context, document: &Document) -> bool {
                             record.media.online, record.media.offline
                         ));
                         ui.collapsing("Source details", |ui| {
-                            ui.label(format!("{:?} {}", record.format, record.format_version));
+                            let format = format!("{:?} ", record.format);
+                            ui.label(display_text(&[&format, &record.format_version], ROW_CHARS));
                             ui.label(format!(
                                 "Start offset: {} frames",
                                 record.start_offset_frames
                             ));
-                            ui.small(format!("SHA-256 {}", record.source_sha256));
+                            ui.small(display_text(
+                                &["SHA-256 ", &record.source_sha256],
+                                ROW_CHARS,
+                            ));
                         });
                     });
                 }
@@ -705,8 +821,10 @@ fn show_remote_locations(ui: &mut egui::Ui, document: &Document, record: &Import
             locators.len(),
             |ui, range| {
                 for &locator in &locators[range] {
-                    ui.add(egui::Label::new(locator).truncate())
-                        .on_hover_text(locator);
+                    ui.add(egui::Label::new(display_text(&[locator], ROW_CHARS)).truncate())
+                        .on_hover_ui(|ui| {
+                            ui.label(display_text(&[locator], DETAIL_CHARS));
+                        });
                 }
             },
         );
@@ -946,6 +1064,87 @@ mod tests {
                 "{painted:?}"
             );
         }
+    }
+
+    #[test]
+    fn ix1_dialog_and_saved_report_bound_hostile_file_text_before_layout() {
+        let directory = TempDirectory::new("ix1-hostile-text");
+        let path = directory.path("edit.otio");
+        let oversized = format!("file://unapproved.invalid/{}/take.mov", "s".repeat(8 << 20));
+        let locator = format!(
+            "file://unapproved.invalid/camera/{}{}end.mov",
+            "\n".repeat(800),
+            '\u{202e}',
+        );
+        write_edit(&path, &locator);
+        let mut timeline: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let clips = timeline["tracks"]["children"][0]["children"]
+            .as_array_mut()
+            .unwrap();
+        let mut second = clips[0].clone();
+        clips[0]["name"] = format!("name\u{202e}{}", "n".repeat(99_995)).into();
+        second["media_reference"]["target_url"] = oversized.clone().into();
+        clips.push(second);
+        std::fs::write(&path, serde_json::to_vec(&timeline).unwrap()).unwrap();
+
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut dialog = ImportDialog::new(path, true, Arc::new(RefusedMedia), &ctx);
+        settle(&mut dialog);
+        assert!(dialog.share_choices.is_empty());
+        assert_eq!(ready(&dialog).media()[0].locator, locator);
+        assert_eq!(ready(&dialog).media()[1].locator, oversized);
+        dialog.selected_media = Some(0);
+
+        let painted = painted_dialog(&ctx, &mut dialog);
+        assert_bounded_galleys(&painted);
+        let detail = painted
+            .iter()
+            .find(|line| {
+                line.starts_with("file://unapproved.invalid/")
+                    && line.ends_with("end.mov")
+                    && line.chars().count() > 160
+            })
+            .expect("selected locator retained both ends");
+        assert!(detail.contains('…'));
+        assert!(detail.contains(r"\u{a}"));
+        assert!(detail.contains(r"\u{202e}"));
+        assert!(
+            painted
+                .iter()
+                .filter(|line| line.contains("Remote · offline"))
+                .all(|line| line.chars().count() <= 160)
+        );
+
+        dialog.selected_media = None;
+        let painted = painted_dialog(&ctx, &mut dialog);
+        assert!(painted.iter().any(|line| line.starts_with(r"name\u{202e}")));
+
+        let document = ready(&dialog).document();
+        let _ = ctx.run_ui(input(), |ui| assert!(!show_report(ui.ctx(), document)));
+        let output = ctx.run_ui(input(), |ui| assert!(!show_report(ui.ctx(), document)));
+        let painted = crate::theme::painted_text(&output);
+        assert_bounded_galleys(&painted);
+        assert!(
+            painted
+                .iter()
+                .any(|line| line.contains(r"\u{202e}") && line.ends_with("end.mov"))
+        );
+        assert!(painted.iter().all(|line| line.chars().count() <= 160));
+    }
+
+    fn assert_bounded_galleys(painted: &[String]) {
+        let longest = painted.iter().map(|line| line.chars().count()).max();
+        assert!(
+            longest.is_some_and(|n| n <= 1024),
+            "longest galley: {longest:?}"
+        );
+        assert!(
+            painted
+                .iter()
+                .all(|line| { !line.chars().any(char::is_control) && !line.contains('\u{202e}') })
+        );
     }
 
     #[test]
