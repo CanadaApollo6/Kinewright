@@ -108,16 +108,38 @@ After a release build:
 
 ```bash
 source ./scripts/setup-ffmpeg.sh
-cargo build --package kinewright-app --release --locked
+cargo build --release --locked -p kinewright-app -p kinewright-media-helper -p kinewright-media-supervisor
 ./scripts/package-linux.sh --version 0.1.0 --no-binary-cache
-./scripts/test-linux-bundle.sh --bundle-dir ./dist/linux-x64
 ```
 
-The staged bundle is `dist/linux-x64` (`Kinewright`, `ffmpeg`, `lib/libav*.so*`,
-licenses, a `.desktop` file). `package-linux.sh` then writes
-`dist/tarball/Kinewright-<version>-linux-x64.tar.gz`. `patchelf` sets
-`$ORIGIN/lib` so the binary finds bundled FFmpeg without a machine-level
-install.
+The staged bundle is `dist/linux-x64`. It contains `Kinewright`, the media
+helper and supervisor beside it, the recording CLI `ffmpeg`, the FFmpeg and
+NeMo-Speech libraries under `lib/`, licenses, and a `.desktop` file.
+`package-linux.sh` writes `dist/tarball/Kinewright-<version>-linux-x64.tar.gz`.
+It requires `patchelf` to set `$ORIGIN/lib`. The helper loads FFmpeg at exec,
+before it enters its namespaces and switches to an empty mount root. The
+supervisor manages the resource scope and has no FFmpeg dependency.
+
+On a system where AppArmor restricts unprivileged user namespaces, install
+the bundled profile for the exact helper path before importing owned media.
+From the unpacked `linux-x64` directory, run:
+
+```bash
+sudo ./scripts/install-apparmor-profile.sh install "$(pwd -P)/kinewright-media-helper"
+```
+
+Run the command again if you move the unpacked directory. The same command
+and template ship in the tarball with instructions in `README.txt`.
+
+From the repository root, run `./scripts/test-linux-bundle.sh --bundle-dir
+/absolute/path/to/linux-x64` against that directory. The test checks dynamic
+library resolution and admits a WAV fixture through the app's owned-media
+import path. The GUI check uses Xvfb and Mesa lavapipe. Use `--admission-only`
+to run the loader and import checks without starting the GUI.
+
+The test creates a temporary session directory beside the bundle and removes
+it on exit. To use another location, pass `--scratch-dir DIR` with an existing
+writable directory on Btrfs, ext4, or XFS.
 
 ## Windows (x86_64 MSVC)
 
