@@ -2579,9 +2579,8 @@ async fn cc7_prepare_commit_and_compare(
 /// planner, `plan_motion`, MO2 Part A generates four more
 /// **registry-only** mutators, and MO2 Part B adds one **registry-only**
 /// inspector, `preview_solo`. The registry sextuple does move, to
-/// `153 / 64 / 89`, which is the count assertions below, and its three byte
-/// measures `2 005 164 / 1 850 602 / 129 437` are pinned beside the served
-/// quad.
+/// `153 / 64 / 89` before IX1. IX1 adds two inspectors and adjusts the
+/// relink description. The count and byte pins below include those changes.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
@@ -2608,12 +2607,12 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         kinewright_agent::compact_tool_names()
     );
 
-    // The internal registry: 153 tools, of which `INSPECTOR_TOOL_NAMES` is 89.
+    // The internal registry has 155 tools, including 91 inspector names.
     let registry = kinewright_agent::capability_tool_names().unwrap();
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        153,
+        155,
         "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool; \
          AU2 Part B adds set_audio_master, set_pan_law and get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds none; \
@@ -2628,7 +2627,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
          MO1 A4c generates copy_clip_attributes; \
          MO1 Part C adds plan_motion; \
          MO2 Part A generates set_clip_blend_mode, add_adjustment_clip, add_solid_clip and set_solid_color; \
-         MO2 Part B adds preview_solo"
+         MO2 Part B adds preview_solo; IX1 adds two inspectors"
     );
     assert_eq!(
         operations.len(),
@@ -2663,7 +2662,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     }
     assert_eq!(
         registry.len() - operations.len(),
-        89,
+        91,
         "AU1 adds get_audio_levels; AU2 Part B adds get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds no inspector; \
          AU4 Part A adds no inspector; AU4 Part B adds the two planners; \
@@ -2671,7 +2670,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
          AU6 §5.4 Part A and Part B add none; \
          IN1 Part A adds get_incidents and resolve_incident; \
          IN2 Part A adds propose_fix; \
-         MO1 Part C adds plan_motion; MO2 Part B adds preview_solo"
+         MO1 Part C adds plan_motion; MO2 Part B adds preview_solo; IX1 adds two inspectors"
     );
     let spectrum = registry
         .iter()
@@ -2756,7 +2755,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
             registry_metrics.input_schema_bytes,
             registry_metrics.description_bytes
         ),
-        (153, 2_005_164, 1_850_602, 129_437),
+        (155, 2_006_996, 1_851_598, 129_943),
         "registry={registry_metrics:?}"
     );
 
@@ -10610,7 +10609,7 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
 /// §6.4 rules 12–13 and §9 clause 19: **three** registry-only capabilities, no
 /// served tool, for the **twenty-third** consecutive measurement.
 ///
-/// The registry sextuple is `153 / 64 / 89 / 2 005 164 / 1 850 602 / 129 437`,
+/// The registry sextuple is `155 / 64 / 91 / 2 006 996 / 1 851 598 / 129 943`,
 /// pinned byte for byte with its decomposition in
 /// `server::tests::served_surface_is_small_and_keeps_the_internal_registry_discoverable`;
 /// this test pins all six registry numbers and the served quad over the live
@@ -10671,15 +10670,15 @@ async fn mo2_the_served_quad_does_not_move_for_the_twenty_third_measurement() {
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        153,
-        "IN1 adds two capabilities, IN2 Part A adds propose_fix, MO1 A4a/b/c add six mutators, MO1 Part C adds plan_motion, MO2 Part A adds four mutators, MO2 Part B adds preview_solo"
+        155,
+        "IN1 adds two capabilities, IN2 Part A adds propose_fix, MO1 A4a/b/c add six mutators, MO1 Part C adds plan_motion, MO2 Part A adds four mutators, MO2 Part B adds preview_solo; IX1 adds two inspectors"
     );
     assert_eq!(
         operations.len(),
         64,
         "MO2 Part A adds four Operation variants"
     );
-    assert_eq!(registry.len() - operations.len(), 89);
+    assert_eq!(registry.len() - operations.len(), 91);
     // MO2 R25/R30 (review 1 S1): the registry byte trio beside the counts.
     let registry_metrics = kinewright_agent::capability_tool_metrics().unwrap();
     assert_eq!(
@@ -10689,7 +10688,7 @@ async fn mo2_the_served_quad_does_not_move_for_the_twenty_third_measurement() {
             registry_metrics.input_schema_bytes,
             registry_metrics.description_bytes
         ),
-        (153, 2_005_164, 1_850_602, 129_437),
+        (155, 2_006_996, 1_851_598, 129_943),
         "registry={registry_metrics:?}"
     );
     let state = registry

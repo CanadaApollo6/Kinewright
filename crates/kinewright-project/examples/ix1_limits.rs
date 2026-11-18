@@ -16,6 +16,16 @@ fn main() {
         .map_or(10_000, |value| value.parse().expect("clip count"));
     assert!([1_000, 10_000, 50_000].contains(&clips));
     assert!(arguments.next().is_none());
+    let peak_pin = match (format.as_str(), clips) {
+        ("otio", 1_000) => 7_622_283,
+        ("otio", 10_000) => 73_710_528,
+        ("otio", 50_000) => 305_313_143,
+        ("fcpxml", 1_000) => 6_882_275,
+        ("fcpxml", 10_000) => 62_050_915,
+        ("fcpxml", 50_000) => 257_348_545,
+        ("validate", 10_000) => 322_685,
+        _ => panic!("choose a supported format and clip count"),
+    };
     let validate = format == "validate";
     let assets = if validate { 2_000 } else { 32 };
     let padding = if clips == 50_000 { 2_200 } else { 2_600 };
@@ -65,6 +75,10 @@ fn main() {
         assert_eq!(prepared.record().media.online, 0);
         (elapsed, heap)
     };
+    assert!(
+        heap <= peak_pin,
+        "{format} {clips}: peak heap {heap} B exceeds {peak_pin} B"
+    );
     println!(
         "{format}\t{clips}\t{assets}\t{size}\t{:.3}\t{heap}\t{}",
         elapsed.as_secs_f64() * 1000.0,

@@ -13,7 +13,7 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 89] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 91] = [
     "get_timeline_state",
     // IN1 §6.1 rule 1: two internal capabilities, reached only through
     // `invoke_capability` and never added to `COMPACT_TOOL_NAMES`.
@@ -23,6 +23,8 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 89] = [
     // `resolve_incident`, exactly as IN1 placed `get_incidents` after
     // `get_timeline_state`. Registry-only: the served quad does not move.
     "propose_fix",
+    "inspect_interchange",
+    "get_import_report",
     "search_capabilities",
     "get_capability",
     "invoke_capability",

@@ -680,3 +680,92 @@ fn active_hash_cancellation_reaches_the_worker() {
         RefusalCode::Cancelled
     );
 }
+
+#[test]
+fn abandoning_the_worker_budget_reports_undispatched_locators_as_timeouts() {
+    let slow = [
+        "1.mov", "2.mov", "3.mov", "4.mov", "5.mov", "6.mov", "7.mov", "8.mov",
+    ];
+    let (started, did_start) = bounded(8);
+    let (release, held) = bounded(8);
+    let (stopped, did_stop) = bounded(8);
+    let mut fs = RecordingFs::new(&[
+        "1.mov", "2.mov", "3.mov", "4.mov", "5.mov", "6.mov", "7.mov", "8.mov", "9.mov",
+    ]);
+    fs.block = Some(Block {
+        names: slow.into(),
+        phase: None,
+        started,
+        release: held,
+        stopped,
+    });
+    let fs = Arc::new(fs);
+    let options = ImportOptions {
+        deadlines: MediaDeadlines {
+            stat: Duration::from_millis(150),
+            ..MediaDeadlines::default()
+        },
+        ..ImportOptions::default()
+    };
+    let (prepared, _) = prepare_with(
+        Arc::clone(&fs),
+        "timeline.otio",
+        options,
+        Preparation::Probe,
+    )
+    .unwrap();
+    for _ in slow {
+        did_start.try_recv().unwrap();
+        release.send(()).unwrap();
+    }
+    for _ in slow {
+        assert!(did_stop.recv().unwrap());
+    }
+    let calls = fs.calls.lock().unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| matches!(call, Call::Stat(_)))
+            .count(),
+        8
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| matches!(call, Call::Stat(path) if path.ends_with("9.mov")))
+    );
+    assert_eq!(prepared.record().media.timed_out, 9);
+    assert!(
+        prepared
+            .media()
+            .iter()
+            .all(|entry| entry.status == MediaStatus::TimedOut)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn media_root_walk_does_not_follow_symlinks() {
+    use kinewright_media::test_support::TempDirectory;
+
+    let dir = TempDirectory::new("ix1-media-root-link");
+    let main = dir.path("timeline.otio");
+    std::fs::write(&main, otio(&["lost/linked.mov"])).unwrap();
+    let outside = dir.path("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("linked.mov"), []).unwrap();
+    let root = dir.path("media_root");
+    std::fs::create_dir(&root).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("shortcut")).unwrap();
+    let inspected = inspect(
+        main.to_str().unwrap(),
+        ImportOptions {
+            media_roots: vec![root.to_str().unwrap().into()],
+            ..ImportOptions::default()
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(inspected.media[0].status, MediaStatus::Missing);
+    assert!(inspected.media[0].matches.is_none());
+}

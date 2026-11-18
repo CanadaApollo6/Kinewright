@@ -696,9 +696,9 @@ agent reads `get_import_report`.
 
 *Bytes.* The served quad stays at 7 tools / 5,660 B (M36), because the served tools embed no
 `Operation`. The registry grows by:
-- **the two capabilities, about 1.5 KB.** `inspect_interchange` is about 650 B of schema and 350 B
-  of description. `code` is a plain string, so it adds no enum bytes. `get_import_report` is about
-  60 B and 220 B. The two directory rows are about 220 B.
+- **The two capabilities and relink description, 1,832 B.** The inspectors contribute
+  1,332 B and 440 B. Their schemas grow the registry by 996 B. The relink description adds 60 B
+  to describe estimated import metadata.
 - **Track names (rulings 3 and 25): 34 B per schema** through `AddTrack`'s `Track` definition.
   All 64 generated operations expose it through `get_capability`, and the registry's `apply_edit_plan`
   row also gains 34 B. The internal registry grows by 2,210 B.
@@ -869,6 +869,23 @@ Pins are the measured value plus 25% (`docs/AW1-HEADLESS-KINEWRIGHT.md:649`). A 
 budget is lowered; the budget is never raised. `Document::asset` is a linear search
 (`model.rs:1501`), so `validate` is O(clips × assets). It is measured at 10k clips × 2k assets and
 indexed first if it takes over 200 ms.
+
+**Laptop release reading (2026-11-17).** Run the `kinewright-project` example `ix1_limits` in
+release with a format and clip count. Each invocation generates the timeline outside the measured
+interval. Media is offline for the measurement. The input digest is included. The initial
+one-minute load was 2.70 for all runs. No desktop measurement has been taken here.
+
+| Case | Input bytes | Time (ms) | Peak heap (bytes) | Heap pin (bytes) |
+|---|---:|---:|---:|---:|
+| OTIO 1,000 | 2,941,760 | 31.336 | 6,097,826 | 7,622,283 |
+| OTIO 10,000 | 29,425,948 | 290.045 | 58,968,422 | 73,710,528 |
+| OTIO 50,000 | 127,173,448 | 1485.311 | 244,250,514 | 305,313,143 |
+| FCPXML 1,000 | 2,696,220 | 34.313 | 5,505,820 | 6,882,275 |
+| FCPXML 10,000 | 26,939,408 | 311.262 | 49,640,732 | 62,050,915 |
+| FCPXML 50,000 | 114,766,908 | 1487.059 | 205,878,836 | 257,348,545 |
+| Validate 10,000 | 27,242,244 | 10.654 | 258,148 | 322,685 |
+
+All measured thresholds held. The validation case has 2,000 assets.
 
 **Exit gates.**
 - Every §3 row and named case has a golden fixture.

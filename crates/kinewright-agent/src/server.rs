@@ -1,3 +1,6 @@
+#[path = "interchange.rs"]
+mod interchange;
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt::Write as _,
@@ -1155,12 +1158,14 @@ fn host_scoped_tool_admitted(request: &CallToolRequestParams) -> bool {
         | "discard_edit_plan"
         | "commit_edit_plan" => true,
         "invoke_capability" => {
-            request
-                .arguments
-                .as_ref()
-                .and_then(|a| a.get("name"))
-                .and_then(serde_json::Value::as_str)
-                == Some("get_timeline_state")
+            matches!(
+                request
+                    .arguments
+                    .as_ref()
+                    .and_then(|a| a.get("name"))
+                    .and_then(serde_json::Value::as_str),
+                Some("get_timeline_state" | "get_import_report" | "inspect_interchange")
+            )
         }
         "prepare_edit_plan" => !request
             .arguments
@@ -1532,6 +1537,26 @@ impl KinewrightMcp {
             "propose_fix" => {
                 let args: ProposeFixArgs = decode_args("propose_fix", arguments)?;
                 self.propose_fix(&args)
+            }
+            "inspect_interchange" => {
+                if self.host_scoped {
+                    return Ok(interchange::outside_roots());
+                }
+                Ok(interchange::inspect_timeline(decode_args(
+                    "inspect_interchange",
+                    arguments,
+                )?))
+            }
+            "get_import_report" => {
+                let _args: EmptyArgs = decode_args("get_import_report", arguments)?;
+                let (revision, document) = self.snapshot()?;
+                Ok(success_structured(
+                    format!(
+                        "{} interchange import record(s)",
+                        document.imported_from.len()
+                    ),
+                    serde_json::json!({"revision": revision, "records": document.imported_from}),
+                ))
             }
             "get_timeline_state" => {
                 let (revision, document) = self.snapshot()?;
@@ -13685,6 +13710,7 @@ fn compact_tools_cached() -> Vec<Tool> {
 #[allow(clippy::too_many_lines)]
 fn inspector_tools() -> Vec<Tool> {
     let read_only = read_only_annotations;
+    let [inspect_interchange, get_import_report] = interchange::tools();
     vec![
         // IN1 §6.4 rule 20: both descriptions are normative bytes, measured at
         // 530 B and 365 B, with self-contained first sentences because
@@ -13735,6 +13761,8 @@ fn inspector_tools() -> Vec<Tool> {
         // in `compact_get_timeline_state_tool`, called here at its registry
         // position so the full registry and the served surface cannot drift.
         compact_get_timeline_state_tool(),
+        inspect_interchange,
+        get_import_report,
         Tool::new(
             "get_color_context",
             "Return the project working, monitoring, and delivery colour descriptions, source metadata, managed-profile status, ordered CC1 stages, and legacy-stage warnings at the exact timeline revision. Each clip carries its ordered managed colour-node stack across all five node kinds - technical_lut, primary_correction, color_wheels, color_curves, creative_look - with role, color_stage, stage_index, bypass, active, inactive_reason, and resolved values; LUT nodes add lut_asset_id, lut_title, lut_sha256, lut_size, lut_kind, lut_provenance, lut_availability, lut_store_path, mix_basis_points, input_encoding, and may_be_active. legacy_look_conversions lists every legacy look_lut/cube_lut with status ready, needs_import, or unconvertible, the exact operations, and a recovery_action naming convert_legacy_look. The default status matches the executed application D65 profile assumption; use raw_only for unassumed classifier evidence. Metadata remains unchanged. Use render_color_proof for an isolated mapped BEFORE/AFTER frame.",
@@ -13857,7 +13885,7 @@ fn inspector_tools() -> Vec<Tool> {
         ),
         Tool::new(
             "relink_media",
-            "Probe and hash one replacement path, require exact kind/frame-rate/duration/resolution compatibility, then apply one undoable RelinkAsset operation at the expected revision. Known fingerprints must match exactly; legacy unknown fingerprints require explicit allow_unverified_source.",
+            "Probe and hash a replacement path and apply an undoable relink at the expected revision. Match kind, frame rate, duration, resolution and any known fingerprint. For an estimated interchange asset with an unknown fingerprint, match frame rate and cover every clip with compatible media. An unknown fingerprint requires allow_unverified_source.",
             schema_object::<RelinkMediaArgs>(),
         )
         .with_annotations(
@@ -24307,7 +24335,7 @@ mod tests {
         }
         // IN1 §6.6: get_incidents and resolve_incident join the registry;
         // IN2 §4.1 rule 2 adds propose_fix beside them.
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 89);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 91);
 
         for name in [
             "plan_primary_correction",
@@ -28245,7 +28273,7 @@ mod tests {
             }
         }
 
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 89);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 91);
         // IN1 §6.1 rule 3: nothing the dispatcher accepted before is now
         // refused, and no generated operation tool became invocable.
         let stranded = crate::schema::INSPECTOR_TOOL_NAMES
@@ -29405,6 +29433,8 @@ mod tests {
     ///   schema. `Document.imported_from` adds no schema bytes. Registry
     ///   totals are **2 005 164 / 1 850 602 / 129 437** and the served quad
     ///   stays **7 / 5 660 / 3 510 / 998**.
+    /// - **IX1 stage 2a: +1 832 / +996 / +506.** Two inspectors and the
+    ///   estimated-source relink description move the registry only.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -29430,15 +29460,15 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (2_005_164, 5_660),
+            (2_006_996, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_850_602,
+            registry_metrics.input_schema_bytes, 1_851_598,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 129_437,
+            registry_metrics.description_bytes, 129_943,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
@@ -35372,12 +35402,12 @@ mod tests {
     /// touch. MO2 A3 (R8) generates four more mutators
     /// (`set_clip_blend_mode`, `add_adjustment_clip`, `add_solid_clip`,
     /// `set_solid_color`), registry-only the same way: counts `152 / 64 / 88`.
-    /// MO2 Part B (R24) adds one inspector (`preview_solo`): `153 / 64 / 89`.
+    /// MO2 Part B added `preview_solo`. IX1 adds two more inspectors for `155 / 64 / 91`.
     #[test]
     fn in2_the_registry_grows_by_one_capability() {
         let registry = KinewrightMcp::capability_tools().unwrap();
-        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 153);
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 89);
+        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 155);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 91);
         assert_eq!(operation_tools().unwrap().len(), 64);
         let generated = operation_tools().unwrap();
         for name in [
