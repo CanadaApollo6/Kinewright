@@ -188,7 +188,7 @@ fn cut_score_cli_scores_supported_studio_save_without_writing() {
     let mut bundle =
         ProjectBundle::activate(&path, BundleWriteAdmission::new_document(), &pool).unwrap();
     // A real small WAV is admitted only while creating the Studio fixture.
-    let bytes = kinewright_media::test_support::wav_f32(&[0.0; 4_800], 48_000, 1);
+    let bytes = kinewright_media::test_support::wav_f32(&vec![0.0; 4_800], 48_000, 1);
     let (asset, entry, pins) = bundle
         .store_mut()
         .unwrap()
