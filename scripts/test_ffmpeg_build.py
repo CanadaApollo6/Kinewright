@@ -363,7 +363,6 @@ class BuildIdentity(unittest.TestCase):
         action = (builder.ROOT/'.github/actions/ffmpeg/action.yml').read_text()
         flag = "KINEWRIGHT_FFMPEG_RESTORED_PRODUCER_CACHE: ${{ inputs.producer != 'true' && steps.cache.outputs.cache-hit == 'true' }}"
         self.assertEqual(action.count(flag), 2)
-        self.assertNotIn('restore-keys', action)
 
     def test_fingerprint_changes_with_tool_dependency_flag_or_setup_changes(self):
         from types import SimpleNamespace
@@ -442,7 +441,28 @@ class BuildIdentity(unittest.TestCase):
         self.assertIn("github.event_name == 'push'", save)
         self.assertIn("inputs.no-binary-cache != 'true'", save)
         self.assertIn('ms1-${{ steps.fingerprint.outputs.key }}', save)
-        self.assertNotIn('restore-keys', workflow)
+        self.assertNotIn('restore-keys', restore)
+        self.assertIn("key: ms1-${{ inputs.producer == 'true' && steps.fingerprint.outputs.key || inputs.cache-key }}", restore)
+
+    def test_vcpkg_package_cache_is_push_write_only_and_the_only_fallback_key(self):
+        workflow = (builder.ROOT/'.github/actions/ffmpeg/action.yml').read_text()
+        restore = workflow[workflow.index('    - name: Restore vcpkg packages'):workflow.index('    - name: Producer Windows dependencies')]
+        save = workflow[workflow.index('    - name: Save vcpkg packages'):workflow.index('    - name: Producer fingerprint')]
+        key = "vcpkg-archives-${{ hashFiles('scripts/prepare-ffmpeg-windows.ps1') }}-"
+        for step in [restore, save]:
+            self.assertIn("runner.os == 'Windows' && inputs.producer == 'true' && inputs.no-binary-cache != 'true'", step)
+            self.assertIn("github.repository == 'CanadaApollo6/Kinewright'", step)
+            self.assertIn('path: third_party/vcpkg-archives', step)
+            self.assertIn('key: ' + key + '${{ steps.vcpkg-image.outputs.image }}', step)
+        self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", restore)
+        self.assertIn("github.event_name == 'push'", save)
+        self.assertNotIn('restore-keys', save)
+        # vcpkg checks every archive against its own hash of compiler, triplet and
+        # port, so an older image's set may be restored. Nothing else falls back.
+        self.assertEqual(workflow.count('restore-keys'), 1)
+        self.assertIn('restore-keys: |\n          ' + key + '\n', restore)
+        script = (builder.ROOT/'scripts/prepare-ffmpeg-windows.ps1').read_text()
+        self.assertIn("$env:VCPKG_DEFAULT_BINARY_CACHE = Join-Path $root 'third_party/vcpkg-archives'", script)
 
     def test_source_cache_uses_the_pin_and_verifies_restores_before_building(self):
         workflow = (builder.ROOT/'.github/actions/ffmpeg/action.yml').read_text()

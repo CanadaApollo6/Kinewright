@@ -14,6 +14,7 @@ third_party/ffmpeg.zip
 third_party/ffmpeg-recorder/
 third_party/ffmpeg-testgen/
 third_party/ffmpeg-deps/
+third_party/vcpkg-archives/
 third_party/nasm/
 third_party/nemo-speech/
 third_party/tools/

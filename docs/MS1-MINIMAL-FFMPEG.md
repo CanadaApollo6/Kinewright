@@ -171,7 +171,16 @@ binaries instead of rebuilding inside a test shard. The exported key names the c
 entry and is not compared to the marker: on Windows the two differ within one
 producer job (seen on run 44398295450; the key step and the build do not compute
 the same fingerprint, cause not yet found, ticket CI-T2). Local builds and release
-jobs verify against their own fingerprint. No fallback keys exist.
+jobs verify against their own fingerprint. No fallback keys exist for these binaries.
+
+The Windows dependency step runs on every producer, before the fingerprint. CI keeps
+vcpkg's own package archives (`third_party/vcpkg-archives`, cache `vcpkg-archives-`,
+keyed by `prepare-ffmpeg-windows.ps1` and the runner image, with a fallback to the
+same script on an older image). vcpkg checks each archive against its hash of
+compiler, triplet and port, so a stale archive is rebuilt, not used. With the
+archives present the step fetches no source archive from an upstream host; without
+them it retries a failed install twice, because upstream hosts sometimes return a
+damaged archive to hosted runners.
 
 Binary cache writes require a successful canonical-repository **push**; PR jobs
 never write, and fork PRs/fork repositories never restore these caches. Each job

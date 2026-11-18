@@ -70,12 +70,37 @@ runs:
     - name: Linux FFmpeg dependencies
       if: runner.os == 'Linux' && inputs.producer == 'true'
       uses: ./.github/actions/ci-apt
+    # vcpkg's own package archives, each checked by vcpkg against its hash of compiler,
+    # triplet and port before use. With them an unchanged pin installs without any
+    # upstream source download. A newer runner image restores the nearest older set
+    # and saves its own.
+    - name: Name the runner image for the vcpkg package cache
+      id: vcpkg-image
+      if: runner.os == 'Windows' && inputs.producer == 'true'
+      shell: pwsh
+      run: |
+        "image=$($env:ImageOS)-$($env:ImageVersion)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+    - name: Restore vcpkg packages built for this pin
+      id: vcpkg-cache
+      if: runner.os == 'Windows' && inputs.producer == 'true' && inputs.no-binary-cache != 'true' && github.repository == 'CanadaApollo6/Kinewright' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      uses: actions/cache/restore@v4
+      with:
+        path: third_party/vcpkg-archives
+        key: vcpkg-archives-${{ hashFiles('scripts/prepare-ffmpeg-windows.ps1') }}-${{ steps.vcpkg-image.outputs.image }}
+        restore-keys: |
+          vcpkg-archives-${{ hashFiles('scripts/prepare-ffmpeg-windows.ps1') }}-
     - name: Producer Windows dependencies
       if: runner.os == 'Windows' && inputs.producer == 'true'
       shell: pwsh
       run: |
         ./scripts/prepare-ffmpeg-windows.ps1
         ./scripts/setup-ffmpeg.ps1 -ToolsOnly
+    - name: Save vcpkg packages built for this pin
+      if: runner.os == 'Windows' && inputs.producer == 'true' && inputs.no-binary-cache != 'true' && github.event_name == 'push' && github.repository == 'CanadaApollo6/Kinewright' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: third_party/vcpkg-archives
+        key: vcpkg-archives-${{ hashFiles('scripts/prepare-ffmpeg-windows.ps1') }}-${{ steps.vcpkg-image.outputs.image }}
     - name: Producer fingerprint
       if: inputs.producer == 'true'
       id: fingerprint
