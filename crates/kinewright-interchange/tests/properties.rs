@@ -231,6 +231,23 @@ proptest! {
     }
 
     #[test]
+    fn windows_local_paths_never_contain_a_colon_outside_the_drive(
+        stem in prop_oneof![Just("NUL".into()), "[a-zA-Z0-9_-]{1,16}\\.mov"],
+        stream in "[a-zA-Z0-9_-]{1,16}",
+        suffix in prop::sample::select(vec!["", "/clip.mov"]),
+    ) {
+        use kinewright_interchange::locator::{Locator, Platform, classify};
+
+        for locator in [
+            format!(r"D:\Media\{stem}:{stream}{suffix}"),
+            format!(r"\\?\D:\Media\{stem}:{stream}{suffix}"),
+            format!("file:///D:/Media/{stem}%3A{stream}{suffix}"),
+        ] {
+            prop_assert_eq!(classify(&locator, Platform::Windows), Locator::Invalid, "{}", locator);
+        }
+    }
+
+    #[test]
     fn mixed_rates_keep_abutting_cuts_and_the_admitted_bound(
         rate_index in 0_usize..4, project_index in 0_usize..3,
         leading in 0_i64..120, a_duration in 30_i64..160, b_duration in 30_i64..160,

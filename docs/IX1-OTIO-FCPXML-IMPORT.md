@@ -550,7 +550,8 @@ For a `file:` URL, apply the host rule first, percent-decode the path and classi
 decoded native path before any filesystem call (ruling 9). A URL with encoded separators
 (`%2F` or `%5C`, case-insensitive) is remote. A decoded path beginning with `//` or two
 backslashes is remote, including `file://localhost//host/share/a.mov`.
-On Windows, drive-relative paths are invalid. The local-path check rejects every component
+On Windows, drive-relative paths are invalid. The decoded path allows a colon only in the
+drive designator. The local-path check rejects every component
 ending in a space or dot and every DOS device name, regardless of ASCII case. It tests the
 stem before the first dot with trailing spaces removed, including superscript ¹, ² and ³ in
 the numbered COM and LPT names.

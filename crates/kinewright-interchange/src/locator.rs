@@ -51,7 +51,7 @@ fn drive_path(path: &str) -> bool {
 }
 
 fn invalid_windows_component(component: &str) -> bool {
-    if component.ends_with([' ', '.']) {
+    if component.contains(':') || component.ends_with([' ', '.']) {
         return true;
     }
     let stem = component
@@ -91,16 +91,21 @@ fn native_path(mut path: String, platform: Platform, decoded_file_url: bool) -> 
         path.remove(0);
     }
     let absolute = if platform == Platform::Windows {
-        if !verbatim_drive
-            && !drive_path(&path)
-            && (path.starts_with(['/', '\\']) || path.as_bytes().get(1) == Some(&b':'))
-        {
+        let drive = verbatim_drive || drive_path(&path);
+        if !drive && path.starts_with(['/', '\\']) {
             return Locator::Invalid;
         }
-        if path.split(['/', '\\']).any(invalid_windows_component) {
+        let components = if verbatim_drive {
+            &path[6..]
+        } else if drive {
+            &path[2..]
+        } else {
+            &path
+        };
+        if components.split(['/', '\\']).any(invalid_windows_component) {
             return Locator::Invalid;
         }
-        verbatim_drive || drive_path(&path)
+        drive
     } else {
         path.starts_with('/')
     };
@@ -398,5 +403,41 @@ mod tests {
             );
         }
         assert_eq!(classify(r"C:media\x.mov", Platform::Unix), Locator::Remote);
+    }
+
+    #[test]
+    fn windows_colons_are_valid_only_in_the_drive_designator() {
+        for locator in [
+            r"C:\Media\NUL:x",
+            r"C:\Media\file.mov:stream",
+            r"C:\Media\file.mov:stream\child",
+            r"\\?\C:\Media\file.mov:stream",
+            r"\\?\C:\NUL:x\child.mov",
+            "file:///C:/Media/%4EUL%3Ax",
+            "file:///C:/Media/file.mov%3astream",
+            "file:///C:/Media%3Astream/file.mov",
+            "Media/file.mov:stream",
+        ] {
+            assert_eq!(
+                classify(locator, Platform::Windows),
+                Locator::Invalid,
+                "{locator}"
+            );
+        }
+        for locator in [
+            r"C:\Media\file.mov",
+            r"\\?\C:\Media\file.mov",
+            "file:///C%3A/Media/file.mov",
+            "Media/file.mov",
+        ] {
+            assert!(
+                matches!(classify(locator, Platform::Windows), Locator::Local(_)),
+                "{locator}"
+            );
+        }
+        assert!(matches!(
+            classify("file:///C:/Media/file.mov%3astream", Platform::Unix),
+            Locator::Local(_)
+        ));
     }
 }

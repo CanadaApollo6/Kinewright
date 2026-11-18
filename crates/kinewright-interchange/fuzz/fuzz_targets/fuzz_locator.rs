@@ -15,9 +15,17 @@ fuzz_target!(|bytes: &[u8]| {
             assert!(!path.as_str().contains('\0'));
             assert!(!path.as_str().split(['/', '\\']).any(|part| part == ".."));
             if platform == Platform::Windows {
-                assert!(!matches!(path.as_str().as_bytes(), [letter, b':', ..]
-                    if letter.is_ascii_alphabetic() && !path.is_absolute()));
-                for part in path.as_str().split(['/', '\\']) {
+                let raw = path.as_str();
+                let drive_path = raw.strip_prefix(r"\\?\").unwrap_or(raw);
+                let components = match drive_path.as_bytes() {
+                    [letter, b':', b'/' | b'\\', rest @ ..] if letter.is_ascii_alphabetic() => {
+                        assert!(path.is_absolute());
+                        rest
+                    }
+                    _ => raw.as_bytes(),
+                };
+                assert!(!components.contains(&b':'));
+                for part in raw.split(['/', '\\']) {
                     assert!(!part.ends_with(' ') && !part.ends_with('.'));
                     let stem = part.split('.').next().unwrap().trim_end_matches(' ');
                     assert!(!matches!(
