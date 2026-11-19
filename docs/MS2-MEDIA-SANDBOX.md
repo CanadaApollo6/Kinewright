@@ -611,6 +611,15 @@ pass `AccessCheck` for read through its own package SID and fail the same
 check through ALL APPLICATION PACKAGES. Successful creation alone proves
 none of these facts.
 
+Decision 8 requires isolation between helpers that share a package SID.
+Create each process and primary thread with protected security descriptors.
+The host user owns both objects. Only the host user and SYSTEM have ACEs,
+and the returned handles are non-inheritable. With the child suspended,
+use `SetTokenInformation(TokenDefaultDacl)` to apply the same two ACEs to
+objects created later, including additional threads. Read back that default
+DACL and both creation descriptors before resuming. A failed write or
+inspection ends the suspended child.
+
 If an additional restricted-token layer is necessary, compose a lowbox token
 from the restricted base via `NtCreateLowBoxToken`, as in Chromium's reviewed
 composition; its restricting-SID list includes the AppContainer SID so the
@@ -664,9 +673,10 @@ and mutation are denied in reachable private, temp, profile, and registry
 locations. If a runtime write is unavoidable, enforce and prove a hard quota
 before admitting media. Expose no write broker. Also test named pipes, ALPC
 endpoints, and process access against the host and a sibling helper. Test
-two helpers from the same profile in separate Jobs. Refuse sibling process
-opens for handle duplication, VM write, and limited query. Refuse main thread
-opens for setting context. Run the same opens with an unconfined control.
+two helpers from the same profile in separate Jobs. In both directions,
+refuse process opens for handle duplication, VM write, and limited query.
+Refuse opens for setting context on the primary thread and a thread created
+after startup. An unconfined control must succeed at each open.
 Unsupported LPAC, mitigation, or nested Job setup refuses launch.
 
 Hosted runs 44512875269, 44523085254, and 44525476876 establish the launch
@@ -681,6 +691,10 @@ absent. The ordinary AppContainer could read an ALL APPLICATION PACKAGES
 file. LPAC received access denied. All this evidence comes from an elevated
 administrator account. A standard account and Windows 10 and 11 client
 builds remain unproven (MS-T8).
+
+Hosted run 44582306271 allowed all four same-SID process and primary-thread
+opens with the default descriptors. The decision 8 descriptors and later
+thread test require a new hosted run.
 
 
 ## Hardware decode and software cost

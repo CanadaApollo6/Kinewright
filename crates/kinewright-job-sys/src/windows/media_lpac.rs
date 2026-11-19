@@ -22,7 +22,8 @@ use windows_sys::Win32::{
         INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     Security::{
-        FreeSid, GetTokenInformation, PSID, SECURITY_CAPABILITIES, TOKEN_INFORMATION_CLASS,
+        FreeSid, GetTokenInformation, PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES,
+        TOKEN_INFORMATION_CLASS,
     },
     Storage::FileSystem::FILE_GENERIC_READ,
     System::{
@@ -66,10 +67,12 @@ use windows_sys::Win32::{
 
 mod error;
 mod profile;
+mod security;
 mod token;
 
 pub use error::{Code, Error, Step, StorageKind};
 pub use profile::{Preparation, Profile, VerifiedProfile};
+use security::ChildSecurity;
 use token::inspect_token;
 
 const JOB_LIMITS: u32 = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
@@ -270,6 +273,7 @@ struct Suspended {
     sid: Sid,
     limits: Limits,
     local: Option<LaunchDirectory>,
+    security: ChildSecurity,
 }
 
 impl Drop for Suspended {
@@ -295,6 +299,8 @@ impl Suspended {
         inspect_token(process, &self.sid)?;
         inspect_job(process, job, &self.limits)?;
         inspect_mitigations(process)?;
+        self.security
+            .inspect_and_set_defaults(process, &self.thread)?;
         self.resume()
     }
 
@@ -380,7 +386,15 @@ fn begin(
         &child_policy,
         "CHILD_PROCESS_POLICY",
     )?;
-    let info = create_suspended(&application, &mut command, &cwd, &environment, &attributes)?;
+    let security = ChildSecurity::new()?;
+    let info = create_suspended(
+        &application,
+        &mut command,
+        &cwd,
+        &environment,
+        &attributes,
+        &security.attributes(),
+    )?;
     drop(attributes);
     drop(inherited);
     Ok(Suspended {
@@ -391,6 +405,7 @@ fn begin(
         sid,
         limits,
         local: Some(local),
+        security,
     })
 }
 
@@ -413,6 +428,7 @@ fn create_suspended(
     cwd: &[u16],
     environment: &[u16],
     attributes: &Attributes,
+    security: &SECURITY_ATTRIBUTES,
 ) -> io::Result<PROCESS_INFORMATION> {
     let mut startup = STARTUPINFOEXW::default();
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>()
@@ -421,13 +437,14 @@ fn create_suspended(
     startup.lpAttributeList = attributes.pointer;
     let mut info = PROCESS_INFORMATION::default();
     // SAFETY: the strings, environment, and attribute values remain live through
-    // creation. The handle list bounds inheritance and the Job attaches atomically.
+    // creation, as does the descriptor behind security. The handle list bounds
+    // inheritance and the Job attaches atomically.
     check_step("CreateProcessW (suspended LPAC)", unsafe {
         CreateProcessW(
             application.as_ptr(),
             command.as_mut_ptr(),
-            ptr::null(),
-            ptr::null(),
+            security,
+            security,
             1,
             EXTENDED_STARTUPINFO_PRESENT
                 | CREATE_SUSPENDED

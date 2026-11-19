@@ -120,7 +120,7 @@ fn query_integrity(token: &Handle) -> io::Result<i32> {
     }
 }
 
-struct Local(*mut std::ffi::c_void);
+pub(super) struct Local(pub(super) *mut std::ffi::c_void);
 impl Drop for Local {
     fn drop(&mut self) {
         // SAFETY: this owns a LocalAlloc pointer returned by the security APIs.

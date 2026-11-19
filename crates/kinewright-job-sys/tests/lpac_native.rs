@@ -156,25 +156,53 @@ fn a_handle_outside_the_list_is_not_inherited() {
 }
 
 #[test]
-fn helpers_with_the_same_sid_cannot_open_each_others_process_or_main_thread() {
+fn helpers_with_the_same_sid_cannot_open_each_others_process_or_threads() {
     let fixture = Fixture::new();
-    let mut sibling = fixture.start("hold", "", true);
-    let report = sibling.reply();
-    report.expect(&["ReadFile(hold)"], &[0], "sibling ready in its own Job");
-    let identity = report.detail.expect("sibling PID and main thread ID");
-    let control = fixture.try_single("sibling", &identity, false);
-    let confined = fixture.try_single("sibling", &identity, true);
-    eprintln!("same-SID sibling {identity}; unconfined control: {control:?}; LPAC: {confined:?}");
-    sibling.release();
-    assert_eq!(sibling.finish(), 0, "sibling exit");
-    assert_eq!(
-        sibling_codes(control.expect("unconfined sibling probe")),
-        [0; 4]
+    let mut left = fixture.start("sibling-hold", fixture.image_dir(), true);
+    let mut right = fixture.start("sibling-hold", fixture.image_dir(), true);
+    let left_id = sibling_identity(left.reply());
+    let right_id = sibling_identity(right.reply());
+    assert_ne!(
+        left_id.split(':').next(),
+        right_id.split(':').next(),
+        "distinct sibling processes"
     );
-    assert_eq!(
-        sibling_codes(confined.expect("LPAC sibling probe")),
-        [ERROR_ACCESS_DENIED; 4]
+    let left_control = fixture.try_single("sibling", &left_id, false);
+    let right_control = fixture.try_single("sibling", &right_id, false);
+    writeln!(left.request, "{right_id}").expect("WriteFile (right sibling identity)");
+    writeln!(right.request, "{left_id}").expect("WriteFile (left sibling identity)");
+    let left_probe = left.try_reply();
+    let right_probe = right.try_reply();
+    eprintln!("sibling {left_id} target: unconfined={left_control:?}, LPAC={right_probe:?}");
+    eprintln!("sibling {right_id} target: unconfined={right_control:?}, LPAC={left_probe:?}");
+    for control in [left_control, right_control] {
+        assert_eq!(
+            sibling_codes(control.expect("unconfined sibling probe")),
+            [0; 5]
+        );
+    }
+    for probe in [left_probe, right_probe] {
+        assert_eq!(
+            sibling_codes(probe.expect("LPAC sibling probe")),
+            [ERROR_ACCESS_DENIED; 5]
+        );
+    }
+    for mut child in [left, right] {
+        child.release();
+        assert_eq!(child.finish(), 0, "sibling exit after completing the probe");
+    }
+    assert_eq!(fs::read(&fixture.source).unwrap(), SOURCE);
+}
+
+fn sibling_identity(report: Report) -> String {
+    report.expect(
+        &["WriteFile(read-only inherited source)"],
+        FILE_DENIALS,
+        "sibling passed startup and read its own source",
     );
+    report
+        .detail
+        .expect("sibling PID, primary thread ID, and later thread ID")
 }
 
 fn sibling_codes(report: Report) -> Vec<u32> {

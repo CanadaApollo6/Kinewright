@@ -256,6 +256,7 @@ mod child {
             Some("package-only-read") => package_read(target),
             Some("inherited-canary") => inherited_canary(target),
             Some("sibling") => return sibling_access(target, output),
+            Some("sibling-hold") => return sibling_hold(target, source, input, output),
             Some("owner-access") => {
                 return super::profile_permissions::owner_access(target, output);
             }
@@ -411,30 +412,82 @@ mod child {
         )
     }
 
+    fn sibling_hold(
+        target: &OsStr,
+        source: Option<File>,
+        input: &mut impl Read,
+        output: &mut impl Write,
+    ) -> io::Result<()> {
+        use std::{io::BufRead, sync::mpsc, thread};
+        let Some(source) = source else {
+            return Err(io::Error::other("missing sibling source"));
+        };
+        let startup = ready(target, true);
+        if startup != ("ready", 0) {
+            return writeln!(output, "{}\t{}", startup.0, startup.1);
+        }
+        let (api, code) = read_source(source);
+        if (api, code) != ("WriteFile(read-only inherited source)", 5) {
+            return writeln!(output, "{api}\t{code}");
+        }
+        let (sender, id) = mpsc::channel();
+        let (stop, parked) = mpsc::channel::<()>();
+        let worker = thread::Builder::new().spawn(move || {
+            // SAFETY: this returns the ID of the calling worker thread.
+            let _ = sender.send(unsafe { GetCurrentThreadId() });
+            let _ = parked.recv();
+        })?;
+        let exchange = (|| {
+            let later = id.recv().map_err(io::Error::other)?;
+            // SAFETY: these APIs return the IDs of the calling process and thread.
+            let (pid, main) = unsafe { (GetCurrentProcessId(), GetCurrentThreadId()) };
+            writeln!(output, "{api}\t{code}\t{pid}:{main}:{later}")?;
+            output.flush()?;
+            let mut input = io::BufReader::new(input);
+            let mut sibling = String::new();
+            input.read_line(&mut sibling)?;
+            sibling_access(OsStr::new(sibling.trim_end()), output)?;
+            output.flush()?;
+            input.read_exact(&mut [0])?;
+            Ok(())
+        })();
+        drop(stop);
+        worker
+            .join()
+            .map_err(|_| io::Error::other("sibling worker panicked"))?;
+        exchange
+    }
+
     fn sibling_access(target: &OsStr, output: &mut impl Write) -> io::Result<()> {
-        let (pid, tid) = target
-            .to_str()
-            .and_then(|target| target.split_once(':'))
-            .ok_or_else(|| io::Error::other("missing sibling process/thread IDs"))?;
+        let fields: Vec<_> = target.to_str().unwrap_or_default().split(':').collect();
+        let [pid, main, later] = fields.as_slice() else {
+            return Err(io::Error::other("missing sibling process/thread IDs"));
+        };
         let pid = parse(OsStr::new(pid))?;
-        let tid = parse(OsStr::new(tid))?;
+        let main = parse(OsStr::new(main))?;
+        let later = parse(OsStr::new(later))?;
         let duplicate = open_process(pid, PROCESS_DUP_HANDLE);
         let vm_write = open_process(pid, PROCESS_VM_WRITE);
         let query = open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION);
+        let main = open_thread(main);
+        let later = open_thread(later);
+        writeln!(
+            output,
+            "sibling access\t0\tOpenProcess(PROCESS_DUP_HANDLE)={duplicate} OpenProcess(PROCESS_VM_WRITE)={vm_write} OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)={query} OpenThread(main,THREAD_SET_CONTEXT)={main} OpenThread(later,THREAD_SET_CONTEXT)={later}"
+        )
+    }
+
+    fn open_thread(tid: u32) -> u32 {
         // SAFETY: this requests a handle to the named test thread and performs no operation on it.
         let thread = unsafe { OpenThread(THREAD_SET_CONTEXT, 0, tid) };
-        let thread = if thread.is_null() {
+        if thread.is_null() {
             // SAFETY: capture the failure on this thread.
             unsafe { GetLastError() }
         } else {
             // SAFETY: OpenThread transferred this handle.
             unsafe { CloseHandle(thread) };
             0
-        };
-        writeln!(
-            output,
-            "sibling access\t0\tOpenProcess(PROCESS_DUP_HANDLE)={duplicate} OpenProcess(PROCESS_VM_WRITE)={vm_write} OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)={query} OpenThread(THREAD_SET_CONTEXT)={thread}"
-        )
+        }
     }
 
     fn direct_registry(target: &OsStr, output: &mut impl Write) -> io::Result<()> {
