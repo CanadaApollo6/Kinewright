@@ -1,3 +1,5 @@
+pub mod media_lpac;
+
 use std::{
     ffi::{OsStr, OsString},
     io,
