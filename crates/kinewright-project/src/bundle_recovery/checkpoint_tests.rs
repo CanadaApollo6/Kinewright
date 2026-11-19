@@ -552,6 +552,99 @@ fn checkpoint_overlong_history_offers_empty_history_rescue() {
 }
 
 #[test]
+fn checkpoint_history_growing_during_hashing_offers_empty_history_rescue() {
+    use std::io::Write as _;
+    let (temp, core, bundle) = fixture();
+    let pool = core.history_pool().clone();
+    let path = temp.path("source.kinewright");
+    let (object, owner) = owner_object(&temp, &bundle);
+    let (grow_object, _) = owner_object(&temp, &bundle);
+    drop(bundle);
+    drop(core);
+    let original = std::fs::read(&path).unwrap();
+    let original_object = std::fs::read(&object).unwrap();
+    assert_eq!(original_object.len() as u64, owner.byte_length);
+
+    let recorded_length = owner.byte_length;
+    let (opened, trace) = crate::io_observer::observe(|| {
+        crate::io_observer::fail_path("owned_verification_read", Path::new(&owner.sha256), || {
+            crate::io_observer::at_path_barrier(
+                Path::new(&owner.sha256),
+                move |point| match point {
+                    "owned_verification_before_hash" => {
+                        crate::io_observer::mutation_attempt(
+                            "owned_verification_grew",
+                            &grow_object,
+                        );
+                        std::fs::OpenOptions::new()
+                            .append(true)
+                            .open(&grow_object)
+                            .unwrap()
+                            .write_all(b"!")
+                            .unwrap();
+                    }
+                    "owned_verification_after_hash" => {
+                        std::fs::OpenOptions::new()
+                            .write(true)
+                            .open(&grow_object)
+                            .unwrap()
+                            .set_len(recorded_length)
+                            .unwrap();
+                    }
+                    _ => {}
+                },
+                || VerifiedCheckpointRecovery::open(&path, &pool),
+            )
+        })
+    });
+
+    let grew_count = trace
+        .events
+        .iter()
+        .filter(|event| event.operation == "owned_verification_grew")
+        .count();
+    assert!(
+        grew_count >= 2,
+        "expected both assessment and rescue verification to grow after metadata length check, got {grew_count}"
+    );
+    assert!(
+        !trace
+            .events
+            .iter()
+            .any(|event| event.operation == "injected_failure"),
+        "overrun guard must stop hashing on the first read: {:?}",
+        trace.events
+    );
+    let recovery = opened
+        .unwrap()
+        .expect("a history object that grows during hashing must allow checkpoint rescue");
+    assert_eq!(recovery.disclosure().history_ref, owner);
+    assert!(
+        recovery
+            .disclosure()
+            .reason
+            .contains("owned identity changed"),
+        "expected overrun identity mismatch, got: {}",
+        recovery.disclosure().reason
+    );
+    assert!(
+        !recovery
+            .disclosure()
+            .reason
+            .contains("owned byte length changed"),
+        "metadata length check should have passed first: {}",
+        recovery.disclosure().reason
+    );
+    let destination = temp.path("recovered.kinewright");
+    recovery.save_copy(&destination).unwrap();
+    let restored = reopen(&destination, &pool);
+    let history = restored.export_history().unwrap();
+    assert!(history.history().undo.is_empty() && history.history().redo.is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(std::fs::read(&object).unwrap(), original_object);
+}
+
+#[test]
 fn checkpoint_history_read_failure_refuses_empty_history_rescue() {
     let (temp, core, bundle) = fixture();
     let pool = core.history_pool().clone();
