@@ -118,6 +118,12 @@ runs:
           third_party/ffmpeg-deps/installed
         key: ms1-${{ inputs.producer == 'true' && steps.fingerprint.outputs.key || inputs.cache-key }}
         fail-on-cache-miss: false
+    # Every later step of the job calls the setup script again (archive build, test
+    # shards, shipping builds), so the decision is job-wide, not one step's.
+    - name: Mark the exactly restored producer binaries for the rest of the job
+      if: inputs.producer != 'true' && steps.cache.outputs.cache-hit == 'true'
+      shell: bash
+      run: echo 'KINEWRIGHT_FFMPEG_RESTORED_PRODUCER_CACHE=true' >> "$GITHUB_ENV"
     - name: Consumer Windows dependencies
       if: runner.os == 'Windows' && inputs.producer != 'true' && steps.cache.outputs.cache-hit != 'true'
       shell: pwsh
@@ -128,7 +134,6 @@ runs:
       env:
         SOURCE_ONLY: ${{ inputs.no-binary-cache }}
         PRODUCER: ${{ inputs.producer }}
-        KINEWRIGHT_FFMPEG_RESTORED_PRODUCER_CACHE: ${{ inputs.producer != 'true' && steps.cache.outputs.cache-hit == 'true' }}
       run: |
         ./scripts/setup-ffmpeg.ps1 -ToolsOnly
         python scripts/build-ffmpeg.py --check-msvc-shell
@@ -145,7 +150,6 @@ runs:
       env:
         SOURCE_ONLY: ${{ inputs.no-binary-cache }}
         PRODUCER: ${{ inputs.producer }}
-        KINEWRIGHT_FFMPEG_RESTORED_PRODUCER_CACHE: ${{ inputs.producer != 'true' && steps.cache.outputs.cache-hit == 'true' }}
       run: |
         cache_arguments=()
         if [[ "$SOURCE_ONLY" == true ]]; then cache_arguments+=(--no-binary-cache); fi

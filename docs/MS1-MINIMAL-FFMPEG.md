@@ -164,7 +164,8 @@ compiler/linker/assembler binary identities and full versions (including MSVC `/
 dependency pkg-config versions/flags, build flags, host ABI, builder/profile/setup
 scripts and CI action. Producers export exact Linux/Windows keys; a CI consumer
 restores by that key, and when the cache step reports an exact hit it reuses the
-restored binaries as they are (`KINEWRIGHT_FFMPEG_RESTORED_PRODUCER_CACHE`), without
+restored binaries as they are (`KINEWRIGHT_FFMPEG_RESTORED_PRODUCER_CACHE`, set for
+every later step of that job, since each calls the setup script again), without
 comparing the marker to its own toolchain: during a runner image rollout a consumer
 can run on a newer image than its producer, and it must reuse the producer's
 binaries instead of rebuilding inside a test shard. The exported key names the cache

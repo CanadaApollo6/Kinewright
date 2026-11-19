@@ -359,10 +359,17 @@ class BuildIdentity(unittest.TestCase):
                         with self.assertRaisesRegex(RuntimeError, 'fresh verified-source download'):
                             builder.build('libraries')
 
-    def test_ci_consumers_take_the_restore_flag_from_the_exact_cache_hit(self):
+    def test_ci_consumers_take_the_restore_flag_from_the_exact_cache_hit_for_the_whole_job(self):
         action = (builder.ROOT/'.github/actions/ffmpeg/action.yml').read_text()
-        flag = "KINEWRIGHT_FFMPEG_RESTORED_PRODUCER_CACHE: ${{ inputs.producer != 'true' && steps.cache.outputs.cache-hit == 'true' }}"
-        self.assertEqual(action.count(flag), 2)
+        mark = action[action.index('    - name: Mark the exactly restored producer binaries'):action.index('    - name: Consumer Windows dependencies')]
+        self.assertIn("if: inputs.producer != 'true' && steps.cache.outputs.cache-hit == 'true'", mark)
+        self.assertIn('''echo 'KINEWRIGHT_FFMPEG_RESTORED_PRODUCER_CACHE=true' >> "$GITHUB_ENV"''', mark)
+        # Later steps call the setup scripts again. A step-level value would be lost
+        # there, and a consumer on a newer runner image would rebuild.
+        self.assertEqual(action.count('KINEWRIGHT_FFMPEG_RESTORED_PRODUCER_CACHE'), 1)
+        self.assertLess(action.index('    - name: Restore trusted same-repository binaries'), action.index(mark))
+        for name in ['ci.yml', 'ci-tests.yml', 'release.yml', 'ffmpeg.yml']:
+            self.assertNotIn('KINEWRIGHT_FFMPEG_RESTORED_PRODUCER_CACHE', (builder.ROOT/'.github/workflows'/name).read_text())
 
     def test_fingerprint_changes_with_tool_dependency_flag_or_setup_changes(self):
         from types import SimpleNamespace
