@@ -237,14 +237,17 @@ impl ImportDialog {
                 .show(ui, |ui| self.show_body(ui));
             ui.add_space(space::TWO);
             ui.horizontal(|ui| {
-                let button = ui.add_enabled(
-                    matches!(self.state, Preparation::Ready(_)) && self.folder_picker.is_none(),
-                    primary_button("Open"),
-                );
-                if std::mem::take(&mut self.focus_open) {
-                    button.request_focus();
+                if !matches!(&self.state, Preparation::Refused(refusal) if refusal.code == RefusalCode::TooLarge)
+                {
+                    let button = ui.add_enabled(
+                        matches!(self.state, Preparation::Ready(_)) && self.folder_picker.is_none(),
+                        primary_button("Open"),
+                    );
+                    if std::mem::take(&mut self.focus_open) {
+                        button.request_focus();
+                    }
+                    open = button.clicked();
                 }
-                open = button.clicked();
                 cancel = ui.button("Cancel").clicked();
             });
         });
@@ -1348,7 +1351,7 @@ mod tests {
     fn ix1_dialog_and_saved_report_bound_hostile_file_text_before_layout() {
         let directory = TempDirectory::new("ix1-hostile-text");
         let path = directory.path("edit.otio");
-        let oversized = format!("file://unapproved.invalid/{}/take.mov", "s".repeat(8 << 20));
+        let long_locator = format!("file://unapproved.invalid/{}/take.mov", "s".repeat(1 << 20));
         let locator = format!(
             "file://unapproved.invalid/camera/{}{}end.mov",
             "\n".repeat(800),
@@ -1362,7 +1365,7 @@ mod tests {
             .unwrap();
         let mut second = clips[0].clone();
         clips[0]["name"] = format!("name\u{202e}{}", "n".repeat(99_995)).into();
-        second["media_reference"]["target_url"] = oversized.clone().into();
+        second["media_reference"]["target_url"] = long_locator.clone().into();
         clips.push(second);
         std::fs::write(&path, serde_json::to_vec(&timeline).unwrap()).unwrap();
 
@@ -1372,7 +1375,7 @@ mod tests {
         settle(&mut dialog);
         assert!(dialog.share_choices.is_empty());
         assert_eq!(ready(&dialog).media()[0].locator, locator);
-        assert_eq!(ready(&dialog).media()[1].locator, oversized);
+        assert_eq!(ready(&dialog).media()[1].locator, long_locator);
         dialog.selected_media = Some(0);
 
         let painted = painted_dialog(&ctx, &mut dialog);

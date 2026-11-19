@@ -9,14 +9,17 @@ pub(super) struct DocumentBound {
 }
 impl DocumentBound {
     pub fn measure(document: &Document, bounds: RoleBounds) -> Result<Self, Error> {
-        let encoded = encoded_bytes(document)?;
-        metrics::exact(encoded);
-        let result = Self {
-            encoded,
-            live: capacity::replay_document_bytes(document)?,
-        };
+        let result = Self::charge(document)?;
         result.check(bounds)?;
         Ok(result)
+    }
+    pub fn charge(document: &Document) -> Result<Self, Error> {
+        let encoded = encoded_bytes(document)?;
+        metrics::exact(encoded);
+        Ok(Self {
+            encoded,
+            live: capacity::replay_document_bytes(document)?,
+        })
     }
     pub fn check(self, bounds: RoleBounds) -> Result<(), Error> {
         if self.encoded > bounds.document_bytes || self.live > bounds.document_live_bytes {

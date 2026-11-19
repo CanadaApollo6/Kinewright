@@ -8485,11 +8485,9 @@ pub(crate) mod in1_tests {
         in1_shutdown(&mut app);
     }
 
-    /// Pin today's import refusal and its presentation when IX preparation
-    /// accepts a timeline that exceeds HX's live document budget.
     #[test]
-    fn ix1_oversized_timeline_open_reports_the_current_history_refusal() {
-        use crate::ix1_tests::{click_text, hostile_locator, layout_text_position, write_edit};
+    fn ix1_oversized_timeline_is_refused_in_preview() {
+        use crate::ix1_tests::{hostile_locator, write_edit};
 
         let directory = TempDirectory::new("ix1-history-limit");
         let (mut app, _engine) =
@@ -8497,6 +8495,7 @@ pub(crate) mod in1_tests {
                 in1_harness(Document::default())
             });
         let existing_project = app.focused().id;
+        let next_project = app.next_project_id;
         let source = directory.path("edit.otio");
         write_edit(&source, &hostile_locator());
         let recovery = directory.path("import-recovery");
@@ -8513,46 +8512,69 @@ pub(crate) mod in1_tests {
             )),
             ..Default::default()
         };
-        let mut draw = |ui: &mut egui::Ui| app.show_interchange(ui.ctx());
-        loop {
-            let output = ctx.run_ui(input(), &mut draw);
-            let painted = crate::theme::painted_text(&output);
-            if painted
-                .iter()
-                .any(|text| text.contains("brought over with changes"))
-            {
-                break;
-            }
-            assert!(
-                Instant::now() < expiry,
-                "import preview did not open: {painted:?}"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let output = ctx.run_ui(input(), &mut draw);
-        let open = layout_text_position(&output, |text| text == "Open");
+        let reason = "This timeline is too large to open: 9 MiB, limit 8 MiB.";
         crate::recovery::with_ja_directory(recovery.clone(), || {
-            let _ = click_text(&ctx, open, egui::PointerButton::Primary, draw);
+            loop {
+                let output = ctx.run_ui(input(), |ui| app.show_interchange(ui.ctx()));
+                let painted = crate::theme::painted_text(&output);
+                if painted.iter().any(|text| text == reason) {
+                    assert!(!painted.iter().any(|text| text == "Open"));
+                    break;
+                }
+                assert!(
+                    Instant::now() < expiry,
+                    "import preview did not show the size refusal: {painted:?}"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
         });
 
-        assert!(app.interchange_dialog.is_none(), "the import modal closed");
+        assert!(app.interchange_dialog.is_some());
+        assert_eq!(app.next_project_id, next_project);
         assert_eq!(app.projects.len(), 1, "no imported session was published");
         assert_eq!(app.focused().id, existing_project);
         assert!(std::fs::read_dir(&recovery).unwrap().next().is_none());
-        let incident = in1b_route_one(&mut app);
-        assert_eq!(incident.code, IncidentCode::Label(LabelIncident::Project));
+        in1_shutdown(&mut app);
+    }
+
+    #[test]
+    fn ix1_oversized_timeline_session_creation_refuses_without_preparation() {
+        use crate::ix1_tests::{hostile_locator, write_edit};
+        use kinewright_interchange::{MediaTable, ir::ParseOptions, lower, otio};
+
+        let directory = TempDirectory::new("ix1-create-history-limit");
+        let source = directory.path("edit.otio");
+        write_edit(&source, &hostile_locator());
+        let timeline = otio::parse(
+            &std::fs::read(source).unwrap(),
+            "edit.otio",
+            ParseOptions::default(),
+        )
+        .unwrap();
+        let (document, _) = lower(&timeline, &MediaTable::default()).unwrap();
+        let (mut app, _engine) =
+            crate::recovery::with_ja_directory(directory.path("existing-recovery"), || {
+                in1_harness(Document::default())
+            });
+        let existing_project = app.focused().id;
+        let recovery = directory.path("import-recovery");
+        std::fs::create_dir(&recovery).unwrap();
+        let result = crate::recovery::with_ja_directory(recovery.clone(), || {
+            app.create_project_session(
+                "Edit".into(),
+                document,
+                kinewright_project::bundle::BundleWriteAdmission::new_document(),
+                None,
+                &SidecarMode::None,
+            )
+        });
         assert_eq!(
-            incident.observed,
-            "Could not open timeline: Capacity(\"creation sizing\")"
+            result.err().as_deref(),
+            Some("Capacity(\"creation sizing\")")
         );
-        assert_eq!(
-            app.status,
-            "The project could not be opened, created, read, or restored."
-        );
-        assert!(app.error_log_open);
-        let _ = ctx.run_ui(input(), |ui| app.show_error_log(ui.ctx()));
-        let output = ctx.run_ui(input(), |ui| app.show_error_log(ui.ctx()));
-        assert!(crate::theme::painted_text(&output).contains(&app.status));
+        assert_eq!(app.focused().id, existing_project);
+        assert_eq!(app.projects.len(), 1);
+        assert!(std::fs::read_dir(&recovery).unwrap().next().is_none());
         in1_shutdown(&mut app);
     }
 

@@ -361,6 +361,7 @@ impl ProjectSession {
         #[cfg(test)] data_dir: &Path,
     ) -> Result<Self, String> {
         let name = name.into();
+        let document = Arc::new(document);
         let core = Core::spawn(
             pool,
             kinewright_project::operation_history::Role::Ordinary,
@@ -370,7 +371,7 @@ impl ProjectSession {
                 batch: kinewright_project::bundle_records::BatchId::fresh()
                     .map_err(|e| e.to_string())?,
             },
-            document.clone(),
+            Arc::clone(&document),
         )
         .map_err(|error| error.to_string())?;
         let core_events = core.subscribe().map_err(|error| error.to_string())?;
@@ -412,7 +413,6 @@ impl ProjectSession {
             );
             studio
         };
-        let document = Arc::new(document);
         let writer_identity = recovery
             .writer()
             .map(|writer| writer.resolved_identity().to_path_buf());

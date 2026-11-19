@@ -318,6 +318,18 @@ pub fn document_capacity_bytes(document: &Document) -> Result<u64, Error> {
     capacity::document_bytes(document)
 }
 
+/// Measure the encoded bytes and replay-safe live bytes charged at history creation.
+///
+/// # Errors
+/// Returns an error if the document cannot be encoded or its size overflows.
+pub fn initial_document_charge(document: &Document) -> Result<Charge, Error> {
+    let bound = DocumentBound::charge(document)?;
+    Ok(Charge {
+        encoded: bound.encoded,
+        decoded: bound.live,
+    })
+}
+
 impl<E> From<Error> for PreparedError<E> {
     fn from(error: Error) -> Self {
         Self::History(error)

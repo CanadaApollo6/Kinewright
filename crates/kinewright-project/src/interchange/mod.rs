@@ -18,6 +18,7 @@ use std::{
     time::Duration,
 };
 
+use kinewright_core::undo::{RoleBounds, initial_document_charge};
 use kinewright_core::{Analysis, Document, ImportRecord, LossCode, MediaAsset, Rational};
 use kinewright_interchange::{
     MAX_INPUT_BYTES, fcpxml,
@@ -339,6 +340,9 @@ fn prepare_with(
     if options.control.is_cancelled() {
         return Err(cancelled());
     }
+    if matches!(mode, Preparation::Probe { .. }) {
+        check_open_size(&lowered.document)?;
+    }
     if timeline.name.is_empty() {
         timeline.name = path
             .file_stem()
@@ -356,6 +360,33 @@ fn prepare_with(
         },
         lowered.sites,
     ))
+}
+
+fn check_open_size(document: &Document) -> Result<(), Refusal> {
+    const MIB: u64 = 1 << 20;
+    let bounds = RoleBounds::ORDINARY;
+    let charge = initial_document_charge(document).map_err(|error| {
+        Refusal::new(
+            RefusalCode::LoweringFailed,
+            format!("The timeline size could not be measured: {error}."),
+        )
+    })?;
+    for (size, limit) in [
+        (charge.decoded, bounds.document_live_bytes),
+        (charge.encoded, bounds.document_bytes),
+    ] {
+        if size > limit {
+            return Err(Refusal::new(
+                RefusalCode::TooLarge,
+                format!(
+                    "This timeline is too large to open: {} MiB, limit {} MiB.",
+                    size.div_ceil(MIB),
+                    limit / MIB,
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Classify a relink candidate before a capability passes it to the media backend.

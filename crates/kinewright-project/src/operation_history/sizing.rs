@@ -3,7 +3,7 @@ use super::{Envelope, Error, Role};
 use kinewright_core::undo::{Charge, RoleBounds};
 use serde::{Deserialize, Serialize};
 
-pub const PRODUCT_DOCUMENT_BYTES: u64 = 8 << 20;
+pub const PRODUCT_DOCUMENT_BYTES: u64 = RoleBounds::ORDINARY.document_live_bytes;
 pub const WORKSPACE_BYTES: u64 = 168 << 20;
 const DOCUMENT_FLOOR: u64 = 512 << 10;
 // Small baselines still need room for the fixed 2,000-removal fixture. The
