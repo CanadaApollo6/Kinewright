@@ -1,5 +1,4 @@
-// The WDK documents a DWORD for class 46 with Se/ZwQueryInformationToken.
-// Win32 does not specify its layout and reserves TokenSecurityAttributes.
+// Win32 reserves TokenSecurityAttributes.
 // Keep both the native shape and its marker outside the required inspection.
 use super::{Handle, token_buffer};
 use std::{mem::size_of, ptr};
@@ -7,10 +6,7 @@ use windows_sys::{
     Wdk::Storage::FileSystem::NtQueryInformationToken,
     Win32::{
         Foundation::{ERROR_INSUFFICIENT_BUFFER, RtlNtStatusToDosError, UNICODE_STRING},
-        Security::{
-            GetTokenInformation, TOKEN_INFORMATION_CLASS, TokenIsLessPrivilegedAppContainer,
-            TokenSecurityAttributes,
-        },
+        Security::TokenSecurityAttributes,
     },
 };
 
@@ -32,70 +28,18 @@ struct Attribute {
     values: *const u64,
 }
 
-pub(super) fn diagnose(token: &Handle) -> [String; 6] {
-    let class = TokenIsLessPrivilegedAppContainer;
-    [
-        win32_probe(token, class, 0),
-        win32_probe(token, class, 1),
-        win32_probe(token, class, 4),
-        {
-            let mut value = 0u32;
-            let mut length = 0;
-            // SAFETY: the DWORD and length are allocated, and token is live.
-            let status = unsafe {
-                NtQueryInformationToken(token.0, class, (&raw mut value).cast(), 4, &raw mut length)
-            };
-            format!(
-                "NtQueryInformationToken TokenIsLessPrivilegedAppContainer DWORD {} returned={length} {}",
-                native_status(status),
-                scalar(status >= 0 && length <= 4, length, value)
-            )
-        },
-        {
-            let name = "GetTokenInformation TokenSecurityAttributes";
-            match token_buffer(
-                token,
-                TokenSecurityAttributes,
-                "TokenSecurityAttributes",
-                size_of::<Attributes>(),
-            ) {
-                Ok(buffer) => format!("{name} Win32 0 {}", marker(&buffer)),
-                Err(error) => format!("{name}: {error}"),
-            }
-        },
-        native_attributes(token),
-    ]
-}
-
-fn scalar(ok: bool, length: u32, value: u32) -> String {
-    if ok && matches!(length, 1 | 4) {
-        format!("value={value}")
-    } else {
-        "value=unconfirmed".into()
-    }
-}
-
-fn win32_probe(token: &Handle, class: TOKEN_INFORMATION_CLASS, bytes: u32) -> String {
-    let mut value = 0u32;
-    let mut length = 0;
-    let output = if bytes == 0 {
-        ptr::null_mut()
-    } else {
-        (&raw mut value).cast()
+pub(super) fn diagnose(token: &Handle) -> [String; 2] {
+    let name = "GetTokenInformation TokenSecurityAttributes";
+    let win32 = match token_buffer(
+        token,
+        TokenSecurityAttributes,
+        "TokenSecurityAttributes",
+        size_of::<Attributes>(),
+    ) {
+        Ok(buffer) => format!("{name} Win32 0 {}", marker(&buffer)),
+        Err(error) => format!("{name}: {error}"),
     };
-    // SAFETY: token is live; output is either null for the size query or points to bytes of storage.
-    let ok = unsafe { GetTokenInformation(token.0, class, output, bytes, &raw mut length) } != 0;
-    let code = if ok {
-        0
-    } else {
-        std::io::Error::last_os_error()
-            .raw_os_error()
-            .unwrap_or_default()
-    };
-    format!(
-        "GetTokenInformation TokenIsLessPrivilegedAppContainer buffer={bytes} Win32 {code} returned={length} {}",
-        scalar(ok && length <= bytes, length, value)
-    )
+    [win32, native_attributes(token)]
 }
 
 fn native_status(status: i32) -> String {
