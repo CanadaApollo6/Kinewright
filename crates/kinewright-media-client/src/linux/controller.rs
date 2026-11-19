@@ -76,8 +76,10 @@ impl Controller {
         socket
             .set_write_timeout(Some(Duration::from_secs(2)))
             .map_err(error(Reason::SupervisorSocket))?;
-        let child = media_host::spawn_supervisor(path, generation, &inherited)
-            .map_err(error(Reason::SupervisorSpawn))?;
+        let child =
+            media_host::spawn_supervisor(path, generation, &inherited).map_err(|error| {
+                super::spawn_refusal(&error, Phase::Supervisor, Reason::SupervisorSpawn)
+            })?;
         drop(inherited);
         let mut guard = Guard { child, socket };
         let pin =

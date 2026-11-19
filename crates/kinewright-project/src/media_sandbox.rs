@@ -177,26 +177,62 @@ mod linux {
     #[cfg(test)]
     #[test]
     fn ms2_refusal_kind_and_message_include_the_bootstrap_cause() {
-        let unsupported = sandbox_error(
-            &Phase::Forked
-                .unavailable(UnavailableReason::UserNamespacesUnavailable)
-                .into(),
-        );
-        assert!(matches!(unsupported, BundleError::Unsupported(_)));
-        assert_eq!(
-            unsupported.to_string(),
-            "unsupported_bundle: media sandbox unavailable (helper Forked, UserNamespacesUnavailable)"
-        );
-        let retry = sandbox_error(
-            &Phase::Boundary
-                .unavailable(UnavailableReason::EarlyEof)
-                .into(),
-        );
-        assert!(matches!(retry, BundleError::Contention(_)));
-        assert_eq!(
-            retry.to_string(),
-            "contention: media sandbox unavailable (helper Boundary, EarlyEof). Try again."
-        );
+        use UnavailableReason::{
+            EarlyEof, ExecutableUnavailable, HelperSpawn, NamespacePolicyDenied, ScratchDirectory,
+            ScratchDirectoryDenied, SupervisorSpawn, UserNamespacesUnavailable,
+        };
+
+        for (phase, reason, detail) in [
+            (
+                Phase::Forked,
+                UserNamespacesUnavailable,
+                "helper Forked, UserNamespacesUnavailable",
+            ),
+            (
+                Phase::Forked,
+                NamespacePolicyDenied,
+                "helper Forked, NamespacePolicyDenied",
+            ),
+            (
+                Phase::Launch,
+                ExecutableUnavailable,
+                "launch, ExecutableUnavailable",
+            ),
+            (
+                Phase::Launch,
+                ScratchDirectoryDenied,
+                "launch, ScratchDirectoryDenied",
+            ),
+            (
+                Phase::Supervisor,
+                ExecutableUnavailable,
+                "supervisor startup, ExecutableUnavailable",
+            ),
+        ] {
+            let error = sandbox_error(&phase.unavailable(reason).into());
+            assert!(matches!(error, BundleError::Unsupported(_)), "{error:?}");
+            assert_eq!(
+                error.to_string(),
+                format!("unsupported_bundle: media sandbox unavailable ({detail})")
+            );
+        }
+        for (phase, reason, detail) in [
+            (Phase::Boundary, EarlyEof, "helper Boundary, EarlyEof"),
+            (Phase::Launch, HelperSpawn, "launch, HelperSpawn"),
+            (Phase::Launch, ScratchDirectory, "launch, ScratchDirectory"),
+            (
+                Phase::Supervisor,
+                SupervisorSpawn,
+                "supervisor startup, SupervisorSpawn",
+            ),
+        ] {
+            let error = sandbox_error(&phase.unavailable(reason).into());
+            assert!(matches!(error, BundleError::Contention(_)), "{error:?}");
+            assert_eq!(
+                error.to_string(),
+                format!("contention: media sandbox unavailable ({detail}). Try again.")
+            );
+        }
     }
 
     /// Domain values from boundary-checked metadata only.

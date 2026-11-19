@@ -8,6 +8,7 @@ use kinewright_media_ipc::{MediaSandboxError, ValidatedProbe};
 use std::{
     fmt,
     fs::File,
+    io,
     path::PathBuf,
     sync::{
         Arc,
@@ -193,9 +194,11 @@ pub enum UnavailableReason {
     SupervisorExited,
     SourceDescriptor,
     ScratchDirectory,
+    ScratchDirectoryDenied,
     HelperPipes,
     DuplicateSource,
     HelperSpawn,
+    ExecutableUnavailable,
     HelperPin,
     ProbeThread,
     ScopeCreateFailed,
@@ -203,6 +206,7 @@ pub enum UnavailableReason {
     ScopeVerifyFailed,
     ScopeVerifyTimedOut,
     UserNamespacesUnavailable,
+    NamespacePolicyDenied,
     EarlyEof,
     BootstrapRead,
     BoundaryObservation,
@@ -222,9 +226,24 @@ impl Unavailable {
                 | UnavailableReason::InvalidConfiguration
                 | UnavailableReason::Subreaper
                 | UnavailableReason::SpawnerPidfd
+                | UnavailableReason::ScratchDirectoryDenied
+                | UnavailableReason::ExecutableUnavailable
                 | UnavailableReason::UserNamespacesUnavailable
+                | UnavailableReason::NamespacePolicyDenied
         )
     }
+}
+
+fn spawn_refusal(error: &io::Error, phase: Phase, retryable: UnavailableReason) -> Unavailable {
+    use rustix::io::Errno;
+
+    let reason = match Errno::from_io_error(error) {
+        Some(Errno::NOENT | Errno::ACCESS | Errno::NOEXEC | Errno::NOTDIR | Errno::LOOP) => {
+            UnavailableReason::ExecutableUnavailable
+        }
+        _ => retryable,
+    };
+    phase.unavailable(reason)
 }
 
 impl fmt::Display for Unavailable {
@@ -459,6 +478,39 @@ impl Drop for CancelOnDrop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawn_refusal_separates_installation_from_resource_errors() {
+        use UnavailableReason::{ExecutableUnavailable, HelperSpawn, SupervisorSpawn};
+        use rustix::io::Errno;
+
+        for (phase, retryable) in [
+            (Phase::Launch, HelperSpawn),
+            (Phase::Supervisor, SupervisorSpawn),
+        ] {
+            for errno in [
+                Errno::NOENT,
+                Errno::ACCESS,
+                Errno::NOEXEC,
+                Errno::NOTDIR,
+                Errno::LOOP,
+            ] {
+                let refusal = spawn_refusal(&errno.into(), phase, retryable);
+                assert_eq!(
+                    refusal,
+                    phase.unavailable(ExecutableUnavailable),
+                    "{errno:?}"
+                );
+                assert!(refusal.is_unsupported());
+            }
+            for errno in [Errno::AGAIN, Errno::NOMEM, Errno::MFILE, Errno::NFILE] {
+                let refusal = spawn_refusal(&errno.into(), phase, retryable);
+                assert_eq!(refusal, phase.unavailable(retryable), "{errno:?}");
+                assert!(!refusal.is_unsupported());
+            }
+        }
+    }
+
     struct Input(File);
     impl Source for Input {
         fn file(&self) -> &File {

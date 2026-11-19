@@ -2,9 +2,9 @@
 //! Ruling 31's Ubuntu `AppArmor` gate. Ubuntu restricts unprivileged user
 //! namespaces unless an `AppArmor` profile grants `userns` to the installed
 //! helper (`packaging/linux/apparmor`). Without the profile the helper cannot
-//! build its boundary, and admission must report `UserNamespacesUnavailable` before any
-//! media byte is parsed; with it, admission succeeds. CI runs this test before
-//! and after installing the profile and names the expected outcome in
+//! build its boundary, and admission must report an unsupported namespace
+//! refusal before any media byte is parsed. With the profile, admission succeeds.
+//! CI runs this test before and after installing the profile and sets
 //! `KINEWRIGHT_MS2_USERNS_EXPECT` (`refused` or `admitted`). On a host without
 //! the restriction (stock Arch) the expectation is `admitted`.
 #[path = "../../kinewright-job-sys/test_support/deadline.rs"]
@@ -155,11 +155,12 @@ fn ms2_apparmor_userns_gate_refuses_without_the_profile_and_admits_with_it() {
     match expected {
         "refused" => assert!(
             matches!(
-                result,
-                Err(Failure::Unavailable(Unavailable {
+                &result,
+                Err(Failure::Unavailable(refusal @ Unavailable {
                     phase: Phase::Forked,
-                    reason: UnavailableReason::UserNamespacesUnavailable,
-                }))
+                    reason: UnavailableReason::UserNamespacesUnavailable
+                        | UnavailableReason::NamespacePolicyDenied,
+                })) if refusal.is_unsupported()
             ),
             "a missing profile must refuse before parsing: {result:?}"
         ),

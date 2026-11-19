@@ -137,23 +137,20 @@ fn run_inner(
     drop(release);
     #[cfg(feature = "slow-tests")]
     witness.silent();
-    match boundary::enter_namespaces(app_pid, spawner.as_ref()) {
-        Ok(()) => {}
-        Err(NamespaceError::UserNamespacesUnavailable(error)) => {
-            // This is the trusted shim's reply to the bootstrap release.
-            // No payload exists yet and no media bytes have been read.
-            let mut response = inherited(boundary::RESPONSE);
-            send(
-                &mut response,
-                1,
-                1,
-                Message::Failed {
-                    error: MediaSandboxError::SandboxUnavailable,
-                },
-            )?;
-            return Err(error);
-        }
-        Err(NamespaceError::Setup(error)) => return Err(error),
+    if let Err(error) = boundary::enter_namespaces(app_pid, spawner.as_ref()) {
+        let (error, reason) = match error {
+            NamespaceError::UserNamespacesUnavailable(error) => {
+                (error, MediaSandboxError::SandboxUnavailable)
+            }
+            NamespaceError::PolicyDenied(error) => {
+                (error, MediaSandboxError::NamespacePolicyDenied)
+            }
+            NamespaceError::Setup(error) => return Err(error),
+        };
+        // Only the trusted shim replies here, before forking the payload.
+        let mut response = inherited(boundary::RESPONSE);
+        send(&mut response, 1, 1, Message::Failed { error: reason })?;
+        return Err(error);
     }
     drop(spawner);
     let parent = boundary::pidfd(std::process::id(), false)?;

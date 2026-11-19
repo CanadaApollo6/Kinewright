@@ -10,6 +10,28 @@ use std::{
     time::Duration,
 };
 
+#[test]
+fn namespace_setup_separates_policy_denials_from_resource_failures() {
+    for errno in [libc::EPERM, libc::EACCES] {
+        assert!(
+            matches!(
+                namespace_setup_error(io::Error::from_raw_os_error(errno)),
+                NamespaceError::PolicyDenied(_)
+            ),
+            "errno {errno}"
+        );
+    }
+    for errno in [libc::ENOSPC, libc::ENOMEM, libc::EAGAIN, libc::EUSERS] {
+        assert!(
+            matches!(
+                namespace_setup_error(io::Error::from_raw_os_error(errno)),
+                NamespaceError::Setup(_)
+            ),
+            "errno {errno}"
+        );
+    }
+}
+
 // The syscall operands deliberately have no paths, listeners or real process IDs.
 // Full-stack canaries are separate from these isolated, native seccomp predicates.
 #[allow(clippy::too_many_lines, reason = "isolated syscall attack table")]

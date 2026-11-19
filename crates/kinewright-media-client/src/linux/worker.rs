@@ -182,8 +182,17 @@ impl Root {
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&root.0)
-            .map_err(|_| Phase::Launch.unavailable(Reason::ScratchDirectory))?;
+            .map_err(|error| Self::create_refusal(&error))?;
         Ok(root)
+    }
+
+    fn create_refusal(error: &io::Error) -> Unavailable {
+        let reason = if error.kind() == io::ErrorKind::PermissionDenied {
+            Reason::ScratchDirectoryDenied
+        } else {
+            Reason::ScratchDirectory
+        };
+        Phase::Launch.unavailable(reason)
     }
 }
 impl Drop for Root {
@@ -269,7 +278,7 @@ pub(super) fn start(launch: Launch<'_>) -> Result<Running, Unavailable> {
         ],
         launch.spawner,
     )
-    .map_err(launch_error(Reason::HelperSpawn))?;
+    .map_err(|error| super::spawn_refusal(&error, Phase::Launch, Reason::HelperSpawn))?;
     drop((command_read, response_write, lifetime_read, release_read));
     let (child, pin) = pin_child(child).map_err(launch_error(Reason::HelperPin))?;
     // Actor signalling and worker cleanup share the same pinned identity. Neither
@@ -796,6 +805,11 @@ impl Protocol<'_> {
             } => Err(Phase::Forked
                 .unavailable(Reason::UserNamespacesUnavailable)
                 .into()),
+            Message::Failed {
+                error: Error::NamespacePolicyDenied,
+            } => Err(Phase::Forked
+                .unavailable(Reason::NamespacePolicyDenied)
+                .into()),
             _ => Err(Failure::Sandbox(Error::ProtocolViolation)),
         }
     }
@@ -890,6 +904,63 @@ fn cgroup_memory(group: &Cgroup) -> io::Result<super::CgroupMemory> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scratch_directory_denial_is_unsupported() {
+        use rustix::io::Errno;
+
+        for errno in [Errno::PERM, Errno::ACCESS] {
+            let refusal = Root::create_refusal(&errno.into());
+            assert_eq!(
+                refusal,
+                Phase::Launch.unavailable(Reason::ScratchDirectoryDenied)
+            );
+            assert!(refusal.is_unsupported());
+        }
+        let refusal = Root::create_refusal(&Errno::NOSPC.into());
+        assert_eq!(refusal, Phase::Launch.unavailable(Reason::ScratchDirectory));
+        assert!(!refusal.is_unsupported());
+    }
+
+    #[test]
+    fn pre_fork_reply_carries_a_policy_denial() {
+        let (reader, writer) = helper_pipe().unwrap();
+        let mut response = File::from(reader);
+        write_frame(
+            &mut File::from(writer),
+            &Frame {
+                request: 1,
+                generation: 1,
+                message: Message::Failed {
+                    error: Error::NamespacePolicyDenied,
+                },
+            },
+        )
+        .unwrap();
+        let mut command = File::options().write(true).open("/dev/null").unwrap();
+        let shared = Shared::default();
+        let mut protocol = Protocol {
+            response: &mut response,
+            command: &mut command,
+            shared: &shared,
+            end: Instant::now() + INITIAL_DEADLINE,
+            generation: 2,
+            cancelled: false,
+            traffic: ProbeSession::new(1, 2, [None, None]),
+            tracer: Tracer(None, 0),
+        };
+        let failure = protocol.receive_forked().unwrap_err();
+        assert!(
+            matches!(
+                failure,
+                Failure::Unavailable(Unavailable {
+                    phase: Phase::Forked,
+                    reason: Reason::NamespacePolicyDenied,
+                })
+            ),
+            "{failure:?}"
+        );
+    }
 
     #[test]
     fn bootstrap_eof_preserves_the_phase_and_stays_retryable() {

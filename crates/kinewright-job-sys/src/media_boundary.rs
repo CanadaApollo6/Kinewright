@@ -95,7 +95,9 @@ pub fn new_session() -> io::Result<()> {
 pub enum NamespaceError {
     /// The kernel or its policy refused `CLONE_NEWUSER` outright.
     UserNamespacesUnavailable(io::Error),
-    /// Includes exhausted namespace quotas and failures after `CLONE_NEWUSER`.
+    /// Policy denied a bootstrap step outside the first `unshare`.
+    PolicyDenied(io::Error),
+    /// Other bootstrap failures, including exhausted namespace quotas.
     Setup(io::Error),
 }
 
@@ -105,8 +107,18 @@ impl From<io::Error> for NamespaceError {
     }
 }
 
+fn namespace_setup_error(error: io::Error) -> NamespaceError {
+    match error.raw_os_error() {
+        Some(libc::EPERM | libc::EACCES) => NamespaceError::PolicyDenied(error),
+        _ => NamespaceError::Setup(error),
+    }
+}
+
 pub fn enter_namespaces(app_pid: u32, spawner: Option<&OwnedFd>) -> Result<(), NamespaceError> {
-    if fs::read_dir("/proc/self/task")?.count() != 1 {
+    let tasks = fs::read_dir("/proc/self/task")
+        .and_then(|mut entries| entries.try_fold(0, |count, entry| entry.map(|_| count + 1)))
+        .map_err(namespace_setup_error)?;
+    if tasks != 1 {
         return Err(io::Error::other("threaded media bootstrap").into());
     }
     // SAFETY: getuid/getgid have no preconditions. Capture the caller before
@@ -121,12 +133,13 @@ pub fn enter_namespaces(app_pid: u32, spawner: Option<&OwnedFd>) -> Result<(), N
             _ => NamespaceError::Setup(error),
         }
     })?;
-    fs::write("/proc/self/setgroups", "deny")?;
-    fs::write("/proc/self/uid_map", format!("{uid} {uid} 1"))?;
-    fs::write("/proc/self/gid_map", format!("{gid} {gid} 1"))?;
-    arm_parent_death(app_pid, spawner)?;
+    fs::write("/proc/self/setgroups", "deny").map_err(namespace_setup_error)?;
+    fs::write("/proc/self/uid_map", format!("{uid} {uid} 1")).map_err(namespace_setup_error)?;
+    fs::write("/proc/self/gid_map", format!("{gid} {gid} 1")).map_err(namespace_setup_error)?;
+    arm_parent_death(app_pid, spawner).map_err(namespace_setup_error)?;
     // SAFETY: no shared descriptor table or threads exist; NEWPID applies to the next fork.
-    check(unsafe { libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWNET | libc::CLONE_NEWPID) })?;
+    check(unsafe { libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWNET | libc::CLONE_NEWPID) })
+        .map_err(namespace_setup_error)?;
     Ok(())
 }
 

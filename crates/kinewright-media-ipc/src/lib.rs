@@ -11,13 +11,14 @@ pub use validate::{ProbeSession, ValidatedProbe};
 pub const MAX_FRAME: usize = 65_536;
 pub const HEADER_BYTES: usize = 40;
 // Exact build protocol. Incompatible builds refuse rather than negotiate.
-const BUILD: [u8; 16] = *b"KW-MS2-PROBE-002";
+const BUILD: [u8; 16] = *b"KW-MS2-PROBE-003";
 const MAGIC: [u8; 4] = *b"KWMP";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum MediaSandboxError {
     SandboxUnavailable,
+    NamespacePolicyDenied,
     Crashed,
     TimedOut,
     ResourceLimit,
