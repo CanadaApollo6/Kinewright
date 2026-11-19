@@ -136,17 +136,21 @@ pub fn launch(
         args,
         Some((source, request, reply)),
         limits,
-        Mode::Lpac,
+        Mode::AppContainer {
+            lpac: true,
+            local: None,
+        },
         before_create,
     )?
     .verify_and_resume()
 }
 
 #[derive(Clone, Copy)]
-enum Mode {
-    Lpac,
-    #[cfg(feature = "lpac-diagnostics")]
-    Plain,
+enum Mode<'a> {
+    AppContainer {
+        lpac: bool,
+        local: Option<&'a Path>,
+    },
     #[cfg(feature = "lpac-diagnostics")]
     SecurityOnly,
     #[cfg(feature = "lpac-diagnostics")]
@@ -155,12 +159,12 @@ enum Mode {
     AddedEnvironment(u8),
 }
 
-impl Mode {
+impl Mode<'_> {
     fn opt_out(self) -> bool {
         match self {
-            Self::Lpac => true,
+            Self::AppContainer { lpac, .. } => lpac,
             #[cfg(feature = "lpac-diagnostics")]
-            Self::Plain | Self::SecurityOnly => false,
+            Self::SecurityOnly => false,
             #[cfg(feature = "lpac-diagnostics")]
             Self::ParentEnvironment | Self::AddedEnvironment(_) => true,
         }
@@ -172,9 +176,20 @@ impl Mode {
             Self::ParentEnvironment => Ok(None),
             #[cfg(feature = "lpac-diagnostics")]
             Self::AddedEnvironment(mask) => diagnostic::added_environment(mask).map(Some),
+            Self::AppContainer {
+                local: Some(local), ..
+            } => profile_environment(local).map(Some),
             _ => system_environment().map(Some),
         }
     }
+}
+
+fn profile_environment(local: &Path) -> io::Result<Vec<u16>> {
+    let mut entry = OsString::from("LOCALAPPDATA=");
+    entry.push(local);
+    let mut block = wide(&entry)?;
+    block.extend(system_environment()?);
+    Ok(block)
 }
 
 type Inputs<'a> = (&'a File, &'a PipeReader, &'a PipeWriter);
@@ -194,7 +209,7 @@ struct Suspended {
     pid: u32,
     sid: Sid,
     limits: Limits,
-    mode: Mode,
+    lpac: bool,
 }
 
 impl Drop for Suspended {
@@ -219,7 +234,7 @@ impl Suspended {
     fn verify_and_resume(self) -> io::Result<Child> {
         let process = self.process.as_ref().expect("suspended process");
         let (job, _) = self.job.as_ref().expect("Job for witnessed launch");
-        inspect_token(process, &self.sid, self.mode.opt_out()).require_verified()?;
+        inspect_token(process, &self.sid, self.lpac).require_verified()?;
         inspect_job(process, job, &self.limits)?;
         inspect_mitigations(process)?;
         self.resume()
@@ -247,7 +262,7 @@ fn begin(
     args: &[OsString],
     inherited: Option<Inputs<'_>>,
     limits: Limits,
-    mode: Mode,
+    mode: Mode<'_>,
     before_create: impl FnOnce(&OsStr, &OsStr, &OsStr),
 ) -> io::Result<Suspended> {
     let directory = program
@@ -341,7 +356,7 @@ fn begin(
         pid: info.dwProcessId,
         sid,
         limits,
-        mode,
+        lpac: mode.opt_out(),
     })
 }
 

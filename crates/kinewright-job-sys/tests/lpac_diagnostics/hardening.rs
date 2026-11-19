@@ -1,5 +1,12 @@
 use super::super::{Local, Sid, copy_wide, wide};
-use std::{ffi::OsStr, mem::size_of, path::Path, ptr};
+use std::{
+    ffi::OsStr,
+    io,
+    mem::size_of,
+    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    path::Path,
+    ptr,
+};
 use windows_sys::{
     Wdk::{Foundation::OBJECT_ATTRIBUTES, System::Registry::NtOpenKey},
     Win32::{
@@ -16,15 +23,21 @@ use windows_sys::{
                 SetEntriesInAclW, SetNamedSecurityInfoW, SetSecurityInfo, TRUSTEE_IS_SID,
             },
             CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
-            NO_INHERITANCE, OWNER_SECURITY_INFORMATION, PSID, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+            GetTokenInformation, NO_INHERITANCE, OWNER_SECURITY_INFORMATION,
+            PROTECTED_DACL_SECURITY_INFORMATION, PSID, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+            TOKEN_QUERY, TOKEN_USER, TokenUser,
         },
         Storage::FileSystem::{
-            DELETE, FILE_APPEND_DATA, FILE_DELETE_CHILD, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA,
-            FILE_WRITE_EA, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+            DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_DELETE_CHILD, FILE_GENERIC_EXECUTE,
+            FILE_GENERIC_READ, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, READ_CONTROL,
+            WRITE_DAC, WRITE_OWNER,
         },
-        System::Registry::{
-            HKEY, KEY_CREATE_LINK, KEY_CREATE_SUB_KEY, KEY_READ, KEY_SET_VALUE, REG_BINARY,
-            RegCloseKey, RegSetValueExW,
+        System::{
+            Registry::{
+                HKEY, KEY_CREATE_LINK, KEY_CREATE_SUB_KEY, KEY_READ, KEY_SET_VALUE, REG_BINARY,
+                RegCloseKey, RegSetValueExW,
+            },
+            Threading::{GetCurrentProcess, OpenProcessToken},
         },
     },
 };
@@ -171,14 +184,14 @@ impl Object<'_> {
         Ok((descriptor, dacl))
     }
 
-    fn set(&self, dacl: *mut ACL) -> Result<(), String> {
+    fn set(&self, dacl: *mut ACL, protection: u32) -> Result<(), String> {
         // SAFETY: the target is the owned profile object and the new DACL stays live.
         let code = unsafe {
             match self {
                 Self::File(name) => SetNamedSecurityInfoW(
                     name.as_ptr(),
                     SE_FILE_OBJECT,
-                    DACL_SECURITY_INFORMATION,
+                    DACL_SECURITY_INFORMATION | protection,
                     ptr::null_mut(),
                     ptr::null_mut(),
                     dacl,
@@ -187,7 +200,7 @@ impl Object<'_> {
                 Self::Registry(key) => SetSecurityInfo(
                     *key,
                     SE_REGISTRY_KEY,
-                    DACL_SECURITY_INFORMATION,
+                    DACL_SECURITY_INFORMATION | protection,
                     ptr::null_mut(),
                     ptr::null_mut(),
                     dacl,
@@ -249,6 +262,70 @@ fn entry(sid: PSID, mode: i32, rights: u32, inheritance: u32) -> EXPLICIT_ACCESS
     entry
 }
 
+pub(super) fn grant_package_read(directory: &Path, file: &Path) -> Result<(), String> {
+    let mut token = ptr::null_mut();
+    // SAFETY: GetCurrentProcess provides the live host pseudo-handle, token is writable.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
+        return Err(format!(
+            "OpenProcessToken (package-only host user): {}",
+            io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: a successful OpenProcessToken hands ownership of token to this scope.
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let mut user = [0usize; 32];
+    let mut size = 0;
+    // SAFETY: the live token and the aligned, fixed-capacity user SID buffer are valid.
+    if unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            user.as_mut_ptr().cast(),
+            size_of_val(&user)
+                .try_into()
+                .expect("host token user buffer size"),
+            &raw mut size,
+        )
+    } == 0
+    {
+        return Err(format!(
+            "GetTokenInformation (package-only host TokenUser): {}",
+            io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: the successful call populated TOKEN_USER and its SID in this buffer.
+    let user_sid = unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let all_packages = convert_sid("S-1-15-2-1")?;
+    for (path, access) in [
+        (directory, FILE_GENERIC_READ | FILE_GENERIC_EXECUTE),
+        (file, FILE_GENERIC_READ),
+    ] {
+        let name = wide(path.as_os_str());
+        let object = Object::File(&name);
+        let grants = [
+            entry(user_sid, GRANT_ACCESS, FILE_ALL_ACCESS, NO_INHERITANCE),
+            entry(all_packages.0, GRANT_ACCESS, access, NO_INHERITANCE),
+        ];
+        let mut updated = ptr::null_mut();
+        // SAFETY: both SIDs are live and updated is writable. Start with an empty ACL.
+        let code = unsafe { SetEntriesInAclW(2, grants.as_ptr(), ptr::null(), &raw mut updated) };
+        let _updated = Local(updated.cast());
+        status_result("SetEntriesInAclW (package-only canary)", code)?;
+        if updated.is_null() {
+            return Err(
+                "SetEntriesInAclW (package-only canary) Win32 0 returned a null DACL".into(),
+            );
+        }
+        object.set(updated, PROTECTED_DACL_SECURITY_INFORMATION)?;
+        let after = final_file_sddl(path)?;
+        eprintln!(
+            "SetNamedSecurityInfoW (package-only canary) Win32 0 [{}] {after}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 fn harden(
     object: &Object<'_>,
     label: &str,
@@ -287,7 +364,7 @@ fn harden(
     if new_dacl.is_null() {
         return Err("SetEntriesInAclW Win32 0 returned a null DACL".into());
     }
-    let result = object.set(new_dacl);
+    let result = object.set(new_dacl, 0);
     let after = object.read().and_then(|(descriptor, _)| sddl(&descriptor));
     match &after {
         Ok(after) => eprintln!("j SDDL after [{label}] {after}"),

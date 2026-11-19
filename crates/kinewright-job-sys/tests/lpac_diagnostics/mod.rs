@@ -1,18 +1,18 @@
-//! Temporary native experiment. Only an explicitly selected hosted witness creates a profile.
+//! Temporary hosted witnesses and diagnostics for the spike-only profile.
 
 use super::{
     Canary, Fixture, SPIKE_CONTAINER_NAME, Sid, fixture_limits, query_container_storage, unique,
     wide,
 };
 use kinewright_job_sys::media_lpac::diagnostic::{
-    CANDIDATE_ENVIRONMENT, Inspection, Variant, inspect,
+    CANDIDATE_ENVIRONMENT, Inspection, ProfileRegistryLocation, Variant, inspect,
 };
 use std::{
     collections::BTreeSet,
     env,
     ffi::{OsStr, OsString},
     fs::{self, File},
-    io::{self, Write},
+    io,
     os::windows::fs::MetadataExt,
     path::{Path, PathBuf},
     ptr,
@@ -28,17 +28,26 @@ use windows_sys::Win32::{
 
 mod hardening;
 
+pub(super) fn grant_package_read(directory: &Path, file: &Path) -> Result<(), String> {
+    hardening::grant_package_read(directory, file)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProfileEnvironment {
     Parent,
     Added(u8),
+    OwnedLocal,
 }
 
 impl ProfileEnvironment {
-    fn variant(self) -> Variant {
+    fn variant(self, fixture: &Fixture) -> Variant<'_> {
         match self {
             Self::Parent => Variant::ParentEnvironment,
             Self::Added(mask) => Variant::AddedEnvironment(mask),
+            Self::OwnedLocal => Variant::ProfileEnvironment {
+                local: &fixture.private_local,
+                lpac: true,
+            },
         }
     }
 
@@ -47,6 +56,7 @@ impl ProfileEnvironment {
             Self::Parent => "g".into(),
             Self::Added(0) => "f".into(),
             Self::Added(mask) => format!("h:{mask}"),
+            Self::OwnedLocal => "h:owned-local".into(),
         }
     }
 }
@@ -63,17 +73,15 @@ pub(super) enum Selection {
     NoProfile,
     Plain,
     ParentEnvironment,
+    PackageControl(ProfileEnvironment),
     Profile(ProfileEnvironment, ProfileMode),
 }
 
 impl Selection {
-    pub(super) fn from_env() -> Self {
-        let Ok(value) = env::var("KINEWRIGHT_LPAC_TEST_VARIANT") else {
-            return Self::NoProfile;
-        };
+    fn from_env(value: &str) -> Self {
         let (value, mode) = value
             .strip_prefix("j:")
-            .map_or((value.as_str(), ProfileMode::Full), |env| {
+            .map_or((value, ProfileMode::Full), |env| {
                 (env, ProfileMode::Hardened)
             });
         match value {
@@ -82,6 +90,7 @@ impl Selection {
             "d" => Self::ParentEnvironment,
             "f" => Self::Profile(ProfileEnvironment::Added(0), mode),
             "g" => Self::Profile(ProfileEnvironment::Parent, mode),
+            "h:owned-local" => Self::Profile(ProfileEnvironment::OwnedLocal, mode),
             value if value.starts_with("h:") => {
                 let mask = value[2..]
                     .parse::<u8>()
@@ -93,12 +102,13 @@ impl Selection {
         }
     }
 
-    pub(super) fn launch_variant(self) -> Variant {
+    pub(super) fn launch_variant(self, fixture: &Fixture) -> Variant<'_> {
         match self {
             Self::NoProfile => Variant::Lpac,
             Self::Plain => Variant::Plain,
             Self::ParentEnvironment => Variant::ParentEnvironment,
-            Self::Profile(environment, _) => environment.variant(),
+            Self::Profile(environment, _) => environment.variant(fixture),
+            Self::PackageControl(environment) => plain_variant(fixture, environment),
         }
     }
 
@@ -106,8 +116,40 @@ impl Selection {
         match self {
             Self::ParentEnvironment | Self::Profile(ProfileEnvironment::Parent, _) => true,
             Self::Profile(ProfileEnvironment::Added(mask), _) => mask != 0,
+            Self::Profile(ProfileEnvironment::OwnedLocal, _) => true,
             _ => false,
         }
+    }
+}
+
+fn plain_variant(fixture: &Fixture, environment: ProfileEnvironment) -> Variant<'_> {
+    Variant::ProfileEnvironment {
+        local: if environment == ProfileEnvironment::OwnedLocal {
+            &fixture.private_local
+        } else {
+            &fixture.real_local
+        },
+        lpac: false,
+    }
+}
+
+pub(super) fn witness_environment(fixture: &mut Fixture) -> ProfileEnvironment {
+    let original = fixture.variant;
+    fixture.variant = Selection::Profile(ProfileEnvironment::OwnedLocal, ProfileMode::Probe);
+    let trial = fixture.try_single("profile-environment", "", true);
+    fixture.variant = original;
+    let started = trial
+        .as_ref()
+        .is_ok_and(|report| report.api == "GetEnvironmentStringsW" && report.code == 0);
+    report_probe(
+        "h owned LOCALAPPDATA",
+        &fixture.private_local.display().to_string(),
+        trial,
+    );
+    if started {
+        ProfileEnvironment::OwnedLocal
+    } else {
+        ProfileEnvironment::Added(1)
     }
 }
 
@@ -223,6 +265,9 @@ fn hresult(status: i32) -> String {
 
 pub(super) fn run() {
     let mut fixture = Fixture::stage();
+    let lease = PROFILE_LEASE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let initial_cleanup = clear_stale_profile();
     if let Err(error) = &initial_cleanup {
         eprintln!("{error}; pre-experiment profile state unverified");
@@ -240,24 +285,12 @@ pub(super) fn run() {
             Variant::ParentEnvironment,
         ),
     ];
-    let [a, b, _c, d] = attempts.map(|(label, variant)| {
-        let outcome = inspect_variant(&fixture, variant);
-        print_variant(label, &outcome);
-        outcome.ok().map(|inspection| inspection.verified)
-    });
-
-    let (profile, cleanup) = profile_variants(&mut fixture);
-    let choices = [("a", a), ("d", d), ("b", b)];
-    let fallback = choices
-        .iter()
-        .find(|(_, result)| *result == Some(true))
-        .or_else(|| choices.iter().find(|(_, result)| result.is_some()))
-        .map_or("none", |(letter, _)| *letter);
-    let selected = profile.unwrap_or_else(|| fallback.into());
-    eprintln!("LPAC_TEST_VARIANT={selected}");
-    if let Some(path) = env::var_os("KINEWRIGHT_LPAC_SELECTION_FILE") {
-        fs::write(path, selected).expect("WriteFile (hosted LPAC selection)");
+    for (label, variant) in attempts {
+        print_variant(label, &inspect_variant(&fixture, variant));
     }
+
+    drop(lease);
+    let cleanup = profile_variants(&mut fixture);
     assert!(
         initial_cleanup.is_ok() && cleanup.is_ok(),
         "pre-cleanup={initial_cleanup:?} post-cleanup={cleanup:?}"
@@ -274,35 +307,75 @@ fn print_variant(label: &str, result: &Result<Inspection, String>) {
     );
 }
 
-fn inspect_variant(fixture: &Fixture, variant: Variant) -> Result<Inspection, String> {
+fn inspect_variant(fixture: &Fixture, variant: Variant<'_>) -> Result<Inspection, String> {
+    with_launch_inputs(fixture, |inputs, limits| {
+        let args = [
+            OsString::from("ready"),
+            fixture.image_dir().as_os_str().to_os_string(),
+        ];
+        inspect(&fixture.exe, &args, inputs, limits, variant)
+    })
+}
+
+fn with_launch_inputs<T>(
+    fixture: &Fixture,
+    call: impl FnOnce((&File, &io::PipeReader, &io::PipeWriter), super::Limits) -> io::Result<T>,
+) -> Result<T, String> {
     let source = File::open(&fixture.source)
         .map_err(|error| format!("CreateFileW (diagnostic source): {error}"))?;
     let (request, _write) =
         io::pipe().map_err(|error| format!("CreatePipe (diagnostic request): {error}"))?;
     let (_read, reply) =
         io::pipe().map_err(|error| format!("CreatePipe (diagnostic reply): {error}"))?;
-    let args = [
-        OsString::from("ready"),
-        fixture.image_dir().as_os_str().to_os_string(),
-    ];
-    inspect(
-        &fixture.exe,
-        &args,
-        (&source, &request, &reply),
-        fixture_limits()?,
-        variant,
-    )
-    .map_err(|error| error.to_string())
+    let _spawning = super::SPAWNING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    call((&source, &request, &reply), fixture_limits()?).map_err(|error| error.to_string())
 }
 
-fn profile_variants(fixture: &mut Fixture) -> (Option<String>, Result<(), String>) {
+fn profile_registry(
+    fixture: &Fixture,
+    environment: ProfileEnvironment,
+) -> Result<ProfileRegistryLocation, String> {
+    use kinewright_job_sys::media_lpac::diagnostic::{
+        profile_registry_by_sid, profile_registry_location,
+    };
+    let lookup = |variant| {
+        with_launch_inputs(fixture, |inputs, limits| {
+            profile_registry_location(&fixture.exe, inputs, limits, variant)
+        })
+    };
+    for (label, variant) in [
+        ("LPAC", environment.variant(fixture)),
+        ("ordinary AppContainer", plain_variant(fixture, environment)),
+    ] {
+        match lookup(variant) {
+            Ok(key) => {
+                eprintln!(
+                    "GetAppContainerRegistryLocation (host {label}) HRESULT 0; NtQueryKey Win32 0 path={}",
+                    key.name
+                );
+                return Ok(key);
+            }
+            Err(error) => eprintln!("profile registry lookup (host {label}): {error}"),
+        }
+    }
+    let key = profile_registry_by_sid(&fixture.sid.text()).map_err(|error| error.to_string())?;
+    eprintln!(
+        "RegOpenKeyExW (host SID lookup) Win32 0; NtQueryKey Win32 0 path={}",
+        key.name
+    );
+    Ok(key)
+}
+
+fn profile_variants(fixture: &mut Fixture) -> Result<(), String> {
     let mut profile = match Profile::create(&fixture.sid) {
         Ok(profile) => profile,
         Err(error) => {
             for letter in ["e", "f", "g", "h", "i", "j"] {
                 eprintln!("LPAC diagnostic {letter}: {error}");
             }
-            return (None, Ok(()));
+            return Ok(());
         }
     };
     let minimum = inspect_variant(fixture, Variant::Lpac);
@@ -319,8 +392,21 @@ fn profile_variants(fixture: &mut Fixture) -> (Option<String>, Result<(), String
         );
     }
     let subset = search_environment(fixture, minimum.is_ok());
-    let best = subset.or_else(|| inherited.is_ok().then_some(ProfileEnvironment::Parent));
-    let selected = compare_storage(fixture, best);
+    let owned = witness_environment(fixture);
+    let best = (owned == ProfileEnvironment::OwnedLocal)
+        .then_some(owned)
+        .or(subset)
+        .or_else(|| inherited.is_ok().then_some(ProfileEnvironment::Parent));
+    let observation = compare_storage(fixture, best);
+    if let Ok(value) = env::var("KINEWRIGHT_LPAC_TEST_VARIANT") {
+        let selection = Selection::from_env(&value);
+        if matches!(selection, Selection::Profile(..)) {
+            print_variant(
+                &format!("override {value}"),
+                &inspect_variant(fixture, selection.launch_variant(fixture)),
+            );
+        }
+    }
     let cleanup = profile.delete().or_else(|error| {
         eprintln!("{error}; retrying cleanup before the checks");
         profile.delete()
@@ -330,24 +416,24 @@ fn profile_variants(fixture: &mut Fixture) -> (Option<String>, Result<(), String
         Err(error) => eprintln!("{error}"),
     }
     describe_folder("post-delete", &fixture.sid.text());
-    for path in selected.folders {
+    for path in observation.folders {
         eprintln!(
             "post-delete folder {} {}",
             path.display(),
             folder_state(&path)
         );
     }
-    if let Some(name) = selected.registry {
+    if let Some(name) = observation.registry {
         eprintln!(
             "post-delete registry {name}: {}",
             hardening::registry_state(&name)
         );
     } else {
         eprintln!(
-            "post-delete registry storage unverified: child did not report an exact key name"
+            "post-delete registry storage unverified: host lookup did not confirm an exact key name"
         );
     }
-    (selected.selection, cleanup)
+    cleanup
 }
 
 fn search_environment(
@@ -370,7 +456,7 @@ fn search_environment(
                 continue;
             }
             let configuration = ProfileEnvironment::Added(mask);
-            let outcome = inspect_variant(fixture, configuration.variant());
+            let outcome = inspect_variant(fixture, configuration.variant(fixture));
             attempts += 1;
             match outcome {
                 Ok(inspection) => {
@@ -409,7 +495,6 @@ fn search_environment(
 struct ProfileObservation {
     folders: BTreeSet<PathBuf>,
     registry: Option<String>,
-    selection: Option<String>,
 }
 
 fn compare_storage(fixture: &mut Fixture, best: Option<ProfileEnvironment>) -> ProfileObservation {
@@ -423,12 +508,13 @@ fn compare_storage(fixture: &mut Fixture, best: Option<ProfileEnvironment>) -> P
         return observation;
     };
     fixture.variant = Selection::Profile(environment, ProfileMode::Probe);
-    eprintln!(
-        "LPAC diagnostic i: unhardened profile with {}",
-        environment.selection()
+    print_variant(
+        &format!("i unhardened profile with {}", environment.selection()),
+        &inspect_variant(fixture, environment.variant(fixture)),
     );
-    let (registry, holder) = hold_registry(fixture, "i");
-    observation.registry = registry;
+    let registry = profile_registry(fixture, environment);
+    observation.registry = registry.as_ref().ok().map(|key| key.name.clone());
+    probe_registry(fixture, "i");
     let seeds = seed_files(&observation.folders);
     let value = unique();
     let registry_value = observation
@@ -442,29 +528,22 @@ fn compare_storage(fixture: &mut Fixture, best: Option<ProfileEnvironment>) -> P
     let hardened = apply_hardening(
         fixture,
         &observation.folders,
-        observation.registry.as_deref(),
+        registry.as_ref().map(|key| key.name.as_str()),
     );
-    release_registry(holder);
-    let launch = inspect_variant(fixture, environment.variant());
+    let launch = inspect_variant(fixture, environment.variant(fixture));
     eprintln!(
-        "LPAC diagnostic j: profile ACL writes complete={}; {}",
-        hardened.complete,
+        "LPAC diagnostic j: profile ACL writes {}; {}",
+        hardened.status(),
         match &launch {
             Ok(result) => result.detail.as_str(),
             Err(error) => error,
         },
     );
-    let use_hardened = launch.is_ok() && hardened.complete;
     if launch.is_ok() {
         probe_registry(fixture, "j");
         probe_storage(fixture, "j", &observation.folders, &seeds, registry_value);
         probe_restoration(fixture, hardened);
     }
-    observation.selection = Some(if use_hardened {
-        format!("j:{}", environment.selection())
-    } else {
-        environment.selection()
-    });
     observation
 }
 
@@ -546,51 +625,12 @@ fn report_probe(stage: &str, target: &str, result: Result<super::Report, String>
     }
 }
 
-fn probe_registry(fixture: &Fixture, stage: &str) -> Option<String> {
-    registry_report(
+fn probe_registry(fixture: &Fixture, stage: &str) {
+    report_probe(
         stage,
+        "profile registry create subkey",
         fixture.try_single("profile-registry", unique(), true),
-    )
-}
-
-fn hold_registry(fixture: &Fixture, stage: &str) -> (Option<String>, Option<super::Running>) {
-    match fixture.try_start("profile-registry-hold", unique(), true) {
-        Ok(mut child) => (registry_report(stage, child.try_reply()), Some(child)),
-        Err(error) => (registry_report(stage, Err(error)), None),
-    }
-}
-
-fn release_registry(holder: Option<super::Running>) {
-    if let Some(mut child) = holder {
-        if let Err(error) = child.request.write_all(b"!") {
-            eprintln!("WriteFile (release profile registry observer): {error}");
-            return;
-        }
-        match child.try_finish() {
-            Ok(code) => {
-                eprintln!("GetExitCodeProcess (profile registry observer) exit {code:#010x}");
-            }
-            Err(error) => eprintln!("{error}"),
-        }
-    }
-}
-
-fn registry_report(stage: &str, result: Result<super::Report, String>) -> Option<String> {
-    match result {
-        Ok(report) => {
-            eprintln!(
-                "{stage} profile registry: {} code {} ({:#010x}); location={:?}",
-                report.api, report.code, report.code, report.detail
-            );
-            report
-                .detail
-                .filter(|name| name.to_ascii_uppercase().starts_with(r"\REGISTRY\"))
-        }
-        Err(error) => {
-            eprintln!("{stage} GetAppContainerRegistryLocation: {error}");
-            None
-        }
-    }
+    );
 }
 
 fn seed_files(folders: &BTreeSet<PathBuf>) -> Vec<Canary> {
@@ -675,29 +715,42 @@ fn probe_storage(
 
 #[derive(Default)]
 struct ProfileHardening {
-    complete: bool,
+    first_failure: Option<String>,
     files: Vec<(PathBuf, String)>,
     registry: Option<String>,
+}
+
+impl ProfileHardening {
+    fn fail(&mut self, error: String) {
+        eprintln!("j profile hardening: {error}");
+        self.first_failure.get_or_insert(error);
+    }
+
+    fn status(&self) -> String {
+        self.first_failure.as_ref().map_or_else(
+            || "complete=true".into(),
+            |error| format!("complete=false step=[{error}]"),
+        )
+    }
 }
 
 fn apply_hardening(
     fixture: &Fixture,
     folders: &BTreeSet<PathBuf>,
-    registry: Option<&str>,
+    registry: Result<&str, &String>,
 ) -> ProfileHardening {
-    let mut result = ProfileHardening {
-        complete: !folders.is_empty(),
-        ..ProfileHardening::default()
-    };
+    let mut result = ProfileHardening::default();
+    if folders.is_empty() {
+        result.fail("GetAppContainerFolderPath did not identify a profile folder tree".into());
+    }
     // Children first preserves the original descriptors before parent inheritance changes.
     for path in folders.iter().rev() {
-        if folder_state(path) != "directory" {
-            eprintln!(
-                "j profile tree cannot harden {} ({})",
-                path.display(),
-                folder_state(path)
-            );
-            result.complete = false;
+        let state = folder_state(path);
+        if state != "directory" {
+            result.fail(format!(
+                "inspect profile directory {}: {state}",
+                path.display()
+            ));
             continue;
         }
         match fs::read_dir(path) {
@@ -708,47 +761,43 @@ fn apply_hardening(
                             record_file_acl(&mut result, &entry, false, &fixture.sid);
                         }
                         Ok((_, kind)) if kind.is_dir() => {}
-                        Ok((entry, _)) => {
-                            eprintln!(
-                                "j profile file hardening skipped unsupported entry {}",
-                                entry.display()
-                            );
-                            result.complete = false;
-                        }
+                        Ok((entry, _)) => result.fail(format!(
+                            "inspect unsupported profile entry {}",
+                            entry.display()
+                        )),
                         Err(error) => {
-                            eprintln!("j FindNextFileW {}: {error}", path.display());
-                            result.complete = false;
+                            result.fail(format!("FindNextFileW {}: {error}", path.display()))
                         }
                     }
                 }
             }
-            Err(error) => {
-                eprintln!("j FindFirstFileW {}: {error}", path.display());
-                result.complete = false;
-            }
+            Err(error) => result.fail(format!("FindFirstFileW {}: {error}", path.display())),
         }
         record_file_acl(&mut result, path, true, &fixture.sid);
     }
-    for (path, _) in &result.files {
-        match hardening::final_file_sddl(path) {
-            Ok(sddl) => eprintln!("j final SDDL after inheritance [{}] {sddl}", path.display()),
-            Err(error) => {
-                eprintln!("j final SDDL [{}] unavailable: {error}", path.display());
-                result.complete = false;
+    let failed_sd = result
+        .files
+        .iter()
+        .filter_map(|(path, _)| match hardening::final_file_sddl(path) {
+            Ok(sddl) => {
+                eprintln!("j final SDDL after inheritance [{}] {sddl}", path.display());
+                None
             }
-        }
+            Err(error) => Some(format!(
+                "final SDDL [{}] unavailable: {error}",
+                path.display()
+            )),
+        })
+        .collect::<Vec<_>>();
+    for error in failed_sd {
+        result.fail(error);
     }
-    if let Some(name) = registry {
-        match hardening::registry(name, &fixture.sid) {
+    match registry {
+        Ok(name) => match hardening::registry(name, &fixture.sid) {
             Ok(sddl) => result.registry = Some(sddl),
-            Err(error) => {
-                eprintln!("j profile registry {name}: {error}");
-                result.complete = false;
-            }
-        }
-    } else {
-        eprintln!("j profile registry hardening unavailable: child did not report its key name");
-        result.complete = false;
+            Err(error) => result.fail(format!("registry {name}: {error}")),
+        },
+        Err(error) => result.fail(error.clone()),
     }
     result
 }
@@ -756,10 +805,7 @@ fn apply_hardening(
 fn record_file_acl(result: &mut ProfileHardening, path: &Path, is_dir: bool, sid: &Sid) {
     match hardening::file(path, is_dir, sid) {
         Ok(sddl) => result.files.push((path.into(), sddl)),
-        Err(error) => {
-            eprintln!("j profile folder/file {}: {error}", path.display());
-            result.complete = false;
-        }
+        Err(error) => result.fail(format!("folder/file {}: {error}", path.display())),
     }
 }
 
@@ -787,16 +833,18 @@ pub(super) fn harden_witness(
     fixture: &mut Fixture,
     environment: ProfileEnvironment,
 ) -> Result<(), String> {
-    fixture.variant = Selection::Profile(environment, ProfileMode::Probe);
-    let (registry, holder) = hold_registry(fixture, "j fresh profile");
-    let applied = apply_hardening(fixture, &profile_folders(&fixture.sid), registry.as_deref());
-    release_registry(holder);
+    let registry = profile_registry(fixture, environment);
+    let applied = apply_hardening(
+        fixture,
+        &profile_folders(&fixture.sid),
+        registry.as_ref().map(|key| key.name.as_str()),
+    );
     fixture.variant = Selection::Profile(environment, ProfileMode::Hardened);
-    if applied.complete {
-        Ok(())
-    } else {
-        Err("j fresh profile hardening incomplete".into())
-    }
+    applied.first_failure.map_or(Ok(()), |error| {
+        Err(format!(
+            "j fresh profile hardening complete=false step=[{error}]"
+        ))
+    })
 }
 
 fn folder_state(path: &Path) -> String {

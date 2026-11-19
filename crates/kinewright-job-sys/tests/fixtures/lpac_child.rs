@@ -133,10 +133,7 @@ mod child {
         #[cfg(feature = "lpac-diagnostics")]
         match case.to_str() {
             Some("profile-registry") => return super::profile_registry::report(target, output),
-            Some("profile-registry-hold") => {
-                super::profile_registry::report(target, output)?;
-                return input.read_exact(&mut start);
-            }
+
             Some(
                 "profile-registry-grow" | "profile-registry-change" | "profile-registry-value",
             ) => {
@@ -154,6 +151,24 @@ mod child {
         }
         let (api, code) = match case.to_str() {
             Some("ready") => ready(target, source.is_some(), true),
+            #[cfg(feature = "lpac-diagnostics")]
+            Some("package-only-read") => match File::open(target) {
+                Ok(mut file) => {
+                    let mut bytes = Vec::new();
+                    match file.read_to_end(&mut bytes) {
+                        Ok(_) if bytes == b"packages-only" => ("ReadFile(package-only canary)", 0),
+                        Ok(_) => ("ReadFile(package-only canary bytes mismatch)", 0),
+                        Err(error) => (
+                            "ReadFile(package-only canary)",
+                            result_code::<()>(Err(error)),
+                        ),
+                    }
+                }
+                Err(error) => (
+                    "CreateFileW(package-only canary)",
+                    result_code::<()>(Err(error)),
+                ),
+            },
             #[cfg(feature = "lpac-diagnostics")]
             Some("ready-parent-environment") => ready(target, source.is_some(), false),
             Some("source") => {

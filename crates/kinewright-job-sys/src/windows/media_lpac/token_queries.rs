@@ -1,5 +1,6 @@
-// The SDK lists these classes without a public output layout. These probes are
-// diagnostic only. Keep the native shape here, outside the normal launcher.
+// The WDK documents a DWORD for class 46 with Se/ZwQueryInformationToken.
+// Win32 does not specify its layout and reserves TokenSecurityAttributes.
+// Keep both the native shape and its marker outside the required inspection.
 use super::{Handle, token_buffer};
 use std::{mem::size_of, ptr};
 use windows_sys::{
@@ -142,7 +143,9 @@ fn native_attributes(token: &Handle) -> String {
             &raw mut returned,
         )
     };
-    let result = if status >= 0 && (size_of::<Attributes>() as u32..=size).contains(&returned) {
+    let result = if status >= 0
+        && (size_of::<Attributes>()..=size as usize).contains(&(returned as usize))
+    {
         marker(&buffer)
     } else {
         "marker=unconfirmed".into()

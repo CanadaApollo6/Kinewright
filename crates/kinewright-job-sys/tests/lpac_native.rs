@@ -85,6 +85,41 @@ fn suspended_lpac_passes_inspection_and_runs_with_minimal_environment() {
     );
 }
 
+#[cfg(feature = "lpac-diagnostics")]
+#[test]
+fn only_ordinary_appcontainer_reads_the_all_application_packages_canary() {
+    use diagnostics::{Profile, ProfileMode, Selection, harden_witness, witness_environment};
+
+    let mut fixture = Fixture::stage();
+    fixture.profile = Some(Profile::create(&fixture.sid).unwrap_or_else(|error| panic!("{error}")));
+    let environment = witness_environment(&mut fixture);
+    let hardened = harden_witness(&mut fixture, environment);
+    let directory = fixture._root.0.join("all application packages control");
+    fs::create_dir(&directory).expect("CreateDirectoryW (ALL APPLICATION PACKAGES canary)");
+    let file = directory.join("read-only.txt");
+    fs::write(&file, b"packages-only").expect("WriteFile (ALL APPLICATION PACKAGES canary)");
+    diagnostics::grant_package_read(&directory, &file).unwrap_or_else(|error| panic!("{error}"));
+
+    fixture.variant = Selection::PackageControl(environment);
+    let ordinary = fixture.try_single("package-only-read", &file, true);
+    eprintln!("ordinary AppContainer package-only read: {ordinary:?}");
+    fixture.variant = Selection::Profile(environment, ProfileMode::Hardened);
+    let lpac = fixture.try_single("package-only-read", &file, true);
+    eprintln!("LPAC package-only read: {lpac:?}");
+
+    assert!(hardened.is_ok(), "{hardened:?}");
+    assert!(
+        ordinary
+            .as_ref()
+            .is_ok_and(|report| report.api == "ReadFile(package-only canary)" && report.code == 0)
+            && lpac
+                .as_ref()
+                .is_ok_and(|report| report.api == "CreateFileW(package-only canary)"
+                    && report.code == ERROR_ACCESS_DENIED),
+        "ordinary AppContainer package-only read: {ordinary:?}; LPAC package-only read: {lpac:?}"
+    );
+}
+
 #[test]
 fn inherited_source_is_readable_but_read_only_through_the_handle_list() {
     let fixture = Fixture::new();
@@ -139,6 +174,11 @@ fn existing_appcontainer_storage_refuses_create_growth_and_mutation() {
     }
 
     let mut checked = BTreeSet::new();
+    #[cfg(feature = "lpac-diagnostics")]
+    assert!(
+        candidates.iter().any(|path| path.is_dir()),
+        "GetAppContainerFolderPath did not identify real profile storage"
+    );
     for path in candidates {
         check_storage_tree(&fixture, &path, &mut checked);
     }
@@ -259,12 +299,14 @@ fn a_job_memory_event_ends_a_child_that_exceeds_the_commit_cap() {
     let fixture = Fixture::new();
     let bytes = (MEMORY_BYTES * 2).to_string();
     let mut open = fixture.start("memory", &bytes, false);
-    open.reply()
-        .expect(&["VirtualAlloc"], &[0], "unconfined child commits 128 MiB");
+    let control = open.reply();
+    eprintln!("unconfined memory control: {control:?}");
+    control.expect(&["VirtualAlloc"], &[0], "unconfined child commits 128 MiB");
     open.release();
     assert_eq!(open.finish(), 0, "unconfined memory control exit");
     let mut confined = fixture.start("memory", &bytes, true);
     let outcome = confined.reply();
+    eprintln!("LPAC memory limit: {outcome:?}");
     outcome.expect(
         &["VirtualAlloc"],
         &[
@@ -317,6 +359,10 @@ struct Fixture {
     variant: diagnostics::Selection,
     #[cfg(feature = "lpac-diagnostics")]
     profile: Option<diagnostics::Profile>,
+    #[cfg(feature = "lpac-diagnostics")]
+    private_local: PathBuf,
+    #[cfg(feature = "lpac-diagnostics")]
+    real_local: PathBuf,
     exe: PathBuf,
     image_bytes: u64,
     source: PathBuf,
@@ -329,17 +375,13 @@ impl Fixture {
         #[cfg(feature = "lpac-diagnostics")]
         {
             let mut fixture = Self::stage();
-            fixture.variant = diagnostics::Selection::from_env();
-            if let diagnostics::Selection::Profile(environment, mode) = fixture.variant {
-                fixture.profile = Some(
-                    diagnostics::Profile::create(&fixture.sid)
-                        .unwrap_or_else(|error| panic!("{error}")),
-                );
-                if mode == diagnostics::ProfileMode::Hardened {
-                    diagnostics::harden_witness(&mut fixture, environment)
-                        .unwrap_or_else(|error| panic!("{error}"));
-                }
-            }
+            fixture.profile = Some(
+                diagnostics::Profile::create(&fixture.sid)
+                    .unwrap_or_else(|error| panic!("{error}")),
+            );
+            let environment = diagnostics::witness_environment(&mut fixture);
+            diagnostics::harden_witness(&mut fixture, environment)
+                .unwrap_or_else(|error| panic!("{error}"));
             fixture
         }
         #[cfg(not(feature = "lpac-diagnostics"))]
@@ -358,11 +400,21 @@ impl Fixture {
         let image_bytes = copy_image(Path::new(input), &exe);
         let source = root.0.join("source");
         fs::write(&source, SOURCE).expect("CreateFileW/WriteFile (fixture source)");
+        #[cfg(feature = "lpac-diagnostics")]
+        let private_local = root.0.join("empty LocalAppData");
+        #[cfg(feature = "lpac-diagnostics")]
+        {
+            fs::create_dir(&private_local).expect("CreateDirectoryW (empty LOCALAPPDATA input)");
+        }
         Self {
             #[cfg(feature = "lpac-diagnostics")]
             variant: diagnostics::Selection::NoProfile,
             #[cfg(feature = "lpac-diagnostics")]
             profile: None,
+            #[cfg(feature = "lpac-diagnostics")]
+            private_local,
+            #[cfg(feature = "lpac-diagnostics")]
+            real_local: env_path("LOCALAPPDATA"),
             exe,
             image_bytes,
             source,
@@ -444,16 +496,17 @@ impl Fixture {
                     self.inspect_launch(case, application, command_line, cwd);
                 };
                 #[cfg(feature = "lpac-diagnostics")]
-                let launched = if matches!(
-                    self.variant,
-                    diagnostics::Selection::Profile(_, diagnostics::ProfileMode::Probe)
-                ) {
+                let launched = if case == "package-only-read"
+                    || matches!(
+                        self.variant,
+                        diagnostics::Selection::Profile(_, diagnostics::ProfileMode::Probe)
+                    ) {
                     media_lpac::diagnostic::launch_profile_canary(
                         &self.exe,
                         &args,
                         (&source, &child_request, &child_reply),
                         limits,
-                        self.variant.launch_variant(),
+                        self.variant.launch_variant(self),
                     )
                 } else {
                     media_lpac::diagnostic::launch(
@@ -461,7 +514,7 @@ impl Fixture {
                         &args,
                         (&source, &child_request, &child_reply),
                         limits,
-                        self.variant.launch_variant(),
+                        self.variant.launch_variant(self),
                         observer,
                     )
                 };
@@ -568,19 +621,26 @@ impl Fixture {
     }
 
     fn refused(&self, case: &str, target: impl AsRef<OsStr>, apis: &[&str], codes: &[u32]) {
-        self.single(case, target.as_ref(), false)
+        let control = self.try_single(case, target.as_ref(), false);
+        let confined = self.try_single(case, target, true);
+        eprintln!("{case} unconfined control: {control:?}");
+        eprintln!("{case} LPAC confinement: {confined:?}");
+        control
+            .unwrap_or_else(|error| panic!("{error}"))
             .expect(apis, &[0], "unconfined control");
-        self.single(case, target, true)
+        confined
+            .unwrap_or_else(|error| panic!("{error}"))
             .expect(apis, codes, "LPAC refusal");
     }
 
     fn refuse_writes(&self, parent: &Path) {
         let create = Canary::new(parent);
-        self.single("create", &create.0, false).expect(
-            &["WriteFile(canary)"],
-            &[0],
-            "unconfined create",
+        let control = self.single("create", &create.0, false);
+        eprintln!(
+            "create unconfined control [{}]: {control:?}",
+            create.0.display()
         );
+        control.expect(&["WriteFile(canary)"], &[0], "unconfined create");
         assert_eq!(fs::read(&create.0).unwrap(), b"canary");
         fs::remove_file(&create.0).expect("remove unconfined create canary");
         self.file_refusal("create", &create.0);
@@ -592,11 +652,12 @@ impl Fixture {
             ("mutate", b"canaryne".as_slice()),
         ] {
             fs::write(&existing.0, b"baseline").expect("seed write canary");
-            self.single(case, &existing.0, false).expect(
-                &["WriteFile(canary)"],
-                &[0],
-                "unconfined write",
+            let control = self.single(case, &existing.0, false);
+            eprintln!(
+                "{case} unconfined control [{}]: {control:?}",
+                existing.0.display()
             );
+            control.expect(&["WriteFile(canary)"], &[0], "unconfined write");
             assert_eq!(fs::read(&existing.0).unwrap(), expected);
             fs::write(&existing.0, b"baseline").expect("reset write canary");
             self.file_refusal(case, &existing.0);
@@ -608,6 +669,7 @@ impl Fixture {
         let report = self
             .storage_probe(case, target)
             .unwrap_or_else(|error| panic!("{error}"));
+        eprintln!("{case} LPAC refusal [{}]: {report:?}", target.display());
         report.expect(
             &["CreateFileW(canary)", "WriteFile(canary)"],
             FILE_DENIALS,
