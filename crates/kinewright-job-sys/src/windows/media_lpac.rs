@@ -839,7 +839,10 @@ impl Child {
             }
         }
         // SAFETY: the verified child is contained by this live Job.
-        let job = self.job.as_ref().expect("child Job");
+        let job = self
+            .job
+            .as_ref()
+            .ok_or_else(|| io::Error::other("missing child Job"))?;
         check_step("TerminateJobObject (observed memory limit)", unsafe {
             TerminateJobObject(job.0, ERROR_NOT_ENOUGH_MEMORY)
         })?;
@@ -863,7 +866,10 @@ impl Child {
     /// # Errors
     /// Returns a native wait or exit-status failure, including timeout.
     pub fn close_job(mut self, timeout: Duration) -> io::Result<u32> {
-        let job = self.job.take().expect("child Job");
+        let job = self
+            .job
+            .take()
+            .ok_or_else(|| io::Error::other("missing child Job"))?;
         // SAFETY: the child owns the sole Job handle and closes it once here.
         check_step("CloseHandle (sole LPAC Job)", unsafe { CloseHandle(job.0) })?;
         std::mem::forget(job);
