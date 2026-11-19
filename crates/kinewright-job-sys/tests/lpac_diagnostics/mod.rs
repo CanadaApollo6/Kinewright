@@ -568,7 +568,7 @@ fn release_registry(holder: Option<super::Running>) {
         }
         match child.try_finish() {
             Ok(code) => {
-                eprintln!("GetExitCodeProcess (profile registry observer) exit {code:#010x}")
+                eprintln!("GetExitCodeProcess (profile registry observer) exit {code:#010x}");
             }
             Err(error) => eprintln!("{error}"),
         }
