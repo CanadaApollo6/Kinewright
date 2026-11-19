@@ -21,4 +21,17 @@ jobs:
       - name: Run LPAC native witnesses
         env:
           RUSTUP_TOOLCHAIN: '1.99.1'
-        run: cargo test -p kinewright-job-sys --test lpac_native -- --nocapture --test-threads=1
+        run: |
+          $env:KINEWRIGHT_LPAC_SELECTION_FILE = Join-Path $PWD 'target/lpac-spike-selection.txt'
+          cargo test -p kinewright-job-sys --features lpac-diagnostics --test lpac_native -- diagnose_lpac_creation_variants --ignored --exact --nocapture --test-threads=1
+          $diagnosticExit = $LASTEXITCODE
+          if (Test-Path -LiteralPath $env:KINEWRIGHT_LPAC_SELECTION_FILE) {
+            $env:KINEWRIGHT_LPAC_TEST_VARIANT = (Get-Content -LiteralPath $env:KINEWRIGHT_LPAC_SELECTION_FILE -Raw).Trim()
+            Remove-Item -LiteralPath $env:KINEWRIGHT_LPAC_SELECTION_FILE
+          } else {
+            $env:KINEWRIGHT_LPAC_TEST_VARIANT = 'none'
+          }
+          if ($diagnosticExit -ne 0) { exit $diagnosticExit }
+          Write-Host "Full witness variant: $env:KINEWRIGHT_LPAC_TEST_VARIANT"
+          cargo test -p kinewright-job-sys --features lpac-diagnostics --test lpac_native -- --nocapture --test-threads=1
+          exit $LASTEXITCODE
