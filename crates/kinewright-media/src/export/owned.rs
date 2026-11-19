@@ -54,11 +54,9 @@ pub(crate) fn export_owned_document(
     document
         .validate()
         .map_err(|error| MediaError::InvalidDocument(Box::new(error)))?;
-    if let Some(input) = &inputs.unsupported_export_font {
-        return Err(MediaError::OwnedExportInputUnavailable {
-            input: input.clone(),
-        });
-    }
+    inputs.fonts.check_export(document)?;
+    refuse_path_effects(document)?;
+    let _no_locators = crate::locator::DenyLocatorOpens::enter();
     let staging = (target.reserve_staging)(target.staging_bytes).map_err(MediaError::Backend)?;
     let _working =
         (target.reserve_working)(working_bytes(document, settings, target.staging_bytes))
@@ -96,6 +94,17 @@ pub(crate) fn export_owned_document(
         report,
         _staging: staging,
     })
+}
+
+fn refuse_path_effects(document: &Document) -> Result<(), MediaError> {
+    for clip in document.tracks.iter().flat_map(|track| &track.clips) {
+        if let Some(effect) = clip.effects.iter().find(|effect| effect.name == "cube_lut") {
+            return Err(MediaError::OwnedExportInputUnavailable {
+                input: format!("clip {} effect {} (cube_lut)", clip.id, effect.id),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn working_bytes(document: &Document, settings: &ExportSettings, staging: u64) -> u64 {

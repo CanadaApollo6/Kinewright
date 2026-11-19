@@ -239,18 +239,22 @@ impl Fixture {
 
     fn inputs(&self) -> PlaybackInputs {
         let bytes = kinewright_core::title_font_bytes();
+        self.inputs_with_fonts(crate::owned_io::ManifestFonts::bind([(
+            "font:Inter",
+            crate::sha256_bytes(bytes).as_str(),
+            bytes.len() as u64,
+        )]))
+    }
+
+    fn inputs_with_fonts(&self, fonts: crate::owned_io::ManifestFonts) -> PlaybackInputs {
         PlaybackInputs::admit(
             Arc::clone(&self.document),
             self.sources.clone(),
             Arc::clone(&self.library),
             Arc::new(()),
+            fonts,
         )
         .unwrap()
-        .with_manifest_fonts([(
-            "font:Inter",
-            crate::sha256_bytes(bytes).as_str(),
-            bytes.len() as u64,
-        )])
     }
 
     fn settings(&self) -> ExportSettings {
@@ -595,11 +599,13 @@ fn s5_owned_export_refuses_an_unrenderable_manifest_font_and_enforces_stage_limi
     let gpu = fallback_gpu().context();
     let out = fixture.dir.path("stage.mp4");
     let (progress, _) = crossbeam_channel::bounded(0);
-    let inputs = Arc::new(fixture.inputs().with_manifest_fonts([(
-        "font:Example",
-        "custom-digest",
-        16,
-    )]));
+    let inputs = Arc::new(
+        fixture.inputs_with_fonts(crate::owned_io::ManifestFonts::bind([(
+            "font:Example",
+            "custom-digest",
+            16,
+        )])),
+    );
     let result = export_owned_document(&inputs, target(&out), &settings, &progress, gpu.clone());
     assert_eq!(
         result.err(),
@@ -660,5 +666,107 @@ fn s5_owned_export_refuses_an_unrenderable_manifest_font_and_enforces_stage_limi
     let collision = export_owned_document(&inputs, target(&out), &settings, &progress, gpu);
     assert!(collision.is_err());
     assert_eq!(fs::read(&out).unwrap(), b"keep me");
+    assert_stage_clean(&fixture.dir);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn s5_owned_export_refuses_legacy_lut_before_opening_stage() {
+    let fixture = Fixture::new();
+    let mut document = (*fixture.document).clone();
+    document.tracks[0].clips[0].effects = vec![Effect {
+        enabled: true,
+        enabled_curve: None,
+        id: EffectId(1),
+        name: "cube_lut".into(),
+        parameters: BTreeMap::from([(
+            "path".into(),
+            ParamValue::Text(fixture.lut_locator.to_str().unwrap().into()),
+        )]),
+        keyframes: BTreeMap::new(),
+    }];
+    document.validate().unwrap();
+    let inputs = Arc::new(fixture.inputs().with_document(Arc::new(document)).unwrap());
+    fs::write(&fixture.lut_locator, BLACK_LUT).unwrap();
+    let gpu = fallback_gpu().context();
+    let out = fixture.dir.path("stage.mp4");
+    let (progress, _events) = crossbeam_channel::unbounded();
+    let result = export_owned_document(
+        &inputs,
+        OwnedExportTarget {
+            reserve_staging: &|_| panic!("legacy LUT must be refused before staging"),
+            ..target(&out)
+        },
+        &fixture.settings(),
+        &progress,
+        gpu.clone(),
+    );
+    assert_eq!(
+        result.err(),
+        Some(MediaError::OwnedExportInputUnavailable {
+            input: "clip 1 effect 1 (cube_lut)".into(),
+        })
+    );
+    assert!(!out.exists());
+    assert_stage_clean(&fixture.dir);
+
+    // Exercise the compositor boundary separately from entry validation.
+    let effects = &inputs.document().tracks[0].clips[0].effects;
+    let compositor = crate::Compositor::new(gpu);
+    let deny = crate::locator::DenyLocatorOpens::enter();
+    assert!(matches!(
+        compositor.lut_binding(effects, None),
+        Err(MediaError::Backend(text)) if text.contains("locator opens are forbidden")
+    ));
+    drop(deny);
+    compositor.lut_binding(effects, None).unwrap();
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn s5_owned_export_refuses_missing_selected_video_and_missing_title_font() {
+    let mut fixture = Fixture::new();
+    let gpu = fallback_gpu().context();
+    let out = fixture.dir.path("stage.mp4");
+    let (progress, _events) = crossbeam_channel::unbounded();
+    let unbound = Arc::new(fixture.inputs_with_fonts(crate::owned_io::ManifestFonts::bind([])));
+    let result = export_owned_document(
+        &unbound,
+        target(&out),
+        &fixture.settings(),
+        &progress,
+        gpu.clone(),
+    );
+    assert_eq!(
+        result.err(),
+        Some(MediaError::OwnedExportInputUnavailable {
+            input: "font:Inter".into()
+        })
+    );
+    let video = fixture.sources.remove(&AssetId(1)).unwrap();
+    fixture.sources.insert(
+        AssetId(1),
+        video.with_selected_streams(None, Some(1)).unwrap(),
+    );
+    let result = export_owned_document(
+        &Arc::new(fixture.inputs()),
+        target(&out),
+        &fixture.settings(),
+        &progress,
+        gpu,
+    );
+    assert_eq!(
+        result.err(),
+        Some(MediaError::OwnedExportInputUnavailable {
+            input: "media:1".into()
+        })
+    );
+    assert!(!out.exists());
     assert_stage_clean(&fixture.dir);
 }

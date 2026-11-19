@@ -22,6 +22,56 @@ impl std::hash::Hash for PlaybackAuthority {
     }
 }
 
+/// Font identities of the owner's checked manifest. Titles have one immutable
+/// face, whose identity is derived from the bytes used by the title renderer.
+#[derive(Clone)]
+pub struct ManifestFonts {
+    embedded: bool,
+    unsupported: Option<String>,
+}
+
+impl ManifestFonts {
+    #[must_use]
+    pub fn bind<'a>(fonts: impl IntoIterator<Item = (&'a str, &'a str, u64)>) -> Self {
+        static TITLE_FONT_DIGEST: OnceLock<String> = OnceLock::new();
+        let bytes = kinewright_core::title_font_bytes();
+        let digest = TITLE_FONT_DIGEST.get_or_init(|| crate::sha256_bytes(bytes));
+        let mut binding = Self {
+            embedded: false,
+            unsupported: None,
+        };
+        for (id, hash, length) in fonts {
+            if id == "font:Inter" && hash == digest && length == bytes.len() as u64 {
+                binding.embedded = true;
+            } else {
+                binding.unsupported = Some(format!("{id} (sha256 {hash})"));
+                break;
+            }
+        }
+        binding
+    }
+
+    pub(crate) fn check_export(&self, document: &Document) -> Result<(), MediaError> {
+        if let Some(input) = &self.unsupported {
+            return Err(MediaError::OwnedExportInputUnavailable {
+                input: input.clone(),
+            });
+        }
+        if !self.embedded
+            && document
+                .tracks
+                .iter()
+                .flat_map(|track| &track.clips)
+                .any(|clip| clip.content.title().is_some())
+        {
+            return Err(MediaError::OwnedExportInputUnavailable {
+                input: "font:Inter".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
 pub struct PlaybackInputs {
     pub(crate) read_authority: Option<ReadAuthority>,
     pub(crate) authority: PlaybackAuthority,
@@ -29,7 +79,7 @@ pub struct PlaybackInputs {
     pub(crate) sources: BTreeMap<AssetId, CertifiedSource>,
     pub(crate) lut: Arc<LutLibrary>,
     pub(crate) lifetime: LifetimeGuard,
-    pub(crate) unsupported_export_font: Option<String>,
+    pub(crate) fonts: ManifestFonts,
 }
 impl PlaybackInputs {
     pub fn with_read_authority(mut self, authority: ReadAuthority) -> Result<Self, MediaError> {
@@ -73,12 +123,10 @@ impl PlaybackInputs {
             self.sources.clone(),
             Arc::clone(&self.lut),
             Arc::clone(&self.lifetime),
+            self.fonts.clone(),
         )?;
         inputs.authority = self.authority.clone();
         inputs.read_authority.clone_from(&self.read_authority);
-        inputs
-            .unsupported_export_font
-            .clone_from(&self.unsupported_export_font);
         Ok(inputs)
     }
     /// The project owner supplies manifest-bound sources and resource leases.
@@ -91,6 +139,7 @@ impl PlaybackInputs {
         sources: BTreeMap<AssetId, CertifiedSource>,
         lut: Arc<LutLibrary>,
         lifetime: LifetimeGuard,
+        fonts: ManifestFonts,
     ) -> Result<Self, MediaError> {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         for asset in &document.media_pool {
@@ -130,26 +179,9 @@ impl PlaybackInputs {
             sources,
             lut,
             lifetime,
-            unsupported_export_font: None,
+            fonts,
         })
     }
-    /// Record the font identities in the owner's checked input manifest.
-    /// The title renderer has one built-in face and consumes its immutable bytes.
-    #[must_use]
-    pub fn with_manifest_fonts<'a>(
-        mut self,
-        fonts: impl IntoIterator<Item = (&'a str, &'a str, u64)>,
-    ) -> Self {
-        static TITLE_FONT_DIGEST: OnceLock<String> = OnceLock::new();
-        let bytes = kinewright_core::title_font_bytes();
-        let digest = TITLE_FONT_DIGEST.get_or_init(|| crate::sha256_bytes(bytes));
-        self.unsupported_export_font = fonts.into_iter().find_map(|(id, hash, length)| {
-            (id != "font:Inter" || hash != digest.as_str() || length != bytes.len() as u64)
-                .then(|| format!("{id} (sha256 {hash})"))
-        });
-        self
-    }
-
     pub(crate) fn source(&self, id: AssetId) -> Result<CertifiedSource, MediaError> {
         self.check_read_authority()?;
         self.sources

@@ -86,7 +86,7 @@ impl ReadAuthority {
 #[path = "certified_playback.rs"]
 mod playback;
 pub(crate) use playback::PlaybackAuthority;
-pub use playback::PlaybackInputs;
+pub use playback::{ManifestFonts, PlaybackInputs};
 #[path = "owned_io_memo.rs"]
 mod memo;
 pub use memo::SourceAdmissionMemo;

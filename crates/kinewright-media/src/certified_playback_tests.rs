@@ -23,6 +23,7 @@ fn thumbnail_inputs(path: &Path, locator: &Path, source: CertifiedSource) -> Arc
             [(kinewright_core::AssetId(1), source)].into(),
             Arc::new(crate::LutLibrary::default()),
             Arc::new(()),
+            ManifestFonts::bind([]),
         )
         .unwrap(),
     )
@@ -99,6 +100,7 @@ fn dq_native_owned_dialogue_measures_without_a_locator_and_reuses_the_profile() 
             [(asset.id, source)].into(),
             Arc::new(crate::LutLibrary::default()),
             Arc::new(()),
+            ManifestFonts::bind([]),
         )
         .unwrap(),
     );
