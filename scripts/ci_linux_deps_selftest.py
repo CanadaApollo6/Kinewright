@@ -43,7 +43,9 @@ if command=='dpkg':
  left,op,right=args[1:];sys.exit(0 if (int(left)>int(right) if op=='gt' else int(left)>=int(right)) else 1)
 if command=='dpkg-deb':
  data=json.loads(Path(args[-1]).read_text());print(data['name'],data['version'],data.get('arch','amd64'));sys.exit(0)
-if command=='curl':sys.exit(7 if 'unreachable.invalid' in args[-1] else 0)
+if command=='curl':
+ sys.exit(7 if os.environ.get('TEST_MIRRORS_UNREACHABLE')=='1' or 'unreachable.invalid' in args[-1] else 0)
+if command=='sleep':sys.exit(0)
 if command=='apt-get':
  lists=Path(next((x.split('=',1)[1] for x in args if x.startswith('Dir::State::lists=')), root/'image-lists'))
  assert lists.resolve().is_relative_to(root)
@@ -101,7 +103,7 @@ class AptPath(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        for name in ["apt-get", "sudo", "dpkg", "dpkg-query", "dpkg-deb", "curl"]:
+        for name in ["apt-get", "sudo", "dpkg", "dpkg-query", "dpkg-deb", "curl", "sleep"]:
             p = self.bin / name
             p.write_text(FAKE)
             p.chmod(0o755)
@@ -156,21 +158,48 @@ class AptPath(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("--no-download", calls[0])
         self.assertIn("Dir::Etc::sourceparts=-", calls[0])
+        self.assertIn("Acquire::Retries=0", calls[0])
+        self.assertNotIn("Acquire::Retries=3", calls[0])
         self.assertFalse(any(x[0] == "curl" for x in self.commands()))
         self.assertEqual(self.mirror.read_bytes(), original)
 
     def test_partial_top_level_cache_goes_online_with_bounded_network(self):
         self.deb(PACKAGES[0])
+        self.installed({PACKAGES[1]: "2"})
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stderr)
+        missing_names = " ".join(PACKAGES[2:])
+        self.assertIn(f"Missing cached debs: {missing_names}", result.stdout.splitlines())
+        self.assertNotIn("Cache-only apt install failed", result.stderr)
         calls = [x for x in self.commands() if x[0] == "apt-get"]
         self.assertEqual(len(calls), 2)
         self.assertIn("update", calls[0])
         for call in calls:
-            for option in ["Acquire::http::Timeout=5", "Acquire::https::Timeout=5", "Acquire::Retries=0"]:
+            for option in ["Acquire::http::Timeout=5", "Acquire::https::Timeout=5"]:
                 self.assertIn(option, call)
         self.assertNotIn("unreachable.invalid", self.mirror.read_text())
         self.assertIn("security.ubuntu.com", self.mirror.read_text())
+
+    def test_package_fetch_retries_apply_only_to_online_install(self):
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        update, install = [x for x in self.commands() if x[0] == "apt-get"]
+        self.assertIn("Acquire::Retries=0", update)
+        self.assertNotIn("Acquire::Retries=3", update)
+        self.assertIn("Acquire::Retries=3", install)
+        self.assertNotIn("--allow-unauthenticated", install)
+        self.assertNotIn("--fix-missing", install)
+
+    def test_all_mirror_probes_can_fail_before_index_refresh_recovers(self):
+        original = self.mirror.read_bytes()
+        result = self.run_installer(TEST_MIRRORS_UNREACHABLE="1", TEST_SECURITY_FAILURES="1",
+                                    TEST_NEEDS_SECURITY="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Apt mirror probe failed", result.stderr)
+        self.assertEqual(len([x for x in self.commands() if x[0] == "curl"]), 3)
+        self.assertEqual(self.mirror.read_bytes(), original)
+        self.assertEqual((self.root / "update-attempts").read_text(), "2")
+        self.assertEqual(json.loads((self.root / "installed.json").read_text()), dict.fromkeys(PACKAGES, "2"))
 
     def test_direct_ubuntu_sources_install_without_probing_or_rewriting_mirrors(self):
         ubuntu_source = (
@@ -204,16 +233,18 @@ class AptPath(unittest.TestCase):
             self.assertEqual((source_dir / "ubuntu.sources").read_text(), ubuntu_source)
         self.assertEqual(json.loads((self.root / "installed.json").read_text()), dict.fromkeys(PACKAGES, "2"))
 
-    def test_security_index_succeeds_on_third_attempt(self):
-        result = self.run_installer(TEST_SECURITY_FAILURES="2", TEST_NEEDS_SECURITY="1")
+    def test_security_index_succeeds_on_fifth_attempt_after_backoff(self):
+        result = self.run_installer(TEST_SECURITY_FAILURES="4", TEST_NEEDS_SECURITY="1")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.root / "update-attempts").read_text(), "3")
+        steps = [x[1] if x[0] == "sleep" else ("update" if "update" in x else "install")
+                 for x in self.commands() if x[0] in ("apt-get", "sleep")]
+        self.assertEqual(steps, ["update", "2", "update", "4", "update", "8", "update", "16", "update", "install"])
         self.assertEqual(json.loads((self.root / "installed.json").read_text()), dict.fromkeys(PACKAGES, "2"))
 
     def test_persistent_security_failure_installs_from_refreshed_indexes(self):
         result = self.run_installer(TEST_SECURITY_FAILURES="99")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.root / "update-attempts").read_text(), "3")
+        self.assertEqual((self.root / "update-attempts").read_text(), "5")
         self.assertEqual(json.loads((self.root / "installed.json").read_text()), dict.fromkeys(PACKAGES, "2"))
 
     def test_persistent_security_failure_cannot_resolve_from_stale_image_index(self):
@@ -224,13 +255,15 @@ class AptPath(unittest.TestCase):
         self.assertEqual(result.returncode, 100, result.stderr)
         self.assertIn("Unable to locate package " + PACKAGES[-1], result.stderr)
         self.assertIn("::error::Native dependency installation failed with exit 100; apt mirrors:", result.stderr)
-        self.assertEqual((self.root / "update-attempts").read_text(), "3")
+        self.assertEqual((self.root / "update-attempts").read_text(), "5")
         self.assertEqual(json.loads((self.root / "installed.json").read_text()), {})
 
     def test_cached_top_level_with_missing_transitive_dependency_is_partial(self):
         self.full_cache()
         result = self.run_installer(TEST_CLOSURE="partial")
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Cache-only apt install failed", result.stderr)
+        self.assertNotIn("Missing cached debs:", result.stdout)
         calls = [x for x in self.commands() if x[0] == "apt-get"]
         self.assertEqual(len(calls), 3)
         self.assertIn("--no-download", calls[0])

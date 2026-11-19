@@ -76,9 +76,9 @@ for deb in "$cache/"*.deb; do
         files[$package]=$deb
     fi
 done
-complete=true
+uncached=()
 for package in "${missing[@]}"; do
-    [[ -n ${files[$package]:-} ]] || complete=false
+    [[ -n ${files[$package]:-} ]] || uncached+=("$package")
 done
 local_debs=()
 for package in "${!files[@]}"; do
@@ -88,12 +88,16 @@ for package in "${!files[@]}"; do
     local_debs+=("${files[$package]}")
 done
 apt_options=(-o "Dir::Cache::archives=$archives" -o APT::Keep-Downloaded-Packages=true
-    -o Acquire::http::Timeout=5 -o Acquire::https::Timeout=5 -o Acquire::Retries=0)
-if $complete && as_root env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" \
+    -o Acquire::http::Timeout=5 -o Acquire::https::Timeout=5)
+if (( ${#uncached[@]} > 0 )); then
+    echo "Missing cached debs: ${uncached[*]}"
+elif as_root env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" -o Acquire::Retries=0 \
     -o Dir::Etc::sourcelist=/dev/null -o Dir::Etc::sourceparts=- \
     --no-download --no-remove install -y --no-install-recommends "${local_debs[@]}"; then
     echo 'Native dependency closure installed entirely from cached debs; no mirror access needed.'
     exit 0
+else
+    echo 'Cache-only apt install failed. Continuing with Ubuntu sources.' >&2
 fi
 
 echo 'The apt cache is partial. Refresh Ubuntu indexes and fetch missing dependencies.'
@@ -101,10 +105,13 @@ if grep -qF "mirror+file:$mirrors" "$sources"; then
     # Only the disposable CI job's mirror list changes.
     # shellcheck source=/etc/os-release disable=SC1091
     suite=${KINEWRIGHT_APT_SUITE:-$(. /etc/os-release; printf '%s' "${VERSION_CODENAME:?}")}
-    python3 scripts/ci_apt_mirrors.py "$mirrors" "$state/mirrors-selected.txt" \
-        --suite "$suite"
-    as_root cp "$state/mirrors-selected.txt" "$mirrors"
-    cp "$state/mirrors-selected.txt" "$state/mirrors-used.txt"
+    if python3 scripts/ci_apt_mirrors.py "$mirrors" "$state/mirrors-selected.txt" \
+        --suite "$suite"; then
+        as_root cp "$state/mirrors-selected.txt" "$mirrors"
+        cp "$state/mirrors-selected.txt" "$state/mirrors-used.txt"
+    else
+        echo 'Apt mirror probe failed. Continuing with the runner mirror list.' >&2
+    fi
 else
     echo "Runner Ubuntu sources do not use mirror+file:$mirrors. Skipping the mirror-list rewrite."
     awk '
@@ -122,17 +129,18 @@ trap 'rm -rf -- "$lists"' EXIT
 chmod 755 "$lists"
 apt_options+=(-o Dir::Etc::sourcelist=/dev/null -o "Dir::Etc::sourceparts=$state/sources"
     -o "Dir::State::lists=$lists" -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache=)
-for attempt in 1 2 3; do
-    if as_root env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" update --error-on=any; then
+for delay in 2 4 8 16 0; do
+    if as_root env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" \
+        -o Acquire::Retries=0 update --error-on=any; then
         break
     fi
-    if (( attempt < 3 )); then
-        echo "Ubuntu index refresh failed (attempt $attempt of 3). Retrying in 1s." >&2
-        sleep 1
-    else
+    if (( delay == 0 )); then
         echo 'Ubuntu index refresh is incomplete. Installing requires resolving and fetching the missing dependencies from the refreshed indexes.' >&2
+        break
     fi
+    echo "Ubuntu index refresh failed. Retrying in ${delay}s." >&2
+    sleep "$delay"
 done
-as_root env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" \
+as_root env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" -o Acquire::Retries=3 \
     --no-remove install -y --no-install-recommends "${missing[@]}"
 echo 'Linux CI native dependencies are installed.'
