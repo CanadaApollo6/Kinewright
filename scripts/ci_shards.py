@@ -220,10 +220,11 @@ def execute_unit(data, unit, number, index, directory):
         # One block keeps concurrent failures readable; the complete log remains an artifact.
         names = "\n".join(f"  {suite['label']}::{name}" for name in unit["tests"])
         tail = "\n".join(text.splitlines()[-40:])
-        expected = set(unit["tests"])
+        failed = set(re.findall(r"(?m)^test (.+?) \.\.\. FAILED$", text))
+        failed.intersection_update(unit["tests"])
         panics = re.findall(r"(?m)^thread '([^'\n]+)'(?: \(\d+\))? panicked at [^\n]*:\n([^\n]+)", text)
         summary = "".join(f"\n  {suite['label']}::{name}: {message}" for name, message in panics
-                          if name in expected)
+                          if name in failed)
         if summary:
             summary = f"\nFirst panic lines:{summary}"
         print(f"Test process {number} {reason}:\n{names}{summary}\nLast 40 output lines ({log_name}):\n{tail}", flush=True)

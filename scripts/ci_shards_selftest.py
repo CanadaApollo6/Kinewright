@@ -459,12 +459,15 @@ class Sharding(unittest.TestCase):
                 binary = root / "witness-0123456789abcdef"
                 binary.touch()
                 data = {"tier": "fast", "suites": [{"path": str(binary), "cwd": str(root), "label": "witness"}]}
-                unit = {"suite": 0, "tests": ["named_test"], "full": False}
+                unit = {"suite": 0, "tests": ["named_test", "other_test"], "full": False}
 
                 def execute(*args, **kwargs):
                     output = kwargs["stdout"]
                     if failure == "panic":
                         output.write(
+                            "running 2 tests\n"
+                            "test named_test ... FAILED\n"
+                            "test other_test ... ok\n"
                             "thread 'named_test' (5724) panicked at tests/foo.rs:4:5:\n"
                             "CreateProcessW (suspended LPAC): os error 2\n"
                             "path detail that belongs in the artifact\n"
