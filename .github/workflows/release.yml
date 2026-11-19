@@ -227,8 +227,46 @@ jobs:
               exit 1
             fi
           done
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
+          # A release becomes public only after all four files are attached
+          # and checked. A published release is never modified by a rerun.
+          expected="$(for asset in "${assets[@]}"; do
+            printf '%s %s\n' "$(basename "$asset")" "$(stat -c %s "$asset")"
+          done | sort)"
+          expected_names="$(cut -d' ' -f1 <<<"$expected")"
+          tag="${GITHUB_REF_NAME}"
+
+          if state="$(gh release view "$tag" --json isDraft --jq .isDraft 2>view-error.txt)"; then
+            :
+          elif grep -qi 'release not found' view-error.txt; then
+            state=absent
           else
-            gh release create "${GITHUB_REF_NAME}" "${assets[@]}" --verify-tag --generate-notes --title "Kinewright ${GITHUB_REF_NAME}"
+            cat view-error.txt >&2
+            exit 1
           fi
+
+          if [[ "$state" == false ]]; then
+            published_names="$(gh release view "$tag" --json assets --jq '.assets[].name' | sort)"
+            if [[ "$published_names" == "$expected_names" ]]; then
+              echo "Release $tag is already published with all four files. Nothing to do."
+              exit 0
+            fi
+            echo "Release $tag is already published but its files differ from the expected four." >&2
+            echo "It was left unchanged. Repair or delete it by hand, then rerun." >&2
+            exit 1
+          fi
+
+          if [[ "$state" == absent ]]; then
+            gh release create "$tag" --draft --verify-tag --generate-notes --title "Kinewright $tag"
+          elif [[ "$state" != true ]]; then
+            echo "Unexpected release state: $state" >&2
+            exit 1
+          fi
+
+          gh release upload "$tag" "${assets[@]}" --clobber
+          attached="$(gh release view "$tag" --json assets --jq '.assets[] | "\(.name) \(.size)"' | sort)"
+          if [[ "$attached" != "$expected" ]]; then
+            echo 'The draft release does not hold exactly the four expected files. It stays a draft.' >&2
+            printf 'expected:\n%s\nattached:\n%s\n' "$expected" "$attached" >&2
+            exit 1
+          fi
+          gh release edit "$tag" --draft=false
