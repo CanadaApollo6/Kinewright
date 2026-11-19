@@ -267,17 +267,16 @@ fn fixture() {
         "pthread" | "pthread_diag" | "degraded_pthread"
     ) {
         if std::env::var_os("KW_MEDIA_CONTROL").is_none() {
-            if case.ends_with("_diag") {
+            let capture_denial = case == "pthread_diag";
+            if capture_denial {
                 diagnostic();
-                super::filter::install_diagnostic(Mode::Scope).unwrap();
-            } else {
-                install_filter(if case == "degraded_pthread" {
-                    Mode::Degraded
-                } else {
-                    Mode::Scope
-                })
-                .unwrap();
             }
+            let mode = if case == "degraded_pthread" {
+                Mode::Degraded
+            } else {
+                Mode::Scope
+            };
+            super::filter::install_pthread_fixture(mode, capture_denial).unwrap();
         }
         let mut thread = std::mem::MaybeUninit::uninit();
         // SAFETY: pthread_create initializes the pthread identifier on success;

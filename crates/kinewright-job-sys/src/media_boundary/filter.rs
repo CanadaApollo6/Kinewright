@@ -30,7 +30,11 @@ fn fds(descriptors: &[i32]) -> io::Result<Vec<Rule>> {
     clippy::too_many_lines,
     reason = "the audited syscall table stays contiguous"
 )]
-fn install(mode: Mode, default: Action) -> io::Result<()> {
+fn install(
+    mode: Mode,
+    default: Action,
+    apply: fn(seccompiler::BpfProgramRef<'_>) -> seccompiler::Result<()>,
+) -> io::Result<()> {
     let arch = std::env::consts::ARCH
         .try_into()
         .map_err(io::Error::other)?;
@@ -182,14 +186,29 @@ fn install(mode: Mode, default: Action) -> io::Result<()> {
         .map_err(io::Error::other)?
         .try_into()
         .map_err(io::Error::other)?;
-    seccompiler::apply_filter_all_threads(&fallback).map_err(io::Error::other)?;
-    seccompiler::apply_filter_all_threads(&policy).map_err(io::Error::other)
+    apply(&fallback).map_err(io::Error::other)?;
+    apply(&policy).map_err(io::Error::other)
 }
 
 pub fn install_filter(mode: Mode) -> io::Result<()> {
-    install(mode, Action::KillProcess)
+    install(
+        mode,
+        Action::KillProcess,
+        seccompiler::apply_filter_all_threads,
+    )
 }
 #[cfg(test)]
 pub(super) fn install_diagnostic(mode: Mode) -> io::Result<()> {
-    install(mode, Action::Trap)
+    install(mode, Action::Trap, seccompiler::apply_filter_all_threads)
+}
+#[cfg(test)]
+pub(super) fn install_pthread_fixture(mode: Mode, diagnostic: bool) -> io::Result<()> {
+    let action = if diagnostic {
+        Action::Trap
+    } else {
+        Action::KillProcess
+    };
+    // New pthreads inherit both filters from the fixture thread. Libtest's
+    // existing runner thread stays outside this pthread creation witness.
+    install(mode, action, seccompiler::apply_filter)
 }
