@@ -96,23 +96,43 @@ if $complete && as_root env DEBIAN_FRONTEND=noninteractive apt-get "${apt_option
     exit 0
 fi
 
-echo 'Apt cache is partial; probe mirrors, refresh Ubuntu indexes, and fetch missing dependencies.'
-grep -qF "mirror+file:$mirrors" "$sources" || {
-    echo "Expected the runner Ubuntu sources to use mirror+file:$mirrors" >&2
-    exit 1
-}
-# Only the disposable CI job's mirror list changes; no developer sources are edited.
-# shellcheck source=/etc/os-release
-suite=${KINEWRIGHT_APT_SUITE:-$(. /etc/os-release; printf '%s' "${VERSION_CODENAME:?}")}
-python3 scripts/ci_apt_mirrors.py "$mirrors" "$state/mirrors-selected.txt" \
-    --suite "$suite"
-as_root cp "$state/mirrors-selected.txt" "$mirrors"
-cp "$state/mirrors-selected.txt" "$state/mirrors-used.txt"
+echo 'The apt cache is partial. Refresh Ubuntu indexes and fetch missing dependencies.'
+if grep -qF "mirror+file:$mirrors" "$sources"; then
+    # Only the disposable CI job's mirror list changes.
+    # shellcheck source=/etc/os-release disable=SC1091
+    suite=${KINEWRIGHT_APT_SUITE:-$(. /etc/os-release; printf '%s' "${VERSION_CODENAME:?}")}
+    python3 scripts/ci_apt_mirrors.py "$mirrors" "$state/mirrors-selected.txt" \
+        --suite "$suite"
+    as_root cp "$state/mirrors-selected.txt" "$mirrors"
+    cp "$state/mirrors-selected.txt" "$state/mirrors-used.txt"
+else
+    echo "Runner Ubuntu sources do not use mirror+file:$mirrors. Skipping the mirror-list rewrite."
+    awk '
+        /^[^[:space:]]/ { show = tolower($0) ~ /^(uris|suites):/ }
+        !NF { show = 0 }
+        show
+    ' "$sources"
+fi
 mkdir -p "$state/sources"
 cp "$sources" "$state/sources/ubuntu.sources"
 # These dependencies all come from Ubuntu; unrelated image PPAs are unnecessary.
-apt_options+=(-o Dir::Etc::sourcelist=/dev/null -o "Dir::Etc::sourceparts=$state/sources")
-as_root env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" update --error-on=any
+# Start with empty lists so a failed refresh cannot reuse indexes from the image.
+lists=$(mktemp -d "$state/lists.XXXXXX")
+trap 'rm -rf -- "$lists"' EXIT
+chmod 755 "$lists"
+apt_options+=(-o Dir::Etc::sourcelist=/dev/null -o "Dir::Etc::sourceparts=$state/sources"
+    -o "Dir::State::lists=$lists" -o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache=)
+for attempt in 1 2 3; do
+    if as_root env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" update --error-on=any; then
+        break
+    fi
+    if (( attempt < 3 )); then
+        echo "Ubuntu index refresh failed (attempt $attempt of 3). Retrying in 1s." >&2
+        sleep 1
+    else
+        echo 'Ubuntu index refresh is incomplete. Installing requires resolving and fetching the missing dependencies from the refreshed indexes.' >&2
+    fi
+done
 as_root env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" \
     --no-remove install -y --no-install-recommends "${missing[@]}"
 echo 'Linux CI native dependencies are installed.'

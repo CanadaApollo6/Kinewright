@@ -45,16 +45,33 @@ if command=='dpkg-deb':
  data=json.loads(Path(args[-1]).read_text());print(data['name'],data['version'],data.get('arch','amd64'));sys.exit(0)
 if command=='curl':sys.exit(7 if 'unreachable.invalid' in args[-1] else 0)
 if command=='apt-get':
- if 'update' in args and os.environ.get('TEST_STALL')=='1':
-  archives=Path(next(x.split('=',1)[1] for x in args if x.startswith('Dir::Cache::archives=')))
-  (archives/'downloaded-before-timeout.deb').write_bytes(b'completed download')
-  (archives/'partial').mkdir(exist_ok=True);(archives/'partial'/'unfinished.deb').write_bytes(b'incomplete')
-  (archives/'lock').touch();time.sleep(20)
+ lists=Path(next((x.split('=',1)[1] for x in args if x.startswith('Dir::State::lists=')), root/'image-lists'))
+ assert lists.resolve().is_relative_to(root)
+ if 'update' in args:
+  if os.environ.get('TEST_STALL')=='1':
+   archives=Path(next(x.split('=',1)[1] for x in args if x.startswith('Dir::Cache::archives=')))
+   (archives/'downloaded-before-timeout.deb').write_bytes(b'completed download')
+   (archives/'partial').mkdir(exist_ok=True);(archives/'partial'/'unfinished.deb').write_bytes(b'incomplete')
+   (archives/'lock').touch();time.sleep(20)
+  attempts=root/'update-attempts'
+  attempt=int(attempts.read_text())+1 if attempts.exists() else 1
+  attempts.write_text(str(attempt))
+  lists.mkdir(exist_ok=True)
+  (lists/'noble').touch()
+  if attempt <= int(os.environ.get('TEST_SECURITY_FAILURES','0')):
+   print('Failed to fetch noble-security InRelease',file=sys.stderr)
+   sys.exit(100 if '--error-on=any' in args else 0)
+  (lists/'noble-security').touch()
  if '--no-download' in args:
   assert 'Dir::Etc::sourcelist=/dev/null' in args and 'Dir::Etc::sourceparts=-' in args
   if os.environ.get('TEST_CLOSURE')=='partial':sys.exit(100)
   assert any(Path(a).name.startswith('transitive_') for a in args if a.endswith('.deb'))
  if 'install' in args:
+  if '--no-download' not in args:
+   assert (lists/'noble').is_file()
+   if os.environ.get('TEST_NEEDS_SECURITY')=='1' and not (lists/'noble-security').is_file():
+    print('Unable to locate package '+args[-1],file=sys.stderr)
+    sys.exit(100)
   for pkg in json.loads((root/'packages.json').read_text()):state[pkg]='2'
   (root/'installed.json').write_text(json.dumps(state))
  sys.exit(0)
@@ -154,6 +171,61 @@ class AptPath(unittest.TestCase):
                 self.assertIn(option, call)
         self.assertNotIn("unreachable.invalid", self.mirror.read_text())
         self.assertIn("security.ubuntu.com", self.mirror.read_text())
+
+    def test_direct_ubuntu_sources_install_without_probing_or_rewriting_mirrors(self):
+        ubuntu_source = (
+            "Types: deb\n"
+            "URIs: http://us-east-2.ec2.archive.ubuntu.com/ubuntu/\n"
+            "Suites: noble noble-updates\n"
+            "Components: main universe\n"
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\n"
+            "Types: deb\n"
+            "URIs: http://security.ubuntu.com/ubuntu/\n"
+            "Suites: noble-security\n"
+            "Components: main universe\n"
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
+        )
+        self.source.write_text(ubuntu_source)
+        original_mirrors = self.mirror.read_bytes()
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Skipping the mirror-list rewrite.", result.stdout)
+        self.assertFalse(any(x[0] == "curl" for x in self.commands()))
+        self.assertEqual(self.mirror.read_bytes(), original_mirrors)
+        for line in ubuntu_source.splitlines():
+            if line.startswith(("URIs:", "Suites:")):
+                self.assertIn(line, result.stdout)
+            elif line:
+                self.assertNotIn(line, result.stdout + result.stderr)
+        for call in (x for x in self.commands() if x[0] == "apt-get"):
+            self.assertIn("Dir::Etc::sourcelist=/dev/null", call)
+            source_dir = Path(next(x.split("=", 1)[1] for x in call if x.startswith("Dir::Etc::sourceparts=")))
+            self.assertEqual(list(source_dir.iterdir()), [source_dir / "ubuntu.sources"])
+            self.assertEqual((source_dir / "ubuntu.sources").read_text(), ubuntu_source)
+        self.assertEqual(json.loads((self.root / "installed.json").read_text()), dict.fromkeys(PACKAGES, "2"))
+
+    def test_security_index_succeeds_on_third_attempt(self):
+        result = self.run_installer(TEST_SECURITY_FAILURES="2", TEST_NEEDS_SECURITY="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "update-attempts").read_text(), "3")
+        self.assertEqual(json.loads((self.root / "installed.json").read_text()), dict.fromkeys(PACKAGES, "2"))
+
+    def test_persistent_security_failure_installs_from_refreshed_indexes(self):
+        result = self.run_installer(TEST_SECURITY_FAILURES="99")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "update-attempts").read_text(), "3")
+        self.assertEqual(json.loads((self.root / "installed.json").read_text()), dict.fromkeys(PACKAGES, "2"))
+
+    def test_persistent_security_failure_cannot_resolve_from_stale_image_index(self):
+        stale_lists = self.root / "image-lists"
+        stale_lists.mkdir()
+        (stale_lists / "noble-security").touch()
+        result = self.run_installer(TEST_SECURITY_FAILURES="99", TEST_NEEDS_SECURITY="1")
+        self.assertEqual(result.returncode, 100, result.stderr)
+        self.assertIn("Unable to locate package " + PACKAGES[-1], result.stderr)
+        self.assertIn("::error::Native dependency installation failed with exit 100; apt mirrors:", result.stderr)
+        self.assertEqual((self.root / "update-attempts").read_text(), "3")
+        self.assertEqual(json.loads((self.root / "installed.json").read_text()), {})
 
     def test_cached_top_level_with_missing_transitive_dependency_is_partial(self):
         self.full_cache()
