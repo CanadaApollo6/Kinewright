@@ -19,7 +19,7 @@ apt_packages=(
     libmp3lame-dev
     zlib1g-dev
     libvpx-dev
-    libfreetype6-dev
+    libfreetype-dev
     libharfbuzz-dev
     libpulse-dev
     libxcb1-dev
