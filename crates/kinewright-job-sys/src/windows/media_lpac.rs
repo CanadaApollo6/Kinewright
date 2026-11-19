@@ -6,7 +6,10 @@ use std::{
     fs::File,
     io::{self, PipeReader, PipeWriter},
     mem::{size_of, size_of_val},
-    os::windows::{ffi::OsStrExt, io::AsRawHandle},
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        io::AsRawHandle,
+    },
     path::Path,
     ptr,
     time::{Duration, Instant},
@@ -116,6 +119,7 @@ pub struct Child {
 
 /// Launch with exactly one read-only file, one request reader and one reply writer.
 /// The first three child arguments are the corresponding handle values in that order.
+/// The observer receives the exact application, command line, and directory before creation.
 ///
 /// # Errors
 /// Invalid inputs, unsupported creation attributes, or failed suspended inspection
@@ -127,6 +131,7 @@ pub fn launch(
     request: &PipeReader,
     reply: &PipeWriter,
     limits: Limits,
+    before_create: impl FnOnce(&OsStr, &OsStr, &OsStr),
 ) -> io::Result<Child> {
     let directory = program
         .parent()
@@ -188,6 +193,11 @@ pub fn launch(
         "CHILD_PROCESS_POLICY",
     )?;
 
+    before_create(
+        &OsString::from_wide(&application[..application.len() - 1]),
+        &OsString::from_wide(&command[..command.len() - 1]),
+        &OsString::from_wide(&cwd[..cwd.len() - 1]),
+    );
     let info = create_suspended(&application, &mut command, &cwd, &environment, &attributes)?;
     drop(attributes);
     drop((file, request, reply));

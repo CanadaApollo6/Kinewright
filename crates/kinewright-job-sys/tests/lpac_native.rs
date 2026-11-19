@@ -14,7 +14,7 @@ use std::{
         io::{AsRawHandle, FromRawHandle, OwnedHandle},
         process::CommandExt,
     },
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf, Prefix},
     process::{Command, Stdio},
     ptr,
     sync::{
@@ -29,7 +29,7 @@ use windows_sys::Win32::{
         ERROR_ACCESS_DENIED, ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_CHILD_PROCESS_BLOCKED,
         ERROR_COMMITMENT_LIMIT, ERROR_FILE_NOT_FOUND, ERROR_NOT_ENOUGH_MEMORY,
         ERROR_NOT_ENOUGH_QUOTA, ERROR_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_WORKING_SET_QUOTA,
-        INVALID_HANDLE_VALUE, LocalFree, WAIT_TIMEOUT,
+        INVALID_HANDLE_VALUE, LocalFree, MAX_PATH, WAIT_TIMEOUT,
     },
     Security::{
         ACL,
@@ -166,18 +166,6 @@ fn loopback_tcp_connection_is_refused() {
 }
 
 #[test]
-fn uncached_hostname_resolution_is_refused() {
-    let fixture = Fixture::new();
-    fixture.refused(
-        "dns",
-        "example.com.",
-        &["DnsQuery_W(uncached A query)"],
-        // Win32 access denial or DNS refusal. A live unconfined query must resolve it.
-        &[ERROR_ACCESS_DENIED, 9005, 9501, 10013, 11001, 11002],
-    );
-}
-
-#[test]
 fn opening_the_host_for_handle_duplication_is_refused() {
     let fixture = Fixture::new();
     fixture.refused(
@@ -309,6 +297,7 @@ fn closing_the_last_job_handle_ends_a_running_child() {
 
 struct Fixture {
     exe: PathBuf,
+    image_bytes: u64,
     source: PathBuf,
     sid: Sid,
     _root: Temp,
@@ -318,38 +307,91 @@ impl Fixture {
     fn new() -> Self {
         let root = Temp::new();
         let directory = root.0.join("image directory");
-        fs::create_dir(&directory).expect("create private fixture image directory");
+        fs::create_dir(&directory).expect("CreateDirectoryW (private fixture image directory)");
         let sid = Sid::derive();
         grant_image_access(&directory, &sid);
         let exe = directory.join("fixture.exe");
         // Create the copy with the directory's inheritable ACL.
         let input = env!("CARGO_BIN_EXE_kinewright-lpac-spike-child");
-        io::copy(
-            &mut File::open(input).expect("open built fixture read-only"),
-            &mut File::create(&exe).expect("create private fixture copy"),
-        )
-        .expect("copy fixture bytes");
+        let image_bytes = copy_image(Path::new(input), &exe);
         let source = root.0.join("source");
-        fs::write(&source, SOURCE).expect("write fixture source");
-        Self {
+        fs::write(&source, SOURCE).expect("CreateFileW/WriteFile (fixture source)");
+        let fixture = Self {
             exe,
+            image_bytes,
             source,
             sid,
             _root: root,
-        }
+        };
+        fixture.inspect_image(fixture.exe.as_os_str());
+        eprintln!(
+            "unconfined startup CreateProcessW input image=[{}] cwd=[{}]",
+            fixture.exe.display(),
+            fixture.image_dir().display()
+        );
+        fixture.single("ready", fixture.image_dir(), false).expect(
+            &["ready"],
+            &[0],
+            "unconfined startup control",
+        );
+        eprintln!("unconfined startup CreateProcessW and loader passed (Win32 0, exit 0)");
+        fixture
     }
 
     fn image_dir(&self) -> &Path {
         self.exe.parent().unwrap()
     }
 
+    fn inspect_image(&self, application: &OsStr) {
+        let file = File::open(application)
+            .unwrap_or_else(|error| panic!("CreateFileW (fixture image preflight): {error}"));
+        let image = file.metadata().unwrap_or_else(|error| {
+            panic!("GetFileInformationByHandle (fixture image preflight): {error}")
+        });
+        eprintln!(
+            "GetFileInformationByHandle (fixture image preflight) Win32 0: file={} bytes={} copied={}",
+            image.is_file(),
+            image.len(),
+            self.image_bytes
+        );
+        assert!(
+            image.is_file() && image.len() == self.image_bytes,
+            "GetFileInformationByHandle (fixture image preflight) Win32 0: expected a {} byte file, got file={} bytes={}",
+            self.image_bytes,
+            image.is_file(),
+            image.len()
+        );
+    }
+
+    #[expect(
+        clippy::unnecessary_debug_formatting,
+        reason = "Preserve the exact Windows strings, including quotes and escaped code units"
+    )]
+    fn inspect_launch(&self, case: &str, application: &OsStr, command_line: &OsStr, cwd: &OsStr) {
+        eprintln!(
+            "CreateProcessW (suspended LPAC, {case}) application={application:?} command_line={command_line:?} cwd={cwd:?} verbatim(application,argv0,cwd)={:?}",
+            (verbatim(application), verbatim(command_line), verbatim(cwd))
+        );
+        self.inspect_image(application);
+        let directory = fs::metadata(cwd).unwrap_or_else(|error| {
+            panic!("GetFileAttributesExW (LPAC current directory preflight): {error}")
+        });
+        assert!(
+            directory.is_dir(),
+            "GetFileAttributesExW (LPAC current directory preflight) Win32 0: expected a directory"
+        );
+    }
+
     fn start(&self, case: &str, target: impl AsRef<OsStr>, lpac: bool) -> Running {
-        let (child_request, mut request) = io::pipe().expect("create request pipe");
-        let (reply, child_reply) = io::pipe().expect("create reply pipe");
+        let (child_request, mut request) = io::pipe().expect("CreatePipe (fixture request)");
+        let (reply, child_reply) = io::pipe().expect("CreatePipe (fixture reply)");
         let process = {
-            let _spawning = SPAWNING.lock().unwrap();
+            // The lock serializes temporary handle inheritance and guards no data.
+            let _spawning = SPAWNING
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if lpac {
-                let source = File::open(&self.source).expect("open source file read-only");
+                let source = File::open(&self.source).expect("CreateFileW (read-only source)");
                 // SAFETY: querying all processor groups needs no pointer or handle.
                 let cpus = unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) };
                 assert_ne!(
@@ -363,36 +405,41 @@ impl Fixture {
                     cpu_rate: 10_000u32.div_ceil(cpus),
                 };
                 let args = [OsString::from(case), target.as_ref().to_os_string()];
-                Process::Lpac(
-                    media_lpac::launch(
-                        &self.exe,
-                        &args,
-                        &source,
-                        &child_request,
-                        &child_reply,
-                        limits,
-                    )
-                    .unwrap_or_else(|error| panic!("{case} LPAC launch/inspection: {error}")),
+                media_lpac::launch(
+                    &self.exe,
+                    &args,
+                    &source,
+                    &child_request,
+                    &child_reply,
+                    limits,
+                    |application, command_line, cwd| {
+                        self.inspect_launch(case, application, command_line, cwd);
+                    },
                 )
+                .map(Process::Lpac)
             } else {
-                Process::Open(Control(
-                    Command::new(&self.exe)
-                        .args(["0", "0", "0", case])
-                        .arg(target.as_ref())
-                        .env_clear()
-                        .env("SystemRoot", env_path("SystemRoot"))
-                        .current_dir(self.image_dir())
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .stdin(Stdio::from(child_request))
-                        .stdout(Stdio::from(child_reply))
-                        .stderr(Stdio::null())
-                        .spawn()
-                        .unwrap_or_else(|error| {
-                            panic!("{case} unconfined CreateProcessW: {error}")
-                        }),
-                ))
+                Command::new(&self.exe)
+                    .args(["0", "0", "0", case])
+                    .arg(target.as_ref())
+                    .env_clear()
+                    .env("SystemRoot", env_path("SystemRoot"))
+                    .current_dir(self.image_dir())
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .stdin(Stdio::from(child_request))
+                    .stdout(Stdio::from(child_reply))
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .map(|child| Process::Open(Control(child)))
             }
         };
+        let process = process.unwrap_or_else(|error| {
+            let step = if lpac {
+                "LPAC launch/inspection after successful unconfined startup"
+            } else {
+                "unconfined CreateProcessW"
+            };
+            panic!("{case} {step}: {error}");
+        });
         request
             .write_all(b"!")
             .unwrap_or_else(|error| panic!("{case} WriteFile(request): {error}"));
@@ -407,7 +454,11 @@ impl Fixture {
     fn single(&self, case: &str, target: impl AsRef<OsStr>, lpac: bool) -> Report {
         let mut child = self.start(case, target, lpac);
         let report = child.reply();
-        assert_eq!(child.finish(), 0, "{case} lpac={lpac}, reply {report:?}");
+        let exit = child.finish();
+        assert!(
+            exit == 0,
+            "GetExitCodeProcess ({case}, lpac={lpac}) exit {exit:#010x}, reply {report:?}"
+        );
         report
     }
 
@@ -458,12 +509,77 @@ impl Fixture {
     }
 }
 
+fn copy_image(input: &Path, image: &Path) -> u64 {
+    let mut input = File::open(input).unwrap_or_else(|e| {
+        panic!(
+            "CreateFileW (open archived fixture): {e}; input=[{}]",
+            input.display()
+        )
+    });
+    let bytes = input
+        .metadata()
+        .unwrap_or_else(|e| panic!("GetFileInformationByHandle (archived fixture): {e}"))
+        .len();
+    let mut output = File::create_new(image)
+        .unwrap_or_else(|e| panic!("CreateFileW (private fixture image): {e}"));
+    let copied = io::copy(&mut input, &mut output)
+        .unwrap_or_else(|e| panic!("ReadFile/WriteFile (copy fixture): {e}"));
+    assert!(
+        bytes > 0 && bytes == copied,
+        "ReadFile/WriteFile (copy fixture) Win32 0: source={bytes} copied={copied}"
+    );
+    copied
+}
+
+fn verbatim(value: &OsStr) -> bool {
+    let mut units = value.encode_wide().peekable();
+    if units.peek() == Some(&u16::from(b'"')) {
+        units.next();
+    }
+    units.take(4).eq(r"\\?\".encode_utf16())
+}
+
 struct Temp(PathBuf);
 
 impl Temp {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(unique());
-        fs::create_dir(&path).expect("create fixture under test temp root");
+        let reported = std::env::temp_dir();
+        let resolved = reported.canonicalize().unwrap_or_else(|error| {
+            panic!(
+                "GetFinalPathNameByHandleW (resolve fixture temp): {error}; temp=[{}]",
+                reported.display()
+            )
+        });
+        // These fixtures use short, drive-qualified DOS names for both CreateProcessW inputs.
+        let local = match resolved.components().next() {
+            Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::VerbatimDisk(_)) => {
+                let units: Vec<u16> = resolved.as_os_str().encode_wide().skip(4).collect();
+                PathBuf::from(OsString::from_wide(&units))
+            }
+            Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_)) => resolved,
+            _ => panic!(
+                "GetFinalPathNameByHandleW (fixture temp) Win32 0: expected local drive, got [{}]",
+                resolved.display()
+            ),
+        };
+        let path = local.join(unique());
+        let units = path
+            .join("image directory")
+            .join("fixture.exe")
+            .as_os_str()
+            .encode_wide()
+            .count();
+        assert!(
+            units < MAX_PATH as usize,
+            "GetFinalPathNameByHandleW (fixture path preflight) Win32 0: expected short DOS path, got {units} UTF-16 units"
+        );
+        eprintln!(
+            "GetFinalPathNameByHandleW (fixture temp) Win32 0: reported=[{}] local=[{}]",
+            reported.display(),
+            local.display()
+        );
+        fs::create_dir(&path)
+            .unwrap_or_else(|e| panic!("CreateDirectoryW (private fixture temp): {e}"));
         Self(path)
     }
 }

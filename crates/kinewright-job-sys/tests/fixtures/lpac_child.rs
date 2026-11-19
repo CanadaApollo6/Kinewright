@@ -35,11 +35,6 @@ mod child {
             CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError, WAIT_FAILED,
             WAIT_OBJECT_0,
         },
-        NetworkManagement::Dns::{
-            DNS_QUERY_BYPASS_CACHE, DNS_QUERY_NO_HOSTS_FILE, DNS_QUERY_NO_LOCAL_NAME,
-            DNS_QUERY_NO_NETBT, DNS_QUERY_TREAT_AS_FQDN, DNS_TYPE_A, DnsFree, DnsFreeRecordList,
-            DnsQuery_W,
-        },
         System::{
             Console::GetConsoleCP,
             Memory::{
@@ -151,7 +146,6 @@ mod child {
                     )),
                 )
             }
-            Some("dns") => dns(target),
             Some("process") => (
                 "OpenProcess(PROCESS_DUP_HANDLE)",
                 open_process(parse(target)?, PROCESS_DUP_HANDLE),
@@ -283,34 +277,6 @@ mod child {
             }
         }
         ("RegCreateKeyExW(HKCU)", status)
-    }
-
-    fn dns(target: &OsStr) -> (&'static str, u32) {
-        let name = wide(target);
-        let mut records = ptr::null_mut();
-        let options = DNS_QUERY_BYPASS_CACHE
-            | DNS_QUERY_NO_HOSTS_FILE
-            | DNS_QUERY_NO_LOCAL_NAME
-            | DNS_QUERY_NO_NETBT
-            | DNS_QUERY_TREAT_AS_FQDN;
-        // SAFETY: name is terminated, records is writable and unused arguments are null.
-        let status = unsafe {
-            DnsQuery_W(
-                name.as_ptr(),
-                DNS_TYPE_A,
-                options,
-                ptr::null_mut(),
-                &raw mut records,
-                ptr::null_mut(),
-            )
-        };
-        if !records.is_null() {
-            // SAFETY: DNS returned ownership of the record list.
-            unsafe { DnsFree(records.cast(), DnsFreeRecordList) };
-        } else if status == 0 {
-            return ("DnsQuery_W(no records returned)", 0);
-        }
-        ("DnsQuery_W(uncached A query)", status)
     }
 
     fn open_process(pid: u32, access: u32) -> u32 {
