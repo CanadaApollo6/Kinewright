@@ -263,3 +263,5 @@ kinewright_media export::owned::tests::s5_owned_export_cancel_and_revocation_dis
 kinewright_media export::owned::tests::s5_owned_export_refuses_an_unrenderable_manifest_font_and_enforces_stage_limits crates/kinewright-media/src/export/owned_tests.rs any # Owned delivery typed font refusal and exclusive bounded staging
 kinewright_media export::owned::tests::s5_owned_export_refuses_legacy_lut_before_opening_stage crates/kinewright-media/src/export/owned_tests.rs any # Replaced legacy LUT locator is refused at entry and behind the locator gate
 kinewright_media export::owned::tests::s5_owned_export_refuses_missing_selected_video_and_missing_title_font crates/kinewright-media/src/export/owned_tests.rs any # Typed owned media and embedded-font admission refusals
+kinewright_media audio::tests::s5_owned_export_pcm_collection_is_bounded_with_repeated_pts crates/kinewright-media/src/audio.rs any # Repeated native PCM timestamps cannot grow the range buffer
+kinewright_media audio::tests::s5_owned_export_decode_cancellation_stops_at_the_first_decoded_chunk crates/kinewright-media/src/audio.rs any # Cancels at the decode handoff and forbids the next read
