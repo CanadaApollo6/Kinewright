@@ -10,19 +10,24 @@ pub enum Mode {
     Scope,
     Degraded,
 }
-fn eq(index: u8, value: u64) -> io::Result<Condition> {
+// Match the kernel's syscall parameter width. The upper register half is
+// unspecified for 32-bit parameters passed through a variadic syscall wrapper.
+fn eq32(index: u8, value: u32) -> io::Result<Condition> {
+    Condition::new(index, Len::Dword, Op::Eq, u64::from(value)).map_err(io::Error::other)
+}
+fn eq64(index: u8, value: u64) -> io::Result<Condition> {
     Condition::new(index, Len::Qword, Op::Eq, value).map_err(io::Error::other)
 }
-fn masked(index: u8, mask: u64, value: u64) -> io::Result<Condition> {
+fn masked64(index: u8, mask: u64, value: u64) -> io::Result<Condition> {
     Condition::new(index, Len::Qword, Op::MaskedEq(mask), value).map_err(io::Error::other)
 }
 fn rule(conditions: Vec<Condition>) -> io::Result<Rule> {
     Rule::new(conditions).map_err(io::Error::other)
 }
-fn fds(descriptors: &[i32]) -> io::Result<Vec<Rule>> {
+fn fds32(descriptors: &[i32]) -> io::Result<Vec<Rule>> {
     descriptors
         .iter()
-        .map(|fd| rule(vec![eq(0, (*fd).cast_unsigned().into())?]))
+        .map(|fd| rule(vec![eq32(0, fd.cast_unsigned())?]))
         .collect()
 }
 
@@ -73,35 +78,37 @@ fn install(
     ] {
         rules.insert(syscall, vec![]);
     }
-    rules.insert(libc::SYS_read, fds(&[SOURCE, COMMAND, LIFETIME])?);
-    rules.insert(libc::SYS_pread64, fds(&[SOURCE, COMMAND])?);
-    rules.insert(libc::SYS_lseek, fds(&[SOURCE, COMMAND])?);
-    rules.insert(libc::SYS_write, fds(&[RESPONSE])?);
-    rules.insert(libc::SYS_writev, fds(&[RESPONSE])?);
+    rules.insert(libc::SYS_read, fds32(&[SOURCE, COMMAND, LIFETIME])?);
+    rules.insert(libc::SYS_pread64, fds32(&[SOURCE, COMMAND])?);
+    rules.insert(libc::SYS_lseek, fds32(&[SOURCE, COMMAND])?);
+    rules.insert(libc::SYS_write, fds32(&[RESPONSE])?);
+    rules.insert(
+        libc::SYS_writev,
+        vec![rule(vec![eq64(0, RESPONSE.cast_unsigned().into())?])?],
+    );
     rules.insert(
         libc::SYS_close,
-        fds(&[SOURCE, COMMAND, RESPONSE, LIFETIME])?,
+        fds32(&[SOURCE, COMMAND, RESPONSE, LIFETIME])?,
     );
-    rules.insert(libc::SYS_fstat, fds(&[SOURCE, COMMAND, RESPONSE])?);
-    // libc may zero-extend its signed 32-bit fd argument on this syscall ABI.
-    // Both exact representations mean -1; no other high bits are accepted.
+    rules.insert(libc::SYS_fstat, fds32(&[SOURCE, COMMAND, RESPONSE])?);
+    // mmap takes an unsigned long fd. Keep both encodings of libc's -1.
     rules.insert(
         libc::SYS_mmap,
         [u64::MAX, u64::from(u32::MAX)]
             .into_iter()
             .map(|fd| {
                 rule(vec![
-                    masked(
+                    masked64(
                         2,
                         !u64::from((libc::PROT_READ | libc::PROT_WRITE).cast_unsigned()),
                         0,
                     )?,
-                    masked(
+                    masked64(
                         3,
                         u64::from(libc::MAP_ANONYMOUS.cast_unsigned()),
                         u64::from(libc::MAP_ANONYMOUS.cast_unsigned()),
                     )?,
-                    eq(4, fd)?,
+                    eq64(4, fd)?,
                 ])
             })
             .collect::<io::Result<_>>()?,
@@ -109,7 +116,7 @@ fn install(
     for syscall in [libc::SYS_mprotect, libc::SYS_pkey_mprotect] {
         rules.insert(
             syscall,
-            vec![rule(vec![masked(
+            vec![rule(vec![masked64(
                 2,
                 !u64::from((libc::PROT_READ | libc::PROT_WRITE).cast_unsigned()),
                 0,
@@ -125,7 +132,7 @@ fn install(
             .map(|flags| {
                 rule(vec![
                     Condition::new(1, Len::Qword, Op::Gt, 0).map_err(io::Error::other)?,
-                    eq(3, flags)?,
+                    eq64(3, flags)?,
                 ])
             })
             .collect::<io::Result<_>>()?,
@@ -140,24 +147,24 @@ fn install(
             103,
         ]
         .into_iter()
-        .map(|value| rule(vec![eq(2, value.cast_unsigned().into())?]))
+        .map(|value| rule(vec![eq32(2, value.cast_unsigned())?]))
         .collect::<io::Result<_>>()?,
     );
     let mut futex = Vec::new();
     for op in [0, 1, 128, 129] {
-        futex.push(rule(vec![eq(1, op)?])?);
+        futex.push(rule(vec![eq32(1, op)?])?);
     }
     for op in [9, 137, 265, 393] {
-        futex.push(rule(vec![eq(1, op)?, eq(5, u64::from(u32::MAX))?])?);
+        futex.push(rule(vec![eq32(1, op)?, eq32(5, u32::MAX)?])?);
     }
     rules.insert(libc::SYS_futex, futex);
-    rules.insert(libc::SYS_sched_getaffinity, vec![rule(vec![eq(0, 0)?])?]);
+    rules.insert(libc::SYS_sched_getaffinity, vec![rule(vec![eq32(0, 0)?])?]);
     // SAFETY: getpid has no preconditions and captures the helper's own namespace tgid.
     rules.insert(
         libc::SYS_tgkill,
-        vec![rule(vec![eq(
+        vec![rule(vec![eq32(
             0,
-            unsafe { libc::getpid() }.cast_unsigned().into(),
+            unsafe { libc::getpid() }.cast_unsigned(),
         )?])?],
     );
     if mode == Mode::Scope {
@@ -172,14 +179,14 @@ fn install(
             | libc::CLONE_CHILD_CLEARTID;
         rules.insert(
             libc::SYS_clone,
-            vec![rule(vec![eq(0, flags.cast_unsigned().into())?])?],
+            vec![rule(vec![eq64(0, flags.cast_unsigned().into())?])?],
         );
     }
     rules.insert(
         libc::SYS_prctl,
         vec![rule(vec![
-            eq(0, libc::PR_SET_DUMPABLE.cast_unsigned().into())?,
-            eq(1, 0)?,
+            eq32(0, libc::PR_SET_DUMPABLE.cast_unsigned())?,
+            eq64(1, 0)?,
         ])?],
     );
     let policy: BpfProgram = Filter::new(rules, default, Action::Allow, arch)

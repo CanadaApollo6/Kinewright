@@ -76,7 +76,6 @@ fn attack(name: &str) -> libc::c_long {
     let (syscall, args): (i64, [u64; 6]) = match name {
         "x32_getpid" => (libc::SYS_getpid | 0x4000_0000, [0; 6]),
         "affinity_other" => (libc::SYS_sched_getaffinity, [u64::MAX, 0, 0, 0, 0, 0]),
-        "affinity_high" => (libc::SYS_sched_getaffinity, [1_u64 << 32, 0, 0, 0, 0, 0]),
         "open" => (libc::SYS_open, [0; 6]),
         "openat" => (libc::SYS_openat, [0; 6]),
         "openat2" => (libc::SYS_openat2, [0; 6]),
@@ -142,10 +141,6 @@ fn attack(name: &str) -> libc::c_long {
             libc::SYS_read,
             [RESPONSE.cast_unsigned().into(), 0, 0, 0, 0, 0],
         ),
-        "read_high" => (
-            libc::SYS_read,
-            [(1 << 32) | u64::from(SOURCE.cast_unsigned()), 0, 0, 0, 0, 0],
-        ),
         "pread_lifetime" => (
             libc::SYS_pread64,
             [LIFETIME.cast_unsigned().into(), 0, 0, 0, 0, 0],
@@ -161,6 +156,17 @@ fn attack(name: &str) -> libc::c_long {
         "writev_command" => (
             libc::SYS_writev,
             [COMMAND.cast_unsigned().into(), 0, 0, 0, 0, 0],
+        ),
+        "writev_high_fd" => (
+            libc::SYS_writev,
+            [
+                (1 << 32) | u64::from(RESPONSE.cast_unsigned()),
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
         ),
         "close_stderr" => (libc::SYS_close, [2, 0, 0, 0, 0, 0]),
         "fstat_lifetime" => (
@@ -189,7 +195,6 @@ fn attack(name: &str) -> libc::c_long {
         "futex_requeue" => (libc::SYS_futex, [0, 3, 0, 0, 0, 0]),
         "futex_wake_bitset" => (libc::SYS_futex, [0, 10, 0, 0, 0, 0]),
         "futex_bad_mask" => (libc::SYS_futex, [0, 9, 0, 0, 0, 1]),
-        "futex_high_op" => (libc::SYS_futex, [0, 1 << 32, 0, 0, 0, 0]),
         "tgkill_other" => (libc::SYS_tgkill, [u64::MAX, 0, 0, 0, 0, 0]),
         "clone_flags" => (
             libc::SYS_clone,
@@ -198,6 +203,17 @@ fn attack(name: &str) -> libc::c_long {
         "prctl_dumpable" => (
             libc::SYS_prctl,
             [libc::PR_SET_DUMPABLE.cast_unsigned().into(), 1, 0, 0, 0, 0],
+        ),
+        "prctl_high_dumpable" => (
+            libc::SYS_prctl,
+            [
+                libc::PR_SET_DUMPABLE.cast_unsigned().into(),
+                1 << 32,
+                0,
+                0,
+                0,
+                0,
+            ],
         ),
         "prctl_other" => (
             libc::SYS_prctl,
@@ -383,6 +399,8 @@ fn fixture() {
         {
             std::process::exit(8);
         }
+    } else if let Some(probe) = case.strip_prefix("width:") {
+        width_probe(probe);
     } else {
         if std::env::var_os("KW_MEDIA_CONTROL").is_none() {
             install_filter(Mode::Scope).unwrap();
@@ -391,6 +409,114 @@ fn fixture() {
     }
     std::process::exit(0);
 }
+
+fn width_probe(probe: &str) {
+    let (name, variant) = probe.split_once(':').unwrap();
+    let allow = variant == "allow";
+    let wide = |allowed: u32, denied: u32| {
+        (0xa5a5_1234_u64 << 32) | u64::from(if allow { allowed } else { denied })
+    };
+    let file = match name {
+        "read" | "pread64" | "lseek" | "close" | "fstat" => Some((0, SOURCE)),
+        "write" => Some((1, RESPONSE)),
+        _ => None,
+    };
+    if let Some((from, to)) = file {
+        // SAFETY: the fixture owns its descriptor table. The input is /dev/null
+        // and the output is its capture pipe. The destination must be unused.
+        unsafe {
+            assert_eq!(libc::fcntl(to, libc::F_GETFD), -1);
+            assert_eq!(libc::dup2(from, to), to);
+        }
+    }
+    let fd = wide(file.map_or(0, |(_, to)| to.cast_unsigned()), 0);
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let mut cpus = std::mem::MaybeUninit::<libc::cpu_set_t>::uninit();
+    let futex = 0_u32;
+    let pid = std::process::id();
+    let (syscall, args) = match name {
+        "read" => (libc::SYS_read, [fd, 0, 0, 0, 0, 0]),
+        "pread64" => (libc::SYS_pread64, [fd, 0, 0, 0, 0, 0]),
+        "lseek" => (libc::SYS_lseek, [fd, 0, 0, 0, 0, 0]),
+        "write" => (libc::SYS_write, [fd, 0, 0, 0, 0, 0]),
+        "close" => (libc::SYS_close, [fd, 0, 0, 0, 0, 0]),
+        "fstat" => (
+            libc::SYS_fstat,
+            [fd, stat.as_mut_ptr().addr() as u64, 0, 0, 0, 0],
+        ),
+        "madvise" => (
+            libc::SYS_madvise,
+            [0, 0, wide(0, libc::MADV_DONTFORK.cast_unsigned()), 0, 0, 0],
+        ),
+        "futex-mask" | "futex-op" => {
+            let wait = (libc::FUTEX_WAIT_BITSET | libc::FUTEX_PRIVATE_FLAG).cast_unsigned();
+            let wake = (libc::FUTEX_WAKE_BITSET | libc::FUTEX_PRIVATE_FLAG).cast_unsigned();
+            (
+                libc::SYS_futex,
+                [
+                    (&raw const futex).addr() as u64,
+                    wide(wait, if name == "futex-op" { wake } else { wait }),
+                    1,
+                    0,
+                    0,
+                    wide(u32::MAX, if name == "futex-mask" { 1 } else { u32::MAX }),
+                ],
+            )
+        }
+        "affinity" => (
+            libc::SYS_sched_getaffinity,
+            [
+                wide(0, u32::MAX),
+                std::mem::size_of::<libc::cpu_set_t>() as u64,
+                cpus.as_mut_ptr().addr() as u64,
+                0,
+                0,
+                0,
+            ],
+        ),
+        "tgkill" => (libc::SYS_tgkill, [wide(pid, 0), u64::from(pid), 0, 0, 0, 0]),
+        "prctl" => (
+            libc::SYS_prctl,
+            [
+                wide(
+                    libc::PR_SET_DUMPABLE.cast_unsigned(),
+                    libc::PR_GET_DUMPABLE.cast_unsigned(),
+                ),
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
+        ),
+        _ => panic!("unknown width probe {name}"),
+    };
+    if std::env::var_os("KW_MEDIA_CONTROL").is_none() {
+        install_filter(Mode::Scope).unwrap();
+    }
+    // SAFETY: the fd calls use zero lengths or the fixture's own valid storage.
+    // The futex wait compares against a mismatched value on a private aligned
+    // word. Affinity writes only our CPU set and tgkill queries self with signal 0.
+    let result = unsafe {
+        libc::syscall(
+            syscall, args[0], args[1], args[2], args[3], args[4], args[5],
+        )
+    };
+    if allow {
+        match name {
+            "futex-mask" | "futex-op" => {
+                assert_eq!(result, -1);
+                assert_eq!(
+                    io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EAGAIN)
+                );
+            }
+            "affinity" => assert!(result > 0),
+            _ => assert_eq!(result, 0),
+        }
+    }
+}
+
 fn resize_mapping() {
     // SAFETY: the fixture exclusively owns the anonymous mapping. It checks
     // every resize before replacing its pointer and unmaps the final extent.
@@ -451,6 +577,37 @@ fn final_filter_reaches_running_and_new_threads() {
 }
 
 #[test]
+fn native_dword_arguments_match_the_kernel_low_word() {
+    let _deadline = deadline::test();
+    for probe in [
+        "futex-mask",
+        "futex-op",
+        "read",
+        "pread64",
+        "lseek",
+        "write",
+        "close",
+        "fstat",
+        "madvise",
+        "affinity",
+        "tgkill",
+        "prctl",
+    ] {
+        let allowed = child(&format!("width:{probe}:allow"), false);
+        assert!(allowed.status.success(), "{probe}: {allowed:?}");
+        let case = format!("width:{probe}:deny");
+        let denied = child(&case, false);
+        assert_eq!(
+            denied.status.signal(),
+            Some(libc::SIGSYS),
+            "{probe}: {denied:?}"
+        );
+        let control = child(&case, true);
+        assert!(control.status.success(), "{probe}: {control:?}");
+    }
+}
+
+#[test]
 fn final_filter_preserves_runtime_calls_and_clone3_fallback() {
     let _deadline = deadline::test();
     let control = child("clone3", true);
@@ -499,7 +656,6 @@ fn each_isolated_denial_is_sigsys_and_changes_without_filter() {
     let _deadline = deadline::test();
     for case in [
         "affinity_other",
-        "affinity_high",
         "open",
         "openat",
         "openat2",
@@ -550,11 +706,11 @@ fn each_isolated_denial_is_sigsys_and_changes_without_filter() {
         "rt_sigqueueinfo",
         "rt_tgsigqueueinfo",
         "read_response",
-        "read_high",
         "pread_lifetime",
         "seek_response",
         "write_source",
         "writev_command",
+        "writev_high_fd",
         "close_stderr",
         "fstat_lifetime",
         "mmap_source",
@@ -567,10 +723,10 @@ fn each_isolated_denial_is_sigsys_and_changes_without_filter() {
         "futex_requeue",
         "futex_wake_bitset",
         "futex_bad_mask",
-        "futex_high_op",
         "tgkill_other",
         "clone_flags",
         "prctl_dumpable",
+        "prctl_high_dumpable",
         "prctl_other",
     ] {
         let denied = child(case, false);
@@ -684,9 +840,10 @@ fn diagnostic() {
     all(target_os = "linux", not(feature = "slow-tests")),
     ignore = "slow tier: cargo test --features slow-tests"
 )]
-fn all_other_madvise_values_and_high_bits_are_killed() {
+fn all_other_madvise_low_word_values_are_killed() {
     let _deadline = deadline::test();
-    for advice in (0_u64..=255).chain([u64::MAX, 1_u64 << 32, (1_u64 << 32) | 0x66]) {
+    let wide_denial = (1_u64 << 32) | u64::from(libc::MADV_DONTFORK.cast_unsigned());
+    for advice in (0_u64..=255).chain([u64::MAX, wide_denial]) {
         if [0, 4, 8, 102, 103].contains(&advice) {
             continue;
         }

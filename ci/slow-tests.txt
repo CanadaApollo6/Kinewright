@@ -218,7 +218,7 @@ kinewright_app ja1_attachment::tests::s2h_lost_save_floor_stays_frozen_until_exa
 kinewright_agent writer_host::hooks_tests::tests::s4b_c5e_expired_authority_keeps_accepted_work_and_stops crates/kinewright-agent/src/writer_host/c5e_tests.rs linux-only # Exact short authority expiry preserves accepted work through Freeze, Stop and reopen
 
 probe_native confined_uhd_av1_probe_uses_the_final_filter crates/kinewright-media-helper/tests/probe_native.rs linux-only # MS2 CPU UHD AV1 confinement qualification
-kinewright_job_sys media_boundary::tests::all_other_madvise_values_and_high_bits_are_killed crates/kinewright-job-sys/src/media_boundary/tests.rs linux-only # MS2 native advice-domain denial controls
+kinewright_job_sys media_boundary::tests::all_other_madvise_low_word_values_are_killed crates/kinewright-job-sys/src/media_boundary/tests.rs linux-only # MS2 native advice-domain denial controls
 scope_native native_scope_limits_join_before_release_and_supervisor_stays_outside crates/kinewright-media-supervisor/tests/scope_native.rs linux-only # MS2 native user-manager availability counted explicitly
 scope_native native_scope_records_are_bounded_and_self_or_stale_requests_are_refused crates/kinewright-media-supervisor/tests/scope_native.rs linux-only # MS2 native user-manager availability counted explicitly
 scope_native native_socket_eof_stops_scope_and_waits_for_empty crates/kinewright-media-supervisor/tests/scope_native.rs linux-only # MS2 socket loss retains cleanup until native emptiness
