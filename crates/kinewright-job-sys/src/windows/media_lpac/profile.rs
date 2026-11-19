@@ -133,7 +133,7 @@ impl Profile {
         let root = self.root(&ac)?;
         let storage = Storage::open(self, root, true)?;
         let packages = PackageSids::new(&sid)?;
-        if storage.unprotected(&packages)?.is_none() {
+        if storage.acl_violation(&packages)?.is_none() {
             return Ok(if created {
                 Preparation::Prepared
             } else {
@@ -189,11 +189,11 @@ impl Profile {
         let ac = self.registered()?;
         let storage = Storage::open(self, self.root(&ac)?, false)?;
         let packages = PackageSids::new(&sid)?;
-        if let Some(target) = storage.unprotected(&packages)? {
+        if let Some(violation) = storage.acl_violation(&packages)? {
             return Err(Error::unexpected(
                 Step::StorageAcl,
                 "GetSecurityInfo",
-                format!("{target} has an unprotected DACL or a package ACE"),
+                violation,
             ));
         }
         Ok((sid, storage))
@@ -377,17 +377,15 @@ impl Storage {
         Ok(self)
     }
 
-    fn unprotected(&self, packages: &PackageSids<'_>) -> Result<Option<String>, Error> {
+    fn acl_violation(&self, packages: &PackageSids<'_>) -> Result<Option<String>, Error> {
         let mut bad = None;
         for node in &self.files {
-            if !node.secure(packages)? && bad.is_none() {
-                bad = Some(node.path().display().to_string());
-            }
+            let violation = node.acl_violation(packages)?;
+            bad = bad.or(violation);
         }
         for key in &self.registry {
-            if !acl::secure(&key.object(), packages)? && bad.is_none() {
-                bad = Some(key.path.clone());
-            }
+            let violation = acl::violation(&key.object(), packages)?;
+            bad = bad.or(violation);
         }
         Ok(bad)
     }
@@ -397,7 +395,7 @@ impl Storage {
             node.protect(packages)?;
         }
         for key in self.registry.iter().rev() {
-            if !acl::secure(&key.object(), packages)? {
+            if acl::violation(&key.object(), packages)?.is_some() {
                 // An empty name on a nonpredefined handle reopens that key, even if renamed.
                 let writable =
                     Key::open_at(key.handle, &[0], key.path.clone(), READ_CONTROL | WRITE_DAC)?;

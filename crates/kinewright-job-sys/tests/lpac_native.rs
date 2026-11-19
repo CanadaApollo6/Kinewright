@@ -474,20 +474,26 @@ fn a_package_grant_on_registry_subkeys_blocks_launch_until_repaired() {
 
 fn assert_refused_then_repaired(fixture: &Fixture, stale: &VerifiedProfile<'_>) {
     fixture.startup(false).expect("unconfined image control");
+    assert_refusal_then_prepare(fixture, stale, fixture.profile.api.sid());
+    fixture.startup(true).expect("LPAC startup after repair");
+}
+
+fn assert_refusal_then_prepare(fixture: &Fixture, stale: &VerifiedProfile<'_>, detail: &str) {
     let profile = &fixture.profile.api;
     let observed = profile
         .verify()
-        .expect_err("verification accepted a restored grant");
+        .expect_err("verification accepted unsafe profile storage");
     let rejected = launch_refusal(fixture, stale);
     eprintln!("verification refused: {observed}; launch refused: {rejected}");
-    assert_eq!(observed.step, Step::StorageAcl);
-    assert_eq!(rejected.step, Step::StorageAcl);
+    for error in [observed, rejected] {
+        assert_eq!(error.step, Step::StorageAcl, "{error}");
+        assert!(error.to_string().contains(detail), "{error}");
+    }
     assert_eq!(
-        profile.prepare().expect("repair restored grant"),
+        profile.prepare().expect("repair unsafe profile storage"),
         Preparation::Prepared
     );
     profile.verify().expect("verify repaired profile");
-    fixture.startup(true).expect("LPAC startup after repair");
 }
 
 fn launch_refusal(fixture: &Fixture, stale: &VerifiedProfile<'_>) -> media_lpac::Error {
@@ -1036,42 +1042,50 @@ impl Fixture {
     }
 
     fn refuse_writes(&self, parent: &Path) {
-        let create = Canary::new(parent);
-        let control = self.single("create", &create.0, false);
-        eprintln!(
-            "create unconfined control [{}]: {control:?}",
-            create.0.display()
-        );
-        control.expect(&["WriteFile(canary)"], &[0], "unconfined create");
-        assert_eq!(fs::read(&create.0).unwrap(), b"canary");
-        fs::remove_file(&create.0).expect("remove unconfined create canary");
-        self.file_refusal("create", &create.0);
-        assert!(!create.0.exists(), "LPAC created {}", create.0.display());
-
-        let existing = Canary::new(parent);
-        fs::write(&existing.0, b"baseline").expect("seed retained write canary");
-        if parent.starts_with(self.profile_root()) {
+        let stale = parent.starts_with(self.profile_root()).then(|| {
             self.profile
                 .api
-                .prepare()
-                .expect("protect host-seeded canary");
+                .verify()
+                .expect("verify profile before creating retained canary")
+        });
+        let canary = Canary::new(parent);
+        let control = self.single("create", &canary.0, false);
+        eprintln!(
+            "create unconfined control [{}]: {control:?}",
+            canary.0.display()
+        );
+        control.expect(&["WriteFile(canary)"], &[0], "unconfined create");
+        assert_eq!(fs::read(&canary.0).unwrap(), b"canary");
+        if let Some(stale) = &stale {
+            assert_refusal_then_prepare(self, stale, "unprotected DACL");
         }
+        let reset = || {
+            OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&canary.0)
+                .and_then(|mut file| file.write_all(b"baseline"))
+                .expect("reset the same write canary");
+        };
         for (case, expected) in [
             ("grow", b"baselinecanary".as_slice()),
             ("mutate", b"canaryne".as_slice()),
         ] {
-            fs::write(&existing.0, b"baseline").expect("seed write canary");
-            let control = self.single(case, &existing.0, false);
+            reset();
+            let control = self.single(case, &canary.0, false);
             eprintln!(
                 "{case} unconfined control [{}]: {control:?}",
-                existing.0.display()
+                canary.0.display()
             );
             control.expect(&["WriteFile(canary)"], &[0], "unconfined write");
-            assert_eq!(fs::read(&existing.0).unwrap(), expected);
-            fs::write(&existing.0, b"baseline").expect("reset write canary");
-            self.file_refusal(case, &existing.0);
-            assert_eq!(fs::read(&existing.0).unwrap(), b"baseline");
+            assert_eq!(fs::read(&canary.0).unwrap(), expected);
+            reset();
+            self.file_refusal(case, &canary.0);
+            assert_eq!(fs::read(&canary.0).unwrap(), b"baseline");
         }
+        fs::remove_file(&canary.0).expect("remove unconfined create canary");
+        self.file_refusal("create", &canary.0);
+        assert!(!canary.0.exists(), "LPAC created {}", canary.0.display());
     }
 
     fn file_refusal(&self, case: &str, target: &Path) {

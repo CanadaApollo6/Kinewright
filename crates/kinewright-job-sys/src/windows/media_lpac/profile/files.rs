@@ -99,17 +99,16 @@ impl Node {
         Ok(())
     }
 
-    pub(super) fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub(super) fn secure(&self, packages: &PackageSids<'_>) -> Result<bool, Error> {
+    pub(super) fn acl_violation(
+        &self,
+        packages: &PackageSids<'_>,
+    ) -> Result<Option<String>, Error> {
         self.confirm(&self.file)?;
-        acl::secure(&acl::Object::file(&self.file, &self.path), packages)
+        acl::violation(&acl::Object::file(&self.file, &self.path), packages)
     }
 
     pub(super) fn protect(&self, packages: &PackageSids<'_>) -> Result<(), Error> {
-        if self.secure(packages)? {
+        if self.acl_violation(packages)?.is_none() {
             return Ok(());
         }
         let share = SHARE | if self.can_prune { FILE_SHARE_DELETE } else { 0 };

@@ -1,4 +1,4 @@
-use super::{Code, Error, Sid, Step, wide};
+use super::{Code, Error, Sid, Step, sid_text, wide};
 use std::{
     ffi::{OsStr, c_void},
     fs::File,
@@ -16,7 +16,7 @@ use windows_sys::Win32::{
             SE_REGISTRY_KEY, SetSecurityInfo,
         },
         DACL_SECURITY_INFORMATION, DeleteAce, EqualSid, GetAce, GetSecurityDescriptorControl,
-        IsValidAcl, PROTECTED_DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+        IsValidAcl, PROTECTED_DACL_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED,
     },
     System::SystemServices::{
         ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE, ACCESS_DENIED_ACE_TYPE,
@@ -128,7 +128,7 @@ fn entries(
     object: &Object<'_>,
     dacl: *mut ACL,
     packages: &PackageSids<'_>,
-) -> Result<Vec<u32>, Error> {
+) -> Result<Vec<(u32, PSID)>, Error> {
     let forbidden = [packages.package.0, packages.all.0, packages.restricted.0];
     // SAFETY: Object::read validated the ACL and owns its allocation during this call.
     let count = u32::from(unsafe { (*dacl).AceCount });
@@ -176,17 +176,20 @@ fn entries(
             return Err(invalid());
         }
         // SAFETY: the live SID and all subauthorities fit within the validated allocation.
-        if forbidden
-            .iter()
-            .any(|target| unsafe { EqualSid(sid.cast(), *target) } != 0)
+        if let Some(target) = forbidden
+            .into_iter()
+            .find(|target| unsafe { EqualSid(sid.cast(), *target) } != 0)
         {
-            found.push(index);
+            found.push((index, target));
         }
     }
     Ok(found)
 }
 
-pub(super) fn secure(object: &Object<'_>, packages: &PackageSids<'_>) -> Result<bool, Error> {
+pub(super) fn violation(
+    object: &Object<'_>,
+    packages: &PackageSids<'_>,
+) -> Result<Option<String>, Error> {
     let (descriptor, dacl) = object.read()?;
     let (mut control, mut revision) = (0, 0);
     // SAFETY: descriptor is live, and control and revision are writable.
@@ -199,7 +202,22 @@ pub(super) fn secure(object: &Object<'_>, packages: &PackageSids<'_>) -> Result<
             object.label.as_ref(),
         ));
     }
-    Ok(entries(object, dacl, packages)?.is_empty() && control & SE_DACL_PROTECTED != 0)
+    let unprotected = control & SE_DACL_PROTECTED == 0;
+    let matching = entries(object, dacl, packages)?;
+    let label = &object.label;
+    if let Some(&(index, sid)) = matching.first() {
+        let sid = sid_text(sid)
+            .map_err(|error| Error::launch(error, Step::StorageAcl, "ConvertSidToStringSidW"))?;
+        let protection = if unprotected {
+            "unprotected DACL and "
+        } else {
+            ""
+        };
+        return Ok(Some(format!(
+            "{label}: {protection}ACE {index} for package SID {sid}"
+        )));
+    }
+    Ok(unprotected.then(|| format!("{label}: unprotected DACL")))
 }
 
 pub(super) fn contains_package(
@@ -212,7 +230,7 @@ pub(super) fn contains_package(
 
 pub(super) fn protect(object: &Object<'_>, packages: &PackageSids<'_>) -> Result<(), Error> {
     let (_descriptor, dacl) = object.read()?;
-    for index in entries(object, dacl, packages)?.into_iter().rev() {
+    for (index, _) in entries(object, dacl, packages)?.into_iter().rev() {
         // SAFETY: dacl is writable, and deleting in reverse keeps earlier indices valid.
         if unsafe { DeleteAce(dacl, index) } == 0 {
             return Err(Error::last(

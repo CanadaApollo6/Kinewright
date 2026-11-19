@@ -130,7 +130,7 @@ impl Drop for Local {
 
 pub(super) fn sid_text(sid: PSID) -> io::Result<String> {
     let mut text = ptr::null_mut();
-    // SAFETY: sid belongs to a live token buffer, text is writable.
+    // SAFETY: callers keep the SID allocation live and text is writable.
     check_step("ConvertSidToStringSidW (AccessCheck)", unsafe {
         ConvertSidToStringSidW(sid, &raw mut text)
     })?;
