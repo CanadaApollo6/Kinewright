@@ -138,43 +138,79 @@ fn verify_status(observed: io::Result<Vec<u8>>) -> io::Result<()> {
     Ok(())
 }
 
-/// A missing sample means the pinned process still has an unreadable pidfd
-/// but its status has no RSS field. The caller must bound gaps in sampling.
+// The degraded payload has only its leader and watchdog. Leave room for the
+// shim and other callers while bounding every task-directory walk.
+const RSS_TASK_CAP: usize = 8;
+
+/// A missing sample means neither the leader nor any surviving task reports
+/// RSS and the pidfd is still unreadable. The caller must bound sampling gaps.
 pub fn resident_bytes(process: &ProcessHandle) -> io::Result<Option<u64>> {
-    let exited_before = exited(process)?;
-    let status = if exited_before {
-        Ok(Vec::new())
-    } else {
-        resident_status(process)
-    };
-    let exited_after = !exited_before && exited(process)?;
-    classify_rss(status, exited_before, exited_after)
+    if exited(process)? {
+        return Ok(Some(0));
+    }
+    let sample = live_resident_bytes(process);
+    if exited(process)? {
+        return Ok(Some(0));
+    }
+    sample
 }
 
-fn resident_status(process: &ProcessHandle) -> io::Result<Vec<u8>> {
+fn live_resident_bytes(process: &ProcessHandle) -> io::Result<Option<u64>> {
     if process.reaped()? {
         return Err(invalid("RSS identity disappeared"));
     }
-    let bytes = bounded(format!("/proc/{}/status", process.pid()))?;
+    let base = format!("/proc/{}", process.pid());
+    let leader = bounded(format!("{base}/status"))?;
+    let sample = classify_rss(&leader, || {
+        let tasks = fs::read_dir(format!("{base}/task"))?;
+        task_rss(tasks.map(|entry| entry.map(|entry| entry.path())), |task| {
+            bounded(task.join("status"))
+        })
+    });
     if process.reaped()? {
         return Err(invalid("RSS identity changed"));
     }
-    Ok(bytes)
+    sample
 }
 
 fn classify_rss(
-    status: io::Result<impl AsRef<[u8]>>,
-    exited_before: bool,
-    exited_after: bool,
+    leader: &[u8],
+    sample_tasks: impl FnOnce() -> io::Result<Option<u64>>,
 ) -> io::Result<Option<u64>> {
-    if exited_before || exited_after {
-        return Ok(Some(0));
+    if let Some(bytes) = parse_rss(leader)? {
+        return Ok(Some(bytes));
     }
-    let status = status?;
-    let text = std::str::from_utf8(status.as_ref()).map_err(io::Error::other)?;
+    // A zombie leader may have no mm while another task still holds it.
+    sample_tasks()
+}
+
+fn task_rss<T, B: AsRef<[u8]>>(
+    tasks: impl IntoIterator<Item = io::Result<T>>,
+    mut status: impl FnMut(T) -> io::Result<B>,
+) -> io::Result<Option<u64>> {
+    let mut sample = None;
+    for (index, task) in tasks.into_iter().enumerate() {
+        if index >= RSS_TASK_CAP {
+            return Err(invalid("oversized RSS task inventory"));
+        }
+        let bytes = match status(task?) {
+            Ok(bytes) => bytes,
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ESRCH) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        sample = sample.max(parse_rss(bytes.as_ref())?);
+    }
+    Ok(sample)
+}
+
+fn parse_rss(status: &[u8]) -> io::Result<Option<u64>> {
+    let text = std::str::from_utf8(status).map_err(io::Error::other)?;
     let Some(value) = text.lines().find_map(|line| line.strip_prefix("VmRSS:")) else {
-        // exit_mm can clear RSS before pidfd readiness. A leader can also
-        // lose its mm while the other threads still hold it.
         return Ok(None);
     };
     let kb = value
@@ -444,27 +480,147 @@ pub fn memory_profile(process: &ProcessHandle, smaps: &mut File) -> io::Result<M
 #[cfg(test)]
 mod status_tests {
     use super::*;
+    use std::{
+        thread,
+        time::{Duration, Instant},
+    };
+
+    const RSS_FIXTURE: &str =
+        "media_host::status_tests::rss_samples_surviving_thread_on_first_poll";
+    const RSS_CHILD: &str = "KW_MEDIA_RSS_ZOMBIE_LEADER";
+    const RESIDENT: usize = 32 * 1024 * 1024;
+
+    struct Fixture(Child);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            drop(self.0.stdin.take());
+            let _ = self.0.wait();
+        }
+    }
 
     #[test]
-    fn rss_requires_pidfd_exit_to_treat_missing_memory_as_zero() {
-        for (text, before, after, expected) in [
-            ("State:\tS\nVmRSS:\t42 kB\n", false, false, Some(42 * 1024)),
-            ("State:\tR\nThreads:\t1\n", false, false, None),
-            // A zombie leader can have a surviving thread holding the mm.
-            ("State:\tZ\nThreads:\t2\n", false, false, None),
-            ("State:\tZ\nThreads:\t1\n", false, true, Some(0)),
-            ("", true, false, Some(0)),
+    fn rss_classifies_leader_and_bounded_task_samples() {
+        let resident = b"State:\tS\nVmRSS:\t42 kB\n".as_slice();
+        let zombie = b"State:\tZ\nThreads:\t2\n".as_slice();
+        assert_eq!(
+            classify_rss(resident, || panic!("leader has RSS")).unwrap(),
+            Some(42 * 1024)
+        );
+        for (tasks, expected) in [
+            (&[zombie, resident][..], Some(42 * 1024)),
+            (&[zombie][..], None),
+            (&[][..], None),
         ] {
-            assert_eq!(classify_rss(Ok(text), before, after).unwrap(), expected);
+            let observed = classify_rss(zombie, || task_rss(tasks.iter().copied().map(Ok), Ok));
+            assert_eq!(observed.unwrap(), expected);
         }
-        assert!(classify_rss(Ok("VmRSS:\tinvalid"), false, false).is_err());
-        for reason in ["RSS identity disappeared", "RSS identity changed"] {
-            assert!(classify_rss(Err::<&str, _>(invalid(reason)), false, false).is_err());
+        let oversized = classify_rss(zombie, || {
+            task_rss(std::iter::repeat_n(resident, RSS_TASK_CAP + 1).map(Ok), Ok)
+        });
+        assert_eq!(
+            oversized.unwrap_err().to_string(),
+            "oversized RSS task inventory"
+        );
+        assert!(classify_rss(b"VmRSS:\tinvalid", || panic!("malformed RSS must fail")).is_err());
+        for errno in [libc::ENOENT, libc::ESRCH] {
             assert_eq!(
-                classify_rss(Err::<&str, _>(invalid(reason)), false, true).unwrap(),
-                Some(0)
+                task_rss([Ok(0), Ok(1)], |task| {
+                    if task == 0 {
+                        Err(io::Error::from_raw_os_error(errno))
+                    } else {
+                        Ok(resident)
+                    }
+                })
+                .unwrap(),
+                Some(42 * 1024),
             );
         }
+    }
+
+    #[test]
+    fn rss_samples_surviving_thread_on_first_poll() {
+        if std::env::var_os(RSS_CHILD).is_some() {
+            hold_resident_pages();
+        }
+
+        let _deadline = crate::deadline::test();
+        let mut child = Fixture(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", RSS_FIXTURE])
+                .env(RSS_CHILD, "1")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let process = ProcessHandle::open(child.0.id()).unwrap();
+        let status_path = format!("/proc/{}/status", process.pid());
+        let start = Instant::now();
+        loop {
+            let leader = bounded(&status_path).unwrap();
+            if leader
+                .split(|byte| *byte == b'\n')
+                .any(|line| line.starts_with(b"State:\tZ"))
+            {
+                assert_eq!(parse_rss(&leader).unwrap(), None);
+                break;
+            }
+            assert!(
+                !exited(&process).unwrap(),
+                "RSS fixture exited before sampling"
+            );
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "leader stayed live"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!exited(&process).unwrap());
+        let first = resident_bytes(&process).unwrap();
+        assert!(
+            first.is_some_and(|bytes| bytes >= RESIDENT as u64),
+            "{first:?}"
+        );
+        drop(child.0.stdin.take());
+        assert!(child.0.wait().unwrap().success());
+        assert_eq!(resident_bytes(&process).unwrap(), Some(0));
+    }
+
+    fn hold_resident_pages() -> ! {
+        extern "C" fn exit_leader(_: libc::c_int) {
+            // SAFETY: the raw exit syscall terminates only its calling
+            // thread and has no user-space arguments or unwinding.
+            unsafe {
+                libc::syscall(libc::SYS_exit, 0);
+            }
+        }
+        // Libtest runs the test on a worker. Exit just the thread-group leader
+        // after committing pages, then hold them until the parent closes stdin.
+        let pages = vec![0xa5_u8; RESIDENT];
+        let pid = std::process::id();
+        assert_ne!(rustix::thread::gettid().as_raw_pid().cast_unsigned(), pid);
+        assert_eq!(
+            fs::read_link("/proc/self/cwd").unwrap(),
+            std::env::current_dir().unwrap()
+        );
+        assert!(
+            bounded("/proc/self/cmdline")
+                .unwrap()
+                .split(|byte| *byte == 0)
+                .any(|arg| arg == RSS_FIXTURE.as_bytes())
+        );
+        // SAFETY: SIGUSR1 is private to this fixture. The target is the
+        // leader of our own process and the handler only issues SYS_exit.
+        unsafe {
+            assert_ne!(
+                libc::signal(libc::SIGUSR1, exit_leader as *const () as usize),
+                libc::SIG_ERR
+            );
+            assert_eq!(libc::syscall(libc::SYS_tgkill, pid, pid, libc::SIGUSR1), 0);
+        }
+        assert_eq!(io::stdin().read(&mut [0]).unwrap(), 0);
+        std::hint::black_box(&pages);
+        std::process::exit(0);
     }
 
     #[test]
