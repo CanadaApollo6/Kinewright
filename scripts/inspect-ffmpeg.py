@@ -49,6 +49,8 @@ EXTERNAL_LIB_ALIASES = {
     'libz': 'zlib',
     'zlib': 'zlib',
     'zlibstatic': 'zlib',
+    'zs': 'zlib',
+    'libzs': 'zlib',
     'x264': 'libx264',
     'libx264': 'libx264',
     'x265': 'libx265',

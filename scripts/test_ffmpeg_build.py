@@ -825,6 +825,38 @@ class SurfaceInspection(unittest.TestCase):
                         inspector.pkgconfig_external_libraries(root)
                     self.assertIn(token, str(refused.exception))
 
+    def test_pkgconfig_maps_windows_static_zlib_libzs_without_matching_neighbours(self):
+        with tempfile.TemporaryDirectory(dir=builder.ROOT / 'target') as directory:
+            root = Path(directory)
+            pc_dir = root / 'lib/pkgconfig'
+            pc_dir.mkdir(parents=True)
+            pc_file = pc_dir / 'libavcodec.pc'
+
+            for libs_private in ['-L/x -llibzs', r'-libpath:C:\x libzs.lib']:
+                with self.subTest(case=libs_private):
+                    pc_file.write_text(
+                        f'Libs: -L${{libdir}} -lavcodec\nLibs.private: {libs_private}\n',
+                        encoding='utf-8',
+                    )
+                    self.assertEqual(inspector.pkgconfig_external_libraries(root), ['zlib'])
+
+            pc_file.write_text(
+                'Libs: -L${libdir} -lavcodec\nLibs.private: -L/x -llibzq\n',
+                encoding='utf-8',
+            )
+            self.assertEqual(inspector.pkgconfig_external_libraries(root), ['libzq'])
+
+            expected = inspector.expected_surface(system='Windows')
+            report = self._matching_report(expected)
+            report['external_library_sources']['pkgconfig'] = ['libdav1d', 'libx264', 'libx265', 'libzq']
+            report['external_libraries'] = ['libdav1d', 'libx264', 'libx265', 'libzq', 'zlib']
+            with self.assertRaises(SystemExit) as refused:
+                inspector.check(report, expected)
+            message = str(refused.exception)
+            self.assertIn('external_libraries.pkgconfig:', message)
+            self.assertIn('unexpected=libzq', message)
+            self.assertIn('missing=zlib', message)
+
     def test_pe_delay_import_without_rva_bit_reports_or_raises(self):
         with tempfile.TemporaryDirectory(dir=builder.ROOT / 'target') as directory:
             root = Path(directory)
