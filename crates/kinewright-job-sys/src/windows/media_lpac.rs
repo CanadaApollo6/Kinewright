@@ -154,6 +154,8 @@ enum Mode {
     SecurityOnly,
     #[cfg(feature = "lpac-diagnostics")]
     ParentEnvironment,
+    #[cfg(feature = "lpac-diagnostics")]
+    AddedEnvironment(u8),
 }
 
 impl Mode {
@@ -163,17 +165,17 @@ impl Mode {
             #[cfg(feature = "lpac-diagnostics")]
             Self::Plain | Self::SecurityOnly => false,
             #[cfg(feature = "lpac-diagnostics")]
-            Self::ParentEnvironment => true,
+            Self::ParentEnvironment | Self::AddedEnvironment(_) => true,
         }
     }
 
-    fn parent_environment(self) -> bool {
+    fn environment(self) -> io::Result<Option<Vec<u16>>> {
         match self {
-            Self::Lpac => false,
             #[cfg(feature = "lpac-diagnostics")]
-            Self::Plain | Self::SecurityOnly => false,
+            Self::ParentEnvironment => Ok(None),
             #[cfg(feature = "lpac-diagnostics")]
-            Self::ParentEnvironment => true,
+            Self::AddedEnvironment(mask) => diagnostic::added_environment(mask).map(Some),
+            _ => system_environment().map(Some),
         }
     }
 }
@@ -262,11 +264,7 @@ fn begin(
     }
     let application = wide(program.as_os_str())?;
     let cwd = wide(directory.as_os_str())?;
-    let environment = if mode.parent_environment() {
-        None
-    } else {
-        Some(system_environment()?)
-    };
+    let environment = mode.environment()?;
     let sid = derive_sid()?;
     let job = inherited
         .as_ref()

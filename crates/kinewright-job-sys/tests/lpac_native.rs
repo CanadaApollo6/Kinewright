@@ -330,11 +330,15 @@ impl Fixture {
         {
             let mut fixture = Self::stage();
             fixture.variant = diagnostics::Selection::from_env();
-            if fixture.variant == diagnostics::Selection::Profile {
+            if let diagnostics::Selection::Profile(environment, mode) = fixture.variant {
                 fixture.profile = Some(
                     diagnostics::Profile::create(&fixture.sid)
                         .unwrap_or_else(|error| panic!("{error}")),
                 );
+                if mode == diagnostics::ProfileMode::Hardened {
+                    diagnostics::harden_witness(&mut fixture, environment)
+                        .unwrap_or_else(|error| panic!("{error}"));
+                }
             }
             fixture
         }
@@ -440,12 +444,16 @@ impl Fixture {
                     self.inspect_launch(case, application, command_line, cwd);
                 };
                 #[cfg(feature = "lpac-diagnostics")]
-                let launched = if self.variant == diagnostics::Selection::ProfileProbe {
+                let launched = if matches!(
+                    self.variant,
+                    diagnostics::Selection::Profile(_, diagnostics::ProfileMode::Probe)
+                ) {
                     media_lpac::diagnostic::launch_profile_canary(
                         &self.exe,
                         &args,
                         (&source, &child_request, &child_reply),
                         limits,
+                        self.variant.launch_variant(),
                     )
                 } else {
                     media_lpac::diagnostic::launch(
@@ -533,7 +541,7 @@ impl Fixture {
         }
         let case = "ready";
         #[cfg(feature = "lpac-diagnostics")]
-        let case = if lpac && self.variant == diagnostics::Selection::ParentEnvironment {
+        let case = if lpac && self.variant.uses_extra_environment() {
             "ready-parent-environment"
         } else {
             case
@@ -822,7 +830,7 @@ impl Running {
             }
             let length = bytes.len();
             let available = available as usize;
-            if length + available > 4096 {
+            if length + available > 16384 {
                 return Err(format!(
                     "{} PeekNamedPipe (reply) Win32 0: unexpected reply length",
                     self.context

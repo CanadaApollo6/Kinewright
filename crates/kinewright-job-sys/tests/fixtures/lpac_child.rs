@@ -131,8 +131,26 @@ mod child {
             return Err(io::Error::other("ReadFile (request): wrong handshake byte"));
         }
         #[cfg(feature = "lpac-diagnostics")]
-        if case == "profile-registry" {
-            return super::profile_registry::report(target, output);
+        match case.to_str() {
+            Some("profile-registry") => return super::profile_registry::report(target, output),
+            Some("profile-registry-hold") => {
+                super::profile_registry::report(target, output)?;
+                return input.read_exact(&mut start);
+            }
+            Some(
+                "profile-registry-grow" | "profile-registry-change" | "profile-registry-value",
+            ) => {
+                return super::profile_registry::write_value(case, target, output);
+            }
+            Some("profile-environment") => return super::profile_permissions::environment(output),
+            Some("profile-objects") => return super::profile_permissions::objects(target, output),
+            Some("profile-file-restore") => {
+                return super::profile_permissions::restore_file(target, output);
+            }
+            Some("profile-registry-restore") => {
+                return super::profile_permissions::restore_registry(target, output);
+            }
+            _ => {}
         }
         let (api, code) = match case.to_str() {
             Some("ready") => ready(target, source.is_some(), true),
@@ -407,13 +425,13 @@ mod profile_registry {
             Foundation::ERROR_INVALID_DATA,
             Security::Isolation::GetAppContainerRegistryLocation,
             System::Registry::{
-                HKEY, KEY_CREATE_SUB_KEY, KEY_READ, KEY_WRITE, RegCloseKey, RegCreateKeyExW,
-                RegDeleteKeyW,
+                HKEY, KEY_CREATE_SUB_KEY, KEY_READ, KEY_SET_VALUE, KEY_WRITE, REG_BINARY,
+                RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegSetValueExW,
             },
         },
     };
 
-    struct Key(HKEY);
+    pub(super) struct Key(pub(super) HKEY);
     impl Drop for Key {
         fn drop(&mut self) {
             // SAFETY: the API transferred ownership of this key handle.
@@ -421,7 +439,7 @@ mod profile_registry {
         }
     }
 
-    fn open(access: u32) -> Result<Key, i32> {
+    pub(super) fn open(access: u32) -> Result<Key, i32> {
         let mut root = ptr::null_mut();
         // SAFETY: root is a writable out parameter for the current AppContainer's registry.
         let status = unsafe { GetAppContainerRegistryLocation(access, &raw mut root) };
@@ -489,6 +507,37 @@ mod profile_registry {
         output.flush()
     }
 
+    pub fn write_value(case: &OsStr, target: &OsStr, output: &mut impl Write) -> io::Result<()> {
+        let root = match open(KEY_SET_VALUE) {
+            Ok(root) => root,
+            Err(status) => {
+                return writeln!(
+                    output,
+                    "GetAppContainerRegistryLocation(KEY_SET_VALUE) HRESULT\t{}",
+                    status.cast_unsigned()
+                );
+            }
+        };
+        let name: Vec<u16> = target.encode_wide().chain([0]).collect();
+        let bytes: &[u8] = if case == "profile-registry-grow" {
+            b"profile canary enlarged"
+        } else {
+            b"changed!"
+        };
+        // SAFETY: root is owned, name terminated, and bytes holds the specified data.
+        let status = unsafe {
+            RegSetValueExW(
+                root.0,
+                name.as_ptr(),
+                0,
+                REG_BINARY,
+                bytes.as_ptr(),
+                u32::try_from(bytes.len()).expect("canary length"),
+            )
+        };
+        writeln!(output, "RegSetValueExW(profile value)\t{status}")
+    }
+
     fn create_canary(root: &Key, target: &OsStr) -> (&'static str, u32) {
         let target: Vec<u16> = target.encode_wide().chain([0]).collect();
         let mut key = ptr::null_mut();
@@ -518,3 +567,7 @@ mod profile_registry {
         ("RegCreateKeyExW(profile canary)", 0)
     }
 }
+
+#[cfg(all(windows, feature = "lpac-diagnostics"))]
+#[path = "profile_permissions.rs"]
+mod profile_permissions;

@@ -18,6 +18,7 @@ pub enum Variant {
     Plain,
     SecurityOnly,
     ParentEnvironment,
+    AddedEnvironment(u8),
 }
 
 impl Variant {
@@ -27,6 +28,7 @@ impl Variant {
             Self::Plain => Mode::Plain,
             Self::SecurityOnly => Mode::SecurityOnly,
             Self::ParentEnvironment => Mode::ParentEnvironment,
+            Self::AddedEnvironment(mask) => Mode::AddedEnvironment(mask),
         }
     }
 }
@@ -140,13 +142,14 @@ pub fn launch_profile_canary(
     args: &[OsString],
     inputs: Inputs<'_>,
     limits: Limits,
+    variant: Variant,
 ) -> io::Result<Child> {
     let child = begin(
         program,
         args,
         Some(inputs),
         limits,
-        Mode::Lpac,
+        variant.mode(),
         |_, _, _| {},
     )?;
     let process = child
@@ -160,4 +163,40 @@ pub fn launch_profile_canary(
     inspect_token(process, &child.sid, true)?;
     inspect_job(process, job, &limits)?;
     child.resume()
+}
+
+/// Candidate names to supplement `SystemRoot` in the native experiment.
+pub const CANDIDATE_ENVIRONMENT: [&str; 7] = [
+    "LOCALAPPDATA",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "APPDATA",
+    "SystemDrive",
+    "windir",
+];
+
+pub(super) fn added_environment(mask: u8) -> io::Result<Vec<u16>> {
+    let mut entries = ["SystemRoot"]
+        .into_iter()
+        .chain(
+            CANDIDATE_ENVIRONMENT
+                .into_iter()
+                .enumerate()
+                .filter_map(|(bit, key)| (mask & (1 << bit) != 0).then_some(key)),
+        )
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|key| key.to_ascii_uppercase());
+    let mut block = Vec::new();
+    for key in entries {
+        let value = std::env::var_os(key).ok_or_else(|| {
+            io::Error::other(format!("CreateProcessW environment: parent lacks {key}"))
+        })?;
+        let mut entry = OsString::from(key);
+        entry.push("=");
+        entry.push(value);
+        block.extend(super::wide(&entry)?);
+    }
+    block.push(0);
+    Ok(block)
 }
