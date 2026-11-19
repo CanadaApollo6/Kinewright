@@ -126,15 +126,18 @@ pub fn launch(
             "security-only variant has no witness Job or pipes",
         ));
     }
-    begin(
+    let child = begin(
         program,
         args,
         Some(inputs),
         limits,
         variant.mode(),
         before_create,
-    )?
-    .verify_and_resume()
+    )?;
+    eprintln!("CreateProcessW (suspended AppContainer) Win32 0");
+    let child = child.verify_and_resume()?;
+    eprintln!("Token, Job and mitigation inspection passed; ResumeThread Win32 0");
+    Ok(child)
 }
 
 /// Run a trusted fixture canary with the `AppContainer` creation attributes.

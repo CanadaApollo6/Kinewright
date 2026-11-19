@@ -88,11 +88,11 @@ fn suspended_lpac_passes_inspection_and_runs_with_minimal_environment() {
 #[cfg(feature = "lpac-diagnostics")]
 #[test]
 fn only_ordinary_appcontainer_reads_the_all_application_packages_canary() {
-    use diagnostics::{Profile, ProfileMode, Selection, harden_witness, witness_environment};
+    use diagnostics::{Profile, ProfileEnvironment, ProfileMode, Selection, harden_witness};
 
     let mut fixture = Fixture::stage();
     fixture.profile = Some(Profile::create(&fixture.sid).unwrap_or_else(|error| panic!("{error}")));
-    let environment = witness_environment(&mut fixture);
+    let environment = ProfileEnvironment::OwnedLocal;
     let hardened = harden_witness(&mut fixture, environment);
     let directory = fixture.root.0.join("all application packages control");
     fs::create_dir(&directory).expect("CreateDirectoryW (ALL APPLICATION PACKAGES canary)");
@@ -172,6 +172,9 @@ fn existing_appcontainer_storage_refuses_create_growth_and_mutation() {
         );
         candidates.insert(path);
     }
+
+    #[cfg(feature = "lpac-diagnostics")]
+    candidates.insert(diagnostics::projected_root(&fixture));
 
     let mut checked = BTreeSet::new();
     #[cfg(feature = "lpac-diagnostics")]
@@ -393,7 +396,7 @@ impl Fixture {
                 diagnostics::Profile::create(&fixture.sid)
                     .unwrap_or_else(|error| panic!("{error}")),
             );
-            let environment = diagnostics::witness_environment(&mut fixture);
+            let environment = diagnostics::ProfileEnvironment::OwnedLocal;
             diagnostics::harden_witness(&mut fixture, environment)
                 .unwrap_or_else(|error| panic!("{error}"));
             fixture
@@ -984,16 +987,9 @@ impl Report {
         let code = fields.next().ok_or_else(|| {
             format!("{context} ReadFile (fixture report) Win32 0: malformed report {text:?}")
         })?;
-        let detail = fields.next();
-        if api == "panic" {
-            return Err(format!(
-                "{context} fixture panic, exit {code}: {}",
-                detail.unwrap_or("")
-            ));
-        }
         Ok(Self {
             api: api.into(),
-            detail: detail.map(str::to_owned),
+            detail: fields.next().map(str::to_owned),
             code: code.parse().map_err(|error| {
                 format!(
                     "{context} ReadFile (fixture reply) Win32 0: invalid reported code: {error}"
@@ -1005,10 +1001,11 @@ impl Report {
     fn expect(&self, apis: &[&str], codes: &[u32], step: &str) {
         assert!(
             apis.contains(&self.api.as_str()) && codes.contains(&self.code),
-            "{step}: {} returned Win32 {} ({:#010x}), expected API {apis:?} and code {codes:?}",
+            "{step}: {} returned Win32 {} ({:#010x}), expected API {apis:?} and code {codes:?}; detail={:?}",
             self.api,
             self.code,
             self.code,
+            self.detail,
         );
     }
 }

@@ -133,7 +133,7 @@ fn plain_variant(fixture: &Fixture, environment: ProfileEnvironment) -> Variant<
     }
 }
 
-pub(super) fn witness_environment(fixture: &mut Fixture) -> ProfileEnvironment {
+fn witness_environment(fixture: &mut Fixture) -> ProfileEnvironment {
     let original = fixture.variant;
     fixture.variant = Selection::Profile(ProfileEnvironment::OwnedLocal, ProfileMode::Probe);
     let trial = fixture.try_single("profile-environment", "", true);
@@ -291,10 +291,15 @@ pub(super) fn run() {
 
     drop(lease);
     let cleanup = profile_variants(&mut fixture);
+    let removal = remove_profile_folders_variant(&mut fixture);
+    let panic = fixture.try_single("panic-witness", "", false);
+    eprintln!("fixture panic hook control: {panic:?}");
     assert!(
-        initial_cleanup.is_ok() && cleanup.is_ok(),
-        "pre-cleanup={initial_cleanup:?} post-cleanup={cleanup:?}"
+        initial_cleanup.is_ok() && cleanup.is_ok() && removal.is_ok(),
+        "pre-cleanup={initial_cleanup:?} post-cleanup={cleanup:?} variant k cleanup={removal:?}"
     );
+    assert!(panic.is_err_and(|error| error.contains("exit 0x00000065")
+        && error.contains("intentional fixture panic witness")));
 }
 
 fn print_variant(label: &str, result: &Result<Inspection, String>) {
@@ -372,7 +377,7 @@ fn profile_variants(fixture: &mut Fixture) -> Result<(), String> {
     let mut profile = match Profile::create(&fixture.sid) {
         Ok(profile) => profile,
         Err(error) => {
-            for letter in ["e", "f", "g", "h", "i", "j"] {
+            for letter in ["e", "f", "g", "h", "i", "j", "l"] {
                 eprintln!("LPAC diagnostic {letter}: {error}");
             }
             return Ok(());
@@ -434,6 +439,130 @@ fn profile_variants(fixture: &mut Fixture) -> Result<(), String> {
         );
     }
     cleanup
+}
+
+fn remove_profile_folders_variant(fixture: &mut Fixture) -> Result<(), String> {
+    let mut profile = Profile::create(&fixture.sid)
+        .map_err(|error| format!("variant k CreateAppContainerProfile: {error}"))?;
+    fixture.variant = Selection::Profile(ProfileEnvironment::OwnedLocal, ProfileMode::Full);
+    let sid = fixture.sid.text();
+    let ac = match query_container_storage(&sid) {
+        Ok(Some(path))
+            if path.is_absolute()
+                && path
+                    .ancestors()
+                    .nth(2)
+                    .and_then(Path::file_name)
+                    .is_some_and(|name| name.eq_ignore_ascii_case("Packages"))
+                && path
+                    .parent()
+                    .is_some_and(|root| folder_state(root) == "directory")
+                && path
+                    .file_name()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("AC"))
+                && path.parent().and_then(Path::file_name).is_some_and(|name| {
+                    name.eq_ignore_ascii_case(SPIKE_CONTAINER_NAME)
+                        || name.eq_ignore_ascii_case(&sid)
+                }) =>
+        {
+            Some(path)
+        }
+        Ok(path) => {
+            eprintln!(
+                "k GetAppContainerFolderPath HRESULT 0 did not identify this profile's AC directory: {path:?}"
+            );
+            None
+        }
+        Err(error) => {
+            eprintln!("k GetAppContainerFolderPath {}", hresult(error));
+            None
+        }
+    };
+    if let Some(ac) = ac {
+        print_removal("k1 remove AC subfolders", &remove_ac_subfolders(&ac));
+        report_start_and_ac(fixture, "k1 after removing AC subfolders", &ac);
+        print_removal("k2 remove AC tree", &remove_directory(&ac));
+        report_start_and_ac(fixture, "k2 after removing AC", &ac);
+    }
+    let deleted = profile.delete();
+    eprintln!(
+        "k DeleteAppContainerProfile: {}",
+        match &deleted {
+            Ok(()) => "HRESULT 0",
+            Err(error) => error,
+        }
+    );
+    describe_folder("k post-delete", &sid);
+    deleted
+}
+
+fn remove_directory(path: &Path) -> Result<(), String> {
+    if folder_state(path) != "directory" {
+        return Err(format!(
+            "GetFileAttributesExW [{}]: {}",
+            path.display(),
+            folder_state(path)
+        ));
+    }
+    fs::remove_dir_all(path)
+        .map_err(|error| format!("RemoveDirectoryW [{}]: {error}", path.display()))?;
+    eprintln!("RemoveDirectoryW [{}] Win32 0", path.display());
+    Ok(())
+}
+
+fn remove_ac_subfolders(ac: &Path) -> Result<(), String> {
+    if folder_state(ac) != "directory" {
+        return Err(format!(
+            "GetFileAttributesExW [{}]: {}",
+            ac.display(),
+            folder_state(ac)
+        ));
+    }
+    let entries =
+        fs::read_dir(ac).map_err(|error| format!("FindFirstFileW [{}]: {error}", ac.display()))?;
+    let mut outcome = Ok(());
+    for entry in entries {
+        let result = entry.and_then(|entry| Ok((entry.path(), entry.file_type()?)));
+        let result = match result {
+            Ok((path, kind)) if kind.is_dir() => remove_directory(&path),
+            Ok((_, kind)) if kind.is_file() => Ok(()),
+            Ok((path, _)) => Err(format!(
+                "GetFileAttributesExW [{}]: unexpected entry",
+                path.display()
+            )),
+            Err(error) => Err(format!("FindNextFileW [{}]: {error}", ac.display())),
+        };
+        if let Err(error) = result {
+            eprintln!("k1 {error}");
+            if outcome.is_ok() {
+                outcome = Err(error);
+            }
+        }
+    }
+    outcome
+}
+
+fn print_removal(step: &str, result: &Result<(), String>) {
+    eprintln!(
+        "{step}: {}",
+        match result {
+            Ok(()) => "Win32 0",
+            Err(error) => error,
+        }
+    );
+}
+
+fn report_start_and_ac(fixture: &Fixture, step: &str, ac: &Path) {
+    let startup = fixture.startup(true);
+    eprintln!(
+        "{step}: launch/inspection/child={startup:?}; AC [{}] {}",
+        ac.display(),
+        folder_state(ac)
+    );
+    if folder_state(ac) == "directory" {
+        let mut folders = BTreeSet::new();
+        collect_folders(ac, &mut folders);
+    }
 }
 
 fn search_environment(
@@ -499,7 +628,7 @@ struct ProfileObservation {
 
 fn compare_storage(fixture: &mut Fixture, best: Option<ProfileEnvironment>) -> ProfileObservation {
     let mut observation = ProfileObservation {
-        folders: profile_folders(&fixture.sid),
+        folders: profile_folders(fixture),
         ..Default::default()
     };
     let Some(environment) = best else {
@@ -515,7 +644,7 @@ fn compare_storage(fixture: &mut Fixture, best: Option<ProfileEnvironment>) -> P
     let registry = profile_registry(fixture, environment);
     observation.registry = registry.as_ref().ok().map(|key| key.name.clone());
     probe_registry(fixture, "i");
-    let seeds = seed_files(&observation.folders);
+    let mut seeds = seed_files(&observation.folders);
     let value = unique();
     let registry_value = observation
         .registry
@@ -523,28 +652,77 @@ fn compare_storage(fixture: &mut Fixture, best: Option<ProfileEnvironment>) -> P
         .map(|name| (name, value.as_str()));
     probe_storage(fixture, "i", &observation.folders, &seeds, registry_value);
 
+    if let Some(name) = observation.registry.as_deref() {
+        probe_direct_registry(fixture, "l before", name, &value);
+    } else {
+        eprintln!(
+            "l direct registry unavailable: {:?}",
+            registry.as_ref().err()
+        );
+    }
+
     // Include directories materialized by the first real confined operations.
-    observation.folders.extend(profile_folders(&fixture.sid));
+    observation.folders.extend(profile_folders(fixture));
     let hardened = apply_hardening(
         fixture,
         &observation.folders,
         registry.as_ref().map(|key| key.name.as_str()),
     );
-    let launch = inspect_variant(fixture, environment.variant(fixture));
     eprintln!(
-        "LPAC diagnostic j: profile ACL writes {}; {}",
-        hardened.status(),
-        match &launch {
-            Ok(result) => result.detail.as_str(),
-            Err(error) => error,
-        },
+        "LPAC diagnostic j: profile ACL writes {}",
+        hardened.status()
     );
-    if launch.is_ok() {
-        probe_registry(fixture, "j");
-        probe_storage(fixture, "j", &observation.folders, &seeds, registry_value);
-        probe_restoration(fixture, hardened);
+    fixture.variant = Selection::Profile(environment, ProfileMode::Hardened);
+    for attempt in [1, 2] {
+        let stage = format!("j launch {attempt}");
+        let startup = fixture.startup(true);
+        eprintln!("{stage}: {startup:?}");
+        verify_after_launch(fixture, &stage, observation.registry.as_deref());
     }
+    let discovered_after_launches = profile_folders(fixture);
+    let new_folders = discovered_after_launches
+        .difference(&observation.folders)
+        .cloned()
+        .collect();
+    seeds.extend(seed_files(&new_folders));
+    observation.folders.extend(new_folders);
+    fixture.variant = Selection::Profile(environment, ProfileMode::Probe);
+    if let Some(name) = observation.registry.as_deref() {
+        probe_direct_registry(fixture, "l after", name, &value);
+    }
+    probe_registry(fixture, "j");
+    probe_storage(fixture, "j", &observation.folders, &seeds, registry_value);
+    verify_after_launch(fixture, "j after probes", observation.registry.as_deref());
     observation
+}
+
+fn probe_direct_registry(fixture: &Fixture, stage: &str, key: &str, value: &str) {
+    report_probe(
+        stage,
+        key,
+        fixture.try_single("profile-registry-direct", format!("{key}\t{value}"), true),
+    );
+}
+
+fn verify_after_launch(fixture: &Fixture, stage: &str, registry: Option<&str>) {
+    let folders = profile_folders(fixture);
+    let mut missing = folders.is_empty();
+    for path in profile_objects(&folders) {
+        if let Err(error) = path.and_then(|path| hardening::verify_file(&path, stage, &fixture.sid))
+        {
+            eprintln!("{stage} ACL readback: {error}");
+            missing = true;
+        }
+    }
+    if let Some(name) = registry {
+        if let Err(error) = hardening::verify_registry(name, stage, &fixture.sid) {
+            eprintln!("{stage} registry ACL readback: {error}");
+            missing = true;
+        }
+    } else {
+        missing = true;
+    }
+    eprintln!("{stage} ACL readback complete={}", !missing);
 }
 
 fn describe_folder(step: &str, sid: &OsStr) {
@@ -559,8 +737,15 @@ fn describe_folder(step: &str, sid: &OsStr) {
     }
 }
 
-fn profile_folders(sid: &Sid) -> BTreeSet<PathBuf> {
-    let sid = sid.text();
+pub(super) fn projected_root(fixture: &Fixture) -> PathBuf {
+    fixture
+        .private_local
+        .join("Packages")
+        .join(SPIKE_CONTAINER_NAME.to_ascii_lowercase())
+}
+
+fn profile_folders(fixture: &Fixture) -> BTreeSet<PathBuf> {
+    let sid = fixture.sid.text();
     let mut folders = BTreeSet::new();
     match query_container_storage(&sid) {
         Ok(Some(path)) if path.is_absolute() => {
@@ -579,6 +764,15 @@ fn profile_folders(sid: &Sid) -> BTreeSet<PathBuf> {
         }
         Ok(_) => eprintln!("profile GetAppContainerFolderPath HRESULT 0 returned an invalid path"),
         Err(hr) => eprintln!("profile GetAppContainerFolderPath {}", hresult(hr)),
+    }
+    let projected = projected_root(fixture);
+    eprintln!(
+        "projected profile folder [{}] {}",
+        projected.display(),
+        folder_state(&projected)
+    );
+    if folder_state(&projected) != "absent" {
+        collect_folders(&projected, &mut folders);
     }
     folders
 }
@@ -716,8 +910,6 @@ fn probe_storage(
 #[derive(Default)]
 struct ProfileHardening {
     first_failure: Option<String>,
-    files: Vec<(PathBuf, String)>,
-    registry: Option<String>,
 }
 
 impl ProfileHardening {
@@ -734,23 +926,16 @@ impl ProfileHardening {
     }
 }
 
-fn apply_hardening(
-    fixture: &Fixture,
-    folders: &BTreeSet<PathBuf>,
-    registry: Result<&str, &String>,
-) -> ProfileHardening {
-    let mut result = ProfileHardening::default();
-    if folders.is_empty() {
-        result.fail("GetAppContainerFolderPath did not identify a profile folder tree".into());
-    }
-    // Children first preserves the original descriptors before parent inheritance changes.
+fn profile_objects(folders: &BTreeSet<PathBuf>) -> Vec<Result<PathBuf, String>> {
+    let mut objects = Vec::new();
+    // Process children first so a parent update cannot change their original descriptors.
     for path in folders.iter().rev() {
         let state = folder_state(path);
         if state != "directory" {
-            result.fail(format!(
-                "inspect profile directory {}: {state}",
+            objects.push(Err(format!(
+                "GetFileAttributesExW [{}]: {state}",
                 path.display()
-            ));
+            )));
             continue;
         }
         match fs::read_dir(path) {
@@ -758,75 +943,52 @@ fn apply_hardening(
                 for entry in entries {
                     match entry.and_then(|entry| Ok((entry.path(), entry.file_type()?))) {
                         Ok((entry, kind)) if kind.is_file() && folder_state(&entry) == "file" => {
-                            record_file_acl(&mut result, &entry, false, &fixture.sid);
+                            objects.push(Ok(entry));
                         }
                         Ok((_, kind)) if kind.is_dir() => {}
-                        Ok((entry, _)) => result.fail(format!(
-                            "inspect unsupported profile entry {}",
+                        Ok((entry, _)) => objects.push(Err(format!(
+                            "GetFileAttributesExW [{}]: unsupported entry",
                             entry.display()
-                        )),
+                        ))),
                         Err(error) => {
-                            result.fail(format!("FindNextFileW {}: {error}", path.display()));
+                            objects.push(Err(format!("FindNextFileW {}: {error}", path.display())));
                         }
                     }
                 }
             }
-            Err(error) => result.fail(format!("FindFirstFileW {}: {error}", path.display())),
+            Err(error) => objects.push(Err(format!("FindFirstFileW {}: {error}", path.display()))),
         }
-        record_file_acl(&mut result, path, true, &fixture.sid);
+        objects.push(Ok(path.clone()));
     }
-    let failed_sd = result
-        .files
-        .iter()
-        .filter_map(|(path, _)| match hardening::final_file_sddl(path) {
-            Ok(sddl) => {
-                eprintln!("j final SDDL after inheritance [{}] {sddl}", path.display());
-                None
-            }
-            Err(error) => Some(format!(
-                "final SDDL [{}] unavailable: {error}",
-                path.display()
-            )),
-        })
-        .collect::<Vec<_>>();
-    for error in failed_sd {
-        result.fail(error);
+    objects
+}
+
+fn apply_hardening(
+    fixture: &Fixture,
+    folders: &BTreeSet<PathBuf>,
+    registry: Result<&str, &String>,
+) -> ProfileHardening {
+    let mut report = ProfileHardening::default();
+    if folders.is_empty() {
+        report.fail("GetAppContainerFolderPath did not identify a profile folder tree".into());
+    }
+    for path in profile_objects(folders) {
+        if let Err(error) = path.and_then(|path| {
+            hardening::file(&path, &fixture.sid)
+                .map_err(|error| format!("[{}]: {error}", path.display()))
+        }) {
+            report.fail(error);
+        }
     }
     match registry {
-        Ok(name) => match hardening::registry(name, &fixture.sid) {
-            Ok(sddl) => result.registry = Some(sddl),
-            Err(error) => result.fail(format!("registry {name}: {error}")),
-        },
-        Err(error) => result.fail(error.clone()),
+        Ok(name) => {
+            if let Err(error) = hardening::registry(name, &fixture.sid) {
+                report.fail(format!("registry {name}: {error}"));
+            }
+        }
+        Err(error) => report.fail(error.clone()),
     }
-    result
-}
-
-fn record_file_acl(result: &mut ProfileHardening, path: &Path, is_dir: bool, sid: &Sid) {
-    match hardening::file(path, is_dir, sid) {
-        Ok(sddl) => result.files.push((path.into(), sddl)),
-        Err(error) => result.fail(format!("folder/file {}: {error}", path.display())),
-    }
-}
-
-fn probe_restoration(fixture: &Fixture, hardening: ProfileHardening) {
-    for (path, sddl) in hardening.files {
-        let mut target = path.as_os_str().to_os_string();
-        target.push("\t");
-        target.push(sddl);
-        report_probe(
-            "j",
-            &format!("restore {}", path.display()),
-            fixture.try_single("profile-file-restore", target, true),
-        );
-    }
-    if let Some(sddl) = hardening.registry {
-        report_probe(
-            "j",
-            "restore registry DACL",
-            fixture.try_single("profile-registry-restore", sddl, true),
-        );
-    }
+    report
 }
 
 pub(super) fn harden_witness(
@@ -836,7 +998,7 @@ pub(super) fn harden_witness(
     let registry = profile_registry(fixture, environment);
     let applied = apply_hardening(
         fixture,
-        &profile_folders(&fixture.sid),
+        &profile_folders(fixture),
         registry.as_ref().map(|key| key.name.as_str()),
     );
     fixture.variant = Selection::Profile(environment, ProfileMode::Hardened);

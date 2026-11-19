@@ -1,118 +1,46 @@
 use super::super::{Local, Sid, copy_wide, wide};
+
+#[path = "../fixtures/lpac_registry_key.rs"]
+mod registry_key;
+
+use registry_key::open_registry;
 use std::{
     ffi::OsStr,
     io,
-    mem::size_of,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     path::Path,
     ptr,
 };
-use windows_sys::{
-    Wdk::{Foundation::OBJECT_ATTRIBUTES, System::Registry::NtOpenKey},
-    Win32::{
-        Foundation::{
-            ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, HANDLE, OBJ_CASE_INSENSITIVE,
-            RtlNtStatusToDosError, UNICODE_STRING,
+use windows_sys::Win32::{
+    Foundation::{ERROR_FILE_NOT_FOUND, ERROR_INVALID_ACL, ERROR_PATH_NOT_FOUND, HANDLE},
+    Security::{
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
+        Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertStringSidToSidW,
+            EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, GetSecurityInfo,
+            SDDL_REVISION_1, SE_FILE_OBJECT, SE_REGISTRY_KEY, SetEntriesInAclW,
+            SetNamedSecurityInfoW, SetSecurityInfo, TRUSTEE_IS_SID,
         },
-        Security::{
-            ACL,
-            Authorization::{
-                ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertStringSidToSidW,
-                DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
-                GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT, SE_REGISTRY_KEY,
-                SetEntriesInAclW, SetNamedSecurityInfoW, SetSecurityInfo, TRUSTEE_IS_SID,
-            },
-            CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
-            GetTokenInformation, NO_INHERITANCE, OWNER_SECURITY_INFORMATION,
-            PROTECTED_DACL_SECURITY_INFORMATION, PSID, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
-            TOKEN_QUERY, TOKEN_USER, TokenUser,
+        DACL_SECURITY_INFORMATION, DeleteAce, EqualSid, GROUP_SECURITY_INFORMATION, GetAce,
+        GetSecurityDescriptorControl, GetTokenInformation, IsValidAcl, NO_INHERITANCE,
+        OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED,
+        TOKEN_QUERY, TOKEN_USER, TokenUser,
+    },
+    Storage::FileSystem::{
+        FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, READ_CONTROL, WRITE_DAC,
+    },
+    System::{
+        Registry::{KEY_READ, KEY_SET_VALUE, REG_BINARY, RegSetValueExW},
+        SystemServices::{
+            ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE, ACCESS_DENIED_ACE_TYPE,
+            ACCESS_DENIED_CALLBACK_ACE_TYPE,
         },
-        Storage::FileSystem::{
-            DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_DELETE_CHILD, FILE_GENERIC_EXECUTE,
-            FILE_GENERIC_READ, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, READ_CONTROL,
-            WRITE_DAC, WRITE_OWNER,
-        },
-        System::{
-            Registry::{
-                HKEY, KEY_CREATE_LINK, KEY_CREATE_SUB_KEY, KEY_READ, KEY_SET_VALUE, REG_BINARY,
-                RegCloseKey, RegSetValueExW,
-            },
-            Threading::{GetCurrentProcess, OpenProcessToken},
-        },
+        Threading::{GetCurrentProcess, OpenProcessToken},
     },
 };
 
 const OWNERSHIP: u32 = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION;
 const SECURITY: u32 = OWNERSHIP | DACL_SECURITY_INFORMATION;
-const CHANGE_SECURITY: u32 = DELETE | WRITE_DAC | WRITE_OWNER;
-const FILE_MUTATION: u32 = CHANGE_SECURITY
-    | FILE_WRITE_DATA
-    | FILE_APPEND_DATA
-    | FILE_DELETE_CHILD
-    | FILE_WRITE_ATTRIBUTES
-    | FILE_WRITE_EA;
-const KEY_MUTATION: u32 = CHANGE_SECURITY | KEY_SET_VALUE | KEY_CREATE_SUB_KEY | KEY_CREATE_LINK;
-
-pub(super) struct RegistryKey(HKEY);
-impl Drop for RegistryKey {
-    fn drop(&mut self) {
-        // SAFETY: NtOpenKey transferred this registry handle to this owner.
-        unsafe { RegCloseKey(self.0) };
-    }
-}
-
-struct RegistryError {
-    api: &'static str,
-    status: Option<i32>,
-    code: u32,
-}
-
-impl std::fmt::Display for RegistryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} Win32 {}", self.api, self.code)?;
-        if let Some(status) = self.status {
-            write!(f, ", NTSTATUS {:#010x}", status.cast_unsigned())?;
-        }
-        Ok(())
-    }
-}
-
-fn open_registry(name: &str, rights: u32) -> Result<RegistryKey, RegistryError> {
-    let mut units = wide(OsStr::new(name));
-    let length = u16::try_from((units.len() - 1) * 2).map_err(|_| RegistryError {
-        api: "NtOpenKey input length",
-        status: None,
-        code: windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER,
-    })?;
-    let name = UNICODE_STRING {
-        Length: length,
-        MaximumLength: length,
-        Buffer: units.as_mut_ptr(),
-    };
-    let attributes = OBJECT_ATTRIBUTES {
-        Length: size_of::<OBJECT_ATTRIBUTES>()
-            .try_into()
-            .expect("OBJECT_ATTRIBUTES size"),
-        ObjectName: &raw const name,
-        Attributes: OBJ_CASE_INSENSITIVE,
-        ..Default::default()
-    };
-    let mut handle = ptr::null_mut();
-    // SAFETY: the owned profile key name and attrs are live and handle is writable.
-    let status = unsafe { NtOpenKey(&raw mut handle, rights, &raw const attributes) };
-    if status >= 0 {
-        Ok(RegistryKey(handle))
-    } else {
-        // SAFETY: the conversion takes an NTSTATUS value.
-        let code = unsafe { RtlNtStatusToDosError(status) };
-        Err(RegistryError {
-            api: "NtOpenKey",
-            status: Some(status),
-            code,
-        })
-    }
-}
-
 pub(super) fn registry_state(name: &str) -> String {
     match open_registry(name, KEY_READ) {
         Ok(_) => "NtOpenKey Win32 0 (still present)".into(),
@@ -180,7 +108,11 @@ impl Object<'_> {
             }
         };
         let descriptor = Local(descriptor);
-        status_result("GetNamedSecurityInfoW/GetSecurityInfo (profile)", code)?;
+        let api = match self {
+            Self::File(_) => "GetNamedSecurityInfoW (DACL)",
+            Self::Registry(_) => "GetSecurityInfo (DACL)",
+        };
+        status_result(api, code)?;
         Ok((descriptor, dacl))
     }
 
@@ -208,7 +140,11 @@ impl Object<'_> {
                 ),
             }
         };
-        status_result("SetNamedSecurityInfoW/SetSecurityInfo (profile DACL)", code)
+        let api = match self {
+            Self::File(_) => "SetNamedSecurityInfoW (DACL)",
+            Self::Registry(_) => "SetSecurityInfo (DACL)",
+        };
+        status_result(api, code)
     }
 }
 
@@ -317,7 +253,8 @@ pub(super) fn grant_package_read(directory: &Path, file: &Path) -> Result<(), St
             );
         }
         object.set(updated, PROTECTED_DACL_SECURITY_INFORMATION)?;
-        let after = final_file_sddl(path)?;
+        let (descriptor, _) = object.read()?;
+        let after = sddl(&descriptor)?;
         eprintln!(
             "SetNamedSecurityInfoW (package-only canary) Win32 0 [{}] {after}",
             path.display()
@@ -326,86 +263,147 @@ pub(super) fn grant_package_read(directory: &Path, file: &Path) -> Result<(), St
     Ok(())
 }
 
-fn harden(
-    object: &Object<'_>,
-    label: &str,
-    sid: &Sid,
-    mask: u32,
-    inheritance: u32,
-) -> Result<String, String> {
-    let (descriptor, old_dacl) = object.read()?;
-    let before = sddl(&descriptor)?;
-    eprintln!("j SDDL before [{label}] {before}");
-    if old_dacl.is_null() {
-        return Err("GetSecurityInfo (profile) returned a null DACL".into());
+fn package_entries(dacl: *mut ACL, sid: &Sid) -> Result<Vec<(u32, String)>, String> {
+    if dacl.is_null() {
+        return Err(format!(
+            "GetSecurityInfo returned a null DACL (Win32 {ERROR_INVALID_ACL})"
+        ));
     }
-    let all_packages = convert_sid("S-1-15-2-1")?;
-    let restricted_packages = convert_sid("S-1-15-2-2")?;
-    let owner_rights = convert_sid("S-1-3-4")?;
-    let entries = [
-        entry(sid.0, DENY_ACCESS, mask, inheritance),
-        entry(all_packages.0, DENY_ACCESS, mask, inheritance),
-        entry(restricted_packages.0, DENY_ACCESS, mask, inheritance),
-        // An OWNER RIGHTS ACE suppresses the owner's implicit WRITE_DAC grant.
-        entry(owner_rights.0, GRANT_ACCESS, READ_CONTROL, inheritance),
+    // SAFETY: dacl is borrowed from a live descriptor returned by Windows.
+    if unsafe { IsValidAcl(dacl) } == 0 {
+        return Err(format!("IsValidAcl Win32 {ERROR_INVALID_ACL}"));
+    }
+    let all = convert_sid("S-1-15-2-1")?;
+    let restricted = convert_sid("S-1-15-2-2")?;
+    let package = sid.text();
+    let targets = [
+        (sid.0, package.as_os_str()),
+        (all.0, OsStr::new("S-1-15-2-1")),
+        (restricted.0, OsStr::new("S-1-15-2-2")),
     ];
-    let mut new_dacl = ptr::null_mut();
-    // SAFETY: the existing descriptor, array and all SIDs remain live through the merge.
-    let code = unsafe {
-        SetEntriesInAclW(
-            entries.len().try_into().expect("ACL entries"),
-            entries.as_ptr(),
-            old_dacl,
-            &raw mut new_dacl,
-        )
-    };
-    let _allocation = Local(new_dacl.cast());
-    status_result("SetEntriesInAclW (profile mutation denies)", code)?;
-    if new_dacl.is_null() {
-        return Err("SetEntriesInAclW Win32 0 returned a null DACL".into());
+    // SAFETY: IsValidAcl validated the ACL, including its header.
+    let count = unsafe { (*dacl).AceCount };
+    let mut matches = Vec::new();
+    for index in 0..u32::from(count) {
+        let mut ace = ptr::null_mut();
+        // SAFETY: index is in the validated ACL, and ace receives a borrowed pointer.
+        if unsafe { GetAce(dacl, index, &raw mut ace) } == 0 {
+            return Err(format!(
+                "GetAce entry {index}: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: GetAce returned the header of a live, validated ACE.
+        let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+        let kind = u32::from(header.AceType);
+        let entry = format!(
+            "entry {index} type={kind:#04x} flags={:#04x}",
+            header.AceFlags
+        );
+        let offset = std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+        if !matches!(
+            kind,
+            ACCESS_ALLOWED_ACE_TYPE
+                | ACCESS_DENIED_ACE_TYPE
+                | ACCESS_ALLOWED_CALLBACK_ACE_TYPE
+                | ACCESS_DENIED_CALLBACK_ACE_TYPE
+        ) || usize::from(header.AceSize) < offset + 8
+        {
+            return Err(format!(
+                "GetAce Win32 0, cannot identify trustee of {entry} (Win32 {ERROR_INVALID_ACL})"
+            ));
+        }
+        // SAFETY: the supported ACE types share this SID offset, and the fixed SID header fits.
+        let trustee = unsafe { ace.cast::<u8>().add(offset) };
+        // SAFETY: byte 1 is the SID subauthority count at the verified offset.
+        let subauthorities = usize::from(unsafe { *trustee.add(1) });
+        if offset + 8 + 4 * subauthorities > usize::from(header.AceSize) {
+            return Err(format!(
+                "GetAce Win32 0, invalid trustee SID in {entry} (Win32 {ERROR_INVALID_ACL})"
+            ));
+        }
+        for (expected, name) in targets {
+            // SAFETY: both SIDs are live, with their subauthorities inside their buffers.
+            if unsafe { EqualSid(trustee.cast(), expected) } != 0 {
+                matches.push((index, format!("{entry} SID={}", name.display())));
+            }
+        }
     }
-    let result = object.set(new_dacl, 0);
-    let after = object.read().and_then(|(descriptor, _)| sddl(&descriptor));
-    match &after {
-        Ok(after) => eprintln!("j SDDL after [{label}] {after}"),
-        Err(error) => eprintln!("j SDDL after [{label}] unavailable: {error}"),
-    }
-    result?;
-    after?;
-    Ok(before)
+    Ok(matches)
 }
 
-pub(super) fn final_file_sddl(path: &Path) -> Result<String, String> {
-    let name = wide(path.as_os_str());
-    let (descriptor, _) = Object::File(&name).read()?;
-    sddl(&descriptor)
+fn verify_object(object: &Object<'_>, label: &str, stage: &str, sid: &Sid) -> Result<(), String> {
+    let (descriptor, dacl) = object.read()?;
+    eprintln!("{stage} SDDL [{label}] {}", sddl(&descriptor)?);
+    let mut control = 0;
+    let mut revision = 0;
+    // SAFETY: descriptor is live and the control flags and revision are writable.
+    if unsafe { GetSecurityDescriptorControl(descriptor.0, &raw mut control, &raw mut revision) }
+        == 0
+    {
+        return Err(format!(
+            "GetSecurityDescriptorControl: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    let remaining = package_entries(dacl, sid)?;
+    if !remaining.is_empty() || control & SE_DACL_PROTECTED == 0 {
+        return Err(format!(
+            "GetSecurityInfo Win32 0 [{label}] protected={} package entries={remaining:?}",
+            control & SE_DACL_PROTECTED != 0
+        ));
+    }
+    eprintln!("{stage} ACL readback [{label}] protected=true package entries=0");
+    Ok(())
 }
 
-pub(super) fn file(path: &Path, is_dir: bool, sid: &Sid) -> Result<String, String> {
+fn harden(object: &Object<'_>, label: &str, sid: &Sid) -> Result<(), String> {
+    let (descriptor, dacl) = object.read()?;
+    eprintln!("j/l SDDL before [{label}] {}", sddl(&descriptor)?);
+    let entries = package_entries(dacl, sid)?;
+    // Delete from the last slot so earlier slot numbers stay valid.
+    for (index, entry) in entries.iter().rev() {
+        // SAFETY: dacl is writable memory from GetSecurityInfo and index names a live ACE.
+        if unsafe { DeleteAce(dacl, *index) } == 0 {
+            return Err(format!(
+                "DeleteAce [{label}] {entry}: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        eprintln!("DeleteAce Win32 0 [{label}] {entry}");
+    }
+    let result = object
+        .set(dacl, PROTECTED_DACL_SECURITY_INFORMATION)
+        .map_err(|error| format!("{error} [{label}] removed entries={entries:?}"));
+    let observed = verify_object(object, label, "j/l after", sid);
+    result.and(observed)
+}
+
+pub(super) fn verify_file(path: &Path, stage: &str, sid: &Sid) -> Result<(), String> {
     let name = wide(path.as_os_str());
-    harden(
+    verify_object(
         &Object::File(&name),
         &path.display().to_string(),
+        stage,
         sid,
-        FILE_MUTATION,
-        if is_dir {
-            SUB_CONTAINERS_AND_OBJECTS_INHERIT
-        } else {
-            NO_INHERITANCE
-        },
     )
 }
 
-pub(super) fn registry(name: &str, sid: &Sid) -> Result<String, String> {
+pub(super) fn file(path: &Path, sid: &Sid) -> Result<(), String> {
+    let name = wide(path.as_os_str());
+    harden(&Object::File(&name), &path.display().to_string(), sid)
+}
+
+pub(super) fn registry(name: &str, sid: &Sid) -> Result<(), String> {
     let key = open_registry(name, READ_CONTROL | WRITE_DAC)
         .map_err(|error| format!("open profile registry for hardening: {error}"))?;
-    harden(
-        &Object::Registry(key.0),
-        name,
-        sid,
-        KEY_MUTATION,
-        CONTAINER_INHERIT_ACE,
-    )
+    harden(&Object::Registry(key.0), name, sid)
+}
+
+pub(super) fn verify_registry(name: &str, stage: &str, sid: &Sid) -> Result<(), String> {
+    let key = open_registry(name, READ_CONTROL)
+        .map_err(|error| format!("open profile registry for readback: {error}"))?;
+    verify_object(&Object::Registry(key.0), name, stage, sid)
 }
 
 fn status_result(api: &str, code: u32) -> Result<(), String> {

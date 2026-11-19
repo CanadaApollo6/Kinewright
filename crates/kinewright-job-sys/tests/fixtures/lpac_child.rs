@@ -239,11 +239,8 @@ mod child {
             }
             Some("profile-environment") => return super::profile_permissions::environment(output),
             Some("profile-objects") => return super::profile_permissions::objects(target, output),
-            Some("profile-file-restore") => {
-                return super::profile_permissions::restore_file(target, output);
-            }
-            Some("profile-registry-restore") => {
-                return super::profile_permissions::restore_registry(target, output);
+            Some("profile-registry-direct") => {
+                return super::profile_registry::write_direct(target, output);
             }
             _ => {}
         }
@@ -517,6 +514,10 @@ mod child {
 }
 
 #[cfg(all(windows, feature = "lpac-diagnostics"))]
+#[path = "lpac_registry_key.rs"]
+mod registry_key;
+
+#[cfg(all(windows, feature = "lpac-diagnostics"))]
 mod profile_registry {
     use std::{
         ffi::OsStr,
@@ -642,6 +643,29 @@ mod profile_registry {
             )
         };
         writeln!(output, "RegSetValueExW(profile value)\t{status}")
+    }
+
+    pub fn write_direct(target: &OsStr, output: &mut impl Write) -> io::Result<()> {
+        let target = target
+            .to_str()
+            .ok_or_else(|| io::Error::other("registry target is not Unicode"))?;
+        let (key, name) = target
+            .split_once('\t')
+            .ok_or_else(|| io::Error::other("missing registry canary name"))?;
+        let key = match super::registry_key::open_registry(key, KEY_SET_VALUE) {
+            Ok(key) => key,
+            Err(error) => {
+                return writeln!(output, "NtOpenKey(KEY_SET_VALUE)\t{}\t{error}", error.code);
+            }
+        };
+        let name: Vec<u16> = OsStr::new(name).encode_wide().chain([0]).collect();
+        // SAFETY: key is live, name is terminated and the supplied data contains six bytes.
+        let code =
+            unsafe { RegSetValueExW(key.0, name.as_ptr(), 0, REG_BINARY, b"direct".as_ptr(), 6) };
+        writeln!(
+            output,
+            "RegSetValueExW(profile direct)\t{code}\tNtOpenKey(KEY_SET_VALUE)=0"
+        )
     }
 
     fn create_canary(root: &Key, target: &OsStr) -> (&'static str, u32) {
