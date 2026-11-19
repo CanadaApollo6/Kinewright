@@ -268,8 +268,13 @@ pub fn profile_registry_location(
     )?;
     let token = token::open(
         child.process.as_ref().expect("suspended process"),
-        TOKEN_DUPLICATE,
+        TOKEN_QUERY | TOKEN_DUPLICATE,
     )?;
+    if !token::query_sid(&token, &child.sid)? {
+        return Err(io::Error::other(
+            "GetTokenInformation (profile registry TokenAppContainerSid) Win32 0: SID mismatch",
+        ));
+    }
     let mut duplicate = ptr::null_mut();
     // SAFETY: the suspended process token is live and duplicate is writable.
     check_step("DuplicateTokenEx (profile registry)", unsafe {

@@ -128,7 +128,7 @@ fn query_app_container(token: &Handle) -> io::Result<u32> {
     Ok(value)
 }
 
-fn query_sid(token: &Handle, expected: &Sid) -> io::Result<bool> {
+pub(super) fn query_sid(token: &Handle, expected: &Sid) -> io::Result<bool> {
     let storage = token_buffer(
         token,
         TokenAppContainerSid,
