@@ -47,7 +47,7 @@ use windows_sys::Win32::{
             PROCESS_MITIGATION_DEP_POLICY, SECURITY_MANDATORY_LOW_RID,
         },
         Threading::{
-            CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+            CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DETACHED_PROCESS,
             EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
             GetProcessMitigationPolicy, InitializeProcThreadAttributeList, OpenProcessToken,
             PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
@@ -273,7 +273,7 @@ fn create_suspended(
             EXTENDED_STARTUPINFO_PRESENT
                 | CREATE_SUSPENDED
                 | CREATE_UNICODE_ENVIRONMENT
-                | CREATE_NO_WINDOW,
+                | DETACHED_PROCESS,
             environment.as_ptr().cast(),
             cwd.as_ptr(),
             &raw const startup.StartupInfo,

@@ -48,7 +48,7 @@ use windows_sys::Win32::{
     System::{
         Com::CoTaskMemFree,
         Pipes::{CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PeekNamedPipe},
-        Threading::{ALL_PROCESSOR_GROUPS, CREATE_NO_WINDOW, GetActiveProcessorCount},
+        Threading::{ALL_PROCESSOR_GROUPS, DETACHED_PROCESS, GetActiveProcessorCount},
     },
 };
 
@@ -64,8 +64,12 @@ static SPAWNING: Mutex<()> = Mutex::new(());
 #[test]
 fn suspended_lpac_passes_inspection_and_runs_with_minimal_environment() {
     let fixture = Fixture::new();
-    let result = fixture.single("ready", fixture.image_dir(), true);
-    result.expect(&["ready"], &[0], "verified LPAC startup");
+    let unconfined = fixture.startup(false);
+    let confined = fixture.startup(true);
+    assert!(
+        unconfined.is_ok() && confined.is_ok(),
+        "unconfined startup: {unconfined:?}; LPAC startup: {confined:?}"
+    );
 }
 
 #[test]
@@ -316,26 +320,13 @@ impl Fixture {
         let image_bytes = copy_image(Path::new(input), &exe);
         let source = root.0.join("source");
         fs::write(&source, SOURCE).expect("CreateFileW/WriteFile (fixture source)");
-        let fixture = Self {
+        Self {
             exe,
             image_bytes,
             source,
             sid,
             _root: root,
-        };
-        fixture.inspect_image(fixture.exe.as_os_str());
-        eprintln!(
-            "unconfined startup CreateProcessW input image=[{}] cwd=[{}]",
-            fixture.exe.display(),
-            fixture.image_dir().display()
-        );
-        fixture.single("ready", fixture.image_dir(), false).expect(
-            &["ready"],
-            &[0],
-            "unconfined startup control",
-        );
-        eprintln!("unconfined startup CreateProcessW and loader passed (Win32 0, exit 0)");
-        fixture
+        }
     }
 
     fn image_dir(&self) -> &Path {
@@ -383,23 +374,36 @@ impl Fixture {
     }
 
     fn start(&self, case: &str, target: impl AsRef<OsStr>, lpac: bool) -> Running {
-        let (child_request, mut request) = io::pipe().expect("CreatePipe (fixture request)");
-        let (reply, child_reply) = io::pipe().expect("CreatePipe (fixture reply)");
+        self.try_start(case, target, lpac)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    fn try_start(
+        &self,
+        case: &str,
+        target: impl AsRef<OsStr>,
+        lpac: bool,
+    ) -> Result<Running, String> {
+        let (child_request, mut request) =
+            io::pipe().map_err(|error| format!("{case} CreatePipe (fixture request): {error}"))?;
+        let (reply, child_reply) =
+            io::pipe().map_err(|error| format!("{case} CreatePipe (fixture reply): {error}"))?;
         let process = {
             // The lock serializes temporary handle inheritance and guards no data.
             let _spawning = SPAWNING
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if lpac {
-                let source = File::open(&self.source).expect("CreateFileW (read-only source)");
+                let source = File::open(&self.source)
+                    .map_err(|error| format!("{case} CreateFileW (read-only source): {error}"))?;
                 // SAFETY: querying all processor groups needs no pointer or handle.
                 let cpus = unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) };
-                assert_ne!(
-                    cpus,
-                    0,
-                    "GetActiveProcessorCount: {}",
-                    io::Error::last_os_error()
-                );
+                if cpus == 0 {
+                    return Err(format!(
+                        "{case} GetActiveProcessorCount: {}",
+                        io::Error::last_os_error()
+                    ));
+                }
                 let limits = Limits {
                     private_bytes: MEMORY_BYTES,
                     cpu_rate: 10_000u32.div_ceil(cpus),
@@ -424,7 +428,7 @@ impl Fixture {
                     .env_clear()
                     .env("SystemRoot", env_path("SystemRoot"))
                     .current_dir(self.image_dir())
-                    .creation_flags(CREATE_NO_WINDOW)
+                    .creation_flags(DETACHED_PROCESS)
                     .stdin(Stdio::from(child_request))
                     .stdout(Stdio::from(child_reply))
                     .stderr(Stdio::null())
@@ -432,34 +436,73 @@ impl Fixture {
                     .map(|child| Process::Open(Control(child)))
             }
         };
-        let process = process.unwrap_or_else(|error| {
-            let step = if lpac {
-                "LPAC launch/inspection after successful unconfined startup"
-            } else {
-                "unconfined CreateProcessW"
-            };
-            panic!("{case} {step}: {error}");
-        });
+        let step = if lpac {
+            "LPAC launch/inspection"
+        } else {
+            "unconfined CreateProcessW"
+        };
+        let process = process.map_err(|error| format!("{case} {step}: {error}"))?;
         request
             .write_all(b"!")
-            .unwrap_or_else(|error| panic!("{case} WriteFile(request): {error}"));
-        Running {
+            .map_err(|error| format!("{case} {step} succeeded, WriteFile(request): {error}"))?;
+        Ok(Running {
             process,
             request,
             reply,
             context: format!("{case} lpac={lpac}"),
-        }
+        })
     }
 
     fn single(&self, case: &str, target: impl AsRef<OsStr>, lpac: bool) -> Report {
-        let mut child = self.start(case, target, lpac);
-        let report = child.reply();
-        let exit = child.finish();
-        assert!(
-            exit == 0,
-            "GetExitCodeProcess ({case}, lpac={lpac}) exit {exit:#010x}, reply {report:?}"
-        );
-        report
+        self.try_single(case, target, lpac)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    fn try_single(
+        &self,
+        case: &str,
+        target: impl AsRef<OsStr>,
+        lpac: bool,
+    ) -> Result<Report, String> {
+        let mut child = self.try_start(case, target, lpac)?;
+        let report = child.try_reply()?;
+        let exit = child.try_finish()?;
+        if exit != 0 {
+            return Err(format!(
+                "GetExitCodeProcess ({case}, lpac={lpac}) exit {exit:#010x}, reply {report:?}"
+            ));
+        }
+        Ok(report)
+    }
+
+    fn startup(&self, lpac: bool) -> Result<(), String> {
+        let mode = if lpac { "LPAC" } else { "unconfined" };
+        if !lpac {
+            eprintln!(
+                "unconfined startup CreateProcessW input image=[{}] cwd=[{}]",
+                self.exe.display(),
+                self.image_dir().display()
+            );
+        }
+        let result = self
+            .try_single("ready", self.image_dir(), lpac)
+            .and_then(|report| {
+                if report.api == "ready" && report.code == 0 {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{} returned Win32 {} ({:#010x})",
+                        report.api, report.code, report.code
+                    ))
+                }
+            });
+        match &result {
+            Ok(()) => eprintln!(
+                "{mode} startup: CreateProcessW and detached startup passed (Win32 0, exit 0)"
+            ),
+            Err(error) => eprintln!("{mode} startup: {error}"),
+        }
+        result
     }
 
     fn refused(&self, case: &str, target: impl AsRef<OsStr>, apis: &[&str], codes: &[u32]) {
@@ -663,6 +706,10 @@ struct Running {
 
 impl Running {
     fn reply(&mut self) -> Report {
+        self.try_reply().unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    fn try_reply(&mut self) -> Result<Report, String> {
         let start = Instant::now();
         let mut bytes = Vec::new();
         while start.elapsed() < TIMEOUT {
@@ -680,20 +727,20 @@ impl Running {
             };
             if ok == 0 {
                 let error = io::Error::last_os_error();
-                match &mut self.process {
-                    Process::Lpac(child) => panic!(
+                return Err(match &mut self.process {
+                    Process::Lpac(child) => format!(
                         "{} PeekNamedPipe(reply): {error}; child wait/exit {:?}",
                         self.context,
                         child
                             .wait(Duration::from_millis(100))
                             .map(|code| format!("{code:#010x}"))
                     ),
-                    Process::Open(child) => panic!(
+                    Process::Open(child) => format!(
                         "{} PeekNamedPipe(reply): {error}; unconfined exit {:?}",
                         self.context,
                         child.0.try_wait()
                     ),
-                }
+                });
             }
             if available == 0 {
                 thread::sleep(Duration::from_millis(5));
@@ -701,23 +748,24 @@ impl Running {
             }
             let length = bytes.len();
             let available = available as usize;
-            assert!(
-                length + available <= 512,
-                "{} unexpected reply length",
-                self.context
-            );
+            if length + available > 512 {
+                return Err(format!(
+                    "{} PeekNamedPipe (reply) Win32 0: unexpected reply length",
+                    self.context
+                ));
+            }
             bytes.resize(length + available, 0);
             self.reply
                 .read_exact(&mut bytes[length..])
-                .expect("ReadFile (fixture reply)");
+                .map_err(|error| format!("{} ReadFile (fixture reply): {error}", self.context))?;
             if bytes.ends_with(b"\n") {
                 return Report::parse(&self.context, &bytes);
             }
         }
-        panic!(
+        Err(format!(
             "{} PeekNamedPipe(reply): expected a report within {TIMEOUT:?} (timeout Win32 {WAIT_TIMEOUT})",
             self.context
-        )
+        ))
     }
 
     fn release(&mut self) {
@@ -726,30 +774,37 @@ impl Running {
             .expect("WriteFile (release fixture)");
     }
 
-    fn finish(mut self) -> u32 {
+    fn finish(self) -> u32 {
+        self.try_finish().unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    fn try_finish(mut self) -> Result<u32, String> {
         match &mut self.process {
             Process::Lpac(child) => child
                 .wait(TIMEOUT)
-                .unwrap_or_else(|e| panic!("{}: {e}", self.context)),
+                .map_err(|error| format!("{}: {error}", self.context)),
             Process::Open(child) => {
                 let start = Instant::now();
                 while start.elapsed() < TIMEOUT {
-                    if let Some(status) = child
-                        .0
-                        .try_wait()
-                        .expect("WaitForSingleObject (unconfined child)")
-                    {
-                        return status
-                            .code()
-                            .expect("get unconfined exit code")
-                            .cast_unsigned();
+                    if let Some(status) = child.0.try_wait().map_err(|error| {
+                        format!(
+                            "{} WaitForSingleObject (unconfined child): {error}",
+                            self.context
+                        )
+                    })? {
+                        return status.code().map(i32::cast_unsigned).ok_or_else(|| {
+                            format!(
+                                "{} GetExitCodeProcess (unconfined child): exit code unavailable",
+                                self.context
+                            )
+                        });
                     }
                     thread::sleep(Duration::from_millis(5));
                 }
-                panic!(
+                Err(format!(
                     "{} WaitForSingleObject (unconfined child): Win32 {WAIT_TIMEOUT}",
                     self.context
-                )
+                ))
             }
         }
     }
@@ -762,18 +817,20 @@ struct Report {
 }
 
 impl Report {
-    fn parse(context: &str, bytes: &[u8]) -> Self {
-        let text = std::str::from_utf8(bytes).expect("fixture report is UTF-8");
-        let (api, code) = text
-            .trim_end()
-            .split_once('\t')
-            .unwrap_or_else(|| panic!("{context} malformed report {text:?}"));
-        Self {
+    fn parse(context: &str, bytes: &[u8]) -> Result<Self, String> {
+        let text = std::str::from_utf8(bytes)
+            .map_err(|error| format!("{context} ReadFile (fixture report) Win32 0: {error}"))?;
+        let (api, code) = text.trim_end().split_once('\t').ok_or_else(|| {
+            format!("{context} ReadFile (fixture report) Win32 0: malformed report {text:?}")
+        })?;
+        Ok(Self {
             api: api.into(),
-            code: code
-                .parse()
-                .expect("fixture report has a numeric Win32 code"),
-        }
+            code: code.parse().map_err(|error| {
+                format!(
+                    "{context} ReadFile (fixture reply) Win32 0: invalid reported code: {error}"
+                )
+            })?,
+        })
     }
 
     fn expect(&self, apis: &[&str], codes: &[u32], step: &str) {

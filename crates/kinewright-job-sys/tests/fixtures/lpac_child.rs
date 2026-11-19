@@ -32,11 +32,14 @@ mod child {
     };
     use windows_sys::Win32::{
         Foundation::{
-            CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError, WAIT_FAILED,
-            WAIT_OBJECT_0,
+            CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError,
+            INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0,
         },
         System::{
-            Console::GetConsoleCP,
+            Console::{
+                GetConsoleWindow, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
+                STD_OUTPUT_HANDLE,
+            },
             Memory::{
                 MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
             },
@@ -128,7 +131,7 @@ mod child {
             return Err(io::Error::other("ReadFile (request): wrong handshake byte"));
         }
         let (api, code) = match case.to_str() {
-            Some("ready") => ready(target),
+            Some("ready") => ready(target, source.is_some()),
             Some("source") => {
                 read_source(source.ok_or_else(|| io::Error::other("missing source handle"))?)
             }
@@ -196,7 +199,7 @@ mod child {
         }
     }
 
-    fn ready(expected_dir: &OsStr) -> (&'static str, u32) {
+    fn ready(expected_dir: &OsStr, lpac: bool) -> (&'static str, u32) {
         let actual = match env::current_dir() {
             Ok(path) => path,
             Err(error) => return ("GetCurrentDirectoryW", result_code::<()>(Err(error))),
@@ -210,9 +213,30 @@ mod child {
         {
             return ("GetEnvironmentStringsW(expected only SystemRoot)", 0);
         }
-        // SAFETY: this query has no pointer or handle argument.
-        if unsafe { GetConsoleCP() } != 0 {
-            return ("GetConsoleCP(expected no console)", 0);
+        // SAFETY: this query has no arguments. A pseudoconsole also returns a window handle.
+        if !unsafe { GetConsoleWindow() }.is_null() {
+            return ("GetConsoleWindow(unexpected console association)", 0);
+        }
+        if lpac {
+            // The LPAC protocol uses explicit handles. Only the control redirects standard I/O.
+            for (slot, step) in [
+                (STD_INPUT_HANDLE, "GetStdHandle(LPAC stdin must be absent)"),
+                (
+                    STD_OUTPUT_HANDLE,
+                    "GetStdHandle(LPAC stdout must be absent)",
+                ),
+                (STD_ERROR_HANDLE, "GetStdHandle(LPAC stderr must be absent)"),
+            ] {
+                // SAFETY: slot names one of the three standard-handle slots.
+                let handle = unsafe { GetStdHandle(slot) };
+                if handle == INVALID_HANDLE_VALUE {
+                    // SAFETY: read this thread's last error immediately after the failed query.
+                    return (step, unsafe { GetLastError() });
+                }
+                if !handle.is_null() {
+                    return (step, 0);
+                }
+            }
         }
         ("ready", 0)
     }
