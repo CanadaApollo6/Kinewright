@@ -579,16 +579,19 @@ directory. Use `SECURITY_CAPABILITIES` with
 [Microsoft's LPAC launch contract](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer).
 
 Preparation can run again at app startup. Remove only known empty profile
-directories with nonrecursive directory removes. Preserve unexpected content.
-Set protected DACLs on `Packages\<name>`, any retained `AC` tree and its
-contents, and the profile registry storage key. Remove every ACE for the
+directories with nonrecursive delete disposition on the verified directory
+handles. Preserve unexpected content. Pin file identities and refuse reparse
+points or changed identities. Apply protected DACLs to the checked objects
+by handle. Cover `Packages\<name>` and every retained descendant, and the
+profile registry storage key and every subkey. Remove every ACE for the
 container SID, ALL APPLICATION PACKAGES, and ALL RESTRICTED APPLICATION
 PACKAGES. Open the registry key by moniker under the current user's classes
 hive at `Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage`.
 Production code does not impersonate a thread. Before each launch, recheck
-registration, SID, and the protected, grant-free storage DACLs with a fixed
-walk cap. An unreadable or over-cap tree refuses launch. Launch performs no
-profile repair. Uninstall calls `DeleteAppContainerProfile`.
+registration, SID, and the protected, grant-free storage DACLs. The combined
+file and registry walk is capped at 256 nodes. An unreadable or over-cap tree
+refuses launch. Launch performs no profile repair. Uninstall calls
+`DeleteAppContainerProfile`.
 
 Use `STARTUPINFOEXW` with
 `EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT`,
@@ -610,7 +613,7 @@ Do not substitute `CreateProcessAsUserW(restricted_token)` for verified LPAC.
 [Chromium composition witness](https://chromium.googlesource.com/chromium/src/+/71104fd3/sandbox/win/src/restricted_token_unittest.cc)
 and [restricting-SID access checks](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createrestrictedtoken).
 
-The host uses `CreateFileW` for the source and `GetFileInformationByHandleEx`
+The host uses `CreateFileW` for the source and `GetFileInformationByHandle`
 for identity/type checks. Inherit only narrowed read-only source, pipe, and
 section handles through `DuplicateHandle`, `SetHandleInformation`, and
 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. No source path or parent process, token,
@@ -654,9 +657,11 @@ and the Job admits one process. Native canaries must prove creation, growth,
 and mutation are denied in reachable private, temp, profile, and registry
 locations. If a runtime write is unavoidable, enforce and prove a hard quota
 before admitting media. Expose no write broker. Also test named pipes, ALPC
-endpoints, and `OpenProcess` against the host and a sibling helper. Stable SID
-reuse grants no sibling IPC authority. Unsupported LPAC, mitigation, or
-nested Job setup refuses launch.
+endpoints, and process access against the host and a sibling helper. Test
+two helpers from the same profile in separate Jobs. Refuse sibling process
+opens for handle duplication, VM write, and limited query. Refuse main thread
+opens for setting context. Run the same opens with an unconfined control.
+Unsupported LPAC, mitigation, or nested Job setup refuses launch.
 
 Hosted runs 44512875269, 44523085254, and 44525476876 establish the launch
 requirements and storage behavior on `windows-2025`. Creation without
