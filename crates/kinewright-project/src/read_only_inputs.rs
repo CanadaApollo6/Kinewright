@@ -14,7 +14,7 @@ use kinewright_media::owned_io::{CertifiedSource, CursorReservation, LifetimeGua
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
-    sync::{Arc, Mutex, atomic::AtomicBool},
+    sync::{Arc, Mutex},
 };
 
 /// Expected identities supplied by the already-admitted bundle or fixture inventory.
@@ -101,8 +101,8 @@ impl ReadOnlyInputs {
     }
 
     /// Fresh probing reuses the pinned descriptor and admitted immutable table.
-    pub fn certify_media_input(&self) -> Result<CertifiedMediaInput, BundleError> {
-        self.media.probe(Arc::new(AtomicBool::new(false)))?;
+    pub fn certify_media_input_until_deadline(&self) -> Result<CertifiedMediaInput, BundleError> {
+        self.media.probe_until_deadline()?;
         Ok(self.media.clone())
     }
 
@@ -195,7 +195,7 @@ impl ReadOnlyInputs {
         )
         .map_err(|error| BundleError::Corrupt(error.to_string()))?;
         Ok(Self {
-            media: CertifiedMediaInput::from_verified_source(source, interpretation)?,
+            media: CertifiedMediaInput::from_verified_source(source, interpretation, None)?,
             usage,
         })
     }

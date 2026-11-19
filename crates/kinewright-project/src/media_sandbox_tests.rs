@@ -189,9 +189,12 @@ fn admit_through_the_helper((name, bytes, kind, resolution): Case) {
     assert!(asset.duration.0 > 0, "{name}");
     // Re-certification without a memo runs the confined probe and the
     // host's interpretation match against the admitted entry.
-    let admitted = owner.store().certify_media_entry(&entry).unwrap();
+    let admitted = owner
+        .store()
+        .certify_media_entry_until_deadline(&entry)
+        .unwrap();
     let source = admitted.playback_source();
-    let confined = super::probe(&source, Arc::new(AtomicBool::new(false))).unwrap();
+    let confined = super::probe(&source, None).unwrap();
     let mut retired = source.probe(Arc::new(AtomicBool::new(false))).unwrap();
     // Compare the probes after expressing absent metadata in the wire's
     // canonical form. Stills occupy one frame of the nominal 30 fps grid.
@@ -268,12 +271,11 @@ fn ms2_unconfigured_admission_is_sandbox_unavailable() {
     let (_, entry) = import(&mut owner, &wav, "tone.wav").unwrap();
     let source = owner
         .store()
-        .certify_media_entry(&entry)
+        .certify_media_entry_until_deadline(&entry)
         .unwrap()
         .playback_source();
-    let (result, in_process) = observe_stream_info_probes(|| {
-        super::probe_with(None, &source, Arc::new(AtomicBool::new(false)))
-    });
+    let (result, in_process) =
+        observe_stream_info_probes(|| super::probe_with(None, &source, None));
     assert_eq!(in_process, 0);
     assert!(
         matches!(&result, Err(BundleError::Unsupported(message)) if message.starts_with("media sandbox unavailable")),

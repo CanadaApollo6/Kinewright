@@ -344,7 +344,7 @@ impl ProjectStore {
         let source = if reference.entry.object.record_kind
             == crate::bundle_records::RecordKind::OwnedMedia
         {
-            Some(self.certify_media_input(reference)?)
+            Some(self.certify_media_input_until_deadline(reference)?)
         } else {
             None
         };

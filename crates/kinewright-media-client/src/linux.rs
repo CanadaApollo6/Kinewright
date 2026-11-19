@@ -384,6 +384,22 @@ impl Runtime {
         }
         Ok(Self { sender, status })
     }
+    /// Probe without a caller signal. The runtime still cancels on caller unwind.
+    pub fn probe_until_deadline(
+        &self,
+        source: Box<dyn Source>,
+        video: Option<u32>,
+        audio: Option<u32>,
+    ) -> Outcome {
+        self.probe(Request {
+            source,
+            video,
+            audio,
+            cancel: Arc::default(),
+            explicit_retry: false,
+        })
+    }
+
     pub fn probe(&self, request: Request) -> Outcome {
         let (reply, receiver) = mpsc::sync_channel(1);
         // Caller unwind revokes the request; actor cleanup ownership survives it.

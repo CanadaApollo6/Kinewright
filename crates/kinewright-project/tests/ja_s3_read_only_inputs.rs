@@ -322,7 +322,7 @@ fn s3_read_only_fixture_native_handles_probe_playback_seek_reopen() {
     let before = ["document", "manifest", "media", "table"]
         .map(|name| std::fs::read(fixture.root.path(name)).unwrap());
     let admission = fixture.admit().unwrap();
-    let source = admission.certify_media_input().unwrap();
+    let source = admission.certify_media_input_until_deadline().unwrap();
     let probe = source.probe(cancel()).unwrap();
     assert_eq!(probe.audio_stream, Some(0));
     assert_eq!(probe.video_stream, None);
@@ -332,7 +332,7 @@ fn s3_read_only_fixture_native_handles_probe_playback_seek_reopen() {
     assert_eq!(&frame.data(0)[..2], &1234_i16.to_le_bytes());
     decoder.seek(0).unwrap();
     assert!(decoder.next_frame().unwrap().is_some());
-    let reopened = admission.certify_media_input().unwrap();
+    let reopened = admission.certify_media_input_until_deadline().unwrap();
     assert!(
         reopened
             .open_audio(cancel())
@@ -367,7 +367,7 @@ fn s3_read_only_fixture_native_av_landmarks_seek_reopen() {
     let fixture = Fixture::audio_video();
     assert!(!fixture.document.media_pool[0].path.exists());
     let admission = fixture.admit().unwrap();
-    let source = admission.certify_media_input().unwrap();
+    let source = admission.certify_media_input_until_deadline().unwrap();
     let probe = source.probe(cancel()).unwrap();
     assert_eq!(probe.kind, MediaKind::AudioVideo);
     assert_eq!(probe.video_stream, Some(0));
@@ -393,7 +393,7 @@ fn s3_read_only_fixture_native_av_landmarks_seek_reopen() {
     assert!(crossings.abs_diff(440 * samples.len() / 48000) <= 1);
     audio.seek(0).unwrap();
     assert!(audio.next_frame().unwrap().is_some());
-    let reopened = admission.certify_media_input().unwrap();
+    let reopened = admission.certify_media_input_until_deadline().unwrap();
     assert_eq!(
         reopened
             .open_video(cancel())
@@ -597,7 +597,7 @@ fn s3_read_only_table_binding_and_probe_interpretation_refuse() {
 fn s3_read_only_tamper_after_certification_and_cache_hit_size_refuse() {
     let fixture = Fixture::new();
     let admission = fixture.admit().unwrap();
-    let source = admission.certify_media_input().unwrap();
+    let source = admission.certify_media_input_until_deadline().unwrap();
     let mut cursor = source.cursor(cancel()).unwrap();
     let mut writer = OpenOptions::new()
         .write(true)
@@ -611,18 +611,18 @@ fn s3_read_only_tamper_after_certification_and_cache_hit_size_refuse() {
         "uncached altered chunk refused"
     );
     assert!(
-        admission.certify_media_input().is_err(),
+        admission.certify_media_input_until_deadline().is_err(),
         "fresh certification sees tamper"
     );
     writer.seek(SeekFrom::Start(44)).unwrap();
     writer.write_all(&fixture.bytes[44..45]).unwrap();
     writer.flush().unwrap();
     assert!(
-        admission.certify_media_input().is_err(),
+        admission.certify_media_input_until_deadline().is_err(),
         "damaged admission stays quarantined"
     );
     let fresh = fixture.admit().unwrap();
-    let source = fresh.certify_media_input().unwrap();
+    let source = fresh.certify_media_input_until_deadline().unwrap();
     let mut cursor = source.cursor(cancel()).unwrap();
     assert_eq!(cursor.read(&mut [0; 4]).unwrap(), 4);
     writer.set_len(fixture.bytes.len() as u64 + 1).unwrap();
@@ -691,7 +691,7 @@ fn s3_read_only_production_fixture_and_store_identity_ledger() {
         };
         let standalone =
             ReadOnlyInputs::admit_fixture(&binding, files(), &StorageLimits::default()).unwrap();
-        let certified = standalone.certify_media_input().unwrap();
+        let certified = standalone.certify_media_input_until_deadline().unwrap();
         let mut video = certified.open_video(cancel()).unwrap();
         assert_eq!(
             video.next_frame().unwrap().unwrap().data(0)[0],
@@ -703,14 +703,14 @@ fn s3_read_only_production_fixture_and_store_identity_ledger() {
         assert!(audio.next_frame().unwrap().is_some());
         audio.seek(0).unwrap();
         assert!(audio.next_frame().unwrap().is_some());
-        assert!(standalone.certify_media_input().is_ok());
+        assert!(standalone.certify_media_input_until_deadline().is_ok());
 
         let baseline = owner.store().usage().unwrap().decoded_bytes;
         let admitted = owner
             .store()
             .admit_read_only_inputs(&binding, files())
             .unwrap();
-        let certified = admitted.certify_media_input().unwrap();
+        let certified = admitted.certify_media_input_until_deadline().unwrap();
         assert_eq!(
             admitted.usage().unwrap().decoded_bytes,
             owner.store().usage().unwrap().decoded_bytes
@@ -759,7 +759,7 @@ fn s3_read_only_windows_certification_keeps_write_refusal_zero_mutation() {
     let admission = fixture.admit().unwrap();
     assert!(
         admission
-            .certify_media_input()
+            .certify_media_input_until_deadline()
             .unwrap()
             .open_audio(cancel())
             .is_ok()

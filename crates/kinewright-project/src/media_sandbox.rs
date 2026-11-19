@@ -102,7 +102,7 @@ mod linux {
 
     pub(crate) fn probe(
         source: &CertifiedSource,
-        cancel: Arc<AtomicBool>,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Result<CertifiedProbe, BundleError> {
         #[cfg(any(test, feature = "ms2-test-bin-dir"))]
         let runtime = Some(test_runtime());
@@ -113,7 +113,7 @@ mod linux {
     pub(crate) fn probe_with(
         runtime: Option<&Runtime>,
         source: &CertifiedSource,
-        cancel: Arc<AtomicBool>,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Result<CertifiedProbe, BundleError> {
         let runtime = runtime.ok_or_else(|| {
             unavailable(Phase::Runtime.unavailable(UnavailableReason::NotConfigured))
@@ -135,15 +135,19 @@ mod linux {
         #[cfg(any(test, feature = "test-util"))]
         super::CONFINED_PROBE_REQUESTS.set(super::CONFINED_PROBE_REQUESTS.get() + 1);
         let (video, audio) = source.selected_streams().unwrap_or((None, None));
-        let probe = runtime
-            .probe(Request {
-                source: Box::new(Pinned(source.clone())),
-                video: index(video)?,
-                audio: index(audio)?,
+        let (video, audio) = (index(video)?, index(audio)?);
+        let pinned = Box::new(Pinned(source.clone()));
+        let probe = match cancel {
+            Some(cancel) => runtime.probe(Request {
+                source: pinned,
+                video,
+                audio,
                 cancel,
                 explicit_retry: false,
-            })
-            .map_err(|failure| sandbox_error(&failure))?;
+            }),
+            None => runtime.probe_until_deadline(pinned, video, audio),
+        }
+        .map_err(|failure| sandbox_error(&failure))?;
         // Admission rechecks host authority and byte identity after the
         // helper is gone.
         source
@@ -327,7 +331,7 @@ pub fn configure_media_sandbox_beside_executable() -> Result<(), BundleError> {
 
 pub(crate) fn probe(
     source: &CertifiedSource,
-    cancel: Arc<AtomicBool>,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<CertifiedProbe, BundleError> {
     #[cfg(target_os = "linux")]
     {
@@ -336,7 +340,7 @@ pub(crate) fn probe(
     #[cfg(not(target_os = "linux"))]
     {
         source
-            .probe(cancel)
+            .probe_with_cancellation(cancel)
             .map_err(|error| BundleError::Corrupt(error.to_string()))
     }
 }

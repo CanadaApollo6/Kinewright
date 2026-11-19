@@ -132,7 +132,7 @@ impl DecodeInput {
         source: &CertifiedSource,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self, kinewright_core::MediaError> {
-        CertifiedInput::open(source, cancel)
+        CertifiedInput::open(source, Some(cancel))
             .map(|input| Self::Certified(Box::new(input)))
             .map_err(media_io_error)
     }
@@ -351,7 +351,7 @@ impl CertifiedSource {
         lifetime: LifetimeGuard,
         reserve_cursor: Arc<CursorReservation>,
     ) -> Result<Self, OwnedIoError> {
-        Self::verify_with_cancel(
+        Self::verify_with_cancellation(
             file,
             source_sha256,
             source_length,
@@ -359,13 +359,13 @@ impl CertifiedSource {
             chunk_sha256,
             lifetime,
             reserve_cursor,
-            Arc::new(AtomicBool::new(false)),
+            None,
         )
     }
 
-    /// Complete verification using the caller's cancellation signal.
+    /// Complete verification with an optional caller cancellation signal.
     #[allow(clippy::too_many_arguments)]
-    pub fn verify_with_cancel(
+    pub fn verify_with_cancellation(
         file: File,
         source_sha256: [u8; 32],
         source_length: u64,
@@ -373,7 +373,7 @@ impl CertifiedSource {
         chunk_sha256: Arc<[[u8; 32]]>,
         lifetime: LifetimeGuard,
         reserve_cursor: Arc<CursorReservation>,
-        cancel: Arc<AtomicBool>,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Result<Self, OwnedIoError> {
         let source = Self::new(
             file,
@@ -384,7 +384,7 @@ impl CertifiedSource {
             lifetime,
             reserve_cursor,
         )?;
-        let mut cursor = source.cursor(cancel)?;
+        let mut cursor = source.cursor_with_cancellation(cancel)?;
         let mut digest = Sha256::new();
         let mut buffer = vec![0_u8; AVIO_BUFFER_BYTES];
         loop {
@@ -538,6 +538,13 @@ impl CertifiedSource {
     }
 
     pub fn cursor(&self, cancel: Arc<AtomicBool>) -> Result<VerifiedCursor, OwnedIoError> {
+        self.cursor_with_cancellation(Some(cancel))
+    }
+
+    fn cursor_with_cancellation(
+        &self,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<VerifiedCursor, OwnedIoError> {
         let charge = (self.0.reserve)(CURSOR_RESERVATION_BYTES).map_err(OwnedIoError::Capacity)?;
         let mut cursor = VerifiedCursor {
             source: Arc::clone(&self.0),
@@ -563,8 +570,15 @@ impl CertifiedSource {
         Ok(cursor)
     }
 
-    #[allow(clippy::too_many_lines)]
     pub fn probe(&self, cancel: Arc<AtomicBool>) -> Result<CertifiedProbe, OwnedIoError> {
+        self.probe_with_cancellation(Some(cancel))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub fn probe_with_cancellation(
+        &self,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<CertifiedProbe, OwnedIoError> {
         let mut input = CertifiedInput::open(self, cancel)?;
         let streams = input
             .format
@@ -680,7 +694,8 @@ impl CertifiedSource {
                 .next_frame()?
                 .ok_or_else(|| decoder_error("video has no decoded frame"))?;
             if still {
-                let mut cursor = self.cursor(Arc::clone(&video.input.avio.cursor().cancel))?;
+                let mut cursor =
+                    self.cursor_with_cancellation(video.input.avio.cursor().cancel.clone())?;
                 let _header_charge =
                     (self.0.reserve)(AVIO_BUFFER_BYTES as u64).map_err(OwnedIoError::Capacity)?;
                 let mut header = Vec::new();
@@ -780,7 +795,7 @@ impl CertifiedSource {
         cancel: Arc<AtomicBool>,
     ) -> Result<CertifiedVideoDecoder, OwnedIoError> {
         self.check_selected(stream_index, true)?;
-        let mut input = CertifiedInput::open(self, cancel)?;
+        let mut input = CertifiedInput::open(self, Some(cancel))?;
         let stream = input
             .format
             .stream(stream_index)
@@ -811,7 +826,7 @@ impl CertifiedSource {
         cancel: Arc<AtomicBool>,
     ) -> Result<CertifiedAudioDecoder, OwnedIoError> {
         self.check_selected(stream_index, false)?;
-        let mut input = CertifiedInput::open(self, cancel)?;
+        let mut input = CertifiedInput::open(self, Some(cancel))?;
         let stream = input
             .format
             .stream(stream_index)
@@ -874,7 +889,7 @@ pub struct VerifiedCursor {
     next_slot: usize,
     position: u64,
     failure: Option<OwnedIoError>,
-    cancel: Arc<AtomicBool>,
+    cancel: Option<Arc<AtomicBool>>,
     _charge: LifetimeGuard,
     #[cfg(any(test, feature = "test-util"))]
     delivered_bytes: u64,
@@ -918,7 +933,11 @@ impl VerifiedCursor {
             self.failure = Some(error.clone());
             return Err(error);
         }
-        if self.cancel.load(Ordering::Acquire) {
+        if self
+            .cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
             return self.fail(OwnedIoError::Cancelled);
         }
         let metadata = match self.source.file.metadata() {
@@ -1112,9 +1131,12 @@ impl CertifiedInput {
             decoder_bound: None,
         }
     }
-    fn open(source: &CertifiedSource, cancel: Arc<AtomicBool>) -> Result<Self, OwnedIoError> {
+    fn open(
+        source: &CertifiedSource,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<Self, OwnedIoError> {
         crate::initialize_ffmpeg().map_err(decoder_error)?;
-        let (format, avio) = bridge::open(source.cursor(cancel)?)?;
+        let (format, avio) = bridge::open(source.cursor_with_cancellation(cancel)?)?;
         let mut input = Self::from_parts(format, avio);
         if input.format.nb_streams() as usize > MAX_CERTIFIED_STREAMS {
             return Err(OwnedIoError::Capacity("too many certified streams".into()));
@@ -2657,7 +2679,7 @@ mod tests {
         let (directory, _path, source) = media_fixture("red");
         let wav = wav_fixture(&directory);
         let url = std::ffi::CString::new(wav.to_str().unwrap()).unwrap();
-        let mut input = CertifiedInput::open(&source, running()).unwrap();
+        let mut input = CertifiedInput::open(&source, Some(running())).unwrap();
         assert!(
             bridge::secondary_open(&mut input, &url) < 0,
             "C0_SECONDARY_OPEN_DENIED"
@@ -2913,7 +2935,7 @@ mod tests {
             "header limit control permits a second stream"
         );
         drop(header);
-        let mut bounded = CertifiedInput::open(&source, running()).unwrap();
+        let mut bounded = CertifiedInput::open(&source, Some(running())).unwrap();
         assert!(
             !bridge::append_stream(&mut bounded.format),
             "C0_PROBE_NEW_STREAM_ALLOCATION_REFUSED",

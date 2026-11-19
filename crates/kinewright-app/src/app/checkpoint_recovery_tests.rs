@@ -188,7 +188,11 @@ mod tests {
             manifest_ref: checkpoint.input_manifest_ref.clone(),
             entry: entry.clone(),
         };
-        let media = owner.store().unwrap().certify_media_input(&input).unwrap();
+        let media = owner
+            .store()
+            .unwrap()
+            .certify_media_input_until_deadline(&input)
+            .unwrap();
         assert_eq!(
             media.probe(Arc::new(AtomicBool::new(false))).unwrap().kind,
             kinewright_core::MediaKind::Audio

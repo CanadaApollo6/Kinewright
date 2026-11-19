@@ -410,17 +410,7 @@ impl CertifiedMediaInput {
     pub(crate) fn from_verified_source(
         source: CertifiedSource,
         interpretation: MediaInterpretation,
-    ) -> Result<Self, BundleError> {
-        Self::from_verified_source_with_cancel(
-            source,
-            interpretation,
-            Arc::new(AtomicBool::new(false)),
-        )
-    }
-    fn from_verified_source_with_cancel(
-        source: CertifiedSource,
-        interpretation: MediaInterpretation,
-        cancel: Arc<AtomicBool>,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Result<Self, BundleError> {
         let probe = crate::media_sandbox::probe(&source, cancel)?;
         if !interpretation.matches_probe(&probe)? {
@@ -462,6 +452,17 @@ impl CertifiedMediaInput {
     pub fn probe(
         &self,
         cancel: Arc<AtomicBool>,
+    ) -> Result<kinewright_media::owned_io::CertifiedProbe, BundleError> {
+        self.probe_with_cancellation(Some(cancel))
+    }
+    pub(crate) fn probe_until_deadline(
+        &self,
+    ) -> Result<kinewright_media::owned_io::CertifiedProbe, BundleError> {
+        self.probe_with_cancellation(None)
+    }
+    fn probe_with_cancellation(
+        &self,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Result<kinewright_media::owned_io::CertifiedProbe, BundleError> {
         let result = crate::media_sandbox::probe(&self.source, cancel)?;
         if !self.interpretation.matches_probe(&result)? {
@@ -583,15 +584,9 @@ impl ProjectStore {
     ) -> Result<(MediaAsset, OwnedInputEntry, Vec<SealedObject>), BundleError> {
         let (source, table) = self.admit_measured_media(reader, length)?;
         let sealed_table = self.admit_record(&table)?;
-        let certificate = self.certify_media_parts(
-            &source.reference,
-            &sealed_table.reference,
-            None,
-            None,
-            Arc::new(AtomicBool::new(false)),
-        )?;
-        let cancel = Arc::new(AtomicBool::new(false));
-        let probe = crate::media_sandbox::probe(&certificate, Arc::clone(&cancel))?;
+        let certificate =
+            self.certify_media_parts(&source.reference, &sealed_table.reference, None, None, None)?;
+        let probe = crate::media_sandbox::probe(&certificate, None)?;
         let probed_color = probe.color_description.clone();
         let asset = MediaAsset {
             remote_locator: None,
@@ -662,16 +657,23 @@ impl ProjectStore {
         self.remember_media_admission(&entry, certificate.admission_memo().map_err(io_error)?)?;
         Ok((asset, entry, vec![source, sealed_table]))
     }
-    pub fn certify_media_input(
+    pub fn certify_media_input_until_deadline(
         &self,
         reference: &OwnedInputRef,
     ) -> Result<CertifiedMediaInput, BundleError> {
-        self.certify_media_input_with_cancel(reference, Arc::new(AtomicBool::new(false)))
+        self.certify_media_input_with_cancellation(reference, None)
     }
     pub fn certify_media_input_with_cancel(
         &self,
         reference: &OwnedInputRef,
         cancel: Arc<AtomicBool>,
+    ) -> Result<CertifiedMediaInput, BundleError> {
+        self.certify_media_input_with_cancellation(reference, Some(cancel))
+    }
+    fn certify_media_input_with_cancellation(
+        &self,
+        reference: &OwnedInputRef,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Result<CertifiedMediaInput, BundleError> {
         let manifest = self.read_input_manifest(&reference.manifest_ref)?;
         if !manifest.entries.contains(&reference.entry) {
@@ -679,17 +681,17 @@ impl ProjectStore {
         }
         self.certify_media_entry_in_context(&reference.entry, Some(&reference.manifest_ref), cancel)
     }
-    pub(crate) fn certify_media_entry(
+    pub(crate) fn certify_media_entry_until_deadline(
         &self,
         entry: &OwnedInputEntry,
     ) -> Result<CertifiedMediaInput, BundleError> {
-        self.certify_media_entry_in_context(entry, None, Arc::new(AtomicBool::new(false)))
+        self.certify_media_entry_in_context(entry, None, None)
     }
     fn certify_media_entry_in_context(
         &self,
         entry: &OwnedInputEntry,
         context: Option<&ObjectRef>,
-        cancel: Arc<AtomicBool>,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Result<CertifiedMediaInput, BundleError> {
         let interpretation = entry.media_interpretation()?;
         let mut memo = self.media_admission_memo(entry)?;
@@ -698,13 +700,13 @@ impl ProjectStore {
             entry.chunk_table_ref()?,
             context,
             Some((entry, &mut memo)),
-            Arc::clone(&cancel),
+            cancel.clone(),
         )?;
         if memo.is_some() {
             return CertifiedMediaInput::from_admitted_source(source, interpretation);
         }
         let certificate =
-            CertifiedMediaInput::from_verified_source_with_cancel(source, interpretation, cancel)?;
+            CertifiedMediaInput::from_verified_source(source, interpretation, cancel)?;
         certificate.verify_unchanged()?;
         self.remember_media_admission(
             entry,
@@ -721,7 +723,7 @@ impl ProjectStore {
             &OwnedInputEntry,
             &mut Option<kinewright_media::owned_io::SourceAdmissionMemo>,
         )>,
-        cancel: Arc<AtomicBool>,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Result<CertifiedSource, BundleError> {
         let table = self.shared_chunk_table(table_ref)?;
         table.table.validate_binding(source, self.limits())?;
@@ -750,7 +752,7 @@ impl ProjectStore {
         }
         #[cfg(any(test, feature = "test-util"))]
         self.observe_cold_media_for_fixture()?;
-        let source = CertifiedSource::verify_with_cancel(
+        let source = CertifiedSource::verify_with_cancellation(
             file,
             parse_digest(&source.sha256)?,
             source.byte_length,
@@ -921,7 +923,10 @@ mod tests {
         descriptor.read_to_end(&mut actual).unwrap();
         assert_eq!(actual, bytes, "C0_FIX1_REUSED_BYTES_REOPEN");
         for _ in 0..2 {
-            let source = owner.store().certify_media_entry(&entry).unwrap();
+            let source = owner
+                .store()
+                .certify_media_entry_until_deadline(&entry)
+                .unwrap();
             let mut decoder = source.open_audio(Arc::new(AtomicBool::new(false))).unwrap();
             assert!(decoder.next_frame().unwrap().is_some());
         }
@@ -1134,7 +1139,10 @@ mod tests {
                 manifest_ref: sealed.reference.clone(),
                 entry,
             };
-            let certified = owner.store().certify_media_input(&reference).unwrap();
+            let certified = owner
+                .store()
+                .certify_media_input_until_deadline(&reference)
+                .unwrap();
             assert_eq!(
                 certified.identity().source_sha256,
                 parse_digest(asset.source_fingerprint.content_sha256.as_deref().unwrap()).unwrap()
@@ -1152,9 +1160,15 @@ mod tests {
             manifest_ref: sealed.reference.clone(),
             entry: entry.clone(),
         };
-        let source = owner.store().certify_media_input(&reference).unwrap();
+        let source = owner
+            .store()
+            .certify_media_input_until_deadline(&reference)
+            .unwrap();
         let baseline = owner.store().usage().unwrap().decoded_bytes;
-        let second = owner.store().certify_media_input(&reference).unwrap();
+        let second = owner
+            .store()
+            .certify_media_input_until_deadline(&reference)
+            .unwrap();
         assert_eq!(
             owner.store().usage().unwrap().decoded_bytes,
             baseline,
@@ -1196,13 +1210,7 @@ mod tests {
         assert!(
             owner
                 .store()
-                .certify_media_parts(
-                    &blob.reference,
-                    &hashed.reference,
-                    None,
-                    None,
-                    Arc::new(AtomicBool::new(false)),
-                )
+                .certify_media_parts(&blob.reference, &hashed.reference, None, None, None,)
                 .is_err(),
             "C0_CONFLICTING_TABLE_BINDING_REFUSED"
         );
@@ -1319,17 +1327,19 @@ mod tests {
         assert_eq!(typed.entries.len(), 2);
         let source = owner
             .store()
-            .certify_media_input(&reference)
+            .certify_media_input_until_deadline(&reference)
             .expect("C0_CERTIFICATE_USES_COMPLETE_IDENTITY_MEMO");
         drop(all_decoder_bytes);
         let mut decoder = source
             .open_audio(Arc::new(AtomicBool::new(false)))
             .expect("C0_UNRELATED_DAMAGE_DOES_NOT_BLOCK_SELECTED_CERTIFICATE");
         assert!(decoder.next_frame().unwrap().is_some());
-        let damaged = owner.store().certify_media_input(&OwnedInputRef {
-            manifest_ref: sealed.reference.clone(),
-            entry: second,
-        });
+        let damaged = owner
+            .store()
+            .certify_media_input_until_deadline(&OwnedInputRef {
+                manifest_ref: sealed.reference.clone(),
+                entry: second,
+            });
         assert!(
             damaged.is_err_and(|error| error.to_string().contains("damaged certified input")),
             "C0_CHANGED_SOURCE_RECERTIFICATION_REJECTS_DAMAGE"
@@ -1342,7 +1352,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let (_root, mut owner) = session("c0-transient-memo-open");
         let (_asset, entry, _pins) = import(&mut owner, 1, 3456);
-        let original = owner.store().certify_media_entry(&entry).unwrap();
+        let original = owner
+            .store()
+            .certify_media_entry_until_deadline(&entry)
+            .unwrap();
         assert!(!original.certification_was_cold());
         let root = owner.store().resolved_root().unwrap();
         let assets = root.with_file_name(format!(
@@ -1353,7 +1366,10 @@ mod tests {
         let permissions = objects.metadata().unwrap().permissions();
         std::fs::set_permissions(&objects, std::fs::Permissions::from_mode(0o000)).unwrap();
         let expected = owner.store().open_input_descriptor(&entry.object).err();
-        let refused = owner.store().certify_media_entry(&entry).err();
+        let refused = owner
+            .store()
+            .certify_media_entry_until_deadline(&entry)
+            .err();
         std::fs::set_permissions(objects, permissions).unwrap();
         let expected = expected.expect("fixture must refuse the temporary directory permission");
         let refused = refused.expect("transient open must remain refused");
@@ -1371,7 +1387,10 @@ mod tests {
             "C0_TRANSIENT_OPEN_KEEPS_ADMISSION_MEMO"
         );
         original.verify_unchanged().unwrap();
-        let warm = owner.store().certify_media_entry(&entry).unwrap();
+        let warm = owner
+            .store()
+            .certify_media_entry_until_deadline(&entry)
+            .unwrap();
         assert!(
             !warm.certification_was_cold(),
             "C0_TRANSIENT_RETRY_STAYS_WARM"
@@ -1390,7 +1409,10 @@ mod tests {
             manifest_ref: sealed.reference.clone(),
             entry,
         };
-        let original = owner.store().certify_media_input(&reference).unwrap();
+        let original = owner
+            .store()
+            .certify_media_input_until_deadline(&reference)
+            .unwrap();
         assert!(!original.certification_was_cold());
         let root = owner.store().resolved_root().unwrap();
         let assets = root.with_file_name(format!(
@@ -1411,14 +1433,20 @@ mod tests {
         )
         .unwrap();
         assert!(original.verify_unchanged().is_err());
-        let refreshed = owner.store().certify_media_input(&reference).unwrap();
+        let refreshed = owner
+            .store()
+            .certify_media_input_until_deadline(&reference)
+            .unwrap();
         assert!(refreshed.certification_was_cold());
         refreshed.verify_unchanged().unwrap();
         let mut decoder = refreshed
             .open_audio(Arc::new(AtomicBool::new(false)))
             .unwrap();
         assert!(decoder.next_frame().unwrap().is_some());
-        let warm = owner.store().certify_media_input(&reference).unwrap();
+        let warm = owner
+            .store()
+            .certify_media_input_until_deadline(&reference)
+            .unwrap();
         assert!(
             !warm.certification_was_cold(),
             "C0_REFRESHED_STAMP_IS_MEMOIZED"

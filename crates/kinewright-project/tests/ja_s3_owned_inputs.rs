@@ -281,7 +281,10 @@ fn s3_owned_input_identity() {
         table
             .validate_binding(&fixture.media.entry.object, owner.store().limits())
             .unwrap();
-        let source = owner.store().certify_media_input(&fixture.media).unwrap();
+        let source = owner
+            .store()
+            .certify_media_input_until_deadline(&fixture.media)
+            .unwrap();
         let probe = source.probe(cancel()).unwrap();
         assert_eq!(probe.video_stream, Some(0));
         assert_eq!(probe.audio_stream, Some(1));
@@ -318,7 +321,10 @@ fn s3_owned_input_identity() {
         );
         assert_eq!(lease.read(&mut [0; 1]).unwrap(), 0);
         lease.seek(SeekFrom::Start(0)).unwrap();
-        let source_again = owner.store().certify_media_input(&fixture.media).unwrap();
+        let source_again = owner
+            .store()
+            .certify_media_input_until_deadline(&fixture.media)
+            .unwrap();
         assert!(
             source_again
                 .open_video(cancel())
@@ -543,7 +549,7 @@ fn s3_rescue_preserves_owned_table_and_lut() {
     let source = session
         .store()
         .unwrap()
-        .certify_media_input(&OwnedInputRef {
+        .certify_media_input_until_deadline(&OwnedInputRef {
             manifest_ref: root.input_manifest_ref,
             entry: entry.clone(),
         })
@@ -627,7 +633,7 @@ fn s3_certified_input_through_use() {
     let source = session
         .store()
         .unwrap()
-        .certify_media_input(&reference)
+        .certify_media_input_until_deadline(&reference)
         .unwrap();
     let mut video = source.open_video(cancel()).unwrap();
     let mut audio = source.open_audio(cancel()).unwrap();
@@ -774,7 +780,7 @@ fn s3_duplicate_publication_full_digest_refuses_late_corruption_with_warm_memo()
     let certificate = edit
         .store()
         .unwrap()
-        .certify_media_input(&reference)
+        .certify_media_input_until_deadline(&reference)
         .unwrap();
     let mut video = certificate.open_video(cancel()).unwrap();
     assert!(video.next_frame().unwrap().is_some());
@@ -899,7 +905,7 @@ fn s3_default_budget_hd_import_probe_decode_and_reopen() {
         let source = edit
             .store()
             .unwrap()
-            .certify_media_input(&reference)
+            .certify_media_input_until_deadline(&reference)
             .unwrap();
         assert_eq!(
             source.probe(cancel()).unwrap().resolution,
@@ -945,7 +951,10 @@ fn s3_default_budget_hd_import_probe_decode_and_reopen() {
         .unwrap()
         .into_writer()
         .unwrap();
-        let reopened = owner.store().certify_media_input(&reference).unwrap();
+        let reopened = owner
+            .store()
+            .certify_media_input_until_deadline(&reference)
+            .unwrap();
         assert!(
             reopened
                 .open_video(cancel())

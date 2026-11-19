@@ -2616,7 +2616,7 @@ impl BundleRecord for crate::owned_inputs::OwnedInputManifest {
             if entry.object.record_kind == RecordKind::OwnedMedia
                 && !store.media_admission_verified(entry)?
             {
-                store.certify_media_entry(entry)?;
+                store.certify_media_entry_until_deadline(entry)?;
             }
         }
         Ok(())
