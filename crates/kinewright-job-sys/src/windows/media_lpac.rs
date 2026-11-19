@@ -6,8 +6,11 @@ use std::{
     fs::{self, File},
     io::{self, PipeReader, PipeWriter},
     mem::{size_of, size_of_val},
-    os::windows::{ffi::OsStrExt, io::AsRawHandle},
-    path::{Path, PathBuf},
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        io::AsRawHandle,
+    },
+    path::{Component, Path, PathBuf, Prefix},
     ptr,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -139,8 +142,8 @@ pub fn launch(
     let _lease = profile::PROFILE_CHANGE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (sid, storage) = verified.0.check()?;
-    let local = LaunchDirectory::create(storage.root(), &sid)?;
+    let (sid, _storage) = verified.0.check()?;
+    let local = LaunchDirectory::create(&sid)?;
     let suspended = begin(program, args, inputs, limits, sid, local)
         .map_err(|error| Error::launch(error, Step::Launch, "CreateProcessW"))?;
     suspended
@@ -151,8 +154,31 @@ pub fn launch(
 struct LaunchDirectory(PathBuf);
 
 impl LaunchDirectory {
-    fn create(root: &Path, sid: &Sid) -> Result<Self, Error> {
+    fn create(sid: &Sid) -> Result<Self, Error> {
         static SERIAL: AtomicU64 = AtomicU64::new(0);
+        let temp = std::env::temp_dir();
+        let root = temp.canonicalize().map_err(|error| {
+            Error::io(
+                Step::Environment,
+                "GetFinalPathNameByHandleW",
+                &error,
+                temp.display().to_string(),
+            )
+        })?;
+        let root = match root.components().next() {
+            Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::VerbatimDisk(_)) => {
+                let dos: Vec<_> = root.as_os_str().encode_wide().skip(4).collect();
+                PathBuf::from(OsString::from_wide(&dos))
+            }
+            Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_)) => root,
+            _ => {
+                return Err(Error::unexpected(
+                    Step::Environment,
+                    "GetFinalPathNameByHandleW",
+                    "expected a drive-qualified launch directory",
+                ));
+            }
+        };
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()

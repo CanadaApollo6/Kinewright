@@ -784,6 +784,13 @@ impl Fixture {
         assert!(!create.0.exists(), "LPAC created {}", create.0.display());
 
         let existing = Canary::new(parent);
+        fs::write(&existing.0, b"baseline").expect("seed retained write canary");
+        if parent.starts_with(self.profile_root()) {
+            self.profile
+                .api
+                .prepare()
+                .expect("protect host-seeded canary");
+        }
         for (case, expected) in [
             ("grow", b"baselinecanary".as_slice()),
             ("mutate", b"canaryne".as_slice()),

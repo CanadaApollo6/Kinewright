@@ -1,15 +1,16 @@
 use super::{Code, Error, Sid, Step, token::sid_text, wide};
 use std::{
-    ffi::OsStr,
-    fs::{self, File, OpenOptions},
+    ffi::{OsStr, OsString},
     io,
-    os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
+    os::windows::ffi::OsStringExt,
     path::{Path, PathBuf},
     ptr,
     sync::Mutex,
 };
 use windows_sys::Win32::{
-    Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_INVALID_NAME},
+    Foundation::{
+        ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_INVALID_NAME, ERROR_NO_MORE_ITEMS,
+    },
     Security::{
         EqualSid,
         Isolation::{
@@ -17,28 +18,40 @@ use windows_sys::Win32::{
             DeriveAppContainerSidFromAppContainerName, GetAppContainerFolderPath,
         },
     },
-    Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, READ_CONTROL,
-        RemoveDirectoryW, WRITE_DAC,
-    },
+    Storage::FileSystem::{READ_CONTROL, WRITE_DAC},
     System::{
         Com::CoTaskMemFree,
         Registry::{
-            HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, REG_LINK, REG_OPTION_OPEN_LINK, RegCloseKey,
-            RegOpenKeyExW, RegQueryValueExW,
+            HKEY, HKEY_CURRENT_USER, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE, REG_LINK,
+            REG_OPTION_OPEN_LINK, RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW,
         },
     },
 };
 
 mod acl;
+mod files;
 use acl::PackageSids;
+use files::Node;
+pub(super) use files::check_launch_directory;
 
 const AC: &str = "AC";
-const EMPTY_AC_DIRECTORIES: &[&str] = &["INetCache", "INetCookies", "INetHistory", "Temp"];
 const NODE_LIMIT: usize = 256;
 const STORAGE_KEY: &str = r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage";
+
+struct Budget(usize);
+impl Budget {
+    fn take(&mut self, api: &str) -> Result<(), Error> {
+        if self.0 == NODE_LIMIT {
+            return Err(Error::unexpected(
+                Step::StorageLimit,
+                api,
+                format!("profile files and registry exceed {NODE_LIMIT} nodes"),
+            ));
+        }
+        self.0 += 1;
+        Ok(())
+    }
+}
 
 /// A name-bound `AppContainer` identity for the current user.
 #[derive(Debug)]
@@ -118,7 +131,7 @@ impl Profile {
         };
         let ac = path.ok_or_else(|| self.missing())?;
         let root = self.root(&ac)?;
-        let storage = Storage::open(self, root, &ac)?;
+        let storage = Storage::open(self, root, true)?;
         let packages = PackageSids::new(&sid)?;
         if storage.unprotected(&packages)?.is_none() {
             return Ok(if created {
@@ -128,41 +141,11 @@ impl Profile {
             });
         }
 
-        // Only the known, empty profile directories are candidates for removal.
-        // Keep the root and its parent open so the verified parent path stays in place.
-        let Storage {
-            _packages: packages_dir,
-            root,
-            registry,
-            ac: nodes,
-        } = storage;
-        if !nodes.is_empty() {
-            let prune: Vec<_> = nodes
-                .into_iter()
-                .filter(|node| {
-                    node.directory
-                        && node.path.parent() == Some(ac.as_path())
-                        && node.path.file_name().is_some_and(|name| {
-                            EMPTY_AC_DIRECTORIES
-                                .iter()
-                                .any(|expected| name.eq_ignore_ascii_case(expected))
-                        })
-                })
-                .map(|node| node.path)
-                .collect();
-            for child in prune {
-                remove_empty(&child)?;
-            }
-            remove_empty(&ac)?;
-        }
-        let storage = Storage {
-            _packages: packages_dir,
-            root,
-            registry,
-            ac: walk(&ac)?,
-        };
+        let storage = storage.prune()?;
         storage.protect(&packages)?;
         // Read through fresh handles so installation cannot report a cached ACL.
+        // Drop the preparation handles first, since some still have DELETE access.
+        drop(storage);
         self.check()?;
         Ok(Preparation::Prepared)
     }
@@ -204,7 +187,7 @@ impl Profile {
     pub(super) fn check(&self) -> Result<(Sid, Storage), Error> {
         let sid = self.expected()?;
         let ac = self.registered()?;
-        let storage = Storage::open(self, self.root(&ac)?, &ac)?;
+        let storage = Storage::open(self, self.root(&ac)?, false)?;
         let packages = PackageSids::new(&sid)?;
         if let Some(target) = storage.unprotected(&packages)? {
             return Err(Error::unexpected(
@@ -360,13 +343,12 @@ fn derive_sid(name: &str) -> Result<Sid, Error> {
 
 pub(super) struct Storage {
     _packages: Node,
-    root: Node,
-    registry: Key,
-    ac: Vec<Node>,
+    files: Vec<Node>,
+    registry: Vec<Key>,
 }
 
 impl Storage {
-    fn open(profile: &Profile, root: &Path, ac: &Path) -> Result<Self, Error> {
+    fn open(profile: &Profile, root: &Path, prepare: bool) -> Result<Self, Error> {
         let packages = root.parent().ok_or_else(|| {
             Error::unexpected(
                 Step::ReadStorage,
@@ -374,41 +356,53 @@ impl Storage {
                 "missing Packages directory",
             )
         })?;
+        let mut budget = Budget(0);
         Ok(Self {
-            _packages: Node::open(packages)?.require_directory()?,
-            root: Node::open(root)?.require_directory()?,
-            registry: Key::open(profile, READ_CONTROL)?,
-            ac: walk(ac)?,
+            _packages: Node::open_directory(packages)?,
+            files: files::walk(root, prepare, &mut budget)?,
+            registry: Key::walk(profile, &mut budget)?,
         })
     }
 
-    pub(super) fn root(&self) -> &Path {
-        &self.root.path
+    fn prune(mut self) -> Result<Self, Error> {
+        let mut retained = Vec::new();
+        // Descendants go first. A removed directory is closed before its parent is tried.
+        for node in self.files.into_iter().rev() {
+            if !node.prune()? {
+                retained.push(node);
+            }
+        }
+        retained.reverse();
+        self.files = retained;
+        Ok(self)
     }
 
     fn unprotected(&self, packages: &PackageSids<'_>) -> Result<Option<String>, Error> {
         let mut bad = None;
-        for node in std::iter::once(&self.root).chain(&self.ac) {
-            if !acl::secure(&node.object(), packages)? && bad.is_none() {
-                bad = Some(node.path.display().to_string());
+        for node in &self.files {
+            if !node.secure(packages)? && bad.is_none() {
+                bad = Some(node.path().display().to_string());
             }
         }
-        if !acl::secure(&self.registry.object(), packages)? && bad.is_none() {
-            bad = Some(self.registry.path.clone());
+        for key in &self.registry {
+            if !acl::secure(&key.object(), packages)? && bad.is_none() {
+                bad = Some(key.path.clone());
+            }
         }
         Ok(bad)
     }
 
     fn protect(&self, packages: &PackageSids<'_>) -> Result<(), Error> {
-        for node in self.ac.iter().rev().chain([&self.root]) {
-            if !acl::secure(&node.object(), packages)? {
-                let writable = open_file(&node.path, READ_CONTROL | WRITE_DAC)?;
-                acl::protect(&acl::Object::file(&writable, &node.path), packages)?;
-            }
+        for node in self.files.iter().rev() {
+            node.protect(packages)?;
         }
-        if !acl::secure(&self.registry.object(), packages)? {
-            let key = Key::open_path(&self.registry.path, READ_CONTROL | WRITE_DAC)?;
-            acl::protect(&key.object(), packages)?;
+        for key in self.registry.iter().rev() {
+            if !acl::secure(&key.object(), packages)? {
+                // An empty name on a nonpredefined handle reopens that key, even if renamed.
+                let writable =
+                    Key::open_at(key.handle, &[0], key.path.clone(), READ_CONTROL | WRITE_DAC)?;
+                acl::protect(&writable.object(), packages)?;
+            }
         }
         Ok(())
     }
@@ -420,20 +414,84 @@ struct Key {
 }
 
 impl Key {
-    fn open(profile: &Profile, rights: u32) -> Result<Self, Error> {
-        Self::open_path(&profile.registry_path(), rights)
+    fn walk(profile: &Profile, budget: &mut Budget) -> Result<Vec<Self>, Error> {
+        budget.take("RegOpenKeyExW")?;
+        let path = profile.registry_path();
+        let name = wide(OsStr::new(&path)).map_err(input_error)?;
+        let mut keys = vec![Self::open_at(HKEY_CURRENT_USER, &name, path, READ_CONTROL)?];
+        let mut parent_index = 0;
+        while parent_index < keys.len() {
+            let parent = &keys[parent_index];
+            let mut children = Vec::new();
+            let mut index = 0;
+            loop {
+                let mut name = [0u16; 256];
+                let mut len = 256;
+                // SAFETY: parent is open for enumeration; name and len are writable.
+                let code = unsafe {
+                    RegEnumKeyExW(
+                        parent.handle,
+                        index,
+                        name.as_mut_ptr(),
+                        &raw mut len,
+                        ptr::null(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                    )
+                };
+                if code == ERROR_NO_MORE_ITEMS {
+                    break;
+                }
+                if code != 0 {
+                    return Err(Error::new(
+                        Step::ReadStorage,
+                        "RegEnumKeyExW",
+                        Code::Win32(code),
+                        &parent.path,
+                    ));
+                }
+                budget.take("RegEnumKeyExW")?;
+                let len = len as usize;
+                if len == 0
+                    || len >= name.len()
+                    || name[len] != 0
+                    || name[..len].iter().any(|unit| matches!(*unit, 0 | 92))
+                {
+                    return Err(Error::unexpected(
+                        Step::ReadStorage,
+                        "RegEnumKeyExW",
+                        &parent.path,
+                    ));
+                }
+                let path = format!(
+                    r"{}\{}",
+                    parent.path,
+                    OsString::from_wide(&name[..len]).to_string_lossy()
+                );
+                children.push(Self::open_at(
+                    parent.handle,
+                    &name[..=len],
+                    path,
+                    READ_CONTROL,
+                )?);
+                index += 1;
+            }
+            keys.extend(children);
+            parent_index += 1;
+        }
+        Ok(keys)
     }
 
-    fn open_path(path: &str, rights: u32) -> Result<Self, Error> {
-        let name = wide(OsStr::new(path)).map_err(input_error)?;
+    fn open_at(parent: HKEY, name: &[u16], path: String, rights: u32) -> Result<Self, Error> {
         let mut handle = ptr::null_mut();
-        // SAFETY: a terminated subkey names storage under the current user's classes hive.
+        // SAFETY: parent is live and name is either the terminated subkey or the empty self name.
         let code = unsafe {
             RegOpenKeyExW(
-                HKEY_CURRENT_USER,
+                parent,
                 name.as_ptr(),
                 REG_OPTION_OPEN_LINK,
-                rights | KEY_QUERY_VALUE,
+                rights | KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS,
                 &raw mut handle,
             )
         };
@@ -445,10 +503,7 @@ impl Key {
                 path,
             ));
         }
-        let key = Self {
-            handle,
-            path: path.into(),
-        };
+        let key = Self { handle, path };
         let link_value = wide(OsStr::new("SymbolicLinkValue")).map_err(input_error)?;
         let (mut kind, mut size) = (0, 0);
         // SAFETY: key is open and the terminated value name and outputs are live.
@@ -467,14 +522,14 @@ impl Key {
                 Step::ReadStorage,
                 "RegQueryValueExW",
                 Code::Win32(code),
-                path,
+                &key.path,
             ));
         }
         if code == 0 && kind == REG_LINK {
             return Err(Error::unexpected(
                 Step::ReadStorage,
                 "RegQueryValueExW",
-                format!("registry link {path}"),
+                format!("registry link {}", key.path),
             ));
         }
         Ok(key)
@@ -490,167 +545,4 @@ impl Drop for Key {
         // SAFETY: this guard owns the key returned by RegOpenKeyExW.
         unsafe { RegCloseKey(self.handle) };
     }
-}
-
-struct Node {
-    path: PathBuf,
-    file: File,
-    directory: bool,
-}
-
-impl Node {
-    fn open(path: &Path) -> Result<Self, Error> {
-        let file = open_file(path, READ_CONTROL | FILE_READ_ATTRIBUTES)?;
-        let mut info = BY_HANDLE_FILE_INFORMATION::default();
-        // SAFETY: the file is live and info is writable.
-        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) } == 0 {
-            return Err(Error::last(
-                Step::ReadStorage,
-                "GetFileInformationByHandle",
-                path.display().to_string(),
-            ));
-        }
-        if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(Error::unexpected(
-                Step::ReadStorage,
-                "GetFileInformationByHandle",
-                format!("reparse point {}", path.display()),
-            ));
-        }
-        if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 && info.nNumberOfLinks != 1 {
-            return Err(Error::unexpected(
-                Step::ReadStorage,
-                "GetFileInformationByHandle",
-                format!("multiply linked file {}", path.display()),
-            ));
-        }
-        Ok(Self {
-            path: path.into(),
-            file,
-            directory: info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0,
-        })
-    }
-
-    fn require_directory(self) -> Result<Self, Error> {
-        if !self.directory {
-            return Err(Error::unexpected(
-                Step::ReadStorage,
-                "GetFileInformationByHandle",
-                format!("expected directory {}", self.path.display()),
-            ));
-        }
-        Ok(self)
-    }
-
-    fn object(&self) -> acl::Object<'_> {
-        acl::Object::file(&self.file, &self.path)
-    }
-}
-
-fn walk(ac: &Path) -> Result<Vec<Node>, Error> {
-    let ac = match Node::open(ac) {
-        Ok(ac) => ac.require_directory()?,
-        Err(error) if error.missing() => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    };
-    let mut nodes = vec![ac];
-    let mut index = 0;
-    while index < nodes.len() {
-        let parent = &nodes[index];
-        if parent.directory {
-            let entries = fs::read_dir(&parent.path).map_err(|error| {
-                Error::io(
-                    Step::ReadStorage,
-                    "FindFirstFileW",
-                    &error,
-                    parent.path.display().to_string(),
-                )
-            })?;
-            for entry in entries {
-                let entry = entry.map_err(|error| {
-                    Error::io(
-                        Step::ReadStorage,
-                        "FindNextFileW",
-                        &error,
-                        ac_label(&nodes[0]),
-                    )
-                })?;
-                if nodes.len() == NODE_LIMIT {
-                    return Err(Error::unexpected(
-                        Step::StorageLimit,
-                        "FindNextFileW",
-                        format!("AC tree exceeds {NODE_LIMIT} nodes"),
-                    ));
-                }
-                nodes.push(Node::open(&entry.path())?);
-            }
-        }
-        index += 1;
-    }
-    Ok(nodes)
-}
-
-fn ac_label(ac: &Node) -> String {
-    ac.path.display().to_string()
-}
-
-fn open_file(path: &Path, access: u32) -> Result<File, Error> {
-    OpenOptions::new()
-        .access_mode(access)
-        // Keep the object at this path while the caller inspects it.
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-        .map_err(|error| {
-            Error::io(
-                Step::ReadStorage,
-                "CreateFileW",
-                &error,
-                path.display().to_string(),
-            )
-        })
-}
-
-fn remove_empty(path: &Path) -> Result<(), Error> {
-    let name = wide(path.as_os_str()).map_err(input_error)?;
-    // SAFETY: this targets a known profile directory. RemoveDirectoryW is nonrecursive.
-    unsafe { RemoveDirectoryW(name.as_ptr()) };
-    // A nonempty or inaccessible directory is preserved and hardened by the next walk.
-    Ok(())
-}
-
-pub(super) fn check_launch_directory(path: &Path, sid: &Sid) -> Result<(), Error> {
-    let node = Node::open(path)?.require_directory()?;
-    let mut contents = fs::read_dir(path).map_err(|error| {
-        Error::io(
-            Step::Environment,
-            "FindFirstFileW",
-            &error,
-            path.display().to_string(),
-        )
-    })?;
-    if let Some(entry) = contents.next() {
-        entry.map_err(|error| {
-            Error::io(
-                Step::Environment,
-                "FindNextFileW",
-                &error,
-                path.display().to_string(),
-            )
-        })?;
-        return Err(Error::unexpected(
-            Step::Environment,
-            "FindNextFileW",
-            format!("launch directory is nonempty: {}", path.display()),
-        ));
-    }
-    let packages = PackageSids::new(sid)?;
-    if acl::contains_package(&node.object(), &packages)? {
-        return Err(Error::unexpected(
-            Step::Environment,
-            "GetSecurityInfo",
-            format!("package ACE on launch directory {}", path.display()),
-        ));
-    }
-    Ok(())
 }
