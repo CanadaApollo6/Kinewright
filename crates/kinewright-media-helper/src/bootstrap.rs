@@ -139,7 +139,7 @@ fn run_inner(
     witness.silent();
     if let Err(error) = boundary::enter_namespaces(app_pid, spawner.as_ref()) {
         let (error, reason) = match error {
-            NamespaceError::UserNamespacesUnavailable(error) => {
+            NamespaceError::RequiredNamespacesUnavailable(error) => {
                 (error, MediaSandboxError::SandboxUnavailable)
             }
             NamespaceError::PolicyDenied(error) => {

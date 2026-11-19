@@ -205,7 +205,7 @@ pub enum UnavailableReason {
     ScopeUnavailable(kinewright_media_ipc::ScopeUnavailableReason),
     ScopeVerifyFailed,
     ScopeVerifyTimedOut,
-    UserNamespacesUnavailable,
+    RequiredNamespacesUnavailable,
     NamespacePolicyDenied,
     EarlyEof,
     BootstrapRead,
@@ -228,7 +228,7 @@ impl Unavailable {
                 | UnavailableReason::SpawnerPidfd
                 | UnavailableReason::ScratchDirectoryDenied
                 | UnavailableReason::ExecutableUnavailable
-                | UnavailableReason::UserNamespacesUnavailable
+                | UnavailableReason::RequiredNamespacesUnavailable
                 | UnavailableReason::NamespacePolicyDenied
         )
     }
@@ -238,9 +238,14 @@ fn spawn_refusal(error: &io::Error, phase: Phase, retryable: UnavailableReason) 
     use rustix::io::Errno;
 
     let reason = match Errno::from_io_error(error) {
-        Some(Errno::NOENT | Errno::ACCESS | Errno::NOEXEC | Errno::NOTDIR | Errno::LOOP) => {
-            UnavailableReason::ExecutableUnavailable
-        }
+        Some(
+            Errno::NOENT
+            | Errno::ACCESS
+            | Errno::PERM
+            | Errno::NOEXEC
+            | Errno::NOTDIR
+            | Errno::LOOP,
+        ) => UnavailableReason::ExecutableUnavailable,
         _ => retryable,
     };
     phase.unavailable(reason)
@@ -491,6 +496,7 @@ mod tests {
             for errno in [
                 Errno::NOENT,
                 Errno::ACCESS,
+                Errno::PERM,
                 Errno::NOEXEC,
                 Errno::NOTDIR,
                 Errno::LOOP,

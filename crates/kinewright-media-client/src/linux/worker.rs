@@ -187,7 +187,10 @@ impl Root {
     }
 
     fn create_refusal(error: &io::Error) -> Unavailable {
-        let reason = if error.kind() == io::ErrorKind::PermissionDenied {
+        let reason = if matches!(
+            error.kind(),
+            io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
+        ) {
             Reason::ScratchDirectoryDenied
         } else {
             Reason::ScratchDirectory
@@ -803,7 +806,7 @@ impl Protocol<'_> {
             Message::Failed {
                 error: Error::SandboxUnavailable,
             } => Err(Phase::Forked
-                .unavailable(Reason::UserNamespacesUnavailable)
+                .unavailable(Reason::RequiredNamespacesUnavailable)
                 .into()),
             Message::Failed {
                 error: Error::NamespacePolicyDenied,
@@ -909,7 +912,7 @@ mod tests {
     fn scratch_directory_denial_is_unsupported() {
         use rustix::io::Errno;
 
-        for errno in [Errno::PERM, Errno::ACCESS] {
+        for errno in [Errno::PERM, Errno::ACCESS, Errno::ROFS] {
             let refusal = Root::create_refusal(&errno.into());
             assert_eq!(
                 refusal,

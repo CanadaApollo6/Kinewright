@@ -93,8 +93,8 @@ pub fn new_session() -> io::Result<()> {
 }
 
 pub enum NamespaceError {
-    /// The kernel or its policy refused `CLONE_NEWUSER` outright.
-    UserNamespacesUnavailable(io::Error),
+    /// A required namespace could not be created on this host.
+    RequiredNamespacesUnavailable(io::Error),
     /// Policy denied a bootstrap step outside the first `unshare`.
     PolicyDenied(io::Error),
     /// Other bootstrap failures, including exhausted namespace quotas.
@@ -114,6 +114,13 @@ fn namespace_setup_error(error: io::Error) -> NamespaceError {
     }
 }
 
+fn second_unshare_error(error: io::Error) -> NamespaceError {
+    match error.raw_os_error() {
+        Some(libc::EINVAL | libc::ENOSYS) => NamespaceError::RequiredNamespacesUnavailable(error),
+        _ => namespace_setup_error(error),
+    }
+}
+
 pub fn enter_namespaces(app_pid: u32, spawner: Option<&OwnedFd>) -> Result<(), NamespaceError> {
     let tasks = fs::read_dir("/proc/self/task")
         .and_then(|mut entries| entries.try_fold(0, |count, entry| entry.map(|_| count + 1)))
@@ -128,7 +135,7 @@ pub fn enter_namespaces(app_pid: u32, spawner: Option<&OwnedFd>) -> Result<(), N
     check(unsafe { libc::unshare(libc::CLONE_NEWUSER) }).map_err(|error| {
         match error.raw_os_error() {
             Some(libc::EPERM | libc::EACCES | libc::EINVAL | libc::ENOSYS) => {
-                NamespaceError::UserNamespacesUnavailable(error)
+                NamespaceError::RequiredNamespacesUnavailable(error)
             }
             _ => NamespaceError::Setup(error),
         }
@@ -139,7 +146,7 @@ pub fn enter_namespaces(app_pid: u32, spawner: Option<&OwnedFd>) -> Result<(), N
     arm_parent_death(app_pid, spawner).map_err(namespace_setup_error)?;
     // SAFETY: no shared descriptor table or threads exist; NEWPID applies to the next fork.
     check(unsafe { libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWNET | libc::CLONE_NEWPID) })
-        .map_err(namespace_setup_error)?;
+        .map_err(second_unshare_error)?;
     Ok(())
 }
 

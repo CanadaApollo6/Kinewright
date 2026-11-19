@@ -578,6 +578,42 @@ mod tests {
         assert!(!circuit.permits(source, true, now + Duration::from_millis(4500)));
     }
     #[test]
+    fn shim_only_payload_refusals_quarantine_the_source() {
+        use kinewright_media_ipc::{Frame, Message, ProbeSession};
+
+        for reason in [Error::NamespacePolicyDenied, Error::SandboxUnavailable] {
+            let mut session = ProbeSession::new(1, 2, [None, None]);
+            assert!(
+                session
+                    .accept(Frame {
+                        request: 1,
+                        generation: 2,
+                        message: Message::Ready {}
+                    })
+                    .is_ok()
+            );
+            let refusal = session
+                .accept(Frame {
+                    request: 1,
+                    generation: 2,
+                    message: Message::Failed { error: reason },
+                })
+                .unwrap_err();
+            let now = Instant::now();
+            let source = [1; 32];
+            let mut circuit = Circuit::new(now);
+            let outcome = attribute(None, Err(Failure::Sandbox(refusal)));
+            let decision = circuit.record(source, Health::of(&outcome), now);
+
+            assert_eq!(
+                (refusal, decision.retry, circuit.permits(source, false, now)),
+                (Error::ProtocolViolation, false, false),
+                "payload supplied {reason:?}"
+            );
+        }
+    }
+
+    #[test]
     fn neutral_outcomes_spend_nothing() {
         let now = Instant::now();
         let mut circuit = Circuit::new(now);

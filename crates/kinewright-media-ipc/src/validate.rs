@@ -200,6 +200,13 @@ impl ProbeSession {
             }
             (State::Complete, Message::Complete {}) => Ok(None),
             (
+                _,
+                Message::Failed {
+                    error:
+                        MediaSandboxError::SandboxUnavailable | MediaSandboxError::NamespacePolicyDenied,
+                },
+            ) => Err(bad),
+            (
                 State::Ready | State::Result,
                 Message::Failed {
                     error: MediaSandboxError::Cancelled,

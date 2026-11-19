@@ -158,7 +158,7 @@ fn ms2_apparmor_userns_gate_refuses_without_the_profile_and_admits_with_it() {
                 &result,
                 Err(Failure::Unavailable(refusal @ Unavailable {
                     phase: Phase::Forked,
-                    reason: UnavailableReason::UserNamespacesUnavailable
+                    reason: UnavailableReason::RequiredNamespacesUnavailable
                         | UnavailableReason::NamespacePolicyDenied,
                 })) if refusal.is_unsupported()
             ),

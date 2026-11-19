@@ -20,12 +20,33 @@ fn namespace_setup_separates_policy_denials_from_resource_failures() {
             ),
             "errno {errno}"
         );
+        assert!(matches!(
+            second_unshare_error(io::Error::from_raw_os_error(errno)),
+            NamespaceError::PolicyDenied(_)
+        ));
     }
     for errno in [libc::ENOSPC, libc::ENOMEM, libc::EAGAIN, libc::EUSERS] {
         assert!(
             matches!(
                 namespace_setup_error(io::Error::from_raw_os_error(errno)),
                 NamespaceError::Setup(_)
+            ),
+            "errno {errno}"
+        );
+        assert!(matches!(
+            second_unshare_error(io::Error::from_raw_os_error(errno)),
+            NamespaceError::Setup(_)
+        ));
+    }
+    for errno in [libc::EINVAL, libc::ENOSYS] {
+        assert!(matches!(
+            namespace_setup_error(io::Error::from_raw_os_error(errno)),
+            NamespaceError::Setup(_)
+        ));
+        assert!(
+            matches!(
+                second_unshare_error(io::Error::from_raw_os_error(errno)),
+                NamespaceError::RequiredNamespacesUnavailable(_)
             ),
             "errno {errno}"
         );

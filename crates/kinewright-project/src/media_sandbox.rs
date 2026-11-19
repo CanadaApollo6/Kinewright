@@ -178,15 +178,16 @@ mod linux {
     #[test]
     fn ms2_refusal_kind_and_message_include_the_bootstrap_cause() {
         use UnavailableReason::{
-            EarlyEof, ExecutableUnavailable, HelperSpawn, NamespacePolicyDenied, ScratchDirectory,
-            ScratchDirectoryDenied, SupervisorSpawn, UserNamespacesUnavailable,
+            EarlyEof, ExecutableUnavailable, HelperSpawn, NamespacePolicyDenied,
+            RequiredNamespacesUnavailable, ScratchDirectory, ScratchDirectoryDenied,
+            SupervisorSpawn,
         };
 
         for (phase, reason, detail) in [
             (
                 Phase::Forked,
-                UserNamespacesUnavailable,
-                "helper Forked, UserNamespacesUnavailable",
+                RequiredNamespacesUnavailable,
+                "helper Forked, RequiredNamespacesUnavailable",
             ),
             (
                 Phase::Forked,
