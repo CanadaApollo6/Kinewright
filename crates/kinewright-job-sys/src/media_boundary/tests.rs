@@ -56,7 +56,7 @@ fn namespace_setup_separates_policy_denials_from_resource_failures() {
 // The syscall operands deliberately have no paths, listeners or real process IDs.
 // Full-stack canaries are separate from these isolated, native seccomp predicates.
 #[allow(clippy::too_many_lines, reason = "isolated syscall attack table")]
-fn attack(name: &str) {
+fn attack(name: &str) -> libc::c_long {
     #[cfg(target_arch = "x86_64")]
     if name == "i386_getpid" {
         // SAFETY: the compat getpid syscall has no pointer operands or side
@@ -64,15 +64,14 @@ fn attack(name: &str) {
         unsafe {
             std::arch::asm!("int 0x80", inlateout("eax") 20_u32 => _, clobber_abi("C"));
         }
-        return;
+        return 0;
     }
     if let Some(value) = name.strip_prefix("madvise_value:") {
         let advice = value.parse::<u64>().unwrap();
         // SAFETY: zero length and a null address cannot alter any mapping.
         unsafe {
-            libc::syscall(libc::SYS_madvise, 0_u64, 0_u64, advice);
+            return libc::syscall(libc::SYS_madvise, 0_u64, 0_u64, advice);
         }
-        return;
     }
     let (syscall, args): (i64, [u64; 6]) = match name {
         "x32_getpid" => (libc::SYS_getpid | 0x4000_0000, [0; 6]),
@@ -211,7 +210,7 @@ fn attack(name: &str) {
     unsafe {
         libc::syscall(
             syscall, args[0], args[1], args[2], args[3], args[4], args[5],
-        );
+        )
     }
 }
 #[test]
@@ -254,12 +253,14 @@ fn fixture() {
             while !gate.load(Ordering::Acquire) {
                 std::thread::yield_now();
             }
-            std::thread::sleep(Duration::from_millis(50));
+            assert!(attack("prctl_other") >= 0);
         });
         while !running.load(Ordering::Acquire) {
             std::thread::yield_now();
         }
-        install_filter(Mode::Scope).unwrap();
+        if std::env::var_os("KW_MEDIA_CONTROL").is_none() {
+            install_filter(Mode::Scope).unwrap();
+        }
         release.store(true, Ordering::Release);
         worker.join().unwrap();
     } else if matches!(
@@ -414,13 +415,9 @@ fn resize_mapping() {
     }
 }
 extern "C" fn worker(_: *mut libc::c_void) -> *mut libc::c_void {
-    let delay = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 10_000_000,
-    };
-    // SAFETY: delay is initialized and nanosleep writes no output here.
-    unsafe {
-        libc::nanosleep(&raw const delay, std::ptr::null_mut());
+    if attack("prctl_other") < 0 {
+        // Avoid unwinding through pthread's C entry point.
+        std::process::exit(8);
     }
     std::ptr::null_mut()
 }
@@ -439,7 +436,22 @@ fn child(case: &str, control: bool) -> std::process::Output {
     child.output().unwrap()
 }
 #[test]
-fn final_filter_joins_running_worker_and_clone3_falls_back() {
+fn final_filter_reaches_running_and_new_threads() {
+    let _deadline = deadline::test();
+    for case in ["join", "pthread"] {
+        let denied = child(case, false);
+        assert_eq!(
+            denied.status.signal(),
+            Some(libc::SIGSYS),
+            "{case}: {denied:?}"
+        );
+        let control = child(case, true);
+        assert!(control.status.success(), "{case}: {control:?}");
+    }
+}
+
+#[test]
+fn final_filter_preserves_runtime_calls_and_clone3_fallback() {
     let _deadline = deadline::test();
     let control = child("clone3", true);
     assert!(
@@ -447,8 +459,6 @@ fn final_filter_joins_running_worker_and_clone3_falls_back() {
         "clone3 negative control {control:?}"
     );
     for case in [
-        "join",
-        "pthread",
         "anonymous_mmap",
         "resize_mapping",
         "guard_advice",
