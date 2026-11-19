@@ -129,7 +129,7 @@ def plan(listing, tier, count):
             if not split:
                 cost = {"kinewright_app": 342 if tier == "fast" else 28, "mcp_server": 182,
                         "ja_s1_storage": 188, "kinewright_project": 86,
-                        "lpac_native": 8}.get(suite["label"], max(1, len(names) * 0.02))
+                        "lpac_native": 12}.get(suite["label"], max(1, len(names) * 0.02))
                 if len(names) == 1:
                     cost = estimates.get((suite["label"], names[0]), cost)
                 cost = measured_batches.get(suite["label"], cost)

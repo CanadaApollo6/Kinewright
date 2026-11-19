@@ -1,6 +1,4 @@
-use kinewright_job_sys::media_lpac::diagnostic::CANDIDATE_ENVIRONMENT;
 use std::{
-    env,
     ffi::OsStr,
     io::{self, Write},
     os::windows::{
@@ -22,19 +20,6 @@ fn wide(value: &OsStr) -> Vec<u16> {
 fn last_error() -> u32 {
     // SAFETY: read this thread's last error after a failed Win32 call.
     unsafe { GetLastError() }
-}
-
-pub(super) fn environment(output: &mut impl Write) -> io::Result<()> {
-    let names = env::vars_os().map(|(name, _)| name).collect::<Vec<_>>();
-    let paths = ["SystemRoot"]
-        .into_iter()
-        .chain(CANDIDATE_ENVIRONMENT)
-        .map(|key| (key, env::var_os(key)))
-        .collect::<Vec<_>>();
-    writeln!(
-        output,
-        "GetEnvironmentStringsW\t0\tnames={names:?} Windows paths={paths:?}"
-    )
 }
 
 fn token() -> Result<OwnedHandle, u32> {

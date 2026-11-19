@@ -16,25 +16,6 @@ use windows_sys::Win32::{
     System::{SystemServices::SECURITY_MANDATORY_LOW_RID, Threading::OpenProcessToken},
 };
 
-pub(super) struct Inspection {
-    #[cfg(feature = "lpac-diagnostics")]
-    pub(super) base_verified: bool,
-    pub(super) verified: bool,
-    pub(super) report: String,
-}
-
-impl Inspection {
-    pub(super) fn require_verified(self) -> io::Result<()> {
-        if self.verified {
-            #[cfg(feature = "lpac-diagnostics")]
-            eprintln!("suspended token: {}", self.report);
-            Ok(())
-        } else {
-            Err(io::Error::other(self.report))
-        }
-    }
-}
-
 pub(super) fn open(process: &Handle, rights: u32) -> io::Result<Handle> {
     let mut token = ptr::null_mut();
     // SAFETY: process is live and token receives an owned handle.
@@ -44,77 +25,36 @@ pub(super) fn open(process: &Handle, rights: u32) -> io::Result<Handle> {
     Ok(Handle(token))
 }
 
-pub(super) fn inspect_token(process: &Handle, expected: &Sid, lpac: bool) -> Inspection {
-    let token = match open(process, TOKEN_QUERY) {
-        Ok(token) => token,
-        Err(error) => {
-            return Inspection {
-                #[cfg(feature = "lpac-diagnostics")]
-                base_verified: false,
-                verified: false,
-                report: format!(
-                    "{error}; TokenIsAppContainer, TokenAppContainerSid, TokenCapabilities, TokenIntegrityLevel and LPAC unconfirmed"
-                ),
-            };
-        }
-    };
-    let app_container = query_app_container(&token);
-    let sid = query_sid(&token, expected);
-    let capabilities = query_capabilities(&token);
-    let integrity = query_integrity(&token);
-    let (own_access, access) = match package_access(process, &token, expected) {
-        Ok(checks) => checks,
-        Err(err) => (Err(io::Error::other(err.to_string())), Err(err)),
-    };
-    let base_verified = app_container.as_ref().is_ok_and(|value| *value == 1)
-        && sid.as_ref().is_ok_and(|matched| *matched)
-        && capabilities.as_ref().is_ok_and(|count| *count == 0)
-        && integrity
-            .as_ref()
-            .is_ok_and(|rid| *rid == SECURITY_MANDATORY_LOW_RID);
-    let verified = base_verified
-        && own_access.as_ref().is_ok_and(|allowed| *allowed)
-        && access.as_ref().is_ok_and(|allowed| *allowed != lpac);
-    let facts = [
-        fact("GetTokenInformation TokenIsAppContainer", app_container, 1),
-        fact(
-            "GetTokenInformation TokenAppContainerSid matches",
-            sid,
-            true,
-        ),
-        fact(
-            "GetTokenInformation TokenCapabilities count",
-            capabilities,
-            0,
-        ),
-        fact(
-            "GetTokenInformation TokenIntegrityLevel RID",
-            integrity,
-            SECURITY_MANDATORY_LOW_RID,
-        ),
-        fact("AccessCheck own package SID read", own_access, true),
-        fact("AccessCheck ALL APPLICATION PACKAGES read", access, !lpac),
-    ];
-    #[cfg(feature = "lpac-diagnostics")]
-    let facts = facts
-        .into_iter()
-        .chain(super::token_queries::diagnose(&token))
-        .collect::<Vec<_>>();
-    // Keep the same facts on successful and failed startup; a query error never masks another.
-    let report = facts.join(" | ");
-    Inspection {
-        #[cfg(feature = "lpac-diagnostics")]
-        base_verified,
-        verified,
-        report,
-    }
-}
-
-fn fact<T: std::fmt::Debug>(name: &str, value: io::Result<T>, expected: T) -> String {
-    match value {
-        Ok(value) => format!("{name} Win32 0 observed={value:?} expected={expected:?}"),
-        Err(error) => format!("{name} unconfirmed ({error}) expected={expected:?}"),
-    }
+pub(super) fn inspect_token(process: &Handle, expected: &Sid) -> io::Result<()> {
+    use super::expect_value;
+    let token = open(process, TOKEN_QUERY)?;
+    expect_value(
+        "GetTokenInformation TokenIsAppContainer",
+        query_app_container(&token)?,
+        1,
+    )?;
+    expect_value(
+        "GetTokenInformation TokenAppContainerSid",
+        query_sid(&token, expected)?,
+        true,
+    )?;
+    expect_value(
+        "GetTokenInformation TokenCapabilities",
+        query_capabilities(&token)?,
+        0,
+    )?;
+    expect_value(
+        "GetTokenInformation TokenIntegrityLevel",
+        query_integrity(&token)?,
+        SECURITY_MANDATORY_LOW_RID,
+    )?;
+    let (own, all_packages) = package_access(process, &token, expected)?;
+    expect_value("AccessCheck own package SID read", own?, true)?;
+    expect_value(
+        "AccessCheck ALL APPLICATION PACKAGES read",
+        all_packages?,
+        false,
+    )
 }
 
 fn query_app_container(token: &Handle) -> io::Result<u32> {
@@ -188,7 +128,7 @@ impl Drop for Local {
     }
 }
 
-fn sid_text(sid: PSID) -> io::Result<String> {
+pub(super) fn sid_text(sid: PSID) -> io::Result<String> {
     let mut text = ptr::null_mut();
     // SAFETY: sid belongs to a live token buffer, text is writable.
     check_step("ConvertSidToStringSidW (AccessCheck)", unsafe {

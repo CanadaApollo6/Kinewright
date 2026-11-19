@@ -5,6 +5,14 @@ fn main() {}
 
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--ordinary-package-control")
+    {
+        let target = std::env::args_os().nth(2).expect("package control canary");
+        let (_, code) = child::package_read(&target);
+        return std::process::ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
     match child::run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
@@ -228,44 +236,11 @@ mod child {
         if start != *b"!" {
             return Err(io::Error::other("ReadFile (request): wrong handshake byte"));
         }
-        #[cfg(feature = "lpac-diagnostics")]
-        match case.to_str() {
-            Some("profile-registry") => return super::profile_registry::report(target, output),
-
-            Some(
-                "profile-registry-grow" | "profile-registry-change" | "profile-registry-value",
-            ) => {
-                return super::profile_registry::write_value(case, target, output);
-            }
-            Some("profile-environment") => return super::profile_permissions::environment(output),
-            Some("profile-objects") => return super::profile_permissions::objects(target, output),
-            Some("profile-registry-direct") => {
-                return super::profile_registry::write_direct(target, output);
-            }
-            _ => {}
-        }
         let (api, code) = match case.to_str() {
-            Some("ready") => ready(target, source.is_some(), true),
-            #[cfg(feature = "lpac-diagnostics")]
-            Some("package-only-read") => match File::open(target) {
-                Ok(mut file) => {
-                    let mut bytes = Vec::new();
-                    match file.read_to_end(&mut bytes) {
-                        Ok(_) if bytes == b"packages-only" => ("ReadFile(package-only canary)", 0),
-                        Ok(_) => ("ReadFile(package-only canary bytes mismatch)", 0),
-                        Err(error) => (
-                            "ReadFile(package-only canary)",
-                            result_code::<()>(Err(error)),
-                        ),
-                    }
-                }
-                Err(error) => (
-                    "CreateFileW(package-only canary)",
-                    result_code::<()>(Err(error)),
-                ),
-            },
-            #[cfg(feature = "lpac-diagnostics")]
-            Some("ready-parent-environment") => ready(target, source.is_some(), false),
+            Some("ready") => ready(target, source.is_some()),
+            Some("package-only-read") => package_read(target),
+            Some("profile-registry-direct") => return direct_registry(target, output),
+            Some("profile-objects") => return super::profile_permissions::objects(target, output),
             Some("source") => {
                 read_source(source.ok_or_else(|| io::Error::other("missing source handle"))?)
             }
@@ -274,8 +249,6 @@ mod child {
             Some("mutate") => file_write(target, "mutate"),
             Some("registry") => registry(target),
             Some("connect") => return connect_loopback(parse(target)?, output),
-            #[cfg(feature = "lpac-diagnostics")]
-            Some("panic-witness") => panic!("intentional fixture panic witness"),
             Some("process") => (
                 "OpenProcess(PROCESS_DUP_HANDLE)",
                 open_process(parse(target)?, PROCESS_DUP_HANDLE),
@@ -326,7 +299,66 @@ mod child {
         }
     }
 
-    fn ready(expected_dir: &OsStr, lpac: bool, minimal_environment: bool) -> (&'static str, u32) {
+    pub(super) fn package_read(target: &OsStr) -> (&'static str, u32) {
+        match File::open(target) {
+            Ok(mut file) => {
+                let mut bytes = Vec::new();
+                match file.read_to_end(&mut bytes) {
+                    Ok(_) if bytes == b"packages-only" => ("ReadFile(package-only canary)", 0),
+                    Ok(_) => ("ReadFile(package-only canary bytes mismatch)", 13),
+                    Err(error) => (
+                        "ReadFile(package-only canary)",
+                        result_code::<()>(Err(error)),
+                    ),
+                }
+            }
+            Err(error) => (
+                "CreateFileW(package-only canary)",
+                result_code::<()>(Err(error)),
+            ),
+        }
+    }
+
+    fn direct_registry(target: &OsStr, output: &mut impl Write) -> io::Result<()> {
+        use windows_sys::Win32::System::Registry::{
+            HKEY_USERS, KEY_SET_VALUE, REG_BINARY, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW,
+        };
+        let (path, value) = target
+            .to_str()
+            .and_then(|target| target.split_once('\t'))
+            .ok_or_else(|| io::Error::other("missing registry canary path and name"))?;
+        let path: Vec<u16> = OsStr::new(path).encode_wide().chain([0]).collect();
+        let value: Vec<u16> = OsStr::new(value).encode_wide().chain([0]).collect();
+        let mut key = ptr::null_mut();
+        // SAFETY: the host supplied an exact, terminated per-user key name.
+        let opened =
+            unsafe { RegOpenKeyExW(HKEY_USERS, path.as_ptr(), 0, KEY_SET_VALUE, &raw mut key) };
+        if opened != 0 {
+            return writeln!(output, "RegOpenKeyExW(KEY_SET_VALUE)\t{opened}");
+        }
+        // SAFETY: key is open, the value name is terminated, and the data contains six bytes.
+        let written =
+            unsafe { RegSetValueExW(key, value.as_ptr(), 0, REG_BINARY, b"canary".as_ptr(), 6) };
+        // SAFETY: this process owns the key and the value name is unique to this witness.
+        let cleanup = unsafe {
+            let cleanup = if written == 0 {
+                RegDeleteValueW(key, value.as_ptr())
+            } else {
+                0
+            };
+            RegCloseKey(key);
+            cleanup
+        };
+        if cleanup != 0 {
+            return writeln!(output, "RegDeleteValueW(canary)\t{cleanup}");
+        }
+        writeln!(
+            output,
+            "RegSetValueExW(profile direct)\t{written}\tRegOpenKeyExW(KEY_SET_VALUE)=0"
+        )
+    }
+
+    fn ready(expected_dir: &OsStr, lpac: bool) -> (&'static str, u32) {
         let actual = match env::current_dir() {
             Ok(path) => path,
             Err(error) => return ("GetCurrentDirectoryW", result_code::<()>(Err(error))),
@@ -336,7 +368,16 @@ mod child {
         }
         let system_root =
             env::var_os("SystemRoot").is_some_and(|value| Path::new(&value).is_absolute());
-        if !system_root || (minimal_environment && env::vars_os().count() != 1) {
+        let expected_environment = if lpac {
+            ["localappdata", "systemroot", "temp", "tmp"].as_slice()
+        } else {
+            ["systemroot"].as_slice()
+        };
+        let mut names: Vec<_> = env::vars_os()
+            .map(|(name, _)| name.to_string_lossy().to_ascii_lowercase())
+            .collect();
+        names.sort();
+        if !system_root || names != expected_environment {
             return ("GetEnvironmentStringsW(unexpected startup environment)", 0);
         }
         // SAFETY: this query has no arguments. A pseudoconsole also returns a window handle.
@@ -513,191 +554,6 @@ mod child {
     }
 }
 
-#[cfg(all(windows, feature = "lpac-diagnostics"))]
-#[path = "lpac_registry_key.rs"]
-mod registry_key;
-
-#[cfg(all(windows, feature = "lpac-diagnostics"))]
-mod profile_registry {
-    use std::{
-        ffi::OsStr,
-        io::{self, Write},
-        mem::size_of_val,
-        os::windows::ffi::OsStrExt,
-        ptr,
-    };
-    use windows_sys::{
-        Wdk::System::Registry::{KeyNameInformation, NtQueryKey},
-        Win32::{
-            Foundation::ERROR_INVALID_DATA,
-            Security::Isolation::GetAppContainerRegistryLocation,
-            System::Registry::{
-                HKEY, KEY_CREATE_SUB_KEY, KEY_READ, KEY_SET_VALUE, KEY_WRITE, REG_BINARY,
-                RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegSetValueExW,
-            },
-        },
-    };
-
-    pub(super) struct Key(pub(super) HKEY);
-    impl Drop for Key {
-        fn drop(&mut self) {
-            // SAFETY: the API transferred ownership of this key handle.
-            unsafe { RegCloseKey(self.0) };
-        }
-    }
-
-    pub(super) fn open(access: u32) -> Result<Key, i32> {
-        let mut root = ptr::null_mut();
-        // SAFETY: root is a writable out parameter for the current AppContainer's registry.
-        let status = unsafe { GetAppContainerRegistryLocation(access, &raw mut root) };
-        if status < 0 {
-            return Err(status);
-        }
-        if root.is_null() {
-            return Err(0x8000_ffff_u32.cast_signed());
-        }
-        Ok(Key(root))
-    }
-
-    fn key_name(key: &Key) -> String {
-        let mut data = [0u32; 512];
-        let mut returned = 0;
-        // SAFETY: the live key is borrowed, the aligned output is writable, and the length
-        // matches the buffer. KEY_NAME_INFORMATION starts with a DWORD byte count.
-        let status = unsafe {
-            NtQueryKey(
-                key.0,
-                KeyNameInformation,
-                data.as_mut_ptr().cast(),
-                size_of_val(&data).try_into().expect("bounded name buffer"),
-                &raw mut returned,
-            )
-        };
-        if status < 0 {
-            return format!(
-                "NtQueryKey(KeyNameInformation) NTSTATUS {:#010x}",
-                status.cast_unsigned()
-            );
-        }
-        let bytes = data[0] as usize;
-        if bytes == 0
-            || !bytes.is_multiple_of(2)
-            || bytes + 4 > (returned as usize).min(size_of_val(&data))
-        {
-            return format!("NtQueryKey(KeyNameInformation) Win32 {ERROR_INVALID_DATA}");
-        }
-        // SAFETY: successful NtQueryKey wrote bytes of UTF-16 after the DWORD header.
-        let name =
-            unsafe { std::slice::from_raw_parts(data.as_ptr().add(1).cast::<u16>(), bytes / 2) };
-        String::from_utf16_lossy(name)
-    }
-
-    pub fn report(target: &OsStr, output: &mut impl Write) -> io::Result<()> {
-        let read = open(KEY_READ);
-        let writable = open(KEY_CREATE_SUB_KEY);
-        let name = match (&read, &writable) {
-            (Ok(key), _) | (Err(_), Ok(key)) => key_name(key),
-            (Err(status), Err(_)) => format!(
-                "GetAppContainerRegistryLocation(KEY_READ) HRESULT {:#010x}",
-                status.cast_unsigned()
-            ),
-        };
-        let (step, code) = match writable {
-            Ok(root) => create_canary(&root, target),
-            Err(status) => (
-                "GetAppContainerRegistryLocation(KEY_CREATE_SUB_KEY) HRESULT",
-                status.cast_unsigned(),
-            ),
-        };
-        let message = format!("{step}\t{code}\t{name}\n");
-        output.write_all(message.as_bytes())?;
-        output.flush()
-    }
-
-    pub fn write_value(case: &OsStr, target: &OsStr, output: &mut impl Write) -> io::Result<()> {
-        let root = match open(KEY_SET_VALUE) {
-            Ok(root) => root,
-            Err(status) => {
-                return writeln!(
-                    output,
-                    "GetAppContainerRegistryLocation(KEY_SET_VALUE) HRESULT\t{}",
-                    status.cast_unsigned()
-                );
-            }
-        };
-        let name: Vec<u16> = target.encode_wide().chain([0]).collect();
-        let bytes: &[u8] = if case == "profile-registry-grow" {
-            b"profile canary enlarged"
-        } else {
-            b"changed!"
-        };
-        // SAFETY: root is owned, name terminated, and bytes holds the specified data.
-        let status = unsafe {
-            RegSetValueExW(
-                root.0,
-                name.as_ptr(),
-                0,
-                REG_BINARY,
-                bytes.as_ptr(),
-                u32::try_from(bytes.len()).expect("canary length"),
-            )
-        };
-        writeln!(output, "RegSetValueExW(profile value)\t{status}")
-    }
-
-    pub fn write_direct(target: &OsStr, output: &mut impl Write) -> io::Result<()> {
-        let target = target
-            .to_str()
-            .ok_or_else(|| io::Error::other("registry target is not Unicode"))?;
-        let (key, name) = target
-            .split_once('\t')
-            .ok_or_else(|| io::Error::other("missing registry canary name"))?;
-        let key = match super::registry_key::open_registry(key, KEY_SET_VALUE) {
-            Ok(key) => key,
-            Err(error) => {
-                return writeln!(output, "NtOpenKey(KEY_SET_VALUE)\t{}\t{error}", error.code);
-            }
-        };
-        let name: Vec<u16> = OsStr::new(name).encode_wide().chain([0]).collect();
-        // SAFETY: key is live, name is terminated and the supplied data contains six bytes.
-        let code =
-            unsafe { RegSetValueExW(key.0, name.as_ptr(), 0, REG_BINARY, b"direct".as_ptr(), 6) };
-        writeln!(
-            output,
-            "RegSetValueExW(profile direct)\t{code}\tNtOpenKey(KEY_SET_VALUE)=0"
-        )
-    }
-
-    fn create_canary(root: &Key, target: &OsStr) -> (&'static str, u32) {
-        let target: Vec<u16> = target.encode_wide().chain([0]).collect();
-        let mut key = ptr::null_mut();
-        // SAFETY: root is owned, target is a unique terminated child name, and key is writable.
-        let status = unsafe {
-            RegCreateKeyExW(
-                root.0,
-                target.as_ptr(),
-                0,
-                ptr::null(),
-                0,
-                KEY_WRITE,
-                ptr::null(),
-                &raw mut key,
-                ptr::null_mut(),
-            )
-        };
-        if status != 0 {
-            return ("RegCreateKeyExW(profile canary)", status);
-        }
-        drop(Key(key));
-        // SAFETY: target names the canary just created relative to this exact profile root.
-        let cleanup = unsafe { RegDeleteKeyW(root.0, target.as_ptr()) };
-        if cleanup != 0 {
-            return ("RegCreateKeyExW(profile canary)=0; RegDeleteKeyW", cleanup);
-        }
-        ("RegCreateKeyExW(profile canary)", 0)
-    }
-}
-
-#[cfg(all(windows, feature = "lpac-diagnostics"))]
+#[cfg(windows)]
 #[path = "profile_permissions.rs"]
 mod profile_permissions;

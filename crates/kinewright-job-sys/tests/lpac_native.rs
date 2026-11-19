@@ -1,7 +1,9 @@
 #![cfg(windows)]
 #![allow(unsafe_code)]
 
-use kinewright_job_sys::media_lpac::{self, Limits, SPIKE_CONTAINER_NAME};
+use kinewright_job_sys::media_lpac::{
+    self, Inputs, Limits, Preparation, Profile, Step, VerifiedProfile,
+};
 use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
@@ -48,22 +50,15 @@ use windows_sys::Win32::{
     System::{
         Com::CoTaskMemFree,
         Pipes::{CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PeekNamedPipe},
+        Registry::KEY_READ,
         Threading::{ALL_PROCESSOR_GROUPS, DETACHED_PROCESS, GetActiveProcessorCount},
     },
 };
 
-#[cfg(feature = "lpac-diagnostics")]
-#[path = "lpac_diagnostics/mod.rs"]
-mod diagnostics;
+#[path = "fixtures/profile_controls.rs"]
+mod profile_controls;
 
-#[test]
-#[ignore = "temporary hosted AppContainer profile experiment"]
-fn diagnose_lpac_creation_variants() {
-    #[cfg(feature = "lpac-diagnostics")]
-    diagnostics::run();
-    #[cfg(not(feature = "lpac-diagnostics"))]
-    panic!("enable lpac-diagnostics for the hosted profile experiment");
-}
+const TEST_PROFILE: &str = "kinewright.mediaprobe.launchtest";
 
 const TIMEOUT: Duration = Duration::from_secs(8);
 const MEMORY_BYTES: usize = 64 * 1024 * 1024;
@@ -85,38 +80,27 @@ fn suspended_lpac_passes_inspection_and_runs_with_minimal_environment() {
     );
 }
 
-#[cfg(feature = "lpac-diagnostics")]
 #[test]
 fn only_ordinary_appcontainer_reads_the_all_application_packages_canary() {
-    use diagnostics::{Profile, ProfileEnvironment, ProfileMode, Selection, harden_witness};
-
-    let mut fixture = Fixture::stage();
-    fixture.profile = Some(Profile::create(&fixture.sid).unwrap_or_else(|error| panic!("{error}")));
-    let environment = ProfileEnvironment::OwnedLocal;
-    let hardened = harden_witness(&mut fixture, environment);
+    let fixture = Fixture::new();
     let directory = fixture.root.0.join("all application packages control");
     fs::create_dir(&directory).expect("CreateDirectoryW (ALL APPLICATION PACKAGES canary)");
     let file = directory.join("read-only.txt");
     fs::write(&file, b"packages-only").expect("WriteFile (ALL APPLICATION PACKAGES canary)");
-    diagnostics::grant_package_read(&directory, &file).unwrap_or_else(|error| panic!("{error}"));
-
-    fixture.variant = Selection::PackageControl(environment);
-    let ordinary = fixture.try_single("package-only-read", &file, true);
-    eprintln!("ordinary AppContainer package-only read: {ordinary:?}");
-    fixture.variant = Selection::Profile(environment, ProfileMode::Hardened);
+    profile_controls::grant_package_read(&directory, &file);
+    let ordinary = profile_controls::plain_read(&fixture, &file);
     let lpac = fixture.try_single("package-only-read", &file, true);
+    eprintln!("ordinary AppContainer package-only read: {ordinary:?}");
     eprintln!("LPAC package-only read: {lpac:?}");
-
-    assert!(hardened.is_ok(), "{hardened:?}");
-    assert!(
-        ordinary
-            .as_ref()
-            .is_ok_and(|report| report.api == "ReadFile(package-only canary)" && report.code == 0)
-            && lpac
-                .as_ref()
-                .is_ok_and(|report| report.api == "CreateFileW(package-only canary)"
-                    && report.code == ERROR_ACCESS_DENIED),
-        "ordinary AppContainer package-only read: {ordinary:?}; LPAC package-only read: {lpac:?}"
+    assert_eq!(
+        ordinary.expect("ordinary AppContainer control"),
+        0,
+        "ordinary AppContainer reads exact canary bytes"
+    );
+    lpac.expect("LPAC package-only canary").expect(
+        &["CreateFileW(package-only canary)"],
+        FILE_DENIALS,
+        "LPAC package-only read",
     );
 }
 
@@ -159,37 +143,235 @@ fn existing_appcontainer_storage_refuses_create_growth_and_mutation() {
         &[0],
         "start LPAC before storage discovery",
     );
-    let mut candidates = BTreeSet::new();
-    let local = env_path("LOCALAPPDATA");
-    let packages = local.join("Packages");
-    let sid = fixture.sid.text();
-    candidates.insert(packages.join(SPIKE_CONTAINER_NAME));
-    candidates.insert(packages.join(&sid));
-    if let Some(path) = container_storage(&sid) {
-        assert_ne!(
-            path, local,
-            "GetAppContainerFolderPath returned the account's LocalAppData"
-        );
-        candidates.insert(path);
-    }
-
-    #[cfg(feature = "lpac-diagnostics")]
-    candidates.insert(diagnostics::projected_root(&fixture));
-
+    let root = fixture.profile_root();
     let mut checked = BTreeSet::new();
-    #[cfg(feature = "lpac-diagnostics")]
+    check_storage_tree(&fixture, &root, &mut checked);
     assert!(
-        candidates.iter().any(|path| path.is_dir()),
-        "GetAppContainerFolderPath did not identify real profile storage"
+        checked.contains(&root),
+        "installed profile root was checked"
     );
-    for path in candidates {
-        check_storage_tree(&fixture, &path, &mut checked);
-    }
-    if checked.is_empty() {
-        eprintln!("LPAC storage: no existing AppContainer directory for {sid:?}");
-    }
+    let target = format!(
+        "{}\t{}",
+        profile_controls::classes_key(&fixture.profile.api),
+        unique()
+    );
+    let control = fixture.try_single("profile-registry-direct", &target, false);
+    let confined = fixture.try_single("profile-registry-direct", &target, true);
+    eprintln!("direct profile registry control: {control:?}; LPAC: {confined:?}");
+    control.expect("unconfined registry control").expect(
+        &["RegSetValueExW(profile direct)"],
+        &[0],
+        "direct unconfined registry control",
+    );
+    confined.expect("LPAC registry refusal").expect(
+        &[
+            "RegOpenKeyExW(KEY_SET_VALUE)",
+            "RegSetValueExW(profile direct)",
+        ],
+        FILE_DENIALS,
+        "direct LPAC registry refusal",
+    );
+    eprintln!(
+        "transient LPAC object namespace: {:?}",
+        fixture.try_single("profile-objects", unique(), true)
+    );
     child.release();
     assert_eq!(child.finish(), 0, "storage discovery child exit");
+}
+
+#[test]
+fn preparation_twice_keeps_the_profile_unchanged() {
+    let fixture = Fixture::new();
+    let root = fixture.profile_root();
+    let before = (
+        profile_controls::file_sddl(&root),
+        profile_controls::registry_sddl(&fixture.profile.api),
+    );
+    assert_eq!(
+        fixture.profile.api.prepare().expect("repeat preparation"),
+        Preparation::Unchanged
+    );
+    assert_eq!(
+        before,
+        (
+            profile_controls::file_sddl(&root),
+            profile_controls::registry_sddl(&fixture.profile.api)
+        )
+    );
+    fixture
+        .startup(true)
+        .expect("LPAC startup after no-op preparation");
+}
+
+#[test]
+fn a_package_grant_on_recreated_ac_blocks_verification_and_launch() {
+    let fixture = Fixture::new();
+    let verified = fixture
+        .profile
+        .api
+        .verify()
+        .expect("safe profile before tampering");
+    let ac = fixture.profile_root().join("AC");
+    fs::create_dir_all(&ac).expect("CreateDirectoryW (recreate pruned AC)");
+    grant_image_access(&ac, &fixture.sid);
+    assert_refused_then_repaired(&fixture, &verified);
+}
+
+#[test]
+fn a_package_grant_on_registry_storage_blocks_verification_and_launch() {
+    let fixture = Fixture::new();
+    let verified = fixture
+        .profile
+        .api
+        .verify()
+        .expect("safe profile before tampering");
+    {
+        let key = profile_controls::Key::open(
+            &fixture.profile.api,
+            windows_sys::Win32::Storage::FileSystem::WRITE_DAC,
+        )
+        .unwrap_or_else(|code| panic!("RegOpenKeyExW (restore package ACE) Win32 {code}"));
+        key.grant(fixture.profile.api.sid());
+    }
+    assert_refused_then_repaired(&fixture, &verified);
+}
+
+fn assert_refused_then_repaired(fixture: &Fixture, stale: &VerifiedProfile<'_>) {
+    fixture.startup(false).expect("unconfined image control");
+    let profile = &fixture.profile.api;
+    let observed = profile
+        .verify()
+        .expect_err("verification accepted a restored grant");
+    let rejected = launch_refusal(fixture, stale);
+    eprintln!("verification refused: {observed}; launch refused: {rejected}");
+    assert_eq!(observed.step, Step::StorageAcl);
+    assert_eq!(rejected.step, Step::StorageAcl);
+    assert_eq!(
+        profile.prepare().expect("repair restored grant"),
+        Preparation::Prepared
+    );
+    profile.verify().expect("verify repaired profile");
+    fixture.startup(true).expect("LPAC startup after repair");
+}
+
+fn launch_refusal(fixture: &Fixture, stale: &VerifiedProfile<'_>) -> media_lpac::Error {
+    let (request, _send) = io::pipe().expect("CreatePipe (request)");
+    let (_read, reply) = io::pipe().expect("CreatePipe (reply)");
+    let source = File::open(&fixture.source).expect("CreateFileW (source)");
+    match fixture.launch(
+        stale,
+        &[
+            OsString::from("ready"),
+            fixture.image_dir().as_os_str().to_os_string(),
+        ],
+        Inputs {
+            source: &source,
+            request: &request,
+            reply: &reply,
+        },
+    ) {
+        Ok(_) => panic!("production launch accepted unsafe profile"),
+        Err(error) => error,
+    }
+}
+
+#[test]
+fn preparation_keeps_unexpected_ac_content_and_refuses_mutation() {
+    let fixture = Fixture::new();
+    let ac = fixture.profile_root().join("AC");
+    let unexpected = ac.join("keep this directory");
+    fs::create_dir_all(&unexpected).expect("CreateDirectoryW (unexpected content)");
+    let file = unexpected.join("data");
+    fs::write(&file, b"baseline").expect("WriteFile (unexpected content)");
+    grant_image_access(&unexpected, &fixture.sid);
+    assert_eq!(
+        fixture
+            .profile
+            .api
+            .prepare()
+            .expect("protect retained AC content"),
+        Preparation::Prepared
+    );
+    assert_eq!(
+        fs::read(&file).expect("ReadFile (preserved content)"),
+        b"baseline"
+    );
+    fixture.refuse_writes(&unexpected);
+    for case in ["grow", "mutate"] {
+        fixture.single(case, &file, false).expect(
+            &["WriteFile(canary)"],
+            &[0],
+            "unconfined existing file write",
+        );
+        fs::write(&file, b"baseline").expect("reset preserved file canary");
+        fixture.file_refusal(case, &file);
+        assert_eq!(
+            fs::read(&file).expect("ReadFile (preserved content)"),
+            b"baseline"
+        );
+    }
+}
+
+#[test]
+fn an_oversize_ac_tree_blocks_verification_and_launch() {
+    let fixture = Fixture::new();
+    let stale = fixture
+        .profile
+        .api
+        .verify()
+        .expect("safe profile before seeding");
+    let ac = fixture.profile_root().join("AC");
+    fs::create_dir_all(&ac).expect("CreateDirectoryW (oversize AC)");
+    for index in 0..256 {
+        File::create_new(ac.join(index.to_string())).expect("CreateFileW (oversize tree seed)");
+    }
+    fixture.startup(false).expect("unconfined image control");
+    let observed = fixture
+        .profile
+        .api
+        .verify()
+        .expect_err("oversize AC tree was verified");
+    let rejected = launch_refusal(&fixture, &stale);
+    eprintln!("verification refused: {observed}; launch refused: {rejected}");
+    assert_eq!(observed.step, Step::StorageLimit);
+    assert_eq!(rejected.step, Step::StorageLimit);
+}
+
+#[test]
+fn removal_leaves_no_profile_folder_or_registry_key() {
+    let fixture = Fixture::new();
+    let root = fixture.profile_root();
+    assert!(root.is_dir(), "installed profile folder exists");
+    drop(
+        profile_controls::Key::open(&fixture.profile.api, KEY_READ)
+            .unwrap_or_else(|code| panic!("RegOpenKeyExW (installed profile) Win32 {code}")),
+    );
+    fixture
+        .profile
+        .api
+        .remove()
+        .expect("DeleteAppContainerProfile (uninstall)");
+    assert_eq!(
+        fs::symlink_metadata(root)
+            .expect_err("profile folder survived removal")
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    let opened = profile_controls::Key::open(&fixture.profile.api, KEY_READ);
+    assert!(
+        matches!(opened, Err(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND)),
+        "RegOpenKeyExW (removed profile) Win32 {}",
+        opened.err().unwrap_or(0)
+    );
+    assert_eq!(
+        fixture
+            .profile
+            .api
+            .verify()
+            .expect_err("removed profile was verified")
+            .step,
+        Step::ReadStorage
+    );
 }
 
 #[test]
@@ -364,124 +546,89 @@ fn closing_the_last_job_handle_ends_a_running_child() {
     eprintln!("CloseHandle(Job): child signaled with exit code {exit:#010x}");
 }
 
+struct TestProfile {
+    api: Profile,
+    _lease: std::sync::MutexGuard<'static, ()>,
+}
+
+impl TestProfile {
+    fn new() -> Self {
+        static LEASE: Mutex<()> = Mutex::new(());
+        let lease = LEASE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let api = Profile::new(TEST_PROFILE).unwrap_or_else(|error| panic!("{error}"));
+        api.remove()
+            .unwrap_or_else(|error| panic!("remove stale profile: {error}"));
+        let profile = Self { api, _lease: lease };
+        profile
+            .api
+            .prepare()
+            .unwrap_or_else(|error| panic!("prepare profile: {error}"));
+        profile
+    }
+}
+
+impl Drop for TestProfile {
+    fn drop(&mut self) {
+        if let Err(error) = self.api.remove() {
+            eprintln!("remove test profile: {error}");
+            assert!(thread::panicking(), "remove test profile: {error}");
+        }
+    }
+}
+
 struct Fixture {
-    #[cfg(feature = "lpac-diagnostics")]
-    variant: diagnostics::Selection,
-    #[cfg(feature = "lpac-diagnostics")]
-    profile: Option<diagnostics::Profile>,
-    #[cfg(feature = "lpac-diagnostics")]
-    private_local: PathBuf,
-    #[cfg(feature = "lpac-diagnostics")]
-    real_local: PathBuf,
+    profile: TestProfile,
     exe: PathBuf,
-    image_bytes: u64,
     source: PathBuf,
     sid: Sid,
-    #[cfg_attr(
-        not(feature = "lpac-diagnostics"),
-        expect(
-            dead_code,
-            reason = "keeps fixture files alive through their owner's cleanup"
-        )
-    )]
     root: Temp,
 }
 
 impl Fixture {
     fn new() -> Self {
-        #[cfg(feature = "lpac-diagnostics")]
-        {
-            let mut fixture = Self::stage();
-            fixture.profile = Some(
-                diagnostics::Profile::create(&fixture.sid)
-                    .unwrap_or_else(|error| panic!("{error}")),
-            );
-            let environment = diagnostics::ProfileEnvironment::OwnedLocal;
-            diagnostics::harden_witness(&mut fixture, environment)
-                .unwrap_or_else(|error| panic!("{error}"));
-            fixture
-        }
-        #[cfg(not(feature = "lpac-diagnostics"))]
-        Self::stage()
-    }
-
-    fn stage() -> Self {
+        let profile = TestProfile::new();
         let root = Temp::new();
         let directory = root.0.join("image directory");
         fs::create_dir(&directory).expect("CreateDirectoryW (private fixture image directory)");
         let sid = Sid::derive();
+        assert_eq!(sid.text(), OsStr::new(profile.api.sid()));
         grant_image_access(&directory, &sid);
         let exe = directory.join("fixture.exe");
-        // Create the copy with the directory's inheritable ACL.
         let input = env!("CARGO_BIN_EXE_kinewright-lpac-spike-child");
-        let image_bytes = copy_image(Path::new(input), &exe);
+        copy_image(Path::new(input), &exe);
         let source = root.0.join("source");
         fs::write(&source, SOURCE).expect("CreateFileW/WriteFile (fixture source)");
-        #[cfg(feature = "lpac-diagnostics")]
-        let private_local = root.0.join("empty LocalAppData");
-        #[cfg(feature = "lpac-diagnostics")]
-        {
-            fs::create_dir(&private_local).expect("CreateDirectoryW (empty LOCALAPPDATA input)");
-        }
         Self {
-            #[cfg(feature = "lpac-diagnostics")]
-            variant: diagnostics::Selection::NoProfile,
-            #[cfg(feature = "lpac-diagnostics")]
-            profile: None,
-            #[cfg(feature = "lpac-diagnostics")]
-            private_local,
-            #[cfg(feature = "lpac-diagnostics")]
-            real_local: env_path("LOCALAPPDATA"),
+            profile,
             exe,
-            image_bytes,
             source,
             sid,
             root,
         }
     }
 
+    fn profile_root(&self) -> PathBuf {
+        let sid = OsStr::new(self.profile.api.sid());
+        container_storage(sid)
+            .expect("GetAppContainerFolderPath (registered profile)")
+            .parent()
+            .expect("registered profile root")
+            .to_path_buf()
+    }
+
+    fn launch(
+        &self,
+        verified: &VerifiedProfile<'_>,
+        args: &[OsString],
+        inputs: Inputs<'_>,
+    ) -> Result<media_lpac::Child, media_lpac::Error> {
+        media_lpac::launch(verified, &self.exe, args, inputs, fixture_limits())
+    }
+
     fn image_dir(&self) -> &Path {
         self.exe.parent().unwrap()
-    }
-
-    fn inspect_image(&self, application: &OsStr) {
-        let file = File::open(application)
-            .unwrap_or_else(|error| panic!("CreateFileW (fixture image preflight): {error}"));
-        let image = file.metadata().unwrap_or_else(|error| {
-            panic!("GetFileInformationByHandle (fixture image preflight): {error}")
-        });
-        eprintln!(
-            "GetFileInformationByHandle (fixture image preflight) Win32 0: file={} bytes={} copied={}",
-            image.is_file(),
-            image.len(),
-            self.image_bytes
-        );
-        assert!(
-            image.is_file() && image.len() == self.image_bytes,
-            "GetFileInformationByHandle (fixture image preflight) Win32 0: expected a {} byte file, got file={} bytes={}",
-            self.image_bytes,
-            image.is_file(),
-            image.len()
-        );
-    }
-
-    #[expect(
-        clippy::unnecessary_debug_formatting,
-        reason = "Preserve the exact Windows strings, including quotes and escaped code units"
-    )]
-    fn inspect_launch(&self, case: &str, application: &OsStr, command_line: &OsStr, cwd: &OsStr) {
-        eprintln!(
-            "CreateProcessW (suspended LPAC, {case}) application={application:?} command_line={command_line:?} cwd={cwd:?} verbatim(application,argv0,cwd)={:?}",
-            (verbatim(application), verbatim(command_line), verbatim(cwd))
-        );
-        self.inspect_image(application);
-        let directory = fs::metadata(cwd).unwrap_or_else(|error| {
-            panic!("GetFileAttributesExW (LPAC current directory preflight): {error}")
-        });
-        assert!(
-            directory.is_dir(),
-            "GetFileAttributesExW (LPAC current directory preflight) Win32 0: expected a directory"
-        );
     }
 
     fn start(&self, case: &str, target: impl AsRef<OsStr>, lpac: bool) -> Running {
@@ -507,45 +654,23 @@ impl Fixture {
             if lpac {
                 let source = File::open(&self.source)
                     .map_err(|error| format!("{case} CreateFileW (read-only source): {error}"))?;
-                let limits = fixture_limits()?;
                 let args = [OsString::from(case), target.as_ref().to_os_string()];
-                let observer = |application: &OsStr, command_line: &OsStr, cwd: &OsStr| {
-                    self.inspect_launch(case, application, command_line, cwd);
-                };
-                #[cfg(feature = "lpac-diagnostics")]
-                let launched = if case == "package-only-read"
-                    || matches!(
-                        self.variant,
-                        diagnostics::Selection::Profile(_, diagnostics::ProfileMode::Probe)
-                    ) {
-                    media_lpac::diagnostic::launch_profile_canary(
-                        &self.exe,
-                        &args,
-                        (&source, &child_request, &child_reply),
-                        limits,
-                        self.variant.launch_variant(self),
-                    )
-                } else {
-                    media_lpac::diagnostic::launch(
-                        &self.exe,
-                        &args,
-                        (&source, &child_request, &child_reply),
-                        limits,
-                        self.variant.launch_variant(self),
-                        observer,
-                    )
-                };
-                #[cfg(not(feature = "lpac-diagnostics"))]
-                let launched = media_lpac::launch(
-                    &self.exe,
+                let verified = self
+                    .profile
+                    .api
+                    .verify()
+                    .map_err(|error| format!("{case} LPAC verify: {error}"))?;
+                self.launch(
+                    &verified,
                     &args,
-                    &source,
-                    &child_request,
-                    &child_reply,
-                    limits,
-                    observer,
-                );
-                launched.map(Process::Lpac)
+                    Inputs {
+                        source: &source,
+                        request: &child_request,
+                        reply: &child_reply,
+                    },
+                )
+                .map(Process::Lpac)
+                .map_err(|error| error.to_string())
             } else {
                 Command::new(&self.exe)
                     .args(["0", "0", "0", case])
@@ -559,6 +684,7 @@ impl Fixture {
                     .stderr(Stdio::null())
                     .spawn()
                     .map(|child| Process::Open(Control(child)))
+                    .map_err(|error| error.to_string())
             }
         };
         let step = if lpac {
@@ -610,12 +736,6 @@ impl Fixture {
             );
         }
         let case = "ready";
-        #[cfg(feature = "lpac-diagnostics")]
-        let case = if lpac && self.variant.uses_extra_environment() {
-            "ready-parent-environment"
-        } else {
-            case
-        };
         let result = self
             .try_single(case, self.image_dir(), lpac)
             .and_then(|report| {
@@ -698,49 +818,43 @@ impl Fixture {
     }
 }
 
-fn fixture_limits() -> Result<Limits, String> {
+fn fixture_limits() -> Limits {
     // SAFETY: querying all processor groups needs no pointer or handle.
     let cpus = unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) };
-    if cpus == 0 {
-        return Err(format!(
-            "GetActiveProcessorCount: {}",
-            io::Error::last_os_error()
-        ));
-    }
-    Ok(Limits {
+    assert_ne!(
+        cpus,
+        0,
+        "GetActiveProcessorCount: {}",
+        io::Error::last_os_error()
+    );
+    Limits {
         private_bytes: MEMORY_BYTES,
         cpu_rate: 10_000u32.div_ceil(cpus),
-    })
+    }
 }
 
-fn copy_image(input: &Path, image: &Path) -> u64 {
-    let mut input = File::open(input).unwrap_or_else(|e| {
+fn copy_image(input: &Path, image: &Path) {
+    let mut source = File::open(input).unwrap_or_else(|error| {
         panic!(
-            "CreateFileW (open archived fixture): {e}; input=[{}]",
+            "CreateFileW (archived fixture {}): {error}",
             input.display()
         )
     });
-    let bytes = input
+    let mut output = File::create_new(image).unwrap_or_else(|error| {
+        panic!(
+            "CreateFileW (private fixture image {}): {error}",
+            image.display()
+        )
+    });
+    let bytes = source
         .metadata()
-        .unwrap_or_else(|e| panic!("GetFileInformationByHandle (archived fixture): {e}"))
+        .expect("GetFileInformationByHandle (archived image)")
         .len();
-    let mut output = File::create_new(image)
-        .unwrap_or_else(|e| panic!("CreateFileW (private fixture image): {e}"));
-    let copied = io::copy(&mut input, &mut output)
-        .unwrap_or_else(|e| panic!("ReadFile/WriteFile (copy fixture): {e}"));
+    let copied = io::copy(&mut source, &mut output).expect("ReadFile/WriteFile (copy fixture)");
     assert!(
         bytes > 0 && bytes == copied,
         "ReadFile/WriteFile (copy fixture) Win32 0: source={bytes} copied={copied}"
     );
-    copied
-}
-
-fn verbatim(value: &OsStr) -> bool {
-    let mut units = value.encode_wide().peekable();
-    if units.peek() == Some(&u16::from(b'"')) {
-        units.next();
-    }
-    units.take(4).eq(r"\\?\".encode_utf16())
 }
 
 struct Temp(PathBuf);
@@ -1014,7 +1128,7 @@ struct Sid(PSID);
 
 impl Sid {
     fn derive() -> Self {
-        let name = wide(SPIKE_CONTAINER_NAME);
+        let name = wide(TEST_PROFILE);
         let mut sid = ptr::null_mut();
         // SAFETY: the name is terminated and the SID out pointer is writable.
         let hr = unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &raw mut sid) };

@@ -241,5 +241,3 @@ kinewright_agent server::tests::dialogue_rehearsal_tests::dq_media_real_recordin
 
 kinewright_project operation_history::sizing_tests::two_thousand_four_track_removals_fit_one_task_and_its_merges crates/kinewright-project/src/operation_history/sizing_tests.rs any on-demand  # release qualification of the fixed 2000-removal task and both merge legs
 kinewright_project operation_history::stored::codec_tests::spare_baseline_capacity_preserves_save_open_and_fresh_merge_fit crates/kinewright-project/src/operation_history/stored_codec_tests.rs any on-demand  # release qualification of baseline allocation shape across a long split stream
-
-lpac_native diagnose_lpac_creation_variants crates/kinewright-job-sys/tests/lpac_native.rs windows on-demand # temporary hosted AppContainer profile experiment

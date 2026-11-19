@@ -1,18 +1,16 @@
-//! Native launch spike for the Windows media boundary.
+//! Verified `AppContainer` launcher for the Windows media boundary.
 
 use super::{Attributes, Handle, wide};
 use std::{
     ffi::{OsStr, OsString},
-    fs::File,
+    fs::{self, File},
     io::{self, PipeReader, PipeWriter},
     mem::{size_of, size_of_val},
-    os::windows::{
-        ffi::{OsStrExt, OsStringExt},
-        io::AsRawHandle,
-    },
-    path::Path,
+    os::windows::{ffi::OsStrExt, io::AsRawHandle},
+    path::{Path, PathBuf},
     ptr,
-    time::{Duration, Instant},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use windows_sys::Win32::{
     Foundation::{
@@ -21,8 +19,7 @@ use windows_sys::Win32::{
         INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     Security::{
-        FreeSid, GetTokenInformation, Isolation::DeriveAppContainerSidFromAppContainerName, PSID,
-        SECURITY_CAPABILITIES, TOKEN_INFORMATION_CLASS,
+        FreeSid, GetTokenInformation, PSID, SECURITY_CAPABILITIES, TOKEN_INFORMATION_CLASS,
     },
     Storage::FileSystem::FILE_GENERIC_READ,
     System::{
@@ -64,8 +61,13 @@ use windows_sys::Win32::{
     },
 };
 
-/// The test installation and launch derive the same SID without creating a profile.
-pub const SPIKE_CONTAINER_NAME: &str = "Kinewright.MediaProbe.LpacSpike";
+mod error;
+mod profile;
+mod token;
+
+pub use error::{Code, Error, Step};
+pub use profile::{Preparation, Profile, VerifiedProfile};
+use token::inspect_token;
 
 const JOB_LIMITS: u32 = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
     | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
@@ -112,75 +114,80 @@ pub struct Child {
     process: Handle,
     port: Handle,
     pid: u32,
+    _local: LaunchDirectory,
 }
 
-/// Launch with exactly one read-only file, one request reader and one reply writer.
-/// The first three child arguments are the corresponding handle values in that order.
-/// The observer receives the exact application, command line, and directory before creation.
-/// The launcher derives the SID and leaves profile provisioning to the caller.
+/// The three handles inherited by the child, in command-line order.
+pub struct Inputs<'a> {
+    pub source: &'a File,
+    pub request: &'a PipeReader,
+    pub reply: &'a PipeWriter,
+}
+
+/// Launch a verified profile with a fresh host-created environment directory.
 ///
 /// # Errors
-/// Invalid inputs, unsupported creation attributes, or failed suspended inspection
-/// refuse launch. The Job kills a contained child on the error path.
+/// Refuses unsafe profile state, invalid inputs, native creation errors, or
+/// failed suspended inspection. A failed inspection kills the suspended child.
 pub fn launch(
+    verified: &VerifiedProfile<'_>,
     program: &Path,
     args: &[OsString],
-    source: &File,
-    request: &PipeReader,
-    reply: &PipeWriter,
+    inputs: Inputs<'_>,
     limits: Limits,
-    before_create: impl FnOnce(&OsStr, &OsStr, &OsStr),
-) -> io::Result<Child> {
-    begin(
-        program,
-        args,
-        Some((source, request, reply)),
-        limits,
-        Mode::AppContainer {
-            lpac: true,
-            local: None,
-        },
-        before_create,
-    )?
-    .verify_and_resume()
+) -> Result<Child, Error> {
+    let _lease = profile::PROFILE_CHANGE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (sid, storage) = verified.0.check()?;
+    let local = LaunchDirectory::create(storage.root(), &sid)?;
+    let suspended = begin(program, args, inputs, limits, sid, local)
+        .map_err(|error| Error::launch(error, Step::Launch, "CreateProcessW"))?;
+    suspended
+        .verify_and_resume()
+        .map_err(|error| Error::launch(error, Step::InspectChild, "suspended child inspection"))
 }
 
-#[derive(Clone, Copy)]
-enum Mode<'a> {
-    AppContainer {
-        lpac: bool,
-        local: Option<&'a Path>,
-    },
-    #[cfg(feature = "lpac-diagnostics")]
-    SecurityOnly,
-    #[cfg(feature = "lpac-diagnostics")]
-    ParentEnvironment,
-    #[cfg(feature = "lpac-diagnostics")]
-    AddedEnvironment(u8),
-}
+struct LaunchDirectory(PathBuf);
 
-impl Mode<'_> {
-    fn opt_out(self) -> bool {
-        match self {
-            Self::AppContainer { lpac, .. } => lpac,
-            #[cfg(feature = "lpac-diagnostics")]
-            Self::SecurityOnly => false,
-            #[cfg(feature = "lpac-diagnostics")]
-            Self::ParentEnvironment | Self::AddedEnvironment(_) => true,
+impl LaunchDirectory {
+    fn create(root: &Path, sid: &Sid) -> Result<Self, Error> {
+        static SERIAL: AtomicU64 = AtomicU64::new(0);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        for _ in 0..8 {
+            let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
+            let path = root.join(format!("launch-{}-{now}-{serial}", std::process::id()));
+            match fs::create_dir(&path) {
+                Ok(()) => {
+                    let directory = Self(path);
+                    profile::check_launch_directory(&directory.0, sid)?;
+                    return Ok(directory);
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    return Err(Error::io(
+                        Step::Environment,
+                        "CreateDirectoryW",
+                        &error,
+                        path.display().to_string(),
+                    ));
+                }
+            }
         }
+        Err(Error::unexpected(
+            Step::Environment,
+            "CreateDirectoryW",
+            "could not allocate a fresh launch directory",
+        ))
     }
+}
 
-    fn environment(self) -> io::Result<Option<Vec<u16>>> {
-        match self {
-            #[cfg(feature = "lpac-diagnostics")]
-            Self::ParentEnvironment => Ok(None),
-            #[cfg(feature = "lpac-diagnostics")]
-            Self::AddedEnvironment(mask) => diagnostic::added_environment(mask).map(Some),
-            Self::AppContainer {
-                local: Some(local), ..
-            } => profile_environment(local).map(Some),
-            _ => system_environment().map(Some),
-        }
+impl Drop for LaunchDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.0);
     }
 }
 
@@ -192,9 +199,13 @@ fn profile_environment(local: &Path) -> io::Result<Vec<u16>> {
     Ok(block)
 }
 
-type Inputs<'a> = (&'a File, &'a PipeReader, &'a PipeWriter);
-
-fn duplicate_inputs((source, request, reply): Inputs<'_>) -> io::Result<(Handle, Handle, Handle)> {
+fn duplicate_inputs(
+    Inputs {
+        source,
+        request,
+        reply,
+    }: Inputs<'_>,
+) -> io::Result<(Handle, Handle, Handle)> {
     Ok((
         inherit(source.as_raw_handle(), FILE_GENERIC_READ, 0, "source")?,
         inherit(request.as_raw_handle(), 0, DUPLICATE_SAME_ACCESS, "request")?,
@@ -209,18 +220,18 @@ struct Suspended {
     pid: u32,
     sid: Sid,
     limits: Limits,
-    lpac: bool,
+    local: Option<LaunchDirectory>,
 }
 
 impl Drop for Suspended {
     fn drop(&mut self) {
         if let Some(process) = &self.process {
-            // SAFETY: the owned handle refers to this fixture's unresumed process.
+            // SAFETY: the owned handle refers to this unresumed process.
             let ended = unsafe { TerminateProcess(process.0, 1) };
             if ended == 0 {
                 eprintln!(
                     "{}",
-                    last_error("TerminateProcess (suspended fixture cleanup)")
+                    last_error("TerminateProcess (suspended child cleanup)")
                 );
             }
             if let Err(error) = wait_process(process, Duration::from_secs(2)) {
@@ -234,7 +245,7 @@ impl Suspended {
     fn verify_and_resume(self) -> io::Result<Child> {
         let process = self.process.as_ref().expect("suspended process");
         let (job, _) = self.job.as_ref().expect("Job for witnessed launch");
-        inspect_token(process, &self.sid, self.lpac).require_verified()?;
+        inspect_token(process, &self.sid)?;
         inspect_job(process, job, &self.limits)?;
         inspect_mitigations(process)?;
         self.resume()
@@ -253,6 +264,7 @@ impl Suspended {
             process: self.process.take().expect("inspected process"),
             port,
             pid: self.pid,
+            _local: self.local.take().expect("launch directory"),
         })
     }
 }
@@ -260,10 +272,10 @@ impl Suspended {
 fn begin(
     program: &Path,
     args: &[OsString],
-    inherited: Option<Inputs<'_>>,
+    inputs: Inputs<'_>,
     limits: Limits,
-    mode: Mode<'_>,
-    before_create: impl FnOnce(&OsStr, &OsStr, &OsStr),
+    sid: Sid,
+    local: LaunchDirectory,
 ) -> io::Result<Suspended> {
     let directory = program
         .parent()
@@ -276,22 +288,14 @@ fn begin(
     }
     let application = wide(program.as_os_str())?;
     let cwd = wide(directory.as_os_str())?;
-    let environment = mode.environment()?;
-    let sid = derive_sid()?;
-    let job = inherited
-        .as_ref()
-        .map(|_| configure_job(&limits))
-        .transpose()?;
-    let inherited = inherited.map(duplicate_inputs).transpose()?;
-    let handles = inherited
-        .as_ref()
-        .map(|(file, request, reply)| [file.0, request.0, reply.0]);
+    let environment = profile_environment(&local.0)?;
+    let job = configure_job(&limits)?;
+    let inherited = duplicate_inputs(inputs)?;
+    let handles = [inherited.0.0, inherited.1.0, inherited.2.0];
     let mut command = Vec::new();
     append_arg(&mut command, program.as_os_str())?;
-    if let Some(handles) = handles {
-        for handle in handles {
-            append_arg(&mut command, OsStr::new(&(handle as usize).to_string()))?;
-        }
+    for handle in handles {
+        append_arg(&mut command, OsStr::new(&(handle as usize).to_string()))?;
     }
     for arg in args {
         append_arg(&mut command, arg)?;
@@ -305,63 +309,43 @@ fn begin(
     let packages = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
     let child_policy = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
     let mitigation = MITIGATIONS;
-    let jobs = job.as_ref().map(|(handle, _)| [handle.0]);
-    let count = 1 + u32::from(mode.opt_out()) + if jobs.is_some() { 4 } else { 0 };
-    let attributes = Attributes::media(count)?;
+    let jobs = [job.0.0];
+    let attributes = Attributes::media(6)?;
     attributes.add(
         PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
         &capabilities,
         "SECURITY_CAPABILITIES",
     )?;
-    if mode.opt_out() {
-        attributes.add(
-            PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
-            &packages,
-            "ALL_APPLICATION_PACKAGES_POLICY",
-        )?;
-    }
-    if let (Some(jobs), Some(handles)) = (&jobs, &handles) {
-        attributes.add(PROC_THREAD_ATTRIBUTE_JOB_LIST, jobs, "JOB_LIST")?;
-        attributes.add(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles, "HANDLE_LIST")?;
-        attributes.add(
-            PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
-            &mitigation,
-            "MITIGATION_POLICY",
-        )?;
-        attributes.add(
-            PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
-            &child_policy,
-            "CHILD_PROCESS_POLICY",
-        )?;
-    }
-    before_create(
-        &OsString::from_wide(&application[..application.len() - 1]),
-        &OsString::from_wide(&command[..command.len() - 1]),
-        &OsString::from_wide(&cwd[..cwd.len() - 1]),
-    );
-    let info = create_suspended(
-        &application,
-        &mut command,
-        &cwd,
-        environment.as_deref(),
-        &attributes,
-        handles.is_some(),
+    attributes.add(
+        PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
+        &packages,
+        "ALL_APPLICATION_PACKAGES_POLICY",
     )?;
+    attributes.add(PROC_THREAD_ATTRIBUTE_JOB_LIST, &jobs, "JOB_LIST")?;
+    attributes.add(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &handles, "HANDLE_LIST")?;
+    attributes.add(
+        PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
+        &mitigation,
+        "MITIGATION_POLICY",
+    )?;
+    attributes.add(
+        PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
+        &child_policy,
+        "CHILD_PROCESS_POLICY",
+    )?;
+    let info = create_suspended(&application, &mut command, &cwd, &environment, &attributes)?;
     drop(attributes);
     drop(inherited);
     Ok(Suspended {
         process: Some(Handle(info.hProcess)),
         thread: Handle(info.hThread),
-        job,
+        job: Some(job),
         pid: info.dwProcessId,
         sid,
         limits,
-        lpac: mode.opt_out(),
+        local: Some(local),
     })
 }
-
-#[cfg(feature = "lpac-diagnostics")]
-pub mod diagnostic;
 
 fn system_environment() -> io::Result<Vec<u16>> {
     let root = std::env::var_os("SystemRoot")
@@ -376,27 +360,12 @@ fn system_environment() -> io::Result<Vec<u16>> {
     Ok(environment)
 }
 
-fn derive_sid() -> io::Result<Sid> {
-    let name = wide(OsStr::new(SPIKE_CONTAINER_NAME))?;
-    let mut sid = ptr::null_mut();
-    // SAFETY: the name is NUL terminated and sid is writable.
-    let hr = unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &raw mut sid) };
-    if hr < 0 || sid.is_null() {
-        return Err(io::Error::other(format!(
-            "DeriveAppContainerSidFromAppContainerName (launch SID): HRESULT {:#010x}",
-            hr.cast_unsigned()
-        )));
-    }
-    Ok(Sid(sid))
-}
-
 fn create_suspended(
     application: &[u16],
     command: &mut [u16],
     cwd: &[u16],
-    environment: Option<&[u16]>,
+    environment: &[u16],
     attributes: &Attributes,
-    inherit_handles: bool,
 ) -> io::Result<PROCESS_INFORMATION> {
     let mut startup = STARTUPINFOEXW::default();
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>()
@@ -412,12 +381,12 @@ fn create_suspended(
             command.as_mut_ptr(),
             ptr::null(),
             ptr::null(),
-            i32::from(inherit_handles),
+            1,
             EXTENDED_STARTUPINFO_PRESENT
                 | CREATE_SUSPENDED
                 | CREATE_UNICODE_ENVIRONMENT
                 | DETACHED_PROCESS,
-            environment.map_or(ptr::null(), |block| block.as_ptr().cast()),
+            environment.as_ptr().cast(),
             cwd.as_ptr(),
             &raw const startup.StartupInfo,
             &raw mut info,
@@ -663,12 +632,6 @@ fn inspect_job(process: &Handle, job: &Handle, limits: &Limits) -> io::Result<()
     )
 }
 
-mod token;
-#[cfg(feature = "lpac-diagnostics")]
-mod token_queries;
-
-use token::inspect_token;
-
 fn read_token(
     token: &Handle,
     class: TOKEN_INFORMATION_CLASS,
@@ -892,8 +855,10 @@ fn expect_value<T: std::fmt::Debug + PartialEq + Copy>(
     if actual == expected {
         return Ok(());
     }
-    Err(io::Error::other(format!(
-        "{step}: observed {actual:?}, expected {expected:?} (Win32 0)"
+    Err(io::Error::other(Error::unexpected(
+        Step::InspectChild,
+        step,
+        format!("observed {actual:?}, expected {expected:?}"),
     )))
 }
 
@@ -918,5 +883,5 @@ fn last_error(step: &str) -> io::Error {
 }
 
 fn os_error(step: &str, error: &io::Error) -> io::Error {
-    io::Error::other(format!("{step}: {error}"))
+    io::Error::other(Error::io(Step::Launch, step, error, error.to_string()))
 }
