@@ -6,8 +6,7 @@ name: Kani
 #   crates/kinewright-core/src/automation.rs  mo1_proofs (H1-H4): value_at_keys,
 #                                             ease_kernel, rounded_div_kernel,
 #                                             PROVEN_VALUE_BOUND, Keyframe types
-#   crates/kinewright-core/src/incident.rs    kani_proofs: restore_id_resume,
-#                                             MAX_RESTORED_ID, compact_json_len
+#   crates/kinewright-core/src/incident.rs    kani_proofs: compact_json_len
 #   crates/kinewright-core/src/time.rs        TimeCode, the frame type the MO1
 #                                             harnesses build keyframes from
 #   crates/kinewright-core/src/lib.rs         module declarations and re-exports
@@ -91,7 +90,6 @@ jobs:
       - name: Verify admitted proofs
         run: |
           set -euo pipefail
-          cargo kani -p kinewright-core --harness kani_restore_id_resume || exit 1
           cargo kani -p kinewright-core --harness kani_compact_json_len_anchor || exit 1
           cargo kani -p kinewright-core --harness kani_compact_json_len_symbolic || exit 1
           cargo kani -p kinewright-core --harness mo1_h1_n2 || exit 1

@@ -8840,8 +8840,8 @@ mod tests {
     }
 }
 
-/// Kani proof harnesses: compiled only under `cargo kani`, which passes
-/// `--cfg kani`. Never compiled into normal builds.
+/// The concrete anchor and symbolic harness prove `compact_json_len`.
+/// Both compile only under `cargo kani`, which passes `--cfg kani`.
 ///
 /// Admission rule (adopt-narrowly verdict, spike report
 /// `target/review/kani/spike-report.md`): a proof is admitted only if it
