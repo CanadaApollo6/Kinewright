@@ -205,11 +205,18 @@ fn loopback_tcp_connection_is_refused() {
     let fixture = Fixture::new();
     let listener =
         TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind loopback control listener");
-    fixture.refused(
-        "connect",
-        listener.local_addr().unwrap().to_string(),
-        &["connect"],
-        &[ERROR_ACCESS_DENIED, 10013], // WSAEACCES
+    let address = listener.local_addr().unwrap().to_string();
+    let control = fixture.try_single("connect", &address, false);
+    let confined = fixture.try_single("connect", &address, true);
+    eprintln!("connect unconfined control: {control:?}");
+    eprintln!("connect LPAC confinement: {confined:?}");
+    let control = control.unwrap_or_else(|error| panic!("{error}"));
+    control.expect(&["connect"], &[0], "unconfined Winsock control");
+    assert_eq!(control.detail.as_deref(), Some("WSAStartup=0 socket=0"));
+    let confined = confined.unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        matches!(confined.api.as_str(), "WSAStartup" | "socket" | "connect") && confined.code != 0,
+        "LPAC loopback Winsock refusal: {confined:?}"
     );
     listener.set_nonblocking(true).unwrap();
     listener
@@ -965,7 +972,6 @@ impl Running {
 struct Report {
     api: String,
     code: u32,
-    #[cfg(feature = "lpac-diagnostics")]
     detail: Option<String>,
 }
 
@@ -978,10 +984,16 @@ impl Report {
         let code = fields.next().ok_or_else(|| {
             format!("{context} ReadFile (fixture report) Win32 0: malformed report {text:?}")
         })?;
+        let detail = fields.next();
+        if api == "panic" {
+            return Err(format!(
+                "{context} fixture panic, exit {code}: {}",
+                detail.unwrap_or("")
+            ));
+        }
         Ok(Self {
             api: api.into(),
-            #[cfg(feature = "lpac-diagnostics")]
-            detail: fields.next().map(str::to_owned),
+            detail: detail.map(str::to_owned),
             code: code.parse().map_err(|error| {
                 format!(
                     "{context} ReadFile (fixture reply) Win32 0: invalid reported code: {error}"

@@ -21,20 +21,24 @@ mod child {
         ffi::{OsStr, OsString},
         fs::{File, OpenOptions},
         io::{self, Read, Write},
-        net::{SocketAddrV4, TcpStream},
+        net::SocketAddrV4,
         os::windows::{
             ffi::OsStrExt,
             io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
         },
         path::Path,
         ptr,
-        time::Duration,
     };
     use windows_sys::Win32::{
         Foundation::{
             CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError,
             INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0,
         },
+        Networking::WinSock::{
+            AF_INET, IN_ADDR, IN_ADDR_0, INVALID_SOCKET, IPPROTO_TCP, SOCK_STREAM, SOCKADDR_IN,
+            SOCKET, WSACleanup, WSADATA, WSAGetLastError, WSAStartup, closesocket, connect, socket,
+        },
+        Storage::FileSystem::WriteFile,
         System::{
             Console::{
                 GetConsoleWindow, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
@@ -59,10 +63,18 @@ mod child {
         let file = next_handle(&mut args)?;
         let request = next_handle(&mut args)?;
         let reply = next_handle(&mut args)?;
+        let stdio = request.is_null() && reply.is_null() && file.is_null();
+        let panic_reply = if stdio {
+            // SAFETY: this returns the unconfined control's redirected stdout pipe.
+            unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
+        } else {
+            reply
+        };
+        install_panic_report(panic_reply as usize);
         let case = next_arg(&mut args)?;
         let target = next_arg(&mut args)?;
 
-        if request.is_null() && reply.is_null() && file.is_null() {
+        if stdio {
             return exercise(
                 &case,
                 &target,
@@ -76,6 +88,92 @@ mod child {
         let mut request = duplicate_file(request)?;
         let mut reply = duplicate_file(reply)?;
         exercise(&case, &target, Some(source), &mut request, &mut reply)
+    }
+
+    fn install_panic_report(reply: usize) {
+        std::panic::set_hook(Box::new(move |info| {
+            let message = format!("{info}").replace(['\r', '\n', '\t'], " ");
+            let mut report = format!("panic\t101\t{message}");
+            report.truncate(report.floor_char_boundary(4095));
+            report.push('\n');
+            let mut written = 0;
+            // SAFETY: the original reply handle remains open for the life of this process.
+            // Write directly so a panic during a stdio write never reacquires its Rust lock.
+            unsafe {
+                WriteFile(
+                    reply as RawHandle,
+                    report.as_ptr(),
+                    u32::try_from(report.len()).unwrap_or(4096),
+                    &raw mut written,
+                    ptr::null_mut(),
+                );
+            }
+        }));
+    }
+
+    struct Winsock;
+    impl Drop for Winsock {
+        fn drop(&mut self) {
+            // SAFETY: this guard corresponds to a successful WSAStartup.
+            unsafe { WSACleanup() };
+        }
+    }
+
+    struct Socket(SOCKET);
+    impl Drop for Socket {
+        fn drop(&mut self) {
+            // SAFETY: the successful socket call gave this guard an owned socket.
+            unsafe { closesocket(self.0) };
+        }
+    }
+
+    fn connect_loopback(address: SocketAddrV4, output: &mut impl Write) -> io::Result<()> {
+        if !address.ip().is_loopback() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "non-loopback address",
+            ));
+        }
+        let mut data = WSADATA::default();
+        // SAFETY: data is writable and 0x0202 requests Winsock 2.2.
+        let startup = unsafe { WSAStartup(0x0202, &raw mut data) };
+        if startup != 0 {
+            return writeln!(output, "WSAStartup\t{startup}");
+        }
+        let _winsock = Winsock;
+        // SAFETY: Winsock initialized successfully and the socket type is TCP/IPv4.
+        let raw = unsafe { socket(i32::from(AF_INET), SOCK_STREAM, IPPROTO_TCP) };
+        if raw == INVALID_SOCKET {
+            // SAFETY: read the thread's Winsock error immediately after the failed call.
+            let code = unsafe { WSAGetLastError() };
+            return writeln!(output, "socket\t{code}\tWSAStartup=0");
+        }
+        let socket = Socket(raw);
+        let endpoint = SOCKADDR_IN {
+            sin_family: AF_INET,
+            sin_port: address.port().to_be(),
+            sin_addr: IN_ADDR {
+                S_un: IN_ADDR_0 {
+                    S_addr: u32::from_ne_bytes(address.ip().octets()),
+                },
+            },
+            sin_zero: [0; 8],
+        };
+        // SAFETY: socket and the encoded IPv4 endpoint remain live through the call.
+        let result = unsafe {
+            connect(
+                socket.0,
+                (&raw const endpoint).cast(),
+                i32::try_from(size_of::<SOCKADDR_IN>()).expect("IPv4 address size"),
+            )
+        };
+        // SAFETY: Winsock records the error on the current thread.
+        let code = if result == 0 {
+            0
+        } else {
+            unsafe { WSAGetLastError() }
+        };
+        writeln!(output, "connect\t{code}\tWSAStartup=0 socket=0")
     }
 
     fn duplicate_file(raw: RawHandle) -> io::Result<File> {
@@ -178,16 +276,9 @@ mod child {
             Some("grow") => file_write(target, "grow"),
             Some("mutate") => file_write(target, "mutate"),
             Some("registry") => registry(target),
-            Some("connect") => {
-                let address: SocketAddrV4 = parse(target)?;
-                (
-                    "connect",
-                    result_code(TcpStream::connect_timeout(
-                        &address.into(),
-                        Duration::from_secs(2),
-                    )),
-                )
-            }
+            Some("connect") => return connect_loopback(parse(target)?, output),
+            #[cfg(feature = "lpac-diagnostics")]
+            Some("panic-witness") => panic!("intentional fixture panic witness"),
             Some("process") => (
                 "OpenProcess(PROCESS_DUP_HANDLE)",
                 open_process(parse(target)?, PROCESS_DUP_HANDLE),
