@@ -9,6 +9,7 @@ use super::{
 use kinewright_job_sys::{media_boundary::Mode, media_host};
 use kinewright_media_ipc::MediaSandboxError as Error;
 use std::{
+    io,
     sync::{
         Arc,
         atomic::Ordering,
@@ -36,6 +37,8 @@ struct Job {
     answer_at: Option<Instant>,
     answered: bool,
     payload: Option<kinewright_job_sys::ProcessHandle>,
+    shim_rss: ResidentSample,
+    payload_rss: ResidentSample,
     next_rss: Instant,
     memory_violation: bool,
 }
@@ -50,12 +53,16 @@ impl Job {
             answer_at: None,
             answered: false,
             payload: None,
+            shim_rss: ResidentSample::default(),
+            payload_rss: ResidentSample::default(),
             next_rss: now,
             memory_violation: false,
         }
     }
-    fn resident_total(&mut self) -> std::io::Result<u64> {
-        let shim = media_host::resident_bytes(&self.running.pin)?;
+    fn resident_total(&mut self, now: Instant) -> io::Result<Option<u64>> {
+        let shim = self
+            .shim_rss
+            .observe(media_host::resident_bytes(&self.running.pin)?, now)?;
         if self.payload.is_none() {
             let pid = self.running.shared.payload.load(Ordering::Acquire);
             if pid != 0 {
@@ -77,12 +84,38 @@ impl Job {
                 }
             }
         }
+        let Some(pin) = &self.payload else {
+            return Ok(shim);
+        };
         let payload = self
-            .payload
-            .as_ref()
-            .map_or(Ok(0), media_host::resident_bytes)?;
-        shim.checked_add(payload)
-            .ok_or_else(|| std::io::Error::other("helper RSS sum overflow"))
+            .payload_rss
+            .observe(media_host::resident_bytes(pin)?, now)?;
+        match (shim, payload) {
+            (Some(shim), Some(payload)) => shim
+                .checked_add(payload)
+                .map(Some)
+                .ok_or_else(|| io::Error::other("helper RSS sum overflow")),
+            // Still enforce the limit on whichever member we have measured.
+            (sample, None) | (None, sample) => Ok(sample),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ResidentSample {
+    bytes: Option<u64>,
+    missing_since: Option<Instant>,
+}
+
+impl ResidentSample {
+    fn observe(&mut self, bytes: Option<u64>, now: Instant) -> io::Result<Option<u64>> {
+        if let Some(bytes) = bytes {
+            self.bytes = Some(bytes);
+            self.missing_since = None;
+        } else if now.duration_since(*self.missing_since.get_or_insert(now)) >= REAP_BUDGET {
+            return Err(io::Error::other("helper RSS sample expired"));
+        }
+        Ok(self.bytes)
     }
 }
 struct AbortOnExit;
@@ -189,23 +222,27 @@ impl Actor {
                 continue;
             }
             job.next_rss = now + TICK;
-            if let Ok(total) = job.resident_total() {
-                #[cfg(feature = "slow-tests")]
-                self.status.observed_rss.fetch_max(total, Ordering::AcqRel);
-                if total > self.config.limits.private_memory {
-                    job.memory_violation = true;
-                    job.cause = Some(Failure::Sandbox(Error::ResourceLimit));
-                    eprintln!(
-                        "MS2_RSS_LIMIT observed={total} admitted={}",
-                        self.config.limits.private_memory
+            let total = match job.resident_total(now) {
+                Ok(Some(total)) => total,
+                Ok(None) => continue,
+                Err(_) => {
+                    job.cause = Some(
+                        Phase::ResourceCheck
+                            .unavailable(Reason::ResidentMemory)
+                            .into(),
                     );
                     let _ = job.running.pin.kill();
+                    continue;
                 }
-            } else {
-                job.cause = Some(
-                    Phase::ResourceCheck
-                        .unavailable(Reason::ResidentMemory)
-                        .into(),
+            };
+            #[cfg(feature = "slow-tests")]
+            self.status.observed_rss.fetch_max(total, Ordering::AcqRel);
+            if total > self.config.limits.private_memory {
+                job.memory_violation = true;
+                job.cause = Some(Failure::Sandbox(Error::ResourceLimit));
+                eprintln!(
+                    "MS2_RSS_LIMIT observed={total} admitted={}",
+                    self.config.limits.private_memory
                 );
                 let _ = job.running.pin.kill();
             }
@@ -559,5 +596,27 @@ impl Actor {
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rss_gap_retains_the_last_sample_and_expires_without_recovery() {
+        let mut sample = ResidentSample::default();
+        let now = Instant::now();
+        assert_eq!(sample.observe(None, now).unwrap(), None);
+        assert_eq!(sample.observe(Some(4096), now + TICK).unwrap(), Some(4096));
+
+        let gap = now + TICK * 2;
+        let deadline = gap + REAP_BUDGET;
+        let last_tick = deadline.checked_sub(TICK).unwrap();
+        assert_eq!(sample.observe(None, gap).unwrap(), Some(4096));
+        assert_eq!(sample.observe(None, last_tick).unwrap(), Some(4096));
+        assert!(sample.observe(None, deadline).is_err());
+        assert_eq!(sample.observe(Some(0), deadline).unwrap(), Some(0));
+        assert_eq!(sample.observe(None, deadline + TICK).unwrap(), Some(0));
     }
 }

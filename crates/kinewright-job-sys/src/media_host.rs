@@ -138,34 +138,53 @@ fn verify_status(observed: io::Result<Vec<u8>>) -> io::Result<()> {
     Ok(())
 }
 
-pub fn resident_bytes(process: &ProcessHandle) -> io::Result<u64> {
-    if exited(process)? {
-        return Ok(0);
-    }
-    let sample = live_resident_bytes(process);
-    // Exit can race the status read, which then omits VmRSS. An exited pidfd
-    // proves zero residency; other observation failures remain failures.
-    if exited(process)? {
-        return Ok(0);
-    }
-    sample
+/// A missing sample means the pinned process still has an unreadable pidfd
+/// but its status has no RSS field. The caller must bound gaps in sampling.
+pub fn resident_bytes(process: &ProcessHandle) -> io::Result<Option<u64>> {
+    let exited_before = exited(process)?;
+    let status = if exited_before {
+        Ok(Vec::new())
+    } else {
+        resident_status(process)
+    };
+    let exited_after = !exited_before && exited(process)?;
+    classify_rss(status, exited_before, exited_after)
 }
-fn live_resident_bytes(process: &ProcessHandle) -> io::Result<u64> {
+
+fn resident_status(process: &ProcessHandle) -> io::Result<Vec<u8>> {
     if process.reaped()? {
         return Err(invalid("RSS identity disappeared"));
     }
     let bytes = bounded(format!("/proc/{}/status", process.pid()))?;
-    let text = std::str::from_utf8(&bytes).map_err(io::Error::other)?;
-    let kb = text
-        .lines()
-        .find_map(|line| line.strip_prefix("VmRSS:"))
-        .and_then(|value| value.split_whitespace().next())
-        .and_then(|value| value.parse::<u64>().ok())
-        .ok_or_else(|| invalid("RSS unavailable"))?;
     if process.reaped()? {
         return Err(invalid("RSS identity changed"));
     }
-    kb.checked_mul(1024).ok_or_else(|| invalid("RSS overflow"))
+    Ok(bytes)
+}
+
+fn classify_rss(
+    status: io::Result<impl AsRef<[u8]>>,
+    exited_before: bool,
+    exited_after: bool,
+) -> io::Result<Option<u64>> {
+    if exited_before || exited_after {
+        return Ok(Some(0));
+    }
+    let status = status?;
+    let text = std::str::from_utf8(status.as_ref()).map_err(io::Error::other)?;
+    let Some(value) = text.lines().find_map(|line| line.strip_prefix("VmRSS:")) else {
+        // exit_mm can clear RSS before pidfd readiness. A leader can also
+        // lose its mm while the other threads still hold it.
+        return Ok(None);
+    };
+    let kb = value
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| invalid("RSS unavailable"))?;
+    kb.checked_mul(1024)
+        .map(Some)
+        .ok_or_else(|| invalid("RSS overflow"))
 }
 
 /// Polling an existing pidfd never resolves a numeric PID again.
@@ -425,6 +444,28 @@ pub fn memory_profile(process: &ProcessHandle, smaps: &mut File) -> io::Result<M
 #[cfg(test)]
 mod status_tests {
     use super::*;
+
+    #[test]
+    fn rss_requires_pidfd_exit_to_treat_missing_memory_as_zero() {
+        for (text, before, after, expected) in [
+            ("State:\tS\nVmRSS:\t42 kB\n", false, false, Some(42 * 1024)),
+            ("State:\tR\nThreads:\t1\n", false, false, None),
+            // A zombie leader can have a surviving thread holding the mm.
+            ("State:\tZ\nThreads:\t2\n", false, false, None),
+            ("State:\tZ\nThreads:\t1\n", false, true, Some(0)),
+            ("", true, false, Some(0)),
+        ] {
+            assert_eq!(classify_rss(Ok(text), before, after).unwrap(), expected);
+        }
+        assert!(classify_rss(Ok("VmRSS:\tinvalid"), false, false).is_err());
+        for reason in ["RSS identity disappeared", "RSS identity changed"] {
+            assert!(classify_rss(Err::<&str, _>(invalid(reason)), false, false).is_err());
+            assert_eq!(
+                classify_rss(Err::<&str, _>(invalid(reason)), false, true).unwrap(),
+                Some(0)
+            );
+        }
+    }
 
     #[test]
     fn required_status_permission_denied_refuses_startup() {
