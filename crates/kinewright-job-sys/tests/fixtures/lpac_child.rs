@@ -5,14 +5,24 @@ fn main() {}
 
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {
-    if std::env::args_os()
-        .nth(1)
-        .is_some_and(|arg| arg == "--ordinary-package-control")
-    {
-        let target = std::env::args_os().nth(2).expect("package control canary");
-        let (_, code) = child::package_read(&target);
+    let mut args = std::env::args_os().skip(1);
+    if let Some(mode) = args.next() {
+        let code = match mode.to_str() {
+            Some("--ordinary-package-control") => {
+                child::package_read(&args.next().expect("package control canary")).1
+            }
+            Some("--ordinary-handle-control") => {
+                child::inherited_canary(&args.next().expect("handle control canary")).1
+            }
+            _ => return run(),
+        };
         return std::process::ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
+    run()
+}
+
+#[cfg(windows)]
+fn run() -> std::process::ExitCode {
     match child::run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
@@ -39,14 +49,16 @@ mod child {
     };
     use windows_sys::Win32::{
         Foundation::{
-            CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError,
-            INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0,
+            CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_INVALID_DATA,
+            ERROR_INVALID_HANDLE, GetLastError, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0,
         },
         Networking::WinSock::{
             AF_INET, IN_ADDR, IN_ADDR_0, INVALID_SOCKET, IPPROTO_TCP, SOCK_STREAM, SOCKADDR_IN,
             SOCKET, WSACleanup, WSADATA, WSAGetLastError, WSAStartup, closesocket, connect, socket,
         },
-        Storage::FileSystem::WriteFile,
+        Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle, ReadFile, WriteFile,
+        },
         System::{
             Console::{
                 GetConsoleWindow, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
@@ -57,9 +69,11 @@ mod child {
             },
             Registry::{HKEY_CURRENT_USER, KEY_WRITE, RegCloseKey, RegCreateKeyExW, RegDeleteKeyW},
             Threading::{
-                CREATE_NO_WINDOW, CREATE_SUSPENDED, CreateProcessW, GetCurrentProcess, OpenProcess,
+                CREATE_NO_WINDOW, CREATE_SUSPENDED, CreateProcessW, GetCurrentProcess,
+                GetCurrentProcessId, GetCurrentThreadId, OpenProcess, OpenThread,
                 PROCESS_DUP_HANDLE, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
-                STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+                PROCESS_VM_WRITE, STARTUPINFOW, THREAD_SET_CONTEXT, TerminateProcess,
+                WaitForSingleObject,
             },
         },
     };
@@ -239,6 +253,11 @@ mod child {
         let (api, code) = match case.to_str() {
             Some("ready") => ready(target, source.is_some()),
             Some("package-only-read") => package_read(target),
+            Some("inherited-canary") => inherited_canary(target),
+            Some("sibling") => return sibling_access(target, output),
+            Some("owner-access") => {
+                return super::profile_permissions::owner_access(target, output);
+            }
             Some("profile-registry-direct") => return direct_registry(target, output),
             Some("profile-objects") => return super::profile_permissions::objects(target, output),
             Some("source") => {
@@ -271,7 +290,13 @@ mod child {
                 )));
             }
         };
-        let report = format!("{api}\t{code}\n");
+        let report = if case == "hold" {
+            // SAFETY: these APIs return the identifiers of this process and thread.
+            let (pid, tid) = unsafe { (GetCurrentProcessId(), GetCurrentThreadId()) };
+            format!("{api}\t{code}\t{pid}:{tid}\n")
+        } else {
+            format!("{api}\t{code}\n")
+        };
         output.write_all(report.as_bytes())?;
         output.flush()?;
         if case == "hold" || case == "memory" {
@@ -317,6 +342,86 @@ mod child {
                 result_code::<()>(Err(error)),
             ),
         }
+    }
+
+    pub(super) fn inherited_canary(target: &OsStr) -> (&'static str, u32) {
+        let Some((raw, volume, index)) = target.to_str().and_then(|text| {
+            let mut parts = text.split(':');
+            Some((
+                parts.next()?.parse::<usize>().ok()?,
+                parts.next()?.parse::<u32>().ok()?,
+                parts.next()?.parse::<u64>().ok()?,
+            ))
+        }) else {
+            return ("inherited canary arguments", ERROR_INVALID_DATA);
+        };
+        let handle = raw as RawHandle;
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: Windows validates the numeric handle, info is writable.
+        if unsafe { GetFileInformationByHandle(handle, &raw mut info) } == 0 {
+            // SAFETY: capture the error from the immediately preceding call.
+            return ("GetFileInformationByHandle(unlisted canary)", unsafe {
+                GetLastError()
+            });
+        }
+        let observed = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+        if (info.dwVolumeSerialNumber, observed) != (volume, index) {
+            return (
+                "unlisted handle names a different object",
+                ERROR_INVALID_HANDLE,
+            );
+        }
+        let expected = b"unlisted handle";
+        let mut bytes = [0u8; 15];
+        let mut read = 0;
+        // SAFETY: identity confirms the exact regular test file. The buffer and count are writable.
+        if unsafe {
+            ReadFile(
+                handle,
+                bytes.as_mut_ptr(),
+                15,
+                &raw mut read,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            // SAFETY: capture the failure on this thread.
+            return ("ReadFile(unlisted canary)", unsafe { GetLastError() });
+        }
+        (
+            "ReadFile(unlisted canary)",
+            if read == 15 && &bytes == expected {
+                0
+            } else {
+                ERROR_INVALID_DATA
+            },
+        )
+    }
+
+    fn sibling_access(target: &OsStr, output: &mut impl Write) -> io::Result<()> {
+        let (pid, tid) = target
+            .to_str()
+            .and_then(|target| target.split_once(':'))
+            .ok_or_else(|| io::Error::other("missing sibling process/thread IDs"))?;
+        let pid = parse(OsStr::new(pid))?;
+        let tid = parse(OsStr::new(tid))?;
+        let duplicate = open_process(pid, PROCESS_DUP_HANDLE);
+        let vm_write = open_process(pid, PROCESS_VM_WRITE);
+        let query = open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION);
+        // SAFETY: this requests a handle to the named test thread and performs no operation on it.
+        let thread = unsafe { OpenThread(THREAD_SET_CONTEXT, 0, tid) };
+        let thread = if thread.is_null() {
+            // SAFETY: capture the failure on this thread.
+            unsafe { GetLastError() }
+        } else {
+            // SAFETY: OpenThread transferred this handle.
+            unsafe { CloseHandle(thread) };
+            0
+        };
+        writeln!(
+            output,
+            "sibling access\t0\tOpenProcess(PROCESS_DUP_HANDLE)={duplicate} OpenProcess(PROCESS_VM_WRITE)={vm_write} OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)={query} OpenThread(THREAD_SET_CONTEXT)={thread}"
+        )
     }
 
     fn direct_registry(target: &OsStr, output: &mut impl Write) -> io::Result<()> {

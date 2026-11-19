@@ -33,7 +33,7 @@ use windows_sys::Win32::{
     },
 };
 
-fn current_user_sid() -> String {
+pub(super) fn current_user_sid() -> String {
     let mut raw = ptr::null_mut();
     // SAFETY: the current process pseudo handle is live, and raw is writable.
     let ok = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut raw) };
@@ -104,9 +104,38 @@ impl Key {
         if code == 0 { Ok(Self(key)) } else { Err(code) }
     }
 
+    pub(super) fn owner(&self, user: &str, assign: bool) {
+        witness_owner(self.0, SE_REGISTRY_KEY, user, assign);
+    }
+
+    pub(super) fn create_subkey(&self, name: &str) -> Self {
+        use windows_sys::Win32::System::Registry::{KEY_ALL_ACCESS, RegCreateKeyExW};
+        let name = wide(name);
+        let mut key = ptr::null_mut();
+        // SAFETY: the parent is an open test key and the terminated child name stays live.
+        let code = unsafe {
+            RegCreateKeyExW(
+                self.0,
+                name.as_ptr(),
+                0,
+                ptr::null(),
+                0,
+                KEY_ALL_ACCESS,
+                ptr::null(),
+                &raw mut key,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(
+            code, 0,
+            "RegCreateKeyExW (test profile subkey) Win32 {code}"
+        );
+        Self(key)
+    }
+
     pub(super) fn grant(&self, sid: &str) {
         let (descriptor, dacl) = descriptor(&format!(
-            "D:P(A;;KA;;;SY)(A;;KA;;;BA)(A;;KA;;;{})(A;;KR;;;{sid})",
+            "D:P(A;;KA;;;SY)(A;;KA;;;BA)(A;;KA;;;{})(A;;KW;;;{sid})",
             current_user_sid()
         ));
         // SAFETY: both the key and descriptor stay live for the write to the test key.
@@ -157,6 +186,76 @@ impl Drop for Key {
         // SAFETY: this owner closes its opened registry key.
         unsafe { RegCloseKey(self.0) };
     }
+}
+
+pub(super) fn file_owner(path: &Path, user: &str, assign: bool) {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, WRITE_OWNER};
+    let access = READ_CONTROL | if assign { WRITE_OWNER } else { 0 };
+    let file = fs::OpenOptions::new()
+        .access_mode(access)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .expect("CreateFileW (host owner setup)");
+    witness_owner(file.as_raw_handle(), SE_FILE_OBJECT, user, assign);
+}
+
+fn witness_owner(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    kind: windows_sys::Win32::Security::Authorization::SE_OBJECT_TYPE,
+    user: &str,
+    assign: bool,
+) {
+    use windows_sys::Win32::Security::{
+        Authorization::ConvertStringSidToSidW, EqualSid, OWNER_SECURITY_INFORMATION,
+    };
+    let user = wide(user);
+    let mut expected = ptr::null_mut();
+    // SAFETY: the SID string is terminated and expected is writable.
+    let ok = unsafe { ConvertStringSidToSidW(user.as_ptr(), &raw mut expected) };
+    assert_ne!(
+        ok,
+        0,
+        "ConvertStringSidToSidW (host owner): {}",
+        io::Error::last_os_error()
+    );
+    let expected = Local(expected);
+    if assign {
+        // SAFETY: the checked fixture handle and expected owner SID are live.
+        let code = unsafe {
+            SetSecurityInfo(
+                handle,
+                kind,
+                OWNER_SECURITY_INFORMATION,
+                expected.0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(code, 0, "SetSecurityInfo (host owner) Win32 {code}");
+    }
+    let (mut owner, mut descriptor) = (ptr::null_mut(), ptr::null_mut());
+    // SAFETY: the fixture handle is live, and the selected output pointers are writable.
+    let code = unsafe {
+        GetSecurityInfo(
+            handle,
+            kind,
+            OWNER_SECURITY_INFORMATION,
+            &raw mut owner,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &raw mut descriptor,
+        )
+    };
+    let _descriptor = Local(descriptor);
+    assert_eq!(code, 0, "GetSecurityInfo (host owner) Win32 {code}");
+    // SAFETY: both SIDs are backed by their live descriptors.
+    assert!(
+        !owner.is_null() && unsafe { EqualSid(owner, expected.0) } != 0,
+        "readback owner differs from the current user SID"
+    );
 }
 
 pub(super) fn registry_sddl(profile: &Profile) -> String {
@@ -361,6 +460,159 @@ pub(super) fn plain_read(fixture: &Fixture, path: &Path) -> io::Result<u32> {
     {
         return Err(io::Error::last_os_error());
     }
+    wait_control(info)
+}
+
+pub(super) fn inherited_canary(fixture: &Fixture) -> (OwnedHandle, String) {
+    use windows_sys::Win32::{
+        Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle},
+        Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle},
+    };
+    let path = fixture.root.0.join("unlisted-file");
+    fs::write(&path, b"unlisted handle").expect("WriteFile (unlisted canary)");
+    let file = fs::File::open(path).expect("CreateFileW (unlisted canary)");
+    let mut raw = ptr::null_mut();
+    // SAFETY: file and pseudo process handle are live and raw is writable.
+    let ok = unsafe {
+        let owner = GetCurrentProcess();
+        DuplicateHandle(
+            owner,
+            file.as_raw_handle(),
+            owner,
+            &raw mut raw,
+            0,
+            1,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    assert_ne!(
+        ok,
+        0,
+        "DuplicateHandle (inheritable canary): {}",
+        io::Error::last_os_error()
+    );
+    // SAFETY: the successful call transferred ownership of the duplicate.
+    let canary = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the exact canary is open and the output is writable.
+    assert_ne!(
+        unsafe { GetFileInformationByHandle(canary.as_raw_handle(), &raw mut info) },
+        0,
+        "GetFileInformationByHandle (unlisted canary): {}",
+        io::Error::last_os_error()
+    );
+    let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    (
+        canary,
+        format!("{}:{}:{index}", raw as usize, info.dwVolumeSerialNumber),
+    )
+}
+
+pub(super) fn ordinary_inheritance(fixture: &Fixture, target: &str) -> io::Result<u32> {
+    // Use ordinary bInheritHandles without a STARTUPINFOEX handle list.
+    let _spawning = SPAWNING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let app = wide(&fixture.exe);
+    let mut command = wide(format!(
+        r#""{}" --ordinary-handle-control {target}"#,
+        fixture.exe.display()
+    ));
+    let cwd = wide(fixture.image_dir());
+    let startup = windows_sys::Win32::System::Threading::STARTUPINFOW {
+        cb: size_of::<windows_sys::Win32::System::Threading::STARTUPINFOW>()
+            .try_into()
+            .expect("startup size"),
+        ..Default::default()
+    };
+    let mut info = PROCESS_INFORMATION::default();
+    // SAFETY: all strings and structures are live. The explicit control inherits ordinary handles.
+    if unsafe {
+        CreateProcessW(
+            app.as_ptr(),
+            command.as_mut_ptr(),
+            ptr::null(),
+            ptr::null(),
+            1,
+            DETACHED_PROCESS,
+            ptr::null(),
+            cwd.as_ptr(),
+            &raw const startup,
+            &raw mut info,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    wait_control(info)
+}
+
+pub(super) struct Junction<'a>(&'a Path);
+impl Drop for Junction<'_> {
+    fn drop(&mut self) {
+        fs::remove_dir(self.0).expect("RemoveDirectoryW (test junction)");
+    }
+}
+
+pub(super) fn junction<'a>(path: &'a Path, target: &Path) -> Junction<'a> {
+    use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt};
+    use windows_sys::Win32::{
+        Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE,
+        },
+        System::IO::DeviceIoControl,
+    };
+    const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00a4;
+    fs::create_dir(path).expect("CreateDirectoryW (test junction)");
+    let junction = Junction(path);
+    let file = fs::OpenOptions::new()
+        .access_mode(FILE_GENERIC_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .expect("CreateFileW (test junction)");
+    let name: Vec<_> = target.as_os_str().encode_wide().collect();
+    let mut substitute = vec![92u16, 63, 63, 92];
+    substitute.extend(&name);
+    let bytes = |units: usize| u16::try_from(units * 2).expect("junction name bytes");
+    // Mount-point reparse buffer. Offsets and lengths are bytes relative to PathBuffer.
+    let mut data = vec![
+        3u16,
+        0xa000,
+        8 + bytes(substitute.len() + name.len() + 2),
+        0,
+        0,
+        bytes(substitute.len()),
+        bytes(substitute.len() + 1),
+        bytes(name.len()),
+    ];
+    data.extend(substitute);
+    data.push(0);
+    data.extend(name);
+    data.push(0);
+    let mut returned = 0;
+    // SAFETY: this sets a mount point on the freshly created test directory, with no output buffer.
+    let ok = unsafe {
+        DeviceIoControl(
+            file.as_raw_handle(),
+            FSCTL_SET_REPARSE_POINT,
+            data.as_ptr().cast(),
+            u32::try_from(size_of_val(data.as_slice())).expect("reparse buffer size"),
+            ptr::null_mut(),
+            0,
+            &raw mut returned,
+            ptr::null_mut(),
+        )
+    };
+    assert_ne!(
+        ok,
+        0,
+        "DeviceIoControl(FSCTL_SET_REPARSE_POINT): {}",
+        io::Error::last_os_error()
+    );
+    junction
+}
+
+fn wait_control(info: PROCESS_INFORMATION) -> io::Result<u32> {
     // SAFETY: CreateProcessW transferred ownership of both handles.
     let (process, _thread) = unsafe {
         (

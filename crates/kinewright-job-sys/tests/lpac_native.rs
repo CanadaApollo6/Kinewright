@@ -7,7 +7,7 @@ use kinewright_job_sys::media_lpac::{
 use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{self, PipeReader, PipeWriter, Read, Write},
     net::{Ipv4Addr, TcpListener},
     os::windows::{
@@ -29,9 +29,9 @@ use std::{
 use windows_sys::Win32::{
     Foundation::{
         ERROR_ACCESS_DENIED, ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_CHILD_PROCESS_BLOCKED,
-        ERROR_COMMITMENT_LIMIT, ERROR_FILE_NOT_FOUND, ERROR_NOT_ENOUGH_MEMORY,
-        ERROR_NOT_ENOUGH_QUOTA, ERROR_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_WORKING_SET_QUOTA,
-        INVALID_HANDLE_VALUE, LocalFree, MAX_PATH, WAIT_TIMEOUT,
+        ERROR_COMMITMENT_LIMIT, ERROR_FILE_NOT_FOUND, ERROR_INVALID_FUNCTION, ERROR_INVALID_HANDLE,
+        ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_ENOUGH_QUOTA, ERROR_NOT_FOUND, ERROR_PATH_NOT_FOUND,
+        ERROR_WORKING_SET_QUOTA, INVALID_HANDLE_VALUE, LocalFree, MAX_PATH, WAIT_TIMEOUT,
     },
     Security::{
         ACL,
@@ -45,12 +45,13 @@ use windows_sys::Win32::{
         PSECURITY_DESCRIPTOR, PSID, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
     },
     Storage::FileSystem::{
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, PIPE_ACCESS_INBOUND,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+        PIPE_ACCESS_INBOUND,
     },
     System::{
         Com::CoTaskMemFree,
         Pipes::{CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PeekNamedPipe},
-        Registry::KEY_READ,
+        Registry::{KEY_CREATE_SUB_KEY, KEY_READ},
         Threading::{ALL_PROCESSOR_GROUPS, DETACHED_PROCESS, GetActiveProcessorCount},
     },
 };
@@ -116,6 +117,71 @@ fn inherited_source_is_readable_but_read_only_through_the_handle_list() {
 }
 
 #[test]
+fn a_handle_outside_the_list_is_not_inherited() {
+    let fixture = Fixture::new();
+    let (_inheritable, target) = profile_controls::inherited_canary(&fixture);
+    let control = profile_controls::ordinary_inheritance(&fixture, &target);
+    let confined = fixture.try_single("inherited-canary", &target, true);
+    eprintln!("ordinary inheritance control: {control:?}; LPAC unlisted handle: {confined:?}");
+    assert_eq!(
+        control.expect("ordinary inheriting control"),
+        0,
+        "control reads exact canary"
+    );
+    confined.expect("LPAC handle probe").expect(
+        &[
+            "GetFileInformationByHandle(unlisted canary)",
+            "unlisted handle names a different object",
+        ],
+        &[
+            ERROR_INVALID_HANDLE,
+            ERROR_INVALID_FUNCTION,
+            ERROR_ACCESS_DENIED,
+        ],
+        "unlisted handle refusal",
+    );
+}
+
+#[test]
+fn helpers_with_the_same_sid_cannot_open_each_others_process_or_main_thread() {
+    let fixture = Fixture::new();
+    let mut sibling = fixture.start("hold", "", true);
+    let report = sibling.reply();
+    report.expect(&["ReadFile(hold)"], &[0], "sibling ready in its own Job");
+    let identity = report.detail.expect("sibling PID and main thread ID");
+    let control = fixture.try_single("sibling", &identity, false);
+    let confined = fixture.try_single("sibling", &identity, true);
+    eprintln!("same-SID sibling {identity}; unconfined control: {control:?}; LPAC: {confined:?}");
+    sibling.release();
+    assert_eq!(sibling.finish(), 0, "sibling exit");
+    assert_eq!(
+        sibling_codes(control.expect("unconfined sibling probe")),
+        [0; 4]
+    );
+    assert_eq!(
+        sibling_codes(confined.expect("LPAC sibling probe")),
+        [ERROR_ACCESS_DENIED; 4]
+    );
+}
+
+fn sibling_codes(report: Report) -> Vec<u32> {
+    report.expect(&["sibling access"], &[0], "read all sibling access results");
+    report
+        .detail
+        .expect("per-right sibling result")
+        .split_ascii_whitespace()
+        .map(|field| {
+            field
+                .split_once('=')
+                .expect("sibling operation and code")
+                .1
+                .parse()
+                .expect("Win32 code")
+        })
+        .collect()
+}
+
+#[test]
 fn image_directory_refuses_create_growth_and_mutation() {
     let fixture = Fixture::new();
     fixture.refuse_writes(fixture.image_dir());
@@ -137,46 +203,121 @@ fn user_profile_directory_refuses_create_growth_and_mutation() {
 #[test]
 fn existing_appcontainer_storage_refuses_create_growth_and_mutation() {
     let fixture = Fixture::new();
+    let root = fixture.profile_root();
+    let retained = Canary::new(&root);
+    fs::write(&retained.0, b"retained").expect("WriteFile (retained owner-rights canary)");
+    fixture
+        .profile
+        .api
+        .prepare()
+        .expect("protect retained owner-rights canary");
     let mut child = fixture.start("hold", "", true);
     child.reply().expect(
         &["ReadFile(hold)"],
         &[0],
         "start LPAC before storage discovery",
     );
-    let root = fixture.profile_root();
     let mut checked = BTreeSet::new();
     check_storage_tree(&fixture, &root, &mut checked);
     assert!(
         checked.contains(&root),
         "installed profile root was checked"
     );
-    let target = format!(
-        "{}\t{}",
-        profile_controls::classes_key(&fixture.profile.api),
-        unique()
-    );
-    let control = fixture.try_single("profile-registry-direct", &target, false);
-    let confined = fixture.try_single("profile-registry-direct", &target, true);
-    eprintln!("direct profile registry control: {control:?}; LPAC: {confined:?}");
-    control.expect("unconfined registry control").expect(
-        &["RegSetValueExW(profile direct)"],
-        &[0],
-        "direct unconfined registry control",
-    );
-    confined.expect("LPAC registry refusal").expect(
-        &[
-            "RegOpenKeyExW(KEY_SET_VALUE)",
-            "RegSetValueExW(profile direct)",
-        ],
-        FILE_DENIALS,
-        "direct LPAC registry refusal",
-    );
+    let key = profile_controls::classes_key(&fixture.profile.api);
+    fixture.refuse_registry_write(&key);
     eprintln!(
         "transient LPAC object namespace: {:?}",
         fixture.try_single("profile-objects", unique(), true)
     );
     child.release();
     assert_eq!(child.finish(), 0, "storage discovery child exit");
+    assert_owner_access_refused(&fixture, &root, &retained.0, &key);
+}
+
+fn assert_owner_access_refused(fixture: &Fixture, root: &Path, retained: &Path, key: &str) {
+    use windows_sys::Win32::Storage::FileSystem::{READ_CONTROL, WRITE_OWNER};
+
+    let user = profile_controls::current_user_sid();
+    let package = fixture.profile.api.sid();
+    let profile = &fixture.profile.api;
+    for path in [root, retained] {
+        profile_controls::file_owner(path, &user, true);
+    }
+    {
+        let registry = profile_controls::Key::open(profile, READ_CONTROL | WRITE_OWNER)
+            .unwrap_or_else(|code| panic!("RegOpenKeyExW (owner setup) Win32 {code}"));
+        registry.owner(&user, true);
+    }
+    profile
+        .prepare()
+        .expect("prepare after setting the current user owner");
+    profile.verify().expect("verify current-user-owned profile");
+    for path in [root, retained] {
+        profile_controls::file_owner(path, &user, false);
+    }
+    profile_controls::Key::open(profile, READ_CONTROL)
+        .unwrap_or_else(|code| panic!("RegOpenKeyExW (owner readback) Win32 {code}"))
+        .owner(&user, false);
+    eprintln!("Owner readback after prepare: file, directory and key all owned by {user}");
+
+    let scratch = fixture.root.0.join("owner control");
+    fs::write(&scratch, b"owner control").expect("WriteFile (owner control)");
+    profile_controls::file_owner(&scratch, &user, true);
+    let result = fixture.try_single(
+        "owner-access",
+        format!("file\tWRITE_DAC\t{user}\t{package}\t{}", scratch.display()),
+        false,
+    );
+    eprintln!("owner descriptor control: {result:?}");
+    let mut outcomes = Vec::new();
+    for (kind, path) in [
+        ("file", root.display().to_string()),
+        ("file", retained.display().to_string()),
+        ("key", key.into()),
+    ] {
+        for right in ["WRITE_DAC", "WRITE_OWNER"] {
+            let target = format!("{kind}\t{right}\t{user}\t{package}\t{path}");
+            let probe = fixture.try_single("owner-access", target, true);
+            eprintln!("same-user owner {kind} [{path}] {right}: {probe:?}");
+            if probe.as_ref().is_ok_and(|report| report.code == 0) {
+                // Undo any installed package entry so we can run the remaining probes.
+                eprintln!(
+                    "restore owner witness after unexpected open: {:?}",
+                    profile.prepare()
+                );
+            }
+            let api = if kind == "file" {
+                "CreateFileW"
+            } else {
+                "RegOpenKeyExW"
+            };
+            outcomes.push((format!("{api}({right})"), probe));
+        }
+    }
+    let control = result.expect("unconfined owner control");
+    control.expect(
+        &["CreateFileW(WRITE_DAC)"],
+        &[0],
+        "unconfined descriptor write",
+    );
+    assert!(
+        control
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("SetSecurityInfo(DACL)=0"))
+    );
+    assert!(
+        profile_controls::file_sddl(&scratch).contains(package),
+        "control installed the package ACE"
+    );
+    for (api, outcome) in outcomes {
+        let report = outcome.expect("LPAC same-user owner probe");
+        report.expect(&[&api], FILE_DENIALS, "same-user owner refusal");
+        assert_eq!(
+            report.detail.as_deref(),
+            Some("TokenUser matches owner SID=true")
+        );
+    }
 }
 
 #[test]
@@ -234,6 +375,101 @@ fn a_package_grant_on_registry_storage_blocks_verification_and_launch() {
         key.grant(fixture.profile.api.sid());
     }
     assert_refused_then_repaired(&fixture, &verified);
+}
+
+#[test]
+fn a_junction_at_ac_leaves_the_target_untouched() {
+    let fixture = Fixture::new();
+    let root = fixture.profile_root();
+    assert_junction_refused(&fixture, &root.join("AC"));
+}
+
+#[test]
+fn junctions_at_known_ac_subfolders_leave_the_target_untouched() {
+    let fixture = Fixture::new();
+    let ac = fixture.profile_root().join("AC");
+    fs::create_dir_all(&ac).expect("CreateDirectoryW (junction test AC)");
+    for name in ["INetCache", "INetCookies", "INetHistory", "Temp"] {
+        assert_junction_refused(&fixture, &ac.join(name));
+    }
+}
+
+fn assert_junction_refused(fixture: &Fixture, path: &Path) {
+    let target = fixture.root.0.join(unique());
+    let cache = target.join("INetCache");
+    fs::create_dir_all(&cache).expect("CreateDirectoryW (junction target and empty INetCache)");
+    let before = (
+        profile_controls::file_sddl(&target),
+        profile_controls::file_sddl(&cache),
+    );
+    let _junction = profile_controls::junction(path, &target);
+    assert!(path.join("INetCache").is_dir(), "junction positive control");
+    let rejected = fixture
+        .profile
+        .api
+        .prepare()
+        .expect_err("preparation followed junction");
+    eprintln!("prepare [{}]: {rejected}", path.display());
+    assert_eq!(rejected.step, Step::ReadStorage);
+    assert!(rejected.to_string().contains("reparse point"), "{rejected}");
+    assert!(
+        cache.is_dir(),
+        "preparation removed an entry outside its profile"
+    );
+    assert_eq!(
+        before,
+        (
+            profile_controls::file_sddl(&target),
+            profile_controls::file_sddl(&cache)
+        )
+    );
+}
+
+#[test]
+fn a_package_grant_on_retained_profile_files_blocks_launch_until_repaired() {
+    let fixture = Fixture::new();
+    let verified = fixture
+        .profile
+        .api
+        .verify()
+        .expect("safe profile before tampering");
+    let retained = Canary::new(&fixture.profile_root());
+    fs::write(&retained.0, b"baseline").expect("WriteFile (retained file)");
+    grant_file_access(&retained.0, &fixture.sid, FILE_GENERIC_WRITE, 0);
+    assert_refused_then_repaired(&fixture, &verified);
+    fixture.single("grow", &retained.0, false).expect(
+        &["WriteFile(canary)"],
+        &[0],
+        "unconfined retained file write",
+    );
+    fs::write(&retained.0, b"baseline").expect("restore retained file sentinel");
+    fixture.file_refusal("grow", &retained.0);
+    assert_eq!(
+        fs::read(&retained.0).expect("read retained file"),
+        b"baseline"
+    );
+}
+
+#[test]
+fn a_package_grant_on_registry_subkeys_blocks_launch_until_repaired() {
+    let fixture = Fixture::new();
+    let verified = fixture
+        .profile
+        .api
+        .verify()
+        .expect("safe profile before tampering");
+    {
+        let key = profile_controls::Key::open(&fixture.profile.api, KEY_CREATE_SUB_KEY)
+            .unwrap_or_else(|code| panic!("RegOpenKeyExW (subkey parent) Win32 {code}"));
+        key.create_subkey("retain-child")
+            .grant(fixture.profile.api.sid());
+    }
+    assert_refused_then_repaired(&fixture, &verified);
+    let key = format!(
+        r"{}\retain-child",
+        profile_controls::classes_key(&fixture.profile.api)
+    );
+    fixture.refuse_registry_write(&key);
 }
 
 fn assert_refused_then_repaired(fixture: &Fixture, stale: &VerifiedProfile<'_>) {
@@ -313,24 +549,30 @@ fn preparation_keeps_unexpected_ac_content_and_refuses_mutation() {
 }
 
 #[test]
-fn an_oversize_ac_tree_blocks_verification_and_launch() {
+fn the_combined_storage_cap_blocks_verification_and_launch() {
     let fixture = Fixture::new();
     let stale = fixture
         .profile
         .api
         .verify()
         .expect("safe profile before seeding");
-    let ac = fixture.profile_root().join("AC");
-    fs::create_dir_all(&ac).expect("CreateDirectoryW (oversize AC)");
-    for index in 0..256 {
-        File::create_new(ac.join(index.to_string())).expect("CreateFileW (oversize tree seed)");
+    let root = fixture.profile_root();
+    for index in 0..127 {
+        File::create_new(root.join(index.to_string())).expect("CreateFileW (combined cap file)");
+    }
+    {
+        let key = profile_controls::Key::open(&fixture.profile.api, KEY_CREATE_SUB_KEY)
+            .unwrap_or_else(|code| panic!("RegOpenKeyExW (combined cap) Win32 {code}"));
+        for index in 0..128 {
+            key.create_subkey(&index.to_string());
+        }
     }
     fixture.startup(false).expect("unconfined image control");
     let observed = fixture
         .profile
         .api
         .verify()
-        .expect_err("oversize AC tree was verified");
+        .expect_err("combined storage cap was not checked");
     let rejected = launch_refusal(&fixture, &stale);
     eprintln!("verification refused: {observed}; launch refused: {rejected}");
     assert_eq!(observed.step, Step::StorageLimit);
@@ -652,8 +894,11 @@ impl Fixture {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if lpac {
-                let source = File::open(&self.source)
-                    .map_err(|error| format!("{case} CreateFileW (read-only source): {error}"))?;
+                let source = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&self.source)
+                    .map_err(|error| format!("{case} CreateFileW (read/write source): {error}"))?;
                 let args = [OsString::from(case), target.as_ref().to_os_string()];
                 let verified = self
                     .profile
@@ -768,6 +1013,26 @@ impl Fixture {
         confined
             .unwrap_or_else(|error| panic!("{error}"))
             .expect(apis, codes, "LPAC refusal");
+    }
+
+    fn refuse_registry_write(&self, key: &str) {
+        let target = format!("{key}\t{}", unique());
+        let control = self.try_single("profile-registry-direct", &target, false);
+        let confined = self.try_single("profile-registry-direct", &target, true);
+        eprintln!("direct registry [{key}] control: {control:?}; LPAC: {confined:?}");
+        control.expect("unconfined registry control").expect(
+            &["RegSetValueExW(profile direct)"],
+            &[0],
+            "direct unconfined registry control",
+        );
+        confined.expect("LPAC registry refusal").expect(
+            &[
+                "RegOpenKeyExW(KEY_SET_VALUE)",
+                "RegSetValueExW(profile direct)",
+            ],
+            FILE_DENIALS,
+            "direct LPAC registry refusal",
+        );
     }
 
     fn refuse_writes(&self, parent: &Path) {
@@ -1181,7 +1446,16 @@ impl Drop for Local {
 }
 
 fn grant_image_access(directory: &Path, sid: &Sid) {
-    let path = wide(directory);
+    grant_file_access(
+        directory,
+        sid,
+        FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+        SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+    );
+}
+
+fn grant_file_access(target: &Path, sid: &Sid, rights: u32, inheritance: u32) {
+    let path = wide(target);
     let mut old_acl: *mut ACL = ptr::null_mut();
     let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
     // SAFETY: path identifies only the just-created directory. The outputs are writable.
@@ -1207,9 +1481,9 @@ fn grant_image_access(directory: &Path, sid: &Sid) {
         "GetNamedSecurityInfoW returned a null DACL"
     );
     let mut ace = EXPLICIT_ACCESS_W {
-        grfAccessPermissions: FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+        grfAccessPermissions: rights,
         grfAccessMode: GRANT_ACCESS,
-        grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+        grfInheritance: inheritance,
         ..Default::default()
     };
     ace.Trustee.TrusteeForm = TRUSTEE_IS_SID;
