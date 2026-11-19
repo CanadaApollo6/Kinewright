@@ -587,7 +587,8 @@ profile registry storage key and every subkey. Remove every ACE for the
 container SID, ALL APPLICATION PACKAGES, and ALL RESTRICTED APPLICATION
 PACKAGES. Open the registry key by moniker under the current user's classes
 hive at `Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage`.
-Open each component below the classes hive separately and refuse registry links.
+Open the classes hive directly as `HKEY_USERS\<SID>_Classes`. Open each
+component below the hive separately and refuse registry links.
 Production code does not impersonate a thread. Before each launch, recheck
 registration, SID, and the protected, grant-free storage DACLs. The combined
 file and registry walk is capped at 256 nodes. An unreadable or over-cap tree

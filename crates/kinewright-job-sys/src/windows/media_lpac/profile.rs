@@ -22,7 +22,7 @@ use windows_sys::Win32::{
     System::{
         Com::CoTaskMemFree,
         Registry::{
-            HKEY, HKEY_CURRENT_USER, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE, REG_LINK,
+            HKEY, HKEY_USERS, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE, REG_LINK,
             REG_OPTION_OPEN_LINK, RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW,
         },
     },
@@ -403,10 +403,16 @@ struct Key {
 impl Key {
     fn walk(profile: &Profile, budget: &mut Budget) -> Result<Vec<Self>, Error> {
         budget.take("RegOpenKeyExW")?;
+        // HKCU\Software\Classes is a system alias for the current user's classes hive.
+        // Start at the hive itself so every component we open can reject links.
+        let sid = super::super::account_sid().map_err(|error| {
+            Error::launch(error, Step::ReadStorage, "resolve classes hive account SID")
+        })?;
+        let hive = format!("{sid}_Classes");
         let classes = Self::open_at(
-            HKEY_CURRENT_USER,
-            &wide(OsStr::new(CLASSES_KEY)).map_err(input_error)?,
-            CLASSES_KEY.into(),
+            HKEY_USERS,
+            &wide(OsStr::new(&hive)).map_err(input_error)?,
+            format!(r"HKEY_USERS\{hive}"),
             0,
         )?;
         let components = STORAGE_KEY
@@ -558,7 +564,8 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
     use windows_sys::Win32::System::Registry::{
-        KEY_ALL_ACCESS, REG_OPTION_CREATE_LINK, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW,
+        HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_OPTION_CREATE_LINK, RegCreateKeyExW, RegDeleteTreeW,
+        RegSetValueExW,
     };
 
     #[link(name = "ntdll")]
