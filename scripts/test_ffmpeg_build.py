@@ -4,6 +4,7 @@ import importlib.util
 import hashlib
 import io
 from pathlib import Path
+import struct
 import tarfile
 import tempfile
 import textwrap
@@ -13,6 +14,10 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location('ffmpeg_builder', Path(__file__).with_name('build-ffmpeg.py'))
 builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
+
+inspect_spec = importlib.util.spec_from_file_location('ffmpeg_inspector', Path(__file__).with_name('inspect-ffmpeg.py'))
+inspector = importlib.util.module_from_spec(inspect_spec)
+inspect_spec.loader.exec_module(inspector)
 
 
 def profile_component_sources(omit=()):
@@ -488,6 +493,241 @@ class BuildIdentity(unittest.TestCase):
         save = source[source.index('    - name: Save verified source'):]
         self.assertIn("github.event_name == 'push'", save)
         self.assertNotIn('no-binary-cache', source)
+
+
+def _minimal_elf64(sonames):
+    strtab = bytearray(b'\x00')
+    offsets = []
+    for name in sonames:
+        offsets.append(len(strtab))
+        strtab.extend(name.encode('utf-8') + b'\x00')
+    dyn = bytearray()
+    for off in offsets:
+        dyn.extend(struct.pack('<qQ', 1, off))  # DT_NEEDED
+    dyn.extend(struct.pack('<qQ', 0, 0))  # DT_NULL
+
+    ehdr_size = 64
+    str_off = ehdr_size
+    dyn_off = str_off + len(strtab)
+    shoff = dyn_off + len(dyn)
+    ehdr = bytearray(ehdr_size)
+    ehdr[0:16] = b'\x7fELF\x02\x01\x01' + b'\x00' * 9
+    struct.pack_into('<Q', ehdr, 40, shoff)
+    struct.pack_into('<HH', ehdr, 58, 64, 3)
+
+    sh_null = struct.pack('<IIQQQQIIQQ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    sh_str = struct.pack('<IIQQQQIIQQ', 0, 3, 0, 0, str_off, len(strtab), 0, 0, 1, 0)
+    sh_dyn = struct.pack('<IIQQQQIIQQ', 0, 6, 0, 0, dyn_off, len(dyn), 1, 0, 8, 16)
+    return bytes(ehdr + strtab + dyn + sh_null + sh_str + sh_dyn)
+
+
+def _minimal_pe64(dll_names, delay_names=()):
+    pe_offset = 0x80
+    opt_size = 240
+    sec_offset = pe_offset + 24 + opt_size
+    rdata_raw = 0x200
+    rdata_rva = 0x1000
+
+    rdata = bytearray()
+    imp_rva = rdata_rva
+    imp_count = len(dll_names)
+    imp_table_size = (imp_count + 1) * 20
+    delay_rva = rdata_rva + imp_table_size if delay_names else 0
+    delay_table_size = (len(delay_names) + 1) * 32 if delay_names else 0
+    strings_rva = rdata_rva + imp_table_size + delay_table_size
+
+    strings = bytearray()
+    imp_name_rvas = []
+    for name in dll_names:
+        imp_name_rvas.append(strings_rva + len(strings))
+        strings.extend(name.encode('ascii') + b'\x00')
+    delay_name_rvas = []
+    for name in delay_names:
+        delay_name_rvas.append(strings_rva + len(strings))
+        strings.extend(name.encode('ascii') + b'\x00')
+
+    for name_rva in imp_name_rvas:
+        rdata.extend(struct.pack('<IIIII', 0, 0, 0, name_rva, 0))
+    rdata.extend(struct.pack('<IIIII', 0, 0, 0, 0, 0))
+    if delay_names:
+        for name_rva in delay_name_rvas:
+            rdata.extend(struct.pack('<IIIIIIII', 1, name_rva, 0, 0, 0, 0, 0, 0))
+        rdata.extend(struct.pack('<IIIIIIII', 0, 0, 0, 0, 0, 0, 0, 0))
+    rdata.extend(strings)
+
+    image = bytearray(rdata_raw + len(rdata))
+    image[0:2] = b'MZ'
+    struct.pack_into('<I', image, 0x3C, pe_offset)
+    image[pe_offset:pe_offset + 4] = b'PE\x00\x00'
+    struct.pack_into('<HHIIIHH', image, pe_offset + 4, 0x8664, 1, 0, 0, 0, opt_size, 0x2022)
+    opt_offset = pe_offset + 24
+    struct.pack_into('<H', image, opt_offset, 0x20B)  # PE32+
+    struct.pack_into('<I', image, opt_offset + 108, 16)  # NumberOfRvaAndSizes
+    dd_offset = opt_offset + 112
+    struct.pack_into('<II', image, dd_offset + 1 * 8, imp_rva, imp_table_size)
+    if delay_names:
+        struct.pack_into('<II', image, dd_offset + 13 * 8, delay_rva, delay_table_size)
+    image[sec_offset:sec_offset + 8] = b'.rdata\x00\x00'
+    struct.pack_into('<IIII', image, sec_offset + 8, len(rdata), rdata_rva, len(rdata), rdata_raw)
+    image[rdata_raw:rdata_raw + len(rdata)] = rdata
+    return bytes(image)
+
+
+class SurfaceInspection(unittest.TestCase):
+    @staticmethod
+    def _matching_report(expected):
+        return {
+            'decoders': sorted(expected['decoders']),
+            'encoders': sorted(expected['encoders']),
+            'demuxers': sorted(expected['demuxers']),
+            'parsers': [list(entry) for entry in sorted(expected['parsers'])],
+            'muxers': sorted(expected['muxers']),
+            'filters': sorted(expected['filters']),
+            'bsfs': sorted(expected['bsfs']),
+            'hwdevices': sorted(expected['hwdevices']),
+            'hwaccels': sorted(expected['hwaccels']),
+            'protocols': {
+                'input': sorted(expected['protocols']['input']),
+                'output': sorted(expected['protocols']['output']),
+            },
+            'external_libraries': sorted(expected['external_libraries']),
+            'external_library_sources': {
+                'linked': sorted(expected['linked_external_libraries']),
+                'pkgconfig': sorted(expected['external_libraries']),
+                'configured': sorted(expected['external_libraries']),
+            },
+            'libraries': {f'lib{stem}.so.1.0.0': 1 for stem in sorted(expected['built_libraries'])},
+        }
+
+    def test_expected_surface_declares_protocols_hwaccels_and_external_libraries(self):
+        linux = inspector.expected_surface(system='Linux')
+        windows = inspector.expected_surface(system='Windows')
+        for surface in (linux, windows):
+            self.assertEqual(surface['protocols'], {'input': {'file'}, 'output': {'file'}})
+            self.assertEqual(surface['hwdevices'], set())
+            self.assertEqual(surface['hwaccels'], set())
+            self.assertEqual(surface['external_libraries'], {'libdav1d', 'libx264', 'libx265', 'zlib'})
+            self.assertEqual(
+                surface['built_libraries'],
+                {'avcodec', 'avformat', 'avfilter', 'avutil', 'swscale', 'swresample'},
+            )
+        self.assertEqual(linux['linked_external_libraries'], {'libdav1d', 'libx264', 'libx265', 'zlib'})
+        self.assertEqual(windows['linked_external_libraries'], set())
+
+    def test_exact_set_check_names_unexpected_and_missing_in_every_category(self):
+        expected = inspector.expected_surface(system='Linux')
+        inspector.check(self._matching_report(expected), expected)
+
+        unexpected_cases = [
+            ('decoders', lambda r: r['decoders'].append('vp8'), 'vp8'),
+            ('encoders', lambda r: r['encoders'].append('libvpx_vp9'), 'libvpx_vp9'),
+            ('demuxers', lambda r: r['demuxers'].append('hls'), 'hls'),
+            ('parsers', lambda r: r['parsers'].append(['hevc_extra']), 'hevc_extra'),
+            ('muxers', lambda r: r['muxers'].append('mpegts'), 'mpegts'),
+            ('filters', lambda r: r['filters'].append('yadif'), 'yadif'),
+            ('bsfs', lambda r: r['bsfs'].append('h264_mp4toannexb'), 'h264_mp4toannexb'),
+            ('hwdevices', lambda r: r['hwdevices'].append('vaapi'), 'vaapi'),
+            ('hwaccels', lambda r: r['hwaccels'].append('h264:vaapi:vaapi'), 'h264:vaapi:vaapi'),
+            ('protocols.input', lambda r: r['protocols']['input'].append('http'), 'http'),
+            ('protocols.output', lambda r: r['protocols']['output'].append('tcp'), 'tcp'),
+            ('external_libraries', lambda r: r['external_libraries'].append('openssl'), 'openssl'),
+            ('external_libraries.linked', lambda r: r['external_library_sources']['linked'].append('libva'), 'libva'),
+            ('external_libraries.pkgconfig', lambda r: r['external_library_sources']['pkgconfig'].append('lzma'), 'lzma'),
+            ('external_libraries.configured', lambda r: r['external_library_sources']['configured'].append('iconv'), 'iconv'),
+            ('libraries', lambda r: r['libraries'].__setitem__('libavdevice.so.63.1.102', 1), 'avdevice'),
+        ]
+        for category, mutate, token in unexpected_cases:
+            with self.subTest(kind='unexpected', category=category):
+                report = self._matching_report(expected)
+                mutate(report)
+                with self.assertRaises(SystemExit) as refused:
+                    inspector.check(report, expected)
+                message = str(refused.exception)
+                self.assertIn(f'{category}:', message)
+                self.assertIn(f'unexpected={token}', message)
+
+        missing_cases = [
+            ('decoders', lambda r: r['decoders'].remove('h264'), 'h264'),
+            ('encoders', lambda r: r['encoders'].remove('libx265'), 'libx265'),
+            ('demuxers', lambda r: r['demuxers'].remove('wav'), 'wav'),
+            ('parsers', lambda r: r['parsers'].remove(['ac3', 'eac3']), 'ac3,eac3'),
+            ('muxers', lambda r: r['muxers'].remove('mp4'), 'mp4'),
+            ('filters', lambda r: r['filters'].remove('scale'), 'scale'),
+            ('bsfs', lambda r: r['bsfs'].remove('extract_extradata'), 'extract_extradata'),
+            ('protocols.input', lambda r: r['protocols']['input'].remove('file'), 'file'),
+            ('protocols.output', lambda r: r['protocols']['output'].remove('file'), 'file'),
+            ('external_libraries', lambda r: r['external_libraries'].remove('zlib'), 'zlib'),
+            ('external_libraries.linked', lambda r: r['external_library_sources']['linked'].remove('libx264'), 'libx264'),
+            ('external_libraries.pkgconfig', lambda r: r['external_library_sources']['pkgconfig'].remove('libdav1d'), 'libdav1d'),
+            ('external_libraries.configured', lambda r: r['external_library_sources']['configured'].remove('libx265'), 'libx265'),
+            ('libraries', lambda r: r['libraries'].pop('libswscale.so.1.0.0'), 'swscale'),
+        ]
+        for category, mutate, token in missing_cases:
+            with self.subTest(kind='missing', category=category):
+                report = self._matching_report(expected)
+                mutate(report)
+                with self.assertRaises(SystemExit) as refused:
+                    inspector.check(report, expected)
+                message = str(refused.exception)
+                self.assertIn(f'{category}:', message)
+                self.assertIn(f'missing={token}', message)
+
+    def test_elf_pe_and_pkgconfig_external_library_enumeration(self):
+        with tempfile.TemporaryDirectory(dir=builder.ROOT / 'target') as directory:
+            root = Path(directory)
+            so_path = root / 'libavcodec.so.63.1.102'
+            so_path.write_bytes(_minimal_elf64([
+                'libc.so.6', 'libm.so.6', 'libavutil.so.61',
+                'libx264.so.165', 'libz.so.1', 'libssl.so.3',
+            ]))
+            self.assertEqual(
+                inspector.binary_external_libraries([so_path]),
+                ['libssl', 'libx264', 'zlib'],
+            )
+
+            dll_path = root / 'avcodec-63.dll'
+            dll_path.write_bytes(_minimal_pe64(
+                ['KERNEL32.dll', 'bcrypt.dll', 'avutil-61.dll', 'api-ms-win-crt-runtime-l1-1-0.dll', 'WS2_32.dll'],
+                delay_names=['d3d11.dll'],
+            ))
+            self.assertEqual(
+                inspector.binary_external_libraries([dll_path]),
+                ['d3d11', 'ws2_32'],
+            )
+
+            pc_linux = root / 'linux-prefix/lib/pkgconfig'
+            pc_linux.mkdir(parents=True)
+            (pc_linux / 'libavcodec.pc').write_text(
+                'Libs: -L${libdir} -lavcodec\n'
+                'Libs.private: -pthread -lm -latomic -ldav1d -lx264 -lx265 -lz -lssl /usr/lib/libva.so.2\n',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                inspector.pkgconfig_external_libraries(root / 'linux-prefix'),
+                ['libdav1d', 'libva', 'libx264', 'libx265', 'ssl', 'zlib'],
+            )
+
+            pc_win = root / 'win-prefix/lib/pkgconfig'
+            pc_win.mkdir(parents=True)
+            (pc_win / 'libavcodec.pc').write_text(
+                'Libs: -L${libdir} avcodec.lib\n'
+                'Libs.private: -libpath:C:\\vcpkg\\lib dav1d.lib libx264.lib x265-static.lib zlib.lib bcrypt.lib user32.lib ws2_32.lib\n',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                inspector.pkgconfig_external_libraries(root / 'win-prefix'),
+                ['libdav1d', 'libx264', 'libx265', 'ws2_32', 'zlib'],
+            )
+
+    def test_built_ffmpeg_matches_exact_profile_surface(self):
+        prefix = builder.ROOT / 'third_party/ffmpeg'
+        self.assertTrue(prefix.is_dir(), 'run scripts/setup-ffmpeg.sh first')
+        report = inspector.inspect(prefix)
+        inspector.check(report)
+        self.assertEqual(report['protocols'], {'input': ['file'], 'output': ['file']})
+        self.assertEqual(report['hwdevices'], [])
+        self.assertEqual(report['hwaccels'], [])
+        self.assertEqual(report['external_libraries'], ['libdav1d', 'libx264', 'libx265', 'zlib'])
 
 
 if __name__ == '__main__':
