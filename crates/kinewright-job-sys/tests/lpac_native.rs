@@ -94,7 +94,7 @@ fn only_ordinary_appcontainer_reads_the_all_application_packages_canary() {
     fixture.profile = Some(Profile::create(&fixture.sid).unwrap_or_else(|error| panic!("{error}")));
     let environment = witness_environment(&mut fixture);
     let hardened = harden_witness(&mut fixture, environment);
-    let directory = fixture._root.0.join("all application packages control");
+    let directory = fixture.root.0.join("all application packages control");
     fs::create_dir(&directory).expect("CreateDirectoryW (ALL APPLICATION PACKAGES canary)");
     let file = directory.join("read-only.txt");
     fs::write(&file, b"packages-only").expect("WriteFile (ALL APPLICATION PACKAGES canary)");
@@ -367,7 +367,14 @@ struct Fixture {
     image_bytes: u64,
     source: PathBuf,
     sid: Sid,
-    _root: Temp,
+    #[cfg_attr(
+        not(feature = "lpac-diagnostics"),
+        expect(
+            dead_code,
+            reason = "keeps fixture files alive through their owner's cleanup"
+        )
+    )]
+    root: Temp,
 }
 
 impl Fixture {
@@ -419,7 +426,7 @@ impl Fixture {
             image_bytes,
             source,
             sid,
-            _root: root,
+            root,
         }
     }
 

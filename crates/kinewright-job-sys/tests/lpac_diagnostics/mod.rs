@@ -114,9 +114,9 @@ impl Selection {
 
     pub(super) fn uses_extra_environment(self) -> bool {
         match self {
-            Self::ParentEnvironment | Self::Profile(ProfileEnvironment::Parent, _) => true,
+            Self::ParentEnvironment
+            | Self::Profile(ProfileEnvironment::Parent | ProfileEnvironment::OwnedLocal, _) => true,
             Self::Profile(ProfileEnvironment::Added(mask), _) => mask != 0,
-            Self::Profile(ProfileEnvironment::OwnedLocal, _) => true,
             _ => false,
         }
     }
@@ -766,7 +766,7 @@ fn apply_hardening(
                             entry.display()
                         )),
                         Err(error) => {
-                            result.fail(format!("FindNextFileW {}: {error}", path.display()))
+                            result.fail(format!("FindNextFileW {}: {error}", path.display()));
                         }
                     }
                 }

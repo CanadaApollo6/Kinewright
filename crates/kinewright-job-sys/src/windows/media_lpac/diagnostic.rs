@@ -137,12 +137,12 @@ pub fn launch(
     .verify_and_resume()
 }
 
-/// Run a trusted fixture canary with the AppContainer creation attributes.
+/// Run a trusted fixture canary with the `AppContainer` creation attributes.
 /// The matrix separately reports LPAC and mitigation inspection so a query
 /// failure cannot hide behavioral results.
 ///
 /// # Errors
-/// Refuses creation errors or a child without the expected base AppContainer token and Job.
+/// Refuses creation errors or a child without the expected base `AppContainer` token and Job.
 pub fn launch_profile_canary(
     program: &Path,
     args: &[OsString],
@@ -266,10 +266,11 @@ pub fn profile_registry_location(
         variant.mode(),
         |_, _, _| {},
     )?;
-    let token = token::open(
-        child.process.as_ref().expect("suspended process"),
-        TOKEN_QUERY | TOKEN_DUPLICATE,
-    )?;
+    let process = child
+        .process
+        .as_ref()
+        .ok_or_else(|| io::Error::other("missing suspended process"))?;
+    let token = token::open(process, TOKEN_QUERY | TOKEN_DUPLICATE)?;
     if !token::query_sid(&token, &child.sid)? {
         return Err(io::Error::other(
             "GetTokenInformation (profile registry TokenAppContainerSid) Win32 0: SID mismatch",
