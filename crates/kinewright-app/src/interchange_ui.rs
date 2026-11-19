@@ -1172,10 +1172,8 @@ mod tests {
             "{painted:?}"
         );
         for path in [&first, &other] {
-            assert!(
-                painted.iter().any(|line| line == &path.to_string_lossy()),
-                "{painted:?}"
-            );
+            let label = display_text(&[&path.to_string_lossy()], ROW_CHARS);
+            assert!(painted.contains(&label), "{painted:?}");
         }
     }
 
