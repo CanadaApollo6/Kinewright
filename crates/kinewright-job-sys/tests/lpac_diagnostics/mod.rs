@@ -291,7 +291,7 @@ pub(super) fn run() {
 
     drop(lease);
     let cleanup = profile_variants(&mut fixture);
-    let removal = remove_profile_folders_variant(&mut fixture);
+    let removal = remove_profile_folders_variant(&mut Fixture::stage());
     let panic = fixture.try_single("panic-witness", "", false);
     eprintln!("fixture panic hook control: {panic:?}");
     assert!(
@@ -554,10 +554,13 @@ fn print_removal(step: &str, result: &Result<(), String>) {
 
 fn report_start_and_ac(fixture: &Fixture, step: &str, ac: &Path) {
     let startup = fixture.startup(true);
+    let projected = projected_root(fixture).join("AC");
     eprintln!(
-        "{step}: launch/inspection/child={startup:?}; AC [{}] {}",
+        "{step}: launch/inspection/child={startup:?}; installed AC [{}] {}; projected AC [{}] {}",
         ac.display(),
-        folder_state(ac)
+        folder_state(ac),
+        projected.display(),
+        folder_state(&projected)
     );
     if folder_state(ac) == "directory" {
         let mut folders = BTreeSet::new();
