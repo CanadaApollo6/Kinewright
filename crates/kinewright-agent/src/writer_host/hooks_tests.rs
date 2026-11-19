@@ -93,6 +93,7 @@ mod tests {
     include!("c3_fix2_tests.rs");
     include!("c3_fix3_tests.rs");
     include!("c4_tests.rs");
+    include!("editorial_tests.rs");
     include!("te12_tests.rs");
     include!("te13_tests.rs");
     include!("te13_fix1_tests.rs");

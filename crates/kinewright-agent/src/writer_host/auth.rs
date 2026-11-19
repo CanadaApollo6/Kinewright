@@ -116,6 +116,7 @@ impl Attachment {
             HostCommand::IssueMetadataIssuer { .. } | HostCommand::ObserveRun { .. } => true,
             HostCommand::DispatchOrchestration { .. }
             | HostCommand::ResolveAttention { .. }
+            | HostCommand::DecideRulebook { .. }
             | HostCommand::DetachForContinuation => true,
             // Viewers get Waiting; Producers are refused inside the hook.
             HostCommand::ReviseCut { .. } => true,
@@ -128,7 +129,10 @@ impl Attachment {
                 | kinewright_project::studio_records::MetadataChange::SubmitBatch { .. } => {
                     matches!(self.role, AttachmentRole::Viewer | AttachmentRole::Editor)
                 }
-                kinewright_project::studio_records::MetadataChange::Orchestration { .. }
+                kinewright_project::studio_records::MetadataChange::RetainEditorial { .. }
+                | kinewright_project::studio_records::MetadataChange::ProposeRulebook(_)
+                | kinewright_project::studio_records::MetadataChange::DecideRulebook(_)
+                | kinewright_project::studio_records::MetadataChange::Orchestration { .. }
                 | kinewright_project::studio_records::MetadataChange::OrchestrationUpdate {
                     ..
                 } => false,
@@ -144,6 +148,7 @@ impl Attachment {
             | HostCommand::ReadFeedbackView { .. } => {
                 matches!(self.role, AttachmentRole::Viewer | AttachmentRole::Editor)
             }
+            HostCommand::ReadEditorial { .. } => self.role != AttachmentRole::Producer,
             HostCommand::ListVersions
             | HostCommand::LeaseSnapshot { .. }
             | HostCommand::SnapshotLeaseStatus { .. }

@@ -267,6 +267,7 @@ pub(super) fn is_hook(command: &HostCommand) -> bool {
             | HostCommand::DispatchOrchestration { .. }
             | HostCommand::ObserveRun { .. }
             | HostCommand::ResolveAttention { .. }
+            | HostCommand::DecideRulebook { .. }
             | HostCommand::DetachForContinuation
             | HostCommand::ReviseCut { .. }
     )
@@ -376,6 +377,7 @@ impl HostCommandOwner {
             | HostCommand::IssueMetadataIssuer { .. }
             | HostCommand::DispatchOrchestration { .. }
             | HostCommand::ObserveRun { .. }
+            | HostCommand::DecideRulebook { .. }
             | HostCommand::SnapshotLeaseStatus { .. }
             | HostCommand::ReleaseSnapshot { .. } => true,
             HostCommand::ReadSnapshot { key } | HostCommand::LeaseSnapshot { key } => {
@@ -562,6 +564,9 @@ impl HostCommandOwner {
                 } => {
                     reply.run_view = Some(self.observe_run(index, &run, after_sequence)?);
                     reply.attention = self.attention_prompts(&run);
+                }
+                HostCommand::DecideRulebook { decision } => {
+                    self.decide_rulebook(index, decision)?;
                 }
                 HostCommand::ResolveAttention { response } => {
                     reply.attention_outcome = Some(self.resolve_attention(index, response)?);
@@ -1736,6 +1741,7 @@ impl HostCommandOwner {
                 .ok_or_else(|| refused("task missing"))?
                 .brief = task_record.brief.clone();
         }
+        self.freeze_task_rulebook(&mut state, task)?;
         let scope = ProducerScope {
             run: run.clone(),
             task: Some(task.clone()),

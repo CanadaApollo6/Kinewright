@@ -36823,10 +36823,12 @@ pub(crate) fn task_role_tools(
     static DIRECTOR: OnceLock<Result<Vec<Tool>, String>> = OnceLock::new();
     static EDITOR: OnceLock<Result<Vec<Tool>, String>> = OnceLock::new();
     static REVIEWER: OnceLock<Result<Vec<Tool>, String>> = OnceLock::new();
+    static SPECIALIST: OnceLock<Result<Vec<Tool>, String>> = OnceLock::new();
     let cache = match role {
         Role::Director => &DIRECTOR,
         Role::Reviewer => &REVIEWER,
-        Role::Editor | Role::Motion | Role::Audio | Role::Colour => &EDITOR,
+        Role::Editor => &EDITOR,
+        Role::Motion | Role::Audio | Role::Colour => &SPECIALIST,
     };
     cache
         .get_or_init(|| {

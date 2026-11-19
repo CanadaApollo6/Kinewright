@@ -23,4 +23,6 @@ pub(crate) const TASK_TOOL_NAMES: &[&str] = &[
     "answer_question",
     "send_message",
     "finish_task",
+    "propose_rulebook_revision",
+    "record_editorial_audit",
 ];

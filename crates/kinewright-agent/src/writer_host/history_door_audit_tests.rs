@@ -173,6 +173,8 @@ impl Door {
             | HostCommand::ReadFeedbackView { .. }
             | HostCommand::ReadFeedbackEvidence { .. }
             | HostCommand::ListVersions
+            | HostCommand::ReadEditorial { .. }
+            | HostCommand::DecideRulebook { .. }
             | HostCommand::ReadSnapshot { .. }
             | HostCommand::ReadFeedback { .. }
             | HostCommand::ResolveFeedback { .. }

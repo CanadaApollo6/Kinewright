@@ -30,6 +30,52 @@ fn definitions() -> Value {
     })
 }
 pub(crate) fn capability(name: &str) -> Value {
+    use kinewright_project::editorial::{
+        MAX_AUDIT_ENTRIES, MAX_AUDIT_TEXT, MAX_BEAT_TEXT, MAX_RULE_TEXT,
+    };
+    if name == "propose_rulebook_revision" {
+        return object(
+            json!({"rule":{"type":"string","maxLength":MAX_RULE_TEXT}}),
+            &["rule"],
+        );
+    }
+    if name == "record_editorial_audit" {
+        let micros = json!({"type":"integer","minimum":0});
+        let snapshot = object(
+            json!({
+                "project":reference("identity"),"version":reference("identity"),
+                "head":reference("identity"),"document_hash":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+                "input_manifest_ref":reference("object_ref")
+            }),
+            &[
+                "project",
+                "version",
+                "head",
+                "document_hash",
+                "input_manifest_ref",
+            ],
+        );
+        let entry = object(
+            json!({
+                "line_or_beat":{"type":"string","maxLength":MAX_BEAT_TEXT},
+                "output":object(json!({"start_micros":micros,"end_micros":micros}), &["start_micros","end_micros"]),
+                "text":{"type":"string","maxLength":MAX_AUDIT_TEXT},
+                "kind":{"enum":["cut_rationale","retention","hook","story"]},
+                "finding":{"enum":["missing_required_beat","misleading_cut","taste","resolved"]}
+            }),
+            &["line_or_beat", "output", "text", "kind", "finding"],
+        );
+        let mut schema = object(
+            json!({
+                "version":reference("identity"),"snapshot":snapshot,
+                "rulebook_ref":{"anyOf":[reference("object_ref"),{"type":"null"}]},
+                "entries":array(entry,MAX_AUDIT_ENTRIES)
+            }),
+            &["version", "snapshot", "rulebook_ref", "entries"],
+        );
+        schema["$defs"] = definitions();
+        return schema;
+    }
     if matches!(name, "task_status" | "wait_task") {
         return object(
             json!({"after_sequence":{"type":"integer","minimum":0}}),

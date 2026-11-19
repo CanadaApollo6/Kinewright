@@ -2,7 +2,7 @@
 use crate::{
     app::KinewrightApp,
     icons::Icon,
-    ja1_attachment::Action,
+    ja1_attachment::{Action, EditorialDetails},
     presenter::{DisplayCell, PresentationContext},
     theme::{self, space},
 };
@@ -10,6 +10,60 @@ use eframe::egui::{self, Color32, Rect, Vec2};
 use kinewright_core::{Document, TimeCode};
 use kinewright_project::{studio_records::SnapshotKey, studio_store::FrozenContext};
 use std::sync::Arc;
+
+fn show_editorial_details(ui: &mut egui::Ui, details: &EditorialDetails) -> Option<Action> {
+    use kinewright_project::editorial::{AuditDisposition, RulebookDecision};
+    if let Some(version) = &details.version {
+        ui.separator();
+        ui.small(version.version.as_str());
+        if let Some(audit) = &details.audit {
+            ui.strong("Editorial audit");
+            match audit.rulebook_ref() {
+                Some(reference) => {
+                    let revision = reference.sha256.get(..12).unwrap_or(&reference.sha256);
+                    ui.label(format!("Rulebook {revision}"));
+                }
+                None => {
+                    ui.label("No approved rules");
+                }
+            }
+            for entry in audit.entries() {
+                let disposition = match entry.disposition {
+                    AuditDisposition::Blocking => "Blocking",
+                    AuditDisposition::Advisory => "Advisory",
+                    AuditDisposition::Resolved => continue,
+                };
+                let entry = &entry.observation;
+                let start =
+                    std::time::Duration::from_micros(entry.output.start_micros).as_secs_f64();
+                let end = std::time::Duration::from_micros(entry.output.end_micros).as_secs_f64();
+                ui.label(format!(
+                    "{disposition} · {} · {start:.3}–{end:.3} s",
+                    entry.line_or_beat
+                ));
+                ui.label(&entry.text);
+            }
+        } else {
+            ui.label("No editorial audit");
+        }
+    }
+    let (reference, proposal) = details.proposal.as_ref()?;
+    ui.separator();
+    ui.strong("Proposed rule");
+    ui.label(&proposal.rule);
+    ui.horizontal(|ui| {
+        let approve = ui.button("Approve").clicked();
+        let decline = ui.button("Decline").clicked();
+        (approve || decline).then(|| Action::StudioRulebook {
+            decision: RulebookDecision {
+                proposal: reference.clone(),
+                approve,
+            },
+            version: details.version.clone(),
+        })
+    })
+    .inner
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -78,6 +132,7 @@ pub(crate) struct Studio {
     pub(crate) manual_failure: Option<ManualFailure>,
     versions: Vec<SnapshotKey>,
     versions_open: bool,
+    editorial: Option<EditorialDetails>,
     pub(crate) tab: Tab,
     draft_snapshot: Option<SnapshotKey>,
     stills: [Option<Still>; 2],
@@ -528,6 +583,8 @@ impl KinewrightApp {
         let manual = attachment.studio_manual_ready.take();
         let context = attachment.studio_ready.take();
         let versions = attachment.studio_versions_ready.take();
+        let editorial = attachment.studio_editorial_ready.take();
+        let editorial_project = attachment.studio_project_id().ok();
         let failure = attachment.studio_error_ready.take();
         let manual_failed = attachment.studio_manual_failed.take();
         let editing = attachment.studio_edit_pending && !attachment.read_only();
@@ -543,6 +600,16 @@ impl KinewrightApp {
         }
         if let Some(failure) = failure {
             self.focused_mut().studio.failure = Some(failure);
+        }
+        let editorial_state = &mut self.focused_mut().studio.editorial;
+        if let Some(editorial) = editorial {
+            *editorial_state = Some(editorial);
+        }
+        if editorial_state
+            .as_ref()
+            .is_some_and(|details| Some(&details.project) != editorial_project.as_ref())
+        {
+            *editorial_state = None;
         }
         if let Some(versions) = versions {
             self.focused_mut().studio.versions = versions;
@@ -695,6 +762,7 @@ impl KinewrightApp {
         if versions_open {
             let versions = self.focused().studio.versions.clone();
             let mut selected = None;
+            let mut editorial_action = None;
             egui::Window::new("Versions")
                 .open(&mut versions_open)
                 .show(ui.ctx(), |ui| {
@@ -703,19 +771,39 @@ impl KinewrightApp {
                             ui.label("No published versions yet");
                         }
                         for (index, version) in versions.iter().enumerate() {
-                            if ui
-                                .button(format!(
-                                    "Version {} · {}",
-                                    index + 1,
-                                    version.version.as_str()
-                                ))
-                                .clicked()
-                            {
-                                selected = Some(version.clone());
-                            }
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .button(format!(
+                                        "Version {} · {}",
+                                        index + 1,
+                                        version.version.as_str()
+                                    ))
+                                    .clicked()
+                                {
+                                    selected = Some(version.clone());
+                                }
+                                if ui.button("Details").clicked() {
+                                    editorial_action =
+                                        Some(Action::StudioEditorial(Some(version.clone())));
+                                }
+                            });
+                        }
+                        let current_details = self.focused().studio.editorial.as_ref();
+                        if ui.button("Refresh").clicked() {
+                            let version =
+                                current_details.and_then(|details| details.version.clone());
+                            editorial_action = Some(Action::StudioEditorial(version));
+                        }
+                        if let Some(details) = current_details
+                            && let Some(action) = show_editorial_details(ui, details)
+                        {
+                            editorial_action = Some(action);
                         }
                     });
                 });
+            if let Some(action) = editorial_action {
+                self.start_ja1(action);
+            }
             if let Some(key) = selected {
                 self.start_ja1(Action::StudioSelect(key));
                 versions_open = false;
@@ -828,6 +916,7 @@ impl KinewrightApp {
         }
         if quiet_button(ui, "Versions", true, false).clicked() {
             self.focused_mut().studio.versions_open = true;
+            self.focused_mut().studio.editorial = None;
             if self.focused().ja1.is_none() {
                 self.enable_ja1();
             }
