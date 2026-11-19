@@ -495,33 +495,60 @@ class BuildIdentity(unittest.TestCase):
         self.assertNotIn('no-binary-cache', source)
 
 
-def _minimal_elf64(sonames):
+def _minimal_elf64(sonames, *, include_phdrs=True, include_shdrs=True, dynamic_sh_type=6,
+                   include_dynamic=True, include_load=True):
+    ehdr_size = 64
+    phnum = (1 if include_load else 0) + (1 if include_dynamic else 0) if include_phdrs else 0
+    phoff = ehdr_size if phnum else 0
+    str_off = ehdr_size + phnum * 56
+    base_vaddr = 0x400000
+
     strtab = bytearray(b'\x00')
     offsets = []
     for name in sonames:
         offsets.append(len(strtab))
         strtab.extend(name.encode('utf-8') + b'\x00')
     dyn = bytearray()
-    for off in offsets:
-        dyn.extend(struct.pack('<qQ', 1, off))  # DT_NEEDED
-    dyn.extend(struct.pack('<qQ', 0, 0))  # DT_NULL
+    if include_dynamic:
+        dyn.extend(struct.pack('<qQ', 5, base_vaddr + str_off))  # DT_STRTAB
+        dyn.extend(struct.pack('<qQ', 10, len(strtab)))  # DT_STRSZ
+        for off in offsets:
+            dyn.extend(struct.pack('<qQ', 1, off))  # DT_NEEDED
+        dyn.extend(struct.pack('<qQ', 0, 0))  # DT_NULL
 
-    ehdr_size = 64
-    str_off = ehdr_size
     dyn_off = str_off + len(strtab)
-    shoff = dyn_off + len(dyn)
+    payload_end = dyn_off + len(dyn)
+    shnum = 0
+    shoff = 0
+    shdrs = bytearray()
+    if include_shdrs:
+        shoff = payload_end
+        shdrs.extend(struct.pack('<IIQQQQIIQQ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        shdrs.extend(struct.pack('<IIQQQQIIQQ', 0, 3, 0, 0, str_off, len(strtab), 0, 0, 1, 0))
+        shnum = 2
+        if include_dynamic:
+            shdrs.extend(struct.pack(
+                '<IIQQQQIIQQ', 0, dynamic_sh_type, 0, base_vaddr + dyn_off, dyn_off, len(dyn), 1, 0, 8, 16
+            ))
+            shnum = 3
+
+    phdrs = bytearray()
+    if include_phdrs:
+        if include_load:
+            phdrs.extend(struct.pack('<IIQQQQQQ', 1, 5, 0, base_vaddr, base_vaddr, payload_end, payload_end, 0x1000))
+        if include_dynamic:
+            phdrs.extend(struct.pack(
+                '<IIQQQQQQ', 2, 6, dyn_off, base_vaddr + dyn_off, base_vaddr + dyn_off, len(dyn), len(dyn), 8
+            ))
+
     ehdr = bytearray(ehdr_size)
     ehdr[0:16] = b'\x7fELF\x02\x01\x01' + b'\x00' * 9
-    struct.pack_into('<Q', ehdr, 40, shoff)
-    struct.pack_into('<HH', ehdr, 58, 64, 3)
-
-    sh_null = struct.pack('<IIQQQQIIQQ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-    sh_str = struct.pack('<IIQQQQIIQQ', 0, 3, 0, 0, str_off, len(strtab), 0, 0, 1, 0)
-    sh_dyn = struct.pack('<IIQQQQIIQQ', 0, 6, 0, 0, dyn_off, len(dyn), 1, 0, 8, 16)
-    return bytes(ehdr + strtab + dyn + sh_null + sh_str + sh_dyn)
+    struct.pack_into('<QQ', ehdr, 32, phoff, shoff)
+    struct.pack_into('<HHHH', ehdr, 54, 56 if phnum else 0, phnum, 64 if shnum else 0, shnum)
+    return bytes(ehdr + phdrs + strtab + dyn + shdrs)
 
 
-def _minimal_pe64(dll_names, delay_names=()):
+def _minimal_pe64(dll_names, delay_names=(), *, image_base=0x10000000, delay_attrs=1, delay_raw_addrs=None):
     pe_offset = 0x80
     opt_size = 240
     sec_offset = pe_offset + 24 + opt_size
@@ -550,8 +577,14 @@ def _minimal_pe64(dll_names, delay_names=()):
         rdata.extend(struct.pack('<IIIII', 0, 0, 0, name_rva, 0))
     rdata.extend(struct.pack('<IIIII', 0, 0, 0, 0, 0))
     if delay_names:
-        for name_rva in delay_name_rvas:
-            rdata.extend(struct.pack('<IIIIIIII', 1, name_rva, 0, 0, 0, 0, 0, 0))
+        for index, name_rva in enumerate(delay_name_rvas):
+            if delay_raw_addrs is not None:
+                addr = delay_raw_addrs[index]
+            elif delay_attrs == 1:
+                addr = name_rva
+            else:
+                addr = image_base + name_rva
+            rdata.extend(struct.pack('<IIIIIIII', delay_attrs, addr, 0, 0, 0, 0, 0, 0))
         rdata.extend(struct.pack('<IIIIIIII', 0, 0, 0, 0, 0, 0, 0, 0))
     rdata.extend(strings)
 
@@ -562,6 +595,7 @@ def _minimal_pe64(dll_names, delay_names=()):
     struct.pack_into('<HHIIIHH', image, pe_offset + 4, 0x8664, 1, 0, 0, 0, opt_size, 0x2022)
     opt_offset = pe_offset + 24
     struct.pack_into('<H', image, opt_offset, 0x20B)  # PE32+
+    struct.pack_into('<Q', image, opt_offset + 24, image_base)
     struct.pack_into('<I', image, opt_offset + 108, 16)  # NumberOfRvaAndSizes
     dd_offset = opt_offset + 112
     struct.pack_into('<II', image, dd_offset + 1 * 8, imp_rva, imp_table_size)
@@ -704,7 +738,7 @@ class SurfaceInspection(unittest.TestCase):
             )
             self.assertEqual(
                 inspector.pkgconfig_external_libraries(root / 'linux-prefix'),
-                ['libdav1d', 'libva', 'libx264', 'libx265', 'ssl', 'zlib'],
+                ['libdav1d', 'libx264', 'libx265', 'ssl', 'va', 'zlib'],
             )
 
             pc_win = root / 'win-prefix/lib/pkgconfig'
@@ -718,6 +752,131 @@ class SurfaceInspection(unittest.TestCase):
                 inspector.pkgconfig_external_libraries(root / 'win-prefix'),
                 ['libdav1d', 'libx264', 'libx265', 'ws2_32', 'zlib'],
             )
+
+    def test_elf_dynamic_section_removed_or_retyped_still_reports_dependencies(self):
+        deps = ['libc.so.6', 'libavutil.so.61', 'libx264.so.165', 'libssl.so.3']
+        with tempfile.TemporaryDirectory(dir=builder.ROOT / 'target') as directory:
+            root = Path(directory)
+
+            with self.subTest(case='retyped_sht_dynamic'):
+                retyped = root / 'retyped.so.1'
+                retyped.write_bytes(_minimal_elf64(deps, dynamic_sh_type=1))  # SHT_PROGBITS
+                self.assertEqual(inspector.elf_needed(retyped), sorted(deps))
+                self.assertEqual(inspector.binary_external_libraries([retyped]), ['libssl', 'libx264'])
+
+            with self.subTest(case='stripped_section_headers'):
+                stripped = root / 'stripped.so.1'
+                stripped.write_bytes(_minimal_elf64(deps, include_shdrs=False))
+                self.assertEqual(inspector.elf_needed(stripped), sorted(deps))
+                self.assertEqual(inspector.binary_external_libraries([stripped]), ['libssl', 'libx264'])
+
+            with self.subTest(case='unmapped_pt_dynamic'):
+                unmapped = root / 'unmapped.so.1'
+                unmapped.write_bytes(_minimal_elf64(deps, include_shdrs=False, include_load=False))
+                with self.assertRaisesRegex(ValueError, 'unmapped DT_STRTAB'):
+                    inspector.elf_needed(unmapped)
+
+            with self.subTest(case='neither_pt_nor_sht_dynamic'):
+                no_dynamic = root / 'static.so.1'
+                no_dynamic.write_bytes(_minimal_elf64([], include_dynamic=False))
+                self.assertEqual(inspector.elf_needed(no_dynamic), [])
+
+    def test_pkgconfig_parses_wl_and_xlinker_and_rejects_unknown_options(self):
+        with tempfile.TemporaryDirectory(dir=builder.ROOT / 'target') as directory:
+            root = Path(directory)
+            pc_dir = root / 'lib/pkgconfig'
+            pc_dir.mkdir(parents=True)
+            pc_file = pc_dir / 'libavcodec.pc'
+
+            for libs_private in [
+                '-Wl,/x/libfoo.a',
+                '-Wl,-lfoo',
+                '-Wl,-Bstatic,-lfoo,-Bdynamic',
+                '-Xlinker -lfoo',
+                '-Xlinker /x/libfoo.a',
+            ]:
+                with self.subTest(case=libs_private):
+                    pc_file.write_text(
+                        f'Libs: -L${{libdir}} -lavcodec\nLibs.private: {libs_private}\n',
+                        encoding='utf-8',
+                    )
+                    self.assertEqual(inspector.pkgconfig_external_libraries(root), ['foo'])
+
+            pc_file.write_text(
+                'Libs: -L${libdir} -lavcodec\n'
+                'Libs.private: -Wl,--as-needed -Wl,-rpath,/x -Wl,-z,relro -lm\n',
+                encoding='utf-8',
+            )
+            self.assertEqual(inspector.pkgconfig_external_libraries(root), [])
+
+            for bad_line, token in [
+                ('-Wl,--unknown-linker-opt', '--unknown-linker-opt'),
+                ('-Xlinker --unknown-xlinker-opt', '--unknown-xlinker-opt'),
+                ('--unknown-top-level-opt', '--unknown-top-level-opt'),
+                ('-Wl,-rpath,-lfoo', '-rpath'),
+                ('-Xlinker', '-Xlinker'),
+            ]:
+                with self.subTest(bad=bad_line):
+                    pc_file.write_text(
+                        f'Libs: -L${{libdir}} -lavcodec\nLibs.private: {bad_line}\n',
+                        encoding='utf-8',
+                    )
+                    with self.assertRaises(ValueError) as refused:
+                        inspector.pkgconfig_external_libraries(root)
+                    self.assertIn(token, str(refused.exception))
+
+    def test_pe_delay_import_without_rva_bit_reports_or_raises(self):
+        with tempfile.TemporaryDirectory(dir=builder.ROOT / 'target') as directory:
+            root = Path(directory)
+
+            va_dll = root / 'va-delay.dll'
+            va_dll.write_bytes(_minimal_pe64(
+                ['KERNEL32.dll'], delay_names=['d3d11.dll'],
+                image_base=0x10000000, delay_attrs=0,
+            ))
+            self.assertEqual(inspector.pe_imports(va_dll), ['KERNEL32.dll', 'd3d11.dll'])
+            self.assertEqual(inspector.binary_external_libraries([va_dll]), ['d3d11'])
+
+            bad_va = root / 'bad-va-delay.dll'
+            bad_va.write_bytes(_minimal_pe64(
+                ['KERNEL32.dll'], delay_names=['d3d11.dll'],
+                image_base=0x180000000, delay_attrs=0, delay_raw_addrs=[0x1050],
+            ))
+            with self.assertRaisesRegex(ValueError, 'unsupported PE delay import'):
+                inspector.pe_imports(bad_va)
+
+            bad_attrs = root / 'bad-attrs-delay.dll'
+            bad_attrs.write_bytes(_minimal_pe64(
+                ['KERNEL32.dll'], delay_names=['d3d11.dll'],
+                image_base=0x10000000, delay_attrs=2, delay_raw_addrs=[0x1050],
+            ))
+            with self.assertRaisesRegex(ValueError, 'unsupported PE delay import'):
+                inspector.pe_imports(bad_attrs)
+
+    def test_configured_hwaccel_refuses_as_unimplemented_while_unexpected_actual_still_fails(self):
+        base_args = builder.configure('libraries', 'Linux')
+        fake_builder = type('FakeBuilder', (), {
+            'PROFILE': builder.PROFILE,
+            'configure': staticmethod(lambda profile, system=None: [*base_args, '--enable-hwaccel=h264_vaapi']),
+        })
+        with patch.object(inspector, '_load_builder', return_value=fake_builder):
+            with self.assertRaises(SystemExit) as refused:
+                inspector.expected_surface(system='Linux')
+        self.assertIn('not implemented', str(refused.exception))
+        self.assertIn('h264_vaapi', str(refused.exception))
+
+        expected = inspector.expected_surface(system='Linux')
+        report = self._matching_report(expected)
+        with self.assertRaises(SystemExit) as refused:
+            inspector.check(report, {**expected, 'hwaccels': {'h264_vaapi'}})
+        self.assertIn('not implemented', str(refused.exception))
+        self.assertIn('h264_vaapi', str(refused.exception))
+
+        report['hwaccels'].append('h264:vaapi:vaapi')
+        with self.assertRaises(SystemExit) as refused:
+            inspector.check(report, expected)
+        self.assertIn('hwaccels:', str(refused.exception))
+        self.assertIn('unexpected=h264:vaapi:vaapi', str(refused.exception))
 
     def test_built_ffmpeg_matches_exact_profile_surface(self):
         prefix = builder.ROOT / 'third_party/ffmpeg'

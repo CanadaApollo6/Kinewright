@@ -58,6 +58,30 @@ EXTERNAL_LIB_ALIASES = {
     'dav1d': 'libdav1d',
     'libdav1d': 'libdav1d',
 }
+HARMLESS_LINKER_FLAGS = {
+    '-pthread', '-pthreads', '-fopenmp', '-static', '-shared', '-rdynamic', '-pie', '-no-pie',
+    '-Bstatic', '-Bdynamic', '-dn', '-dy', '-call_shared', '-non_shared',
+    '--as-needed', '--no-as-needed', '--start-group', '--end-group', '-(', '-)',
+    '--whole-archive', '--no-whole-archive', '--push-state', '--pop-state',
+    '--allow-shlib-undefined', '--no-undefined', '--gc-sections', '--no-gc-sections',
+    '--enable-new-dtags', '--disable-new-dtags', '-O1', '-O2', '-s', '-S',
+    '--strip-all', '--strip-debug',
+}
+HARMLESS_VALUE_OPTIONS = {
+    '-L', '-libpath', '/LIBPATH', '/libpath',
+    '-rpath', '--rpath', '-R', '-rpath-link', '--rpath-link',
+    '-soname', '--soname', '-h',
+}
+HARMLESS_PREFIX_OPTIONS = (
+    '-rpath=', '--rpath=', '-rpath-link=', '--rpath-link=',
+    '-soname=', '--soname=',
+)
+HARMLESS_Z_KEYWORDS = {
+    'relro', 'norelro', 'now', 'lazy', 'noexecstack', 'defs', 'nodefs',
+    'origin', 'text', 'notext', 'combreloc', 'nocombreloc',
+    'separate-code', 'noseparate-code',
+}
+LIBRARY_FILE_RE = re.compile(r'\.(lib|a|dll|so(\.\d+)*)$', re.IGNORECASE)
 
 
 class Named(C.Structure):
@@ -81,10 +105,87 @@ def _load_builder(build_script=None):
 
 
 def _c_string(blob, offset):
+    if offset < 0 or offset >= len(blob):
+        raise ValueError(f'string offset {offset} out of range (length {len(blob)})')
     end = blob.find(b'\x00', offset)
     if end < 0:
         raise ValueError(f'unterminated string at offset {offset}')
     return blob[offset:end].decode('utf-8', errors='replace')
+
+
+def _elf_dynamic_from_segment(data, endian, dyn_offset, dyn_size, load_segments, path):
+    if dyn_size == 0 or dyn_offset + dyn_size > len(data):
+        raise ValueError(f'{path}: invalid PT_DYNAMIC range ({dyn_offset:#x}+{dyn_size:#x})')
+    needed_offsets = []
+    strtab_vaddr = None
+    strtab_size = None
+    saw_null = False
+    pos = dyn_offset
+    end = dyn_offset + dyn_size
+    while pos + 16 <= end:
+        d_tag, d_val = struct.unpack_from(f'{endian}qQ', data, pos)
+        pos += 16
+        if d_tag == 0:  # DT_NULL
+            saw_null = True
+            break
+        if d_tag == 1:  # DT_NEEDED
+            needed_offsets.append(d_val)
+        elif d_tag == 5:  # DT_STRTAB
+            strtab_vaddr = d_val
+        elif d_tag == 10:  # DT_STRSZ
+            strtab_size = d_val
+    if not saw_null:
+        raise ValueError(f'{path}: PT_DYNAMIC truncated before DT_NULL')
+    if not needed_offsets:
+        return []
+    if strtab_vaddr is None:
+        raise ValueError(f'{path}: PT_DYNAMIC has DT_NEEDED without DT_STRTAB')
+    str_off = None
+    seg_end = None
+    for p_vaddr, p_filesz, p_offset in load_segments:
+        if p_vaddr <= strtab_vaddr < p_vaddr + p_filesz:
+            str_off = p_offset + (strtab_vaddr - p_vaddr)
+            seg_end = p_offset + p_filesz
+            break
+    if str_off is None or seg_end > len(data):
+        raise ValueError(f'{path}: unmapped DT_STRTAB {strtab_vaddr:#x}')
+    if strtab_size is not None:
+        if str_off + strtab_size > seg_end:
+            raise ValueError(f'{path}: DT_STRSZ {strtab_size:#x} exceeds PT_LOAD segment')
+        strtab = data[str_off:str_off + strtab_size]
+    else:
+        strtab = data[str_off:seg_end]
+    return [_c_string(strtab, off) for off in needed_offsets]
+
+
+def _elf_dynamic_from_section(data, endian, section, sections, path):
+    sh_offset, sh_size, sh_link, sh_entsize = section[4], section[5], section[6], section[9]
+    if sh_offset + sh_size > len(data):
+        raise ValueError(f'{path}: SHT_DYNAMIC extends past end of file')
+    if sh_link >= len(sections):
+        raise ValueError(f'{path}: invalid dynamic strtab index {sh_link}')
+    str_off, str_size = sections[sh_link][4], sections[sh_link][5]
+    if str_off + str_size > len(data):
+        raise ValueError(f'{path}: dynamic string table extends past end of file')
+    strtab = data[str_off:str_off + str_size]
+    step = sh_entsize or 16
+    if step < 16:
+        raise ValueError(f'{path}: invalid SHT_DYNAMIC entry size {step}')
+    needed = []
+    saw_null = False
+    pos = sh_offset
+    end = sh_offset + sh_size
+    while pos + 16 <= end:
+        d_tag, d_val = struct.unpack_from(f'{endian}qQ', data, pos)
+        pos += step
+        if d_tag == 0:  # DT_NULL
+            saw_null = True
+            break
+        if d_tag == 1:  # DT_NEEDED
+            needed.append(_c_string(strtab, d_val))
+    if not saw_null:
+        raise ValueError(f'{path}: SHT_DYNAMIC truncated before DT_NULL')
+    return needed
 
 
 def elf_needed(path):
@@ -100,33 +201,65 @@ def elf_needed(path):
         endian = '>'
     else:
         raise ValueError(f'{path}: invalid ELF endianness {data[5]}')
-    e_shoff = struct.unpack_from(f'{endian}Q', data, 40)[0]
-    e_shentsize, e_shnum = struct.unpack_from(f'{endian}HH', data, 58)
-    if e_shoff == 0 or e_shnum == 0 or e_shentsize < 64:
-        raise ValueError(f'{path}: missing ELF section headers')
+
+    e_phoff, e_shoff = struct.unpack_from(f'{endian}QQ', data, 32)
+    e_phentsize, e_phnum, e_shentsize, e_shnum = struct.unpack_from(f'{endian}HHHH', data, 54)
+    if (e_phoff == 0) != (e_phnum == 0):
+        raise ValueError(f'{path}: inconsistent ELF program header table')
+    if (e_shoff == 0) != (e_shnum == 0):
+        raise ValueError(f'{path}: inconsistent ELF section header table')
+    if e_phnum == 0 and e_shnum == 0:
+        raise ValueError(f'{path}: ELF has neither program headers nor section headers')
+
+    load_segments = []
+    pt_dynamic = []
+    if e_phnum:
+        if e_phentsize < 56 or e_phoff + e_phnum * e_phentsize > len(data):
+            raise ValueError(f'{path}: invalid ELF program headers')
+        for index in range(e_phnum):
+            offset = e_phoff + index * e_phentsize
+            p_type, _, p_offset, p_vaddr, _, p_filesz, _, _ = struct.unpack_from(
+                f'{endian}IIQQQQQQ', data, offset
+            )
+            if p_type == 1:  # PT_LOAD
+                load_segments.append((p_vaddr, p_filesz, p_offset))
+            elif p_type == 2:  # PT_DYNAMIC
+                pt_dynamic.append((p_offset, p_filesz))
+
     sections = []
-    for index in range(e_shnum):
-        offset = e_shoff + index * e_shentsize
-        sections.append(struct.unpack_from(f'{endian}IIQQQQIIQQ', data, offset))
-    needed = []
-    for section in sections:
-        sh_type, sh_offset, sh_size, sh_link, sh_entsize = (
-            section[1], section[4], section[5], section[6], section[9]
+    sht_dynamic = []
+    if e_shnum:
+        if e_shentsize < 64 or e_shoff + e_shnum * e_shentsize > len(data):
+            raise ValueError(f'{path}: invalid ELF section headers')
+        for index in range(e_shnum):
+            offset = e_shoff + index * e_shentsize
+            section = struct.unpack_from(f'{endian}IIQQQQIIQQ', data, offset)
+            sections.append(section)
+            if section[1] == 6:  # SHT_DYNAMIC
+                sht_dynamic.append(section)
+
+    if not pt_dynamic and not sht_dynamic:
+        return []
+
+    segment_needed = None
+    if pt_dynamic:
+        segment_needed = set()
+        for dyn_offset, dyn_size in pt_dynamic:
+            segment_needed.update(
+                _elf_dynamic_from_segment(data, endian, dyn_offset, dyn_size, load_segments, path)
+            )
+    section_needed = None
+    if sht_dynamic:
+        section_needed = set()
+        for section in sht_dynamic:
+            section_needed.update(_elf_dynamic_from_section(data, endian, section, sections, path))
+
+    if segment_needed is not None and section_needed is not None and segment_needed != section_needed:
+        raise ValueError(
+            f'{path}: PT_DYNAMIC ({sorted(segment_needed)}) disagrees with '
+            f'SHT_DYNAMIC ({sorted(section_needed)})'
         )
-        if sh_type != 6:  # SHT_DYNAMIC
-            continue
-        if sh_link >= len(sections):
-            raise ValueError(f'{path}: invalid dynamic strtab index {sh_link}')
-        str_off, str_size = sections[sh_link][4], sections[sh_link][5]
-        strtab = data[str_off:str_off + str_size]
-        step = sh_entsize or 16
-        for pos in range(sh_offset, sh_offset + sh_size, step):
-            d_tag, d_val = struct.unpack_from(f'{endian}qQ', data, pos)
-            if d_tag == 0:  # DT_NULL
-                break
-            if d_tag == 1:  # DT_NEEDED
-                needed.append(_c_string(strtab, d_val))
-    return sorted(set(needed))
+    return sorted(segment_needed if segment_needed is not None else section_needed)
 
 
 def pe_imports(path):
@@ -135,19 +268,29 @@ def pe_imports(path):
     if len(data) < 0x40 or data[:2] != b'MZ':
         raise ValueError(f'{path}: not a PE file')
     pe_offset = struct.unpack_from('<I', data, 0x3C)[0]
-    if data[pe_offset:pe_offset + 4] != b'PE\x00\x00':
+    if pe_offset + 24 > len(data) or data[pe_offset:pe_offset + 4] != b'PE\x00\x00':
         raise ValueError(f'{path}: missing PE signature')
     _, num_sections, _, _, _, opt_size, _ = struct.unpack_from('<HHIIIHH', data, pe_offset + 4)
     opt_offset = pe_offset + 24
+    if opt_offset + opt_size > len(data) or opt_size < 96:
+        raise ValueError(f'{path}: truncated PE optional header')
     magic = struct.unpack_from('<H', data, opt_offset)[0]
     if magic == 0x10B:  # PE32
+        image_base = struct.unpack_from('<I', data, opt_offset + 28)[0]
         dd_offset = opt_offset + 96
     elif magic == 0x20B:  # PE32+
+        if opt_size < 112:
+            raise ValueError(f'{path}: truncated PE32+ optional header')
+        image_base = struct.unpack_from('<Q', data, opt_offset + 24)[0]
         dd_offset = opt_offset + 112
     else:
         raise ValueError(f'{path}: unsupported PE optional header magic {magic:#x}')
     num_dd = struct.unpack_from('<I', data, dd_offset - 4)[0]
+    if dd_offset + num_dd * 8 > opt_offset + opt_size:
+        raise ValueError(f'{path}: truncated PE data directories')
     sec_offset = opt_offset + opt_size
+    if sec_offset + num_sections * 40 > len(data):
+        raise ValueError(f'{path}: truncated PE section table')
     sections = []
     for index in range(num_sections):
         entry = sec_offset + index * 40
@@ -157,7 +300,10 @@ def pe_imports(path):
     def rva_to_offset(rva):
         for vaddr, span, rptr in sections:
             if vaddr <= rva < vaddr + span:
-                return rptr + (rva - vaddr)
+                file_offset = rptr + (rva - vaddr)
+                if file_offset >= len(data):
+                    raise ValueError(f'{path}: RVA {rva:#x} maps past end of file')
+                return file_offset
         raise ValueError(f'{path}: unmapped RVA {rva:#x}')
 
     imported = set()
@@ -166,22 +312,38 @@ def pe_imports(path):
         if imp_rva:
             pos = rva_to_offset(imp_rva)
             while True:
+                if pos + 20 > len(data):
+                    raise ValueError(f'{path}: truncated PE import directory')
                 fields = struct.unpack_from('<IIIII', data, pos)
                 if not any(fields):
                     break
-                if fields[3]:
-                    imported.add(_c_string(data, rva_to_offset(fields[3])))
+                if fields[3] == 0:
+                    raise ValueError(f'{path}: PE import descriptor missing DLL name RVA')
+                imported.add(_c_string(data, rva_to_offset(fields[3])))
                 pos += 20
     if num_dd > 13:
         delay_rva, _ = struct.unpack_from('<II', data, dd_offset + 13 * 8)
         if delay_rva:
             pos = rva_to_offset(delay_rva)
             while True:
-                attrs, name_rva = struct.unpack_from('<II', data, pos)
-                if name_rva == 0:
+                if pos + 32 > len(data):
+                    raise ValueError(f'{path}: truncated PE delay import directory')
+                fields = struct.unpack_from('<IIIIIIII', data, pos)
+                if not any(fields):
                     break
-                if attrs & 1:
-                    imported.add(_c_string(data, rva_to_offset(name_rva)))
+                attrs, name_addr = fields[0], fields[1]
+                if name_addr == 0:
+                    raise ValueError(f'{path}: PE delay import descriptor missing DLL name')
+                if attrs == 1:
+                    name_rva = name_addr
+                elif attrs == 0 and name_addr >= image_base:
+                    name_rva = name_addr - image_base
+                else:
+                    raise ValueError(
+                        f'{path}: unsupported PE delay import descriptor '
+                        f'(attrs={attrs:#x}, name={name_addr:#x}, image_base={image_base:#x})'
+                    )
+                imported.add(_c_string(data, rva_to_offset(name_rva)))
                 pos += 32
     return sorted(imported)
 
@@ -242,7 +404,57 @@ def binary_external_libraries(library_paths):
                 name = _external_from_elf_soname(soname)
                 if name is not None:
                     found.add(name)
+        else:
+            raise ValueError(f'{path}: unsupported binary format for external library inspection')
     return sorted(found)
+
+
+def _expand_pkgconfig_tokens(raw_tokens, source):
+    expanded = []
+    index = 0
+    while index < len(raw_tokens):
+        token = raw_tokens[index]
+        index += 1
+        if not token:
+            continue
+        if token == '-Xlinker':
+            if index >= len(raw_tokens) or not raw_tokens[index]:
+                raise ValueError(f'{source}: missing argument after -Xlinker')
+            expanded.append(raw_tokens[index])
+            index += 1
+        elif token.startswith('-Wl,'):
+            parts = token[4:].split(',')
+            if not parts or any(part == '' for part in parts):
+                raise ValueError(f'{source}: malformed -Wl option: {token}')
+            expanded.extend(parts)
+        else:
+            expanded.append(token)
+    return expanded
+
+
+def _classify_pkgconfig_library(raw_lib, from_path):
+    lib = raw_lib
+    lib_lower = lib.lower()
+    if '.so.' in lib_lower:
+        lib = lib[:lib_lower.index('.so.')]
+        lib_lower = lib.lower()
+    else:
+        for suffix in ('.lib', '.a', '.dll', '.so'):
+            if lib_lower.endswith(suffix):
+                lib = lib[:-len(suffix)]
+                lib_lower = lib.lower()
+                break
+    if lib_lower in PKGCONFIG_RUNTIME_LIBS:
+        return None
+    if from_path and lib_lower.startswith('lib') and len(lib) > 3:
+        lib = lib[3:]
+        lib_lower = lib.lower()
+        if lib_lower in PKGCONFIG_RUNTIME_LIBS:
+            return None
+    stem = lib_lower[3:] if lib_lower.startswith('lib') else lib_lower
+    if stem in FFMPEG_LIBRARY_STEMS:
+        return None
+    return _normalize_external_token(lib)
 
 
 def pkgconfig_external_libraries(root):
@@ -257,46 +469,69 @@ def pkgconfig_external_libraries(root):
             key, sep, value = line.partition(':')
             if not sep or key.strip() not in {'Libs', 'Libs.private'}:
                 continue
-            tokens = [t.strip('"\'') for t in shlex.split(value, posix=False)]
-            skip_next = False
-            for token in tokens:
-                if skip_next:
-                    skip_next = False
-                    continue
-                if not token:
-                    continue
-                if token in {'-L', '-libpath', '/LIBPATH', '-framework', '-Xlinker'}:
-                    skip_next = True
-                    continue
+            raw_tokens = [t.strip('"\'') for t in shlex.split(value, posix=False)]
+            tokens = _expand_pkgconfig_tokens(raw_tokens, pc_file)
+            index = 0
+            while index < len(tokens):
+                token = tokens[index]
+                index += 1
                 lower = token.lower()
-                if token.startswith('-L') or lower.startswith(('-wl,', '-libpath:', '/libpath:', '-pthread', '-fopenmp', '-rpath')):
+                if token in HARMLESS_LINKER_FLAGS:
                     continue
-                elif token.startswith('-l:') and len(token) > 3:
-                    lib = token[3:]
-                elif token.startswith('-l') and len(token) > 2:
-                    lib = token[2:]
-                elif token.startswith('-'):
+                if token in HARMLESS_VALUE_OPTIONS:
+                    if index >= len(tokens) or tokens[index].startswith('-'):
+                        raise ValueError(f'{pc_file}: missing or invalid value after {token}')
+                    index += 1
                     continue
-                elif token.startswith('/') and '/' not in token[1:] and not re.search(r'\.(lib|a|dll|so(\.\d+)*)$', lower):
+                if token == '-z':
+                    if index >= len(tokens) or tokens[index] not in HARMLESS_Z_KEYWORDS:
+                        arg = tokens[index] if index < len(tokens) else '<eof>'
+                        raise ValueError(f'{pc_file}: unrecognized -z linker option: -z {arg}')
+                    index += 1
                     continue
-                else:
-                    lib = token.replace('\\', '/').rsplit('/', 1)[-1]
-                lib_lower = lib.lower()
-                if '.so.' in lib_lower:
-                    lib = lib[:lib_lower.index('.so.')]
-                    lib_lower = lib.lower()
-                else:
-                    for suffix in ('.lib', '.a', '.dll', '.so'):
-                        if lib_lower.endswith(suffix):
-                            lib = lib[:-len(suffix)]
-                            lib_lower = lib.lower()
-                            break
-                if lib_lower in PKGCONFIG_RUNTIME_LIBS:
+                if token == '--library':
+                    if index >= len(tokens) or tokens[index].startswith('-'):
+                        raise ValueError(f'{pc_file}: missing library name after --library')
+                    name = _classify_pkgconfig_library(tokens[index], from_path=False)
+                    index += 1
+                    if name is not None:
+                        found.add(name)
                     continue
-                stem = lib_lower[3:] if lib_lower.startswith('lib') else lib_lower
-                if stem in FFMPEG_LIBRARY_STEMS:
+                if token.startswith('--library=') and len(token) > 10:
+                    name = _classify_pkgconfig_library(token[10:], from_path=False)
+                    if name is not None:
+                        found.add(name)
                     continue
-                found.add(_normalize_external_token(lib))
+                if (
+                    (token.startswith('-L') and len(token) > 2)
+                    or (token.startswith('-R') and len(token) > 2)
+                    or lower.startswith(('-libpath:', '/libpath:'))
+                    or any(token.startswith(prefix) and len(token) > len(prefix)
+                           for prefix in HARMLESS_PREFIX_OPTIONS)
+                ):
+                    continue
+                if token.startswith('-l:') and len(token) > 3:
+                    name = _classify_pkgconfig_library(
+                        token[3:].replace('\\', '/').rsplit('/', 1)[-1],
+                        from_path=True,
+                    )
+                    if name is not None:
+                        found.add(name)
+                    continue
+                if token.startswith('-l') and len(token) > 2:
+                    name = _classify_pkgconfig_library(token[2:], from_path=False)
+                    if name is not None:
+                        found.add(name)
+                    continue
+                if not token.startswith('-') and LIBRARY_FILE_RE.search(token):
+                    name = _classify_pkgconfig_library(
+                        token.replace('\\', '/').rsplit('/', 1)[-1],
+                        from_path=True,
+                    )
+                    if name is not None:
+                        found.add(name)
+                    continue
+                raise ValueError(f'{pc_file}: unrecognized pkg-config linker token: {token}')
     return sorted(found)
 
 
@@ -326,6 +561,14 @@ def _enabled_list(config_args, kind):
     return names
 
 
+def _refuse_configured_hwaccels(hwaccels):
+    if hwaccels:
+        raise SystemExit(
+            'FFmpeg profile enables hardware accelerators '
+            f'({", ".join(sorted(hwaccels))}), but hwaccel name-to-triple comparison is not implemented'
+        )
+
+
 def expected_surface(profile_path=None, build_script=None, system=None):
     """Derive exact expected component sets from build-ffmpeg.py and ffmpeg-profile.json."""
     system = system or platform.system()
@@ -351,6 +594,7 @@ def expected_surface(profile_path=None, build_script=None, system=None):
     encoders = _enabled_list(args, 'encoder')
     protocols = _enabled_list(args, 'protocol')
     hwaccels = _enabled_list(args, 'hwaccel')
+    _refuse_configured_hwaccels(hwaccels)
     hwdevices = set()
     external_libraries = set(configured_external_libraries(args))
     built_libraries = {'avutil'} | {
@@ -369,6 +613,8 @@ def expected_surface(profile_path=None, build_script=None, system=None):
         'hwaccels': hwaccels,
         'protocols': {'input': set(protocols), 'output': set(protocols)},
         'external_libraries': external_libraries,
+        # Windows builds link vcpkg x64-windows-static dependencies (--pkg-config-flags=--static)
+        # statically into FFmpeg's DLLs, so their PE import tables contain no external libraries.
         'linked_external_libraries': set() if system == 'Windows' else set(external_libraries),
         'built_libraries': built_libraries,
     }
@@ -547,6 +793,7 @@ def check(report, expected=None):
     """Compare every reported surface category against exact expected sets."""
     if expected is None:
         expected = expected_surface()
+    _refuse_configured_hwaccels(expected['hwaccels'])
     errors = []
     comparisons = [
         ('decoders', report['decoders'], expected['decoders']),
