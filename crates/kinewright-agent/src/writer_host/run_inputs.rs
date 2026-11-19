@@ -80,6 +80,9 @@ impl HostCommandOwner {
             identity: checkpoint.identity,
             input_manifest_ref: checkpoint.input_manifest_ref.clone(),
             revision_refs: vec![],
+            audit_ref: None,
+            rulebook_ref: None,
+            editorial_rationale_ref: None,
             parent_version: None,
             run_provenance: None,
         })

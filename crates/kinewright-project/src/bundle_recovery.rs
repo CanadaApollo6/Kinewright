@@ -962,6 +962,18 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
             RecordKind::VersionIndex => {
                 admit!(crate::studio_records::VersionIndex);
             }
+            RecordKind::EditorialAudit => {
+                admit!(crate::editorial::EditorialAudit);
+            }
+            RecordKind::EditorialRationale => {
+                admit!(crate::editorial::EditorialRationale);
+            }
+            RecordKind::RulebookRevision => {
+                admit!(crate::editorial::RulebookRevision);
+            }
+            RecordKind::RulebookProposal => {
+                admit!(crate::editorial::RulebookProposal);
+            }
             RecordKind::FeedbackIndex => {
                 admit!(crate::studio_records::FeedbackIndex);
             }
@@ -1477,6 +1489,28 @@ pub(super) fn validate_studio_records(
             read_record::<$ty>(namespace, $reference, usage, &mut BTreeSet::new(), limits)?
         };
     }
+    if let Some(reference) = &root.pending_rulebook_ref {
+        let proposal = load!(crate::editorial::RulebookProposal, reference);
+        if proposal.proposed_by.project != root.project_id
+            || proposal.parent != root.approved_rulebook_ref
+        {
+            return Err(BundleError::Corrupt("rulebook proposal binding".into()));
+        }
+    }
+    if let Some(reference) = &root.approved_rulebook_ref {
+        let revision = load!(crate::editorial::RulebookRevision, reference);
+        let crate::editorial::RulebookApprover::ProjectOwner(project) = &revision.approved_by;
+        if project != &root.project_id && !root.origin_project_ids.contains(project) {
+            return Err(BundleError::Corrupt("rulebook approval project".into()));
+        }
+        let proposal = load!(crate::editorial::RulebookProposal, &revision.proposal_ref);
+        if &proposal.proposed_by.project != project
+            || proposal.parent != revision.parent
+            || revision.rules.last() != Some(&proposal.rule)
+        {
+            return Err(BundleError::Corrupt("rulebook approval proposal".into()));
+        }
+    }
     let versions = if let Some(r) = &root.version_index_ref {
         Some(load!(VersionIndex, r))
     } else {
@@ -1498,6 +1532,22 @@ pub(super) fn validate_studio_records(
                 || checkpoint.identity != descriptor.identity
             {
                 return Err(BundleError::Corrupt("snapshot checkpoint binding".into()));
+            }
+            if let Some(reference) = &descriptor.audit_ref {
+                let audit = load!(crate::editorial::EditorialAudit, reference);
+                crate::editorial_store::validate_editorial_binding(
+                    descriptor,
+                    audit.snapshot(),
+                    audit.rulebook_ref(),
+                )?;
+            }
+            if let Some(reference) = &descriptor.editorial_rationale_ref {
+                let rationale = load!(crate::editorial::EditorialRationale, reference);
+                if rationale.0.snapshot != descriptor.key {
+                    return Err(BundleError::Corrupt(
+                        "editorial rationale version binding".into(),
+                    ));
+                }
             }
         }
     }

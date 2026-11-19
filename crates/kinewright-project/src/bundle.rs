@@ -128,6 +128,8 @@ pub struct StudioRoot {
     pub branch_index_ref: ObjectRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version_index_ref: Option<ObjectRef>,
+    pub approved_rulebook_ref: Option<ObjectRef>,
+    pub pending_rulebook_ref: Option<ObjectRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback_index_ref: Option<ObjectRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -210,6 +212,8 @@ impl StudioRoot {
         }
         for (reference, kind) in [
             (&self.version_index_ref, RecordKind::VersionIndex),
+            (&self.approved_rulebook_ref, RecordKind::RulebookRevision),
+            (&self.pending_rulebook_ref, RecordKind::RulebookProposal),
             (&self.feedback_index_ref, RecordKind::FeedbackIndex),
             (&self.run_index_ref, RecordKind::RunIndex),
         ] {
@@ -247,6 +251,8 @@ impl StudioRoot {
                 .flat_map(|binding| [binding.checkpoint.clone(), binding.base_ref.clone()]),
         );
         refs.extend(self.version_index_ref.clone());
+        refs.extend(self.approved_rulebook_ref.clone());
+        refs.extend(self.pending_rulebook_ref.clone());
         refs.extend(self.feedback_index_ref.clone());
         refs.extend(self.run_index_ref.clone());
         refs.extend(self.claim_index_ref.clone());

@@ -531,6 +531,7 @@ fn task_assignment_result_cuts() -> [RunProjection; 3] {
         turn_ended: true,
         expired: false,
         background: 0,
+        frozen_rulebook: None,
         feedback: vec![],
         decisions: vec![],
         completion: None,

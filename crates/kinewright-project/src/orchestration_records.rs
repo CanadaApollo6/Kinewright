@@ -536,6 +536,8 @@ pub struct TaskProgress {
     pub turn_ended: bool,
     pub expired: bool,
     pub background: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frozen_rulebook: Option<crate::editorial::FrozenRulebook>,
     pub feedback: Vec<ObjectRef>,
     pub decisions: Vec<ObjectRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -53,6 +53,10 @@ pub struct SnapshotDescriptor {
     pub identity: crate::operation_history::SnapshotIdentity,
     pub input_manifest_ref: ObjectRef,
     pub revision_refs: Vec<ObjectRef>,
+    pub audit_ref: Option<ObjectRef>,
+    /// The rulebook that governed the complete audit.
+    pub rulebook_ref: Option<ObjectRef>,
+    pub editorial_rationale_ref: Option<ObjectRef>,
     pub parent_version: Option<VersionId>,
     pub run_provenance: Option<RunId>,
 }
@@ -66,6 +70,9 @@ impl SnapshotDescriptor {
             self.input_manifest_ref.clone(),
         ];
         refs.extend(self.revision_refs.clone());
+        refs.extend(self.audit_ref.clone());
+        refs.extend(self.rulebook_ref.clone());
+        refs.extend(self.editorial_rationale_ref.clone());
         refs
     }
 }
@@ -762,6 +769,7 @@ impl RunView {
 pub enum MetadataScope {
     Feedback,
     Snapshot,
+    Editorial,
     Orchestration,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -792,6 +800,17 @@ pub struct MetadataUpdate {
 )]
 pub enum MetadataChange {
     PublishSnapshot(PublishSnapshot),
+    #[serde(skip_deserializing)]
+    RetainEditorial {
+        target: VersionId,
+        role: crate::orchestration_records::Role,
+        frozen: crate::editorial::FrozenRulebook,
+        part: crate::editorial::AuditPart,
+    },
+    #[serde(skip_deserializing)]
+    ProposeRulebook(crate::editorial::RulebookProposal),
+    #[serde(skip_deserializing)]
+    DecideRulebook(crate::editorial::RulebookDecision),
     SaveFeedback(FeedbackRevision),
     SaveVoice(VoiceRef),
     SubmitBatch {
@@ -817,6 +836,7 @@ pub enum MetadataChange {
 )]
 pub enum MetadataResult {
     Snapshot(SnapshotKey),
+    Editorial,
     Feedback(ObjectRef),
     Voice(NoteId),
     Batch(FeedbackBatchId),

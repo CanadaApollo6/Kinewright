@@ -340,6 +340,8 @@ pub fn verify_projection_payloads(
         || left.branch_index_ref != right.branch_index_ref
         || left.input_manifest_ref != right.input_manifest_ref
         || left.version_index_ref != right.version_index_ref
+        || left.approved_rulebook_ref != right.approved_rulebook_ref
+        || left.pending_rulebook_ref != right.pending_rulebook_ref
         || left.feedback_index_ref != right.feedback_index_ref
         || left.run_index_ref != right.run_index_ref
         || left.claim_index_ref != right.claim_index_ref
