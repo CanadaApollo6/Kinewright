@@ -21,11 +21,8 @@ use windows_sys::Win32::{
         INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     Security::{
-        EqualSid, FreeSid, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
-        Isolation::DeriveAppContainerSidFromAppContainerName, PSID, SECURITY_CAPABILITIES,
-        TOKEN_APPCONTAINER_INFORMATION, TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL,
-        TOKEN_QUERY, TokenAppContainerSid, TokenCapabilities, TokenIntegrityLevel,
-        TokenIsAppContainer, TokenIsLessPrivilegedAppContainer,
+        FreeSid, GetTokenInformation, Isolation::DeriveAppContainerSidFromAppContainerName, PSID,
+        SECURITY_CAPABILITIES, TOKEN_INFORMATION_CLASS,
     },
     Storage::FileSystem::FILE_GENERIC_READ,
     System::{
@@ -44,12 +41,12 @@ use windows_sys::Win32::{
         },
         SystemServices::{
             JOB_OBJECT_MSG_JOB_MEMORY_LIMIT, JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT,
-            PROCESS_MITIGATION_DEP_POLICY, SECURITY_MANDATORY_LOW_RID,
+            PROCESS_MITIGATION_DEP_POLICY,
         },
         Threading::{
             CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DETACHED_PROCESS,
             EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
-            GetProcessMitigationPolicy, InitializeProcThreadAttributeList, OpenProcessToken,
+            GetProcessMitigationPolicy, InitializeProcThreadAttributeList,
             PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
             PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
             PROC_THREAD_ATTRIBUTE_JOB_LIST, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
@@ -222,7 +219,7 @@ impl Suspended {
     fn verify_and_resume(self) -> io::Result<Child> {
         let process = self.process.as_ref().expect("suspended process");
         let (job, _) = self.job.as_ref().expect("Job for witnessed launch");
-        inspect_token(process, &self.sid, self.mode.opt_out())?;
+        inspect_token(process, &self.sid, self.mode.opt_out()).require_verified()?;
         inspect_job(process, job, &self.limits)?;
         inspect_mitigations(process)?;
         self.resume()
@@ -651,85 +648,11 @@ fn inspect_job(process: &Handle, job: &Handle, limits: &Limits) -> io::Result<()
     )
 }
 
-fn inspect_token(process: &Handle, expected: &Sid, lpac: bool) -> io::Result<()> {
-    let mut token = ptr::null_mut();
-    // SAFETY: the process is live and token receives a newly owned handle.
-    check_step("OpenProcessToken (suspended LPAC)", unsafe {
-        OpenProcessToken(process.0, TOKEN_QUERY, &raw mut token)
-    })?;
-    let token = Handle(token);
-    let mut app_container = 0u32;
-    read_token(
-        &token,
-        TokenIsAppContainer,
-        "TokenIsAppContainer",
-        &mut app_container,
-    )?;
-    expect_value("GetTokenInformation TokenIsAppContainer", app_container, 1)?;
-    let mut less_privileged = 0u32;
-    read_token(
-        &token,
-        TokenIsLessPrivilegedAppContainer,
-        "TokenIsLessPrivilegedAppContainer",
-        &mut less_privileged,
-    )?;
-    expect_value(
-        "GetTokenInformation TokenIsLessPrivilegedAppContainer",
-        less_privileged,
-        u32::from(lpac),
-    )?;
+mod token;
+#[cfg(feature = "lpac-diagnostics")]
+mod token_queries;
 
-    let sid = token_buffer(
-        &token,
-        TokenAppContainerSid,
-        "TokenAppContainerSid",
-        size_of::<TOKEN_APPCONTAINER_INFORMATION>(),
-    )?;
-    // SAFETY: a successful query populated the aligned header and its SID.
-    let same_sid = unsafe {
-        let actual = (*sid.as_ptr().cast::<TOKEN_APPCONTAINER_INFORMATION>()).TokenAppContainer;
-        !actual.is_null() && EqualSid(actual, expected.0) != 0
-    };
-    expect_value(
-        "GetTokenInformation TokenAppContainerSid / EqualSid",
-        same_sid,
-        true,
-    )?;
-
-    let groups = token_buffer(
-        &token,
-        TokenCapabilities,
-        "TokenCapabilities",
-        size_of::<u32>(),
-    )?;
-    // SAFETY: TOKEN_GROUPS starts with a DWORD count even if it contains zero groups.
-    let count = unsafe { *groups.as_ptr().cast::<u32>() };
-    expect_value("GetTokenInformation TokenCapabilities count", count, 0)?;
-
-    let label = token_buffer(
-        &token,
-        TokenIntegrityLevel,
-        "TokenIntegrityLevel",
-        size_of::<TOKEN_MANDATORY_LABEL>(),
-    )?;
-    // SAFETY: TokenIntegrityLevel supplies a valid mandatory label SID with its RID
-    // in the last subauthority. The aligned buffer retains the SID.
-    let rid = unsafe {
-        let sid = (*label.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid;
-        let count = *GetSidSubAuthorityCount(sid);
-        if count == 0 {
-            return Err(io::Error::other(
-                "GetTokenInformation TokenIntegrityLevel: SID has no RID",
-            ));
-        }
-        (*GetSidSubAuthority(sid, u32::from(count) - 1)).cast_signed()
-    };
-    expect_value(
-        "GetTokenInformation TokenIntegrityLevel RID",
-        rid,
-        SECURITY_MANDATORY_LOW_RID,
-    )
-}
+use token::inspect_token;
 
 fn read_token(
     token: &Handle,

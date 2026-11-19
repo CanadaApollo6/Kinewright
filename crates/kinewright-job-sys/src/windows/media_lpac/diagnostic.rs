@@ -70,14 +70,8 @@ pub fn inspect(
         .as_ref()
         .map(|(job, _)| inspect_job(process, job, &limits));
     let mitigations = inspect_mitigations(process);
-    let verified = token.is_ok() && matches!(job, Some(Ok(()))) && mitigations.is_ok();
-    let token = match token {
-        Ok(()) => format!(
-            "AppContainer=true LPAC={} SID=match capabilities=0 integrity=low",
-            mode.opt_out()
-        ),
-        Err(error) => error.to_string(),
-    };
+    let verified = token.verified && matches!(job, Some(Ok(()))) && mitigations.is_ok();
+    let token = token.report;
     let job = match job {
         Some(Ok(())) => format!(
             "member=true kill-on-close=true active=1 process/job bytes={} CPU hard cap={}",
@@ -132,11 +126,12 @@ pub fn launch(
     .verify_and_resume()
 }
 
-/// Run the trusted profile-storage canary with the full LPAC creation attributes.
-/// The matrix separately reports mitigation inspection so a query failure cannot hide storage.
+/// Run a trusted fixture canary with the AppContainer creation attributes.
+/// The matrix separately reports LPAC and mitigation inspection so a query
+/// failure cannot hide behavioral results.
 ///
 /// # Errors
-/// Refuses creation errors or a child without the expected LPAC token and Job.
+/// Refuses creation errors or a child without the expected base AppContainer token and Job.
 pub fn launch_profile_canary(
     program: &Path,
     args: &[OsString],
@@ -160,7 +155,11 @@ pub fn launch_profile_canary(
         .job
         .as_ref()
         .ok_or_else(|| io::Error::other("missing profile canary Job"))?;
-    inspect_token(process, &child.sid, true)?;
+    let token = inspect_token(process, &child.sid, variant.mode().opt_out());
+    eprintln!("suspended canary token: {}", token.report);
+    if !token.base_verified {
+        return Err(io::Error::other(token.report));
+    }
     inspect_job(process, job, &limits)?;
     child.resume()
 }

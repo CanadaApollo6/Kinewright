@@ -8,7 +8,7 @@ repository.workspace = true
 
 [features]
 slow-tests = []
-lpac-diagnostics = ["windows-sys/Wdk_Foundation", "windows-sys/Wdk_System_Registry"]
+lpac-diagnostics = ["windows-sys/Wdk_Foundation", "windows-sys/Wdk_System_Registry", "windows-sys/Wdk_Storage_FileSystem"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 kinewright-hash = { path = "../kinewright-hash" }
