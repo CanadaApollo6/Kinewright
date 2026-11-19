@@ -943,6 +943,17 @@ fn closing_the_last_job_handle_ends_a_running_child() {
     );
     let projected = PathBuf::from(ready.detail.expect("child's projected LocalAppData"));
     let directory = projected.ancestors().nth(3).expect("host launch directory");
+    let parent = directory.parent().expect("launch directory parent");
+    let known = profile_controls::local_app_data_known_folder();
+    assert_eq!(
+        parent
+            .canonicalize()
+            .expect("canonical launch directory parent"),
+        known
+            .canonicalize()
+            .expect("canonical LocalAppData known folder"),
+        "launch directory parent must be the account's LocalAppData known folder"
+    );
     assert!(
         directory
             .file_name()

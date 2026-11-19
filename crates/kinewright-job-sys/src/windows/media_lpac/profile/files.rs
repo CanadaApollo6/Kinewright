@@ -43,11 +43,9 @@ impl Node {
     fn access_mask(directory: bool, mode: Access) -> u32 {
         let data = if directory {
             FILE_LIST_DIRECTORY
-        } else if matches!(mode, Access::Verify) {
-            // Pin file names during verification. Attribute-only opens do not enforce sharing.
-            FILE_READ_DATA
         } else {
-            0
+            // Both modes pin the file name. Attribute-only opens do not enforce sharing.
+            FILE_READ_DATA
         };
         READ_CONTROL | FILE_READ_ATTRIBUTES | data | mode.write_dac()
     }
@@ -336,4 +334,40 @@ pub(in super::super) fn check_launch_directory(path: &Path, sid: &Sid) -> Result
         ));
     }
     Ok(node)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::tests::ScratchDirectory;
+    use super::*;
+    use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+
+    #[test]
+    fn preparation_handle_prevents_renaming_a_retained_file() {
+        let scratch = ScratchDirectory::new();
+        let profile = scratch.0.join("profile");
+        std::fs::create_dir(&profile).expect("create profile witness directory");
+        let file = profile.join("retained");
+        let moved = scratch.0.join("moved");
+        std::fs::write(&file, b"retained").expect("seed retained file");
+        let held = Node::open(&file, false, Access::Prepare).expect("open with preparation mask");
+        let denial = std::fs::rename(&file, &moved).expect_err("preparation handle allowed rename");
+        assert_eq!(
+            denial.raw_os_error(),
+            Some(ERROR_SHARING_VIOLATION.cast_signed()),
+            "{denial}"
+        );
+        drop(held);
+
+        // Control the actual regression: a metadata-only handle has the same sharing mode.
+        let metadata_only = OpenOptions::new()
+            .access_mode(Node::access_mask(false, Access::Prepare) & !FILE_READ_DATA)
+            .share_mode(SHARE)
+            .custom_flags(FLAGS)
+            .open(&file)
+            .expect("open without FILE_READ_DATA");
+        std::fs::rename(&file, &moved).expect("metadata-only handle permits rename");
+        drop(metadata_only);
+        assert_eq!(std::fs::read(moved).unwrap(), b"retained");
+    }
 }

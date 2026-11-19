@@ -4,9 +4,41 @@ use std::{
     ffi::OsString,
     fs, io,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
-    path::Path,
+    path::{Path, PathBuf},
     ptr,
 };
+
+pub(super) fn local_app_data_known_folder() -> PathBuf {
+    use windows_sys::Win32::{
+        System::Com::CoTaskMemFree,
+        UI::Shell::{FOLDERID_LocalAppData, KF_FLAG_DONT_UNEXPAND, SHGetKnownFolderPath},
+    };
+    let mut folder = ptr::null_mut();
+    let folder_id = FOLDERID_LocalAppData;
+    // SAFETY: the known-folder ID is live, null token selects this user, and folder is writable.
+    let status = unsafe {
+        SHGetKnownFolderPath(
+            &raw const folder_id,
+            KF_FLAG_DONT_UNEXPAND.cast_unsigned(),
+            ptr::null_mut(),
+            &raw mut folder,
+        )
+    };
+    let path = if status >= 0 && !folder.is_null() {
+        // SAFETY: success returned a terminated UTF-16 path in the live allocation.
+        Some(PathBuf::from(unsafe { copy_wide(folder) }))
+    } else {
+        None
+    };
+    // SAFETY: SHGetKnownFolderPath transfers this allocation, and null is accepted.
+    unsafe { CoTaskMemFree(folder.cast()) };
+    path.unwrap_or_else(|| {
+        panic!(
+            "SHGetKnownFolderPath(LocalAppData) HRESULT {:#010x}",
+            status.cast_unsigned()
+        )
+    })
+}
 use windows_sys::Win32::{
     Foundation::{ERROR_INSUFFICIENT_BUFFER, WAIT_OBJECT_0},
     Security::{

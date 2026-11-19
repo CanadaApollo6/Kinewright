@@ -168,7 +168,6 @@ struct LaunchDirectory {
 
 impl LaunchDirectory {
     fn create(sid: &Sid) -> Result<Self, Error> {
-        static SERIAL: AtomicU64 = AtomicU64::new(0);
         let parent = local_app_data().map_err(|error| {
             Error::io(
                 Step::Environment,
@@ -199,6 +198,14 @@ impl LaunchDirectory {
                 ));
             }
         };
+        Self::create_in(&root, |path| profile::check_launch_directory(path, sid))
+    }
+
+    fn create_in(
+        root: &Path,
+        check: impl FnOnce(&Path) -> Result<profile::Node, Error>,
+    ) -> Result<Self, Error> {
+        static SERIAL: AtomicU64 = AtomicU64::new(0);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -211,11 +218,12 @@ impl LaunchDirectory {
             ));
             match fs::create_dir(&path) {
                 Ok(()) => {
-                    let checked = profile::check_launch_directory(&path, sid)?;
-                    return Ok(Self {
+                    let mut directory = Self {
                         path,
-                        checked: Some(checked),
-                    });
+                        checked: None,
+                    };
+                    directory.checked = Some(check(&directory.path)?);
+                    return Ok(directory);
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(error) => {
@@ -279,13 +287,7 @@ struct Suspended {
 impl Drop for Suspended {
     fn drop(&mut self) {
         if let Some(process) = &self.process {
-            // SAFETY: this process belongs to the launch even if Job inspection failed.
-            if unsafe { TerminateProcess(process.0, 1) } == 0 {
-                eprintln!(
-                    "{}",
-                    last_error("TerminateProcess (suspended child cleanup)")
-                );
-            }
+            terminate_process(process, "TerminateProcess (suspended child cleanup)");
             drop(self.job.take());
             wait_for_exit(process);
         }
@@ -887,10 +889,21 @@ impl Child {
             .job
             .take()
             .ok_or_else(|| io::Error::other("missing child Job"))?;
-        // SAFETY: the child owns the sole Job handle and closes it once here.
-        check_step("CloseHandle (sole LPAC Job)", unsafe { CloseHandle(job.0) })?;
+        let raw = job.0;
         std::mem::forget(job);
+        // SAFETY: the sole Job handle has been detached from its Drop owner.
+        if let Err(error) = check_step("CloseHandle (sole LPAC Job)", unsafe { CloseHandle(raw) }) {
+            terminate_process(&self.process, "TerminateProcess (Job close failure)");
+            return Err(error);
+        }
         wait_process(&self.process, timeout)
+    }
+}
+
+fn terminate_process(process: &Handle, step: &str) {
+    // SAFETY: the caller retains the process handle with TERMINATE rights from creation.
+    if unsafe { TerminateProcess(process.0, 1) } == 0 {
+        eprintln!("{}", last_error(step));
     }
 }
 
@@ -966,4 +979,57 @@ fn last_error(step: &str) -> io::Error {
 
 fn os_error(step: &str, error: &io::Error) -> io::Error {
     io::Error::other(Error::io(Step::Launch, step, error, error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    pub(super) struct ScratchDirectory(pub(super) PathBuf);
+
+    impl ScratchDirectory {
+        pub(super) fn new() -> Self {
+            static SERIAL: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "kinewright-lpac-test-{}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                SERIAL.fetch_add(1, Ordering::Relaxed),
+            ));
+            fs::create_dir(&path).expect("create test scratch directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for ScratchDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn failed_launch_directory_check_removes_the_created_directory() {
+        let scratch = ScratchDirectory::new();
+        let Err(error) = LaunchDirectory::create_in(&scratch.0, |path| {
+            assert!(path.is_dir());
+            assert!(
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("kinewright-lpac-")
+            );
+            Err(Error::unexpected(
+                Step::Environment,
+                "test directory check",
+                "injected failure",
+            ))
+        }) else {
+            panic!("launch directory check should fail");
+        };
+        assert_eq!(error.api, "test directory check");
+        assert!(fs::read_dir(&scratch.0).unwrap().next().is_none());
+    }
 }
