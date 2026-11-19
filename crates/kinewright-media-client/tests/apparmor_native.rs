@@ -2,7 +2,7 @@
 //! Ruling 31's Ubuntu `AppArmor` gate. Ubuntu restricts unprivileged user
 //! namespaces unless an `AppArmor` profile grants `userns` to the installed
 //! helper (`packaging/linux/apparmor`). Without the profile the helper cannot
-//! build its boundary, and admission must be `SandboxUnavailable` before any
+//! build its boundary, and admission must report `UserNamespacesUnavailable` before any
 //! media byte is parsed; with it, admission succeeds. CI runs this test before
 //! and after installing the profile and names the expected outcome in
 //! `KINEWRIGHT_MS2_USERNS_EXPECT` (`refused` or `admitted`). On a host without
@@ -12,8 +12,10 @@ mod deadline;
 #[path = "../../kinewright-job-sys/test_support/ms2_diag.rs"]
 mod ms2_diag;
 
-use kinewright_media_client::{Config, Failure, Limits, Request, Runtime, Source};
-use kinewright_media_ipc::{Kind, MediaSandboxError};
+use kinewright_media_client::{
+    Config, Failure, Limits, Phase, Request, Runtime, Source, Unavailable, UnavailableReason,
+};
+use kinewright_media_ipc::Kind;
 use std::{
     fs::{self, File},
     path::{Path, PathBuf},
@@ -154,7 +156,10 @@ fn ms2_apparmor_userns_gate_refuses_without_the_profile_and_admits_with_it() {
         "refused" => assert!(
             matches!(
                 result,
-                Err(Failure::Sandbox(MediaSandboxError::SandboxUnavailable))
+                Err(Failure::Unavailable(Unavailable {
+                    phase: Phase::Forked,
+                    reason: UnavailableReason::UserNamespacesUnavailable,
+                }))
             ),
             "a missing profile must refuse before parsing: {result:?}"
         ),

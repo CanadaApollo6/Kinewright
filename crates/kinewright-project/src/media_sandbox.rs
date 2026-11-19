@@ -13,7 +13,9 @@ mod linux {
     use super::{Arc, AtomicBool, BundleError, CertifiedProbe, CertifiedSource};
     use kinewright_core::{ColorDescription, MediaKind, Rational, TimeCode};
     use kinewright_media::owned_io::{CertifiedStream, StreamKind};
-    use kinewright_media_client::{Busy, Config, Failure, Limits, Request, Runtime, Source};
+    use kinewright_media_client::{
+        Config, Failure, Limits, Phase, Request, Runtime, Source, Unavailable, UnavailableReason,
+    };
     use kinewright_media_ipc::{Kind, MediaSandboxError, ProbeResult, ValidatedProbe};
     use std::{fs::File, path::Path, sync::OnceLock};
 
@@ -22,15 +24,15 @@ mod linux {
     /// Start the process's one probe runtime. A second call is refused.
     ///
     /// # Errors
-    /// `Unsupported` when the runtime is already configured or the sandbox
-    /// cannot start on this system.
+    /// `Unsupported` for invalid or repeated configuration. `Contention`
+    /// when the spawner thread could not start.
     pub fn configure_media_sandbox(config: Config) -> Result<(), BundleError> {
-        let already = || BundleError::Unsupported("media sandbox is already configured".into());
+        let already =
+            || unavailable(Phase::Runtime.unavailable(UnavailableReason::AlreadyConfigured));
         if RUNTIME.get().is_some() {
             return Err(already());
         }
-        let runtime =
-            Runtime::start(config).map_err(|error| sandbox_error(&Failure::Sandbox(error)))?;
+        let runtime = Runtime::start(config).map_err(unavailable)?;
         RUNTIME.set(runtime).map_err(|_| already())
     }
 
@@ -114,7 +116,7 @@ mod linux {
         cancel: Arc<AtomicBool>,
     ) -> Result<CertifiedProbe, BundleError> {
         let runtime = runtime.ok_or_else(|| {
-            sandbox_error(&Failure::Sandbox(MediaSandboxError::SandboxUnavailable))
+            unavailable(Phase::Runtime.unavailable(UnavailableReason::NotConfigured))
         })?;
         let index = |value: Option<usize>| -> Result<Option<u32>, BundleError> {
             value
@@ -153,16 +155,48 @@ mod linux {
 
     fn sandbox_error(failure: &Failure) -> BundleError {
         match failure {
-            Failure::Busy(Busy::QueueFull | Busy::QueueWait | Busy::Paused { .. }) => {
-                BundleError::Contention(failure.to_string())
-            }
-            Failure::Sandbox(MediaSandboxError::SandboxUnavailable) => BundleError::Unsupported(
-                "media sandbox unavailable: media cannot be admitted on this system".into(),
+            Failure::Busy(_) => BundleError::Contention(failure.to_string()),
+            Failure::Unavailable(error) => unavailable(*error),
+            Failure::Sandbox(MediaSandboxError::SandboxUnavailable) => BundleError::Corrupt(
+                "unexpected media sandbox refusal during the probe protocol".into(),
             ),
             Failure::Sandbox(_) | Failure::Authority(_) => {
                 BundleError::Corrupt(failure.to_string())
             }
         }
+    }
+
+    fn unavailable(error: Unavailable) -> BundleError {
+        if error.is_unsupported() {
+            BundleError::Unsupported(error.to_string())
+        } else {
+            BundleError::Contention(error.to_string())
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn ms2_refusal_kind_and_message_include_the_bootstrap_cause() {
+        let unsupported = sandbox_error(
+            &Phase::Forked
+                .unavailable(UnavailableReason::UserNamespacesUnavailable)
+                .into(),
+        );
+        assert!(matches!(unsupported, BundleError::Unsupported(_)));
+        assert_eq!(
+            unsupported.to_string(),
+            "unsupported_bundle: media sandbox unavailable (helper Forked, UserNamespacesUnavailable)"
+        );
+        let retry = sandbox_error(
+            &Phase::Boundary
+                .unavailable(UnavailableReason::EarlyEof)
+                .into(),
+        );
+        assert!(matches!(retry, BundleError::Contention(_)));
+        assert_eq!(
+            retry.to_string(),
+            "contention: media sandbox unavailable (helper Boundary, EarlyEof). Try again."
+        );
     }
 
     /// Domain values from boundary-checked metadata only.

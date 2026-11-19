@@ -1,7 +1,7 @@
 //! Audited exec/bootstrap FFI and ownership of inherited descriptors.
 use kinewright_job_sys::media_boundary::MediaFile;
-use kinewright_job_sys::media_boundary::{self as boundary, Mode};
-use kinewright_media_ipc::{Frame, Message, read_frame, write_frame};
+use kinewright_job_sys::media_boundary::{self as boundary, Mode, NamespaceError};
+use kinewright_media_ipc::{Frame, MediaSandboxError, Message, read_frame, write_frame};
 use std::{
     io::{self, Read},
     path::PathBuf,
@@ -137,7 +137,24 @@ fn run_inner(
     drop(release);
     #[cfg(feature = "slow-tests")]
     witness.silent();
-    boundary::enter_namespaces(app_pid, spawner.as_ref())?;
+    match boundary::enter_namespaces(app_pid, spawner.as_ref()) {
+        Ok(()) => {}
+        Err(NamespaceError::UserNamespacesUnavailable(error)) => {
+            // This is the trusted shim's reply to the bootstrap release.
+            // No payload exists yet and no media bytes have been read.
+            let mut response = inherited(boundary::RESPONSE);
+            send(
+                &mut response,
+                1,
+                1,
+                Message::Failed {
+                    error: MediaSandboxError::SandboxUnavailable,
+                },
+            )?;
+            return Err(error);
+        }
+        Err(NamespaceError::Setup(error)) => return Err(error),
+    }
     drop(spawner);
     let parent = boundary::pidfd(std::process::id(), false)?;
     if let Some(pid) = kinewright_job_sys::fork_payload_init()? {

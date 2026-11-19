@@ -21,7 +21,7 @@ mod actor;
 mod admission;
 mod controller;
 mod worker;
-pub use worker::diagnostics;
+pub use worker::{Phase, diagnostics};
 
 pub const ACTIVE_PROBES: usize = 2;
 /// Queue bound (ruling 35): 32 requests behind two slots. The queue deadline
@@ -167,16 +167,99 @@ pub enum Busy {
     /// `retry_after` resumes it.
     Paused { retry_after: Duration },
 }
+
+/// An admission refusal diagnosed by the host or by trusted bootstrap before
+/// the helper receives permission to parse media.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Unavailable {
+    pub phase: Phase,
+    pub reason: UnavailableReason,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnavailableReason {
+    NotConfigured,
+    AlreadyConfigured,
+    InvalidConfiguration,
+    SpawnerThread,
+    Subreaper,
+    SpawnerPidfd,
+    SupervisorSocket,
+    SupervisorSpawn,
+    SupervisorPin,
+    SupervisorHandshake,
+    SupervisorHandshakeTimedOut,
+    SupervisorThread,
+    SupervisorExited,
+    SourceDescriptor,
+    ScratchDirectory,
+    HelperPipes,
+    DuplicateSource,
+    HelperSpawn,
+    HelperPin,
+    ProbeThread,
+    ScopeCreateFailed,
+    ScopeUnavailable(kinewright_media_ipc::ScopeUnavailableReason),
+    ScopeVerifyFailed,
+    ScopeVerifyTimedOut,
+    UserNamespacesUnavailable,
+    EarlyEof,
+    BootstrapRead,
+    BoundaryObservation,
+    ResidentMemory,
+    #[cfg(feature = "slow-tests")]
+    MemoryWitness,
+}
+
+impl Unavailable {
+    /// Configuration and runtime prerequisites that a new probe cannot change.
+    #[must_use]
+    pub const fn is_unsupported(self) -> bool {
+        matches!(
+            self.reason,
+            UnavailableReason::NotConfigured
+                | UnavailableReason::AlreadyConfigured
+                | UnavailableReason::InvalidConfiguration
+                | UnavailableReason::Subreaper
+                | UnavailableReason::SpawnerPidfd
+                | UnavailableReason::UserNamespacesUnavailable
+        )
+    }
+}
+
+impl fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "media sandbox unavailable ({}, {:?})",
+            self.phase, self.reason
+        )?;
+        if !self.is_unsupported() {
+            f.write_str(". Try again.")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for Unavailable {}
+
 #[derive(Debug)]
 pub enum Failure {
     Sandbox(MediaSandboxError),
+    Unavailable(Unavailable),
     Authority(MediaError),
     Busy(Busy),
+}
+impl From<Unavailable> for Failure {
+    fn from(error: Unavailable) -> Self {
+        Self::Unavailable(error)
+    }
 }
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Sandbox(error) => write!(f, "media sandbox: {error:?}"),
+            Self::Unavailable(error) => error.fmt(f),
             Self::Authority(error) => error.fmt(f),
             Self::Busy(Busy::QueueFull) => {
                 f.write_str("media admission queue is full; try again shortly")
@@ -248,7 +331,7 @@ pub struct Runtime {
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 impl Runtime {
-    pub fn start(config: Config) -> Result<Self, MediaSandboxError> {
+    pub fn start(config: Config) -> Result<Self, Unavailable> {
         let valid = config.helper.is_absolute()
             && config.supervisor.is_absolute()
             && (64 * 1024 * 1024..=2 * 1024 * 1024 * 1024).contains(&config.limits.address_space)
@@ -256,8 +339,11 @@ impl Runtime {
                 .contains(&config.limits.private_memory)
             && (32 * 1024 * 1024..=config.limits.private_memory)
                 .contains(&config.limits.allocation);
-        if !valid || STARTED.swap(true, Ordering::AcqRel) {
-            return Err(MediaSandboxError::SandboxUnavailable);
+        if !valid {
+            return Err(Phase::Runtime.unavailable(UnavailableReason::InvalidConfiguration));
+        }
+        if STARTED.swap(true, Ordering::AcqRel) {
+            return Err(Phase::Runtime.unavailable(UnavailableReason::AlreadyConfigured));
         }
         let (sender, receiver) = mpsc::sync_channel(PENDING_PROBES + 1);
         let status = Arc::new(Status::default());
@@ -270,7 +356,7 @@ impl Runtime {
             .is_err()
         {
             STARTED.store(false, Ordering::Release);
-            return Err(MediaSandboxError::SandboxUnavailable);
+            return Err(Phase::Runtime.unavailable(UnavailableReason::SpawnerThread));
         }
         Ok(Self { sender, status })
     }

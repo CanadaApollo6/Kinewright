@@ -1,7 +1,7 @@
 //! One pipe owner per probe. Its guard retains cleanup across caller/worker loss.
 use super::{
-    CANCEL_GRACE, Failure, INITIAL_DEADLINE, Limits, Outcome, SCOPE_PROOF_ERRORS,
-    controller::Handle,
+    CANCEL_GRACE, Failure, INITIAL_DEADLINE, Limits, Outcome, SCOPE_PROOF_ERRORS, Unavailable,
+    UnavailableReason as Reason, controller::Handle,
 };
 use kinewright_job_sys::{
     Cgroup, ProcessHandle,
@@ -13,7 +13,7 @@ use std::{
     fs::{self, File},
     io::{self, Read, Write},
     os::{
-        fd::{AsFd, BorrowedFd},
+        fd::{AsFd, BorrowedFd, OwnedFd},
         unix::fs::DirBuilderExt,
     },
     path::{Path, PathBuf},
@@ -29,7 +29,7 @@ use std::{
 /// Diagnostics only: which step each live probe is in, so a stalled test can
 /// say which reply it waits for. Bounded and lock-free; carries no authority.
 static WAITING: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
-const PHASES: [&str; 13] = [
+const PHASES: [&str; Phase::ResourceCheck as usize + 1] = [
     "launch",
     "supervisor CreateScope reply",
     "supervisor VerifyScope reply",
@@ -43,9 +43,12 @@ const PHASES: [&str; 13] = [
     "cleanup: session members reaped",
     "cleanup: shim reaped",
     "cleanup: scope empty",
+    "runtime setup",
+    "supervisor startup",
+    "resource check",
 ];
-#[derive(Clone, Copy)]
-enum Phase {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Phase {
     Launch,
     CreateScope,
     VerifyScope,
@@ -59,6 +62,23 @@ enum Phase {
     Members,
     Reaped,
     ScopeEmpty,
+    Runtime,
+    Supervisor,
+    ResourceCheck,
+}
+impl Phase {
+    #[must_use]
+    pub const fn unavailable(self, reason: Reason) -> Unavailable {
+        Unavailable {
+            phase: self,
+            reason,
+        }
+    }
+}
+impl std::fmt::Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(PHASES[*self as usize])
+    }
 }
 /// Writes one claimed `WAITING` slot: `shim pid << 8 | phase`.
 #[derive(Clone, Copy)]
@@ -153,6 +173,19 @@ pub(super) struct Launch<'a> {
     pub scope_seam: Option<super::ScopeSeam>,
 }
 struct Root(PathBuf);
+impl Root {
+    fn create(generation: u64) -> Result<Self, Unavailable> {
+        let root = Self(std::env::temp_dir().join(format!(
+            "kinewright-media-{}-{generation}",
+            std::process::id()
+        )));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root.0)
+            .map_err(|_| Phase::Launch.unavailable(Reason::ScratchDirectory))?;
+        Ok(root)
+    }
+}
 impl Drop for Root {
     fn drop(&mut self) {
         let _ = fs::remove_dir(&self.0);
@@ -204,20 +237,23 @@ fn pin_child(child: Child) -> io::Result<(Child, Arc<ProcessHandle>)> {
     Ok((child, pin))
 }
 
-pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
+fn helper_pipe() -> Result<(OwnedFd, OwnedFd), Unavailable> {
     use rustix::pipe::{PipeFlags, pipe_with};
-    media_host::readonly_source(launch.source)?;
-    let root = Root(std::env::temp_dir().join(format!(
-        "kinewright-media-{}-{}",
-        std::process::id(),
-        launch.generation
-    )));
-    fs::DirBuilder::new().mode(0o700).create(&root.0)?;
-    let (command_read, command_write) = pipe_with(PipeFlags::CLOEXEC)?;
-    let (response_read, response_write) = pipe_with(PipeFlags::CLOEXEC)?;
-    let (lifetime_read, lifetime_write) = pipe_with(PipeFlags::CLOEXEC)?;
-    let (release_read, release_write) = pipe_with(PipeFlags::CLOEXEC)?;
-    let source = launch.source.try_clone()?;
+    pipe_with(PipeFlags::CLOEXEC).map_err(|_| Phase::Launch.unavailable(Reason::HelperPipes))
+}
+
+pub(super) fn start(launch: Launch<'_>) -> Result<Running, Unavailable> {
+    let launch_error = |reason| move |_| Phase::Launch.unavailable(reason);
+    media_host::readonly_source(launch.source).map_err(launch_error(Reason::SourceDescriptor))?;
+    let root = Root::create(launch.generation)?;
+    let (command_read, command_write) = helper_pipe()?;
+    let (response_read, response_write) = helper_pipe()?;
+    let (lifetime_read, lifetime_write) = helper_pipe()?;
+    let (release_read, release_write) = helper_pipe()?;
+    let source = launch
+        .source
+        .try_clone()
+        .map_err(launch_error(Reason::DuplicateSource))?;
     let child = media_host::spawn_helper(
         launch.helper,
         &root.0,
@@ -232,9 +268,10 @@ pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
             release_read.as_fd(),
         ],
         launch.spawner,
-    )?;
+    )
+    .map_err(launch_error(Reason::HelperSpawn))?;
     drop((command_read, response_write, lifetime_read, release_read));
-    let (child, pin) = pin_child(child)?;
+    let (child, pin) = pin_child(child).map_err(launch_error(Reason::HelperPin))?;
     // Actor signalling and worker cleanup share the same pinned identity. Neither
     // resolves a numeric PID to signal it after this point.
     let observed_pin = Arc::clone(&pin);
@@ -260,7 +297,8 @@ pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
     };
     #[cfg(feature = "slow-tests")]
     if launch.observer.is_some() {
-        lease.shim_smaps = Some(media_host::open_smaps(&lease.pin)?);
+        lease.shim_smaps =
+            Some(media_host::open_smaps(&lease.pin).map_err(launch_error(Reason::MemoryWitness))?);
     }
     let generation = launch.generation;
     let selected = launch.selected;
@@ -300,7 +338,8 @@ pub(super) fn start(launch: Launch<'_>) -> io::Result<Running> {
                 &mut fallback,
             );
             lease.finish(result, fallback, &shared, end)
-        })?;
+        })
+        .map_err(launch_error(Reason::ProbeThread))?;
     Ok(Running {
         pin: observed_pin,
         shared: observed_shared,
@@ -351,18 +390,24 @@ impl Lease {
                 self.scope = Some(scope);
                 let _ = self.owned_group();
                 *fallback = true;
-                return Err(Failure::Sandbox(Error::SandboxUnavailable));
+                return Err(Phase::CreateScope
+                    .unavailable(Reason::ScopeCreateFailed)
+                    .into());
             }
-            Message::ScopeUnavailable { scope, .. } => {
+            Message::ScopeUnavailable { scope, reason } => {
                 self.scope = scope;
                 *fallback = true;
-                return Err(Failure::Sandbox(Error::SandboxUnavailable));
+                return Err(Phase::CreateScope
+                    .unavailable(Reason::ScopeUnavailable(reason))
+                    .into());
             }
             Message::Failed {
                 error: Error::SandboxUnavailable,
             } => {
                 *fallback = true;
-                return Err(Failure::Sandbox(Error::SandboxUnavailable));
+                return Err(Phase::CreateScope
+                    .unavailable(Reason::ScopeCreateFailed)
+                    .into());
             }
             Message::Failed { error } => return Err(Failure::Sandbox(error)),
             _ => return Err(bad()),
@@ -379,12 +424,22 @@ impl Lease {
                 scope: actual,
                 starttime,
             } if actual == scope && starttime == self.pin.start() => {}
-            Message::ScopeUnavailable { .. }
-            | Message::Failed {
-                error: Error::SandboxUnavailable,
+            Message::ScopeUnavailable { reason, .. } => {
+                *fallback = true;
+                return Err(Phase::VerifyScope
+                    .unavailable(Reason::ScopeUnavailable(reason))
+                    .into());
+            }
+            Message::Failed {
+                error: error @ (Error::SandboxUnavailable | Error::TimedOut),
             } => {
                 *fallback = true;
-                return Err(Failure::Sandbox(Error::SandboxUnavailable));
+                let reason = if error == Error::TimedOut {
+                    Reason::ScopeVerifyTimedOut
+                } else {
+                    Reason::ScopeVerifyFailed
+                };
+                return Err(Phase::VerifyScope.unavailable(reason).into());
             }
             Message::Failed { error } => return Err(Failure::Sandbox(error)),
             _ => return Err(bad()),
@@ -396,7 +451,9 @@ impl Lease {
             // Attached and owned, then reported failed: the fallback shape of
             // a reply lost after attach, with the scope held by this lease.
             *fallback = true;
-            return Err(Failure::Sandbox(Error::SandboxUnavailable));
+            return Err(Phase::VerifyScope
+                .unavailable(Reason::ScopeVerifyFailed)
+                .into());
         }
         media_scope::verify_controls(group, limits.private_memory).map_err(|_| bad())?;
         let members = group.members().map_err(|_| bad())?;
@@ -426,13 +483,7 @@ impl Lease {
         release
             .write_all(&[1])
             .map_err(|_| Failure::Sandbox(Error::Crashed))?;
-        let forked = protocol.receive(Phase::Forked)?;
-        if (forked.request, forked.generation) != (1, 1) {
-            return Err(bad());
-        }
-        let Message::Forked { pid } = forked.message else {
-            return Err(bad());
-        };
+        let pid = protocol.receive_forked()?;
         let payload = media_scope::child(self.pin.pid(), pid).map_err(|_| bad())?;
         protocol
             .shared
@@ -451,7 +502,7 @@ impl Lease {
             eprintln!("MS2_LANDLOCK_UNAVAILABLE namespace_seccomp_required=true");
         }
         let observation = media_host::observe_boundary(&self.pin, &payload, source)
-            .map_err(|_| Failure::Sandbox(Error::SandboxUnavailable))?;
+            .map_err(|_| Phase::Boundary.unavailable(Reason::BoundaryObservation))?;
         #[cfg(feature = "slow-tests")]
         let mut observation = observation;
         for property in &observation.unobservable {
@@ -491,15 +542,10 @@ impl Lease {
             .map_err(Failure::Sandbox)?;
         #[cfg(feature = "slow-tests")]
         if let Some(observer) = &settings.observer {
-            let unavailable = |_| Failure::Sandbox(Error::SandboxUnavailable);
-            let shim_smaps = self
-                .shim_smaps
-                .as_mut()
-                .ok_or(Failure::Sandbox(Error::SandboxUnavailable))?;
-            let payload_smaps = observation
-                .smaps
-                .as_mut()
-                .ok_or(Failure::Sandbox(Error::SandboxUnavailable))?;
+            let failure = Phase::Complete.unavailable(Reason::MemoryWitness);
+            let unavailable = |_| failure;
+            let shim_smaps = self.shim_smaps.as_mut().ok_or(failure)?;
+            let payload_smaps = observation.smaps.as_mut().ok_or(failure)?;
             let memory = super::ProbeMemory {
                 shim: media_host::memory_profile(&self.pin, shim_smaps).map_err(unavailable)?,
                 payload: media_host::memory_profile(&payload, payload_smaps)
@@ -738,6 +784,21 @@ impl Protocol<'_> {
     fn send(&mut self, message: Message) -> Result<(), Failure> {
         send(self.command, self.generation, message)
     }
+    fn receive_forked(&mut self) -> Result<u32, Failure> {
+        let forked = self.receive(Phase::Forked)?;
+        if (forked.request, forked.generation) != (1, 1) {
+            return Err(Failure::Sandbox(Error::ProtocolViolation));
+        }
+        match forked.message {
+            Message::Forked { pid } => Ok(pid),
+            Message::Failed {
+                error: Error::SandboxUnavailable,
+            } => Err(Phase::Forked
+                .unavailable(Reason::UserNamespacesUnavailable)
+                .into()),
+            _ => Err(Failure::Sandbox(Error::ProtocolViolation)),
+        }
+    }
     fn receive(&mut self, phase: Phase) -> Result<Frame, Failure> {
         self.tracer.set(phase);
         let mut reader = Interruptible {
@@ -752,13 +813,18 @@ impl Protocol<'_> {
         if self.cancelled {
             self.traffic.cancel_sent();
         }
-        frame.map_err(|error| {
-            Failure::Sandbox(match error.kind() {
-                io::ErrorKind::InvalidData => Error::ProtocolViolation,
-                io::ErrorKind::TimedOut => Error::TimedOut,
-                _ if !self.shared.ready.load(Ordering::Acquire) => Error::SandboxUnavailable,
-                _ => Error::Crashed,
-            })
+        frame.map_err(|error| match error.kind() {
+            io::ErrorKind::InvalidData => Failure::Sandbox(Error::ProtocolViolation),
+            io::ErrorKind::TimedOut => Failure::Sandbox(Error::TimedOut),
+            kind if !self.shared.ready.load(Ordering::Acquire) => {
+                let reason = if kind == io::ErrorKind::UnexpectedEof {
+                    Reason::EarlyEof
+                } else {
+                    Reason::BootstrapRead
+                };
+                phase.unavailable(reason).into()
+            }
+            _ => Failure::Sandbox(Error::Crashed),
         })
     }
     fn close(&mut self) -> Result<(), Failure> {
@@ -819,4 +885,39 @@ fn cgroup_memory(group: &Cgroup) -> io::Result<super::CgroupMemory> {
         peak: scalar("memory.peak")?,
         events,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_eof_preserves_the_phase_and_stays_retryable() {
+        let mut response = File::open("/dev/null").unwrap();
+        let mut command = File::options().write(true).open("/dev/null").unwrap();
+        let shared = Shared::default();
+        let mut protocol = Protocol {
+            response: &mut response,
+            command: &mut command,
+            shared: &shared,
+            end: Instant::now() + INITIAL_DEADLINE,
+            generation: 2,
+            cancelled: false,
+            traffic: ProbeSession::new(1, 2, [None, None]),
+            tracer: Tracer(None, 0),
+        };
+        for waiting in [Phase::Forked, Phase::Boundary, Phase::Ready] {
+            let error = protocol.receive(waiting).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    Failure::Unavailable(Unavailable {
+                        phase,
+                        reason: Reason::EarlyEof,
+                    }) if phase == waiting
+                ),
+                "{error:?}"
+            );
+        }
+    }
 }

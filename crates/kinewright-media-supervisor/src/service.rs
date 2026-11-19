@@ -126,7 +126,11 @@ impl Service {
             Err(error) => {
                 eprintln!("MS2_SCOPE_VERIFY {id}: {error}");
                 Message::Failed {
-                    error: Error::SandboxUnavailable,
+                    error: if error.kind() == io::ErrorKind::WouldBlock {
+                        Error::TimedOut
+                    } else {
+                        Error::SandboxUnavailable
+                    },
                 }
             }
         }

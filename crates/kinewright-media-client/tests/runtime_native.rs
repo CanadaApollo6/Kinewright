@@ -211,6 +211,7 @@ fn unproven_case(case: &std::ffi::OsStr, config: Config, png: &Path) -> Option<C
 /// budget plus the error bound, and close reports the cleanup failure.
 #[cfg(feature = "slow-tests")]
 fn unproven_fallback(config: Config, png: &Path) {
+    use kinewright_media_client::{Failure, Phase, Unavailable, UnavailableReason};
     use kinewright_media_ipc::MediaSandboxError;
     let runtime = Runtime::start(config).unwrap();
     let started = Instant::now();
@@ -231,7 +232,16 @@ fn unproven_fallback(config: Config, png: &Path) {
     );
     assert_eq!(launches, 1, "an unproven fallback run was relaunched");
     assert_eq!(held, 1);
-    assert!(result.is_err());
+    assert!(
+        matches!(
+            result,
+            Err(Failure::Unavailable(Unavailable {
+                phase: Phase::VerifyScope,
+                reason: UnavailableReason::ScopeVerifyFailed,
+            }))
+        ),
+        "{result:?}"
+    );
     // REAP_BUDGET (2 s) plus SCOPE_PROOF_ERRORS (500 ms).
     assert!(elapsed < Duration::from_millis(2500), "{elapsed:?}");
     assert_eq!(shutdown, Err(MediaSandboxError::Crashed));

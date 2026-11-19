@@ -1,4 +1,5 @@
 //! One blocking socket owner. The spawner never waits on a scope RPC.
+use super::{Phase, Unavailable, UnavailableReason as Reason};
 use kinewright_job_sys::{ProcessHandle, media_host, media_scope};
 use kinewright_media_ipc::{
     Frame, MediaSandboxError as Error, Message, ScopeUnavailableReason, read_frame, write_frame,
@@ -65,17 +66,33 @@ impl Drop for Guard {
 impl Controller {
     /// Called only by the dedicated spawner. Bootstrap is bounded by socket
     /// timeouts; all subsequent blocking RPCs run on the controller worker.
-    pub fn start(path: &Path, generation: u64) -> io::Result<Self> {
-        let (socket, inherited) = media_scope::socketpair()?;
-        socket.set_read_timeout(Some(Duration::from_secs(5)))?;
-        socket.set_write_timeout(Some(Duration::from_secs(2)))?;
-        let child = media_host::spawn_supervisor(path, generation, &inherited)?;
+    pub fn start(path: &Path, generation: u64) -> Result<Self, Unavailable> {
+        let error = |reason| move |_| Phase::Supervisor.unavailable(reason);
+        let (socket, inherited) =
+            media_scope::socketpair().map_err(error(Reason::SupervisorSocket))?;
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(error(Reason::SupervisorSocket))?;
+        socket
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .map_err(error(Reason::SupervisorSocket))?;
+        let child = media_host::spawn_supervisor(path, generation, &inherited)
+            .map_err(error(Reason::SupervisorSpawn))?;
         drop(inherited);
         let mut guard = Guard { child, socket };
-        let pin = Arc::new(ProcessHandle::open(guard.child.id())?);
-        let initial = read_frame(&mut guard.socket)?;
+        let pin =
+            Arc::new(ProcessHandle::open(guard.child.id()).map_err(error(Reason::SupervisorPin))?);
+        let initial = read_frame(&mut guard.socket).map_err(|error| {
+            let reason = match error.kind() {
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => {
+                    Reason::SupervisorHandshakeTimedOut
+                }
+                _ => Reason::SupervisorHandshake,
+            };
+            Phase::Supervisor.unavailable(reason)
+        })?;
         if initial.request != 1 || initial.generation != generation {
-            return Err(io::Error::other("supervisor bootstrap identity"));
+            return Err(Phase::Supervisor.unavailable(Reason::SupervisorHandshake));
         }
         let available = match initial.message {
             Message::Ready {} => true,
@@ -83,7 +100,7 @@ impl Controller {
                 scope: None,
                 reason: ScopeUnavailableReason::NoUserManager,
             } => false,
-            _ => return Err(io::Error::other("supervisor bootstrap contract")),
+            _ => return Err(Phase::Supervisor.unavailable(Reason::SupervisorHandshake)),
         };
         let (sender, receiver) = mpsc::sync_channel::<Call>(4);
         // The worker accounts for stop acknowledgements while the spawner
@@ -97,7 +114,8 @@ impl Controller {
                 let result = serve(&mut guard.socket, generation, &receiver, &worker_stops);
                 guard.finish(&worker_pin);
                 result
-            })?;
+            })
+            .map_err(error(Reason::SupervisorThread))?;
         Ok(Self {
             handle: Handle {
                 sender,

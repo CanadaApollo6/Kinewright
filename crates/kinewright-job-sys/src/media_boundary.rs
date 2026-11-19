@@ -92,21 +92,42 @@ pub fn new_session() -> io::Result<()> {
     check(unsafe { libc::setsid() })
 }
 
-pub fn enter_namespaces(app_pid: u32, spawner: Option<&OwnedFd>) -> io::Result<()> {
+pub enum NamespaceError {
+    /// The kernel or its policy refused `CLONE_NEWUSER` outright.
+    UserNamespacesUnavailable(io::Error),
+    /// Includes exhausted namespace quotas and failures after `CLONE_NEWUSER`.
+    Setup(io::Error),
+}
+
+impl From<io::Error> for NamespaceError {
+    fn from(error: io::Error) -> Self {
+        Self::Setup(error)
+    }
+}
+
+pub fn enter_namespaces(app_pid: u32, spawner: Option<&OwnedFd>) -> Result<(), NamespaceError> {
     if fs::read_dir("/proc/self/task")?.count() != 1 {
-        return Err(io::Error::other("threaded media bootstrap"));
+        return Err(io::Error::other("threaded media bootstrap").into());
     }
     // SAFETY: getuid/getgid have no preconditions. Capture the caller before
     // NEWUSER, where an unmapped identity would instead read as the overflow UID.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     // SAFETY: the dedicated, single-threaded shim owns its descriptor table.
-    check(unsafe { libc::unshare(libc::CLONE_NEWUSER) })?;
+    check(unsafe { libc::unshare(libc::CLONE_NEWUSER) }).map_err(|error| {
+        match error.raw_os_error() {
+            Some(libc::EPERM | libc::EACCES | libc::EINVAL | libc::ENOSYS) => {
+                NamespaceError::UserNamespacesUnavailable(error)
+            }
+            _ => NamespaceError::Setup(error),
+        }
+    })?;
     fs::write("/proc/self/setgroups", "deny")?;
     fs::write("/proc/self/uid_map", format!("{uid} {uid} 1"))?;
     fs::write("/proc/self/gid_map", format!("{gid} {gid} 1"))?;
     arm_parent_death(app_pid, spawner)?;
     // SAFETY: no shared descriptor table or threads exist; NEWPID applies to the next fork.
-    check(unsafe { libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWNET | libc::CLONE_NEWPID) })
+    check(unsafe { libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWNET | libc::CLONE_NEWPID) })?;
+    Ok(())
 }
 
 /// Retain only the four fixed capabilities; even stdio is absent after this call.

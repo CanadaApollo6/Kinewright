@@ -1,6 +1,7 @@
 //! Sole process spawner and admission owner. No media parsing or scope RPC here.
 use super::{
-    ACTIVE_PROBES, CANCEL_GRACE, Config, Failure, Outcome, REAP_BUDGET, Request, Status, TICK,
+    ACTIVE_PROBES, CANCEL_GRACE, Config, Failure, Outcome, Phase, REAP_BUDGET, Request, Status,
+    TICK, Unavailable, UnavailableReason as Reason,
     admission::{Health, Pending, Queue, attribute},
     controller::Controller,
     worker,
@@ -113,7 +114,7 @@ struct Actor {
     spawner: Option<std::os::fd::OwnedFd>,
     generation: u64,
     supervisor_generation: u64,
-    controller: Option<Controller>,
+    controller: Result<Controller, Unavailable>,
     scope_failure: Option<Error>,
     /// Decode slots held by leases whose scope emptiness was never proven.
     /// They are never released; the first such failure is reported at close.
@@ -129,10 +130,12 @@ impl Actor {
         let initialized = kinewright_job_sys::install_subreaper().is_ok();
         let spawner = media_host::spawner_pidfd();
         let available = initialized && spawner.is_ok();
-        let controller = if available {
-            Controller::start(&config.supervisor, 1).ok()
+        let controller = if !initialized {
+            Err(Phase::Runtime.unavailable(Reason::Subreaper))
+        } else if spawner.is_err() {
+            Err(Phase::Runtime.unavailable(Reason::SpawnerPidfd))
         } else {
-            None
+            Controller::start(&config.supervisor, 1)
         };
         Self {
             config,
@@ -153,10 +156,12 @@ impl Actor {
         }
     }
     fn supervisor_health(&mut self) {
-        if self.controller.as_ref().is_some_and(|value| {
+        if self.controller.as_ref().is_ok_and(|value| {
             value.finished() || media_host::exited(&value.handle.pin).unwrap_or(true)
-        }) && let Some(controller) = self.controller.take()
-        {
+        }) && let Ok(controller) = std::mem::replace(
+            &mut self.controller,
+            Err(Phase::Supervisor.unavailable(Reason::SupervisorExited)),
+        ) {
             if controller.scope_cleanup_pending() {
                 self.scope_failure = Some(if controller.finished() {
                     controller.shutdown().err().unwrap_or(Error::Crashed)
@@ -197,7 +202,11 @@ impl Actor {
                     let _ = job.running.pin.kill();
                 }
             } else {
-                job.cause = Some(Failure::Sandbox(Error::SandboxUnavailable));
+                job.cause = Some(
+                    Phase::ResourceCheck
+                        .unavailable(Reason::ResidentMemory)
+                        .into(),
+                );
                 let _ = job.running.pin.kill();
             }
         }
@@ -318,7 +327,7 @@ impl Actor {
     fn restart(&mut self) {
         // Only restart after every old lease has independently completed native
         // cleanup. An absent manager still has a live lifecycle supervisor.
-        if self.controller.is_none()
+        if self.controller.is_err()
             && self.active.is_empty()
             && (self.scope_failure.is_some() || !self.queue.is_empty())
             && self.available
@@ -326,9 +335,9 @@ impl Actor {
             && let Some(next) = self.supervisor_generation.checked_add(1)
         {
             self.supervisor_generation = next;
-            self.controller = Controller::start(&self.config.supervisor, next).ok();
+            self.controller = Controller::start(&self.config.supervisor, next);
             if let Some(cause) = self.scope_failure.take() {
-                let ready = self.controller.is_some();
+                let ready = self.controller.is_ok();
                 eprintln!(
                     "MS2_SUPERVISOR_RESTART generation={next} scope_cleanup={cause:?} ready={ready}"
                 );
@@ -342,7 +351,7 @@ impl Actor {
         if self
             .controller
             .as_ref()
-            .is_some_and(Controller::scope_cleanup_pending)
+            .is_ok_and(Controller::scope_cleanup_pending)
         {
             return;
         }
@@ -371,11 +380,12 @@ impl Actor {
                 let _ = item.reply.send(Err(error));
                 continue;
             }
-            let Some(control) = self.controller.as_ref() else {
-                let _ = item
-                    .reply
-                    .send(Err(Failure::Sandbox(Error::SandboxUnavailable)));
-                continue;
+            let control = match &self.controller {
+                Ok(control) => control,
+                Err(error) => {
+                    let _ = item.reply.send(Err((*error).into()));
+                    continue;
+                }
             };
             if !self.queue.circuit.permits(
                 item.request.source.identity(),
@@ -422,22 +432,24 @@ impl Actor {
                 #[cfg(feature = "slow-tests")]
                 scope_seam: self.config.scope_seam,
             };
-            if let Ok(running) = worker::start(launch) {
-                #[cfg(feature = "slow-tests")]
-                self.status.launches.fetch_add(1, Ordering::AcqRel);
-                self.active.push(Job::launched(item, running, now));
-            } else {
-                let failure = Failure::Sandbox(Error::SandboxUnavailable);
-                let identity = item.request.source.identity();
-                if self
-                    .queue
-                    .circuit
-                    .record(identity, Health::Unhealthy(Error::SandboxUnavailable), now)
-                    .paused
-                {
-                    self.queue.clear_for_pause(&self.status, now);
+            match worker::start(launch) {
+                Ok(running) => {
+                    #[cfg(feature = "slow-tests")]
+                    self.status.launches.fetch_add(1, Ordering::AcqRel);
+                    self.active.push(Job::launched(item, running, now));
                 }
-                let _ = item.reply.send(Err(failure));
+                Err(error) => {
+                    let result = Err(error.into());
+                    let identity = item.request.source.identity();
+                    let recorded = self
+                        .queue
+                        .circuit
+                        .record(identity, Health::of(&result), now);
+                    if recorded.paused {
+                        self.queue.clear_for_pause(&self.status, now);
+                    }
+                    let _ = item.reply.send(result);
+                }
             }
         }
     }
@@ -486,9 +498,13 @@ impl Actor {
             && !self
                 .controller
                 .as_ref()
-                .is_some_and(Controller::scope_cleanup_pending)
+                .is_ok_and(Controller::scope_cleanup_pending)
         {
-            let supervisor = self.controller.take().map_or(Ok(()), Controller::shutdown);
+            let supervisor = std::mem::replace(
+                &mut self.controller,
+                Err(Phase::Supervisor.unavailable(Reason::SupervisorExited)),
+            )
+            .map_or(Ok(()), Controller::shutdown);
             if let Some(reply) = self.close_reply.take() {
                 let failure = self.scope_failure.or(self.cleanup_failure);
                 let _ = reply.send(failure.map_or(supervisor, Err));

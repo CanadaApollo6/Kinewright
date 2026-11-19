@@ -49,6 +49,8 @@ impl Health {
                 Self::Neutral
             }
             Err(Failure::Sandbox(error)) => Self::Unhealthy(*error),
+            // Keep the unavailable outcome's breaker charge and retry policy.
+            Err(Failure::Unavailable(_)) => Self::Unhealthy(Error::SandboxUnavailable),
         }
     }
 }
