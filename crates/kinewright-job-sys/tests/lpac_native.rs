@@ -263,9 +263,13 @@ fn assert_owner_access_refused(fixture: &Fixture, root: &Path, retained: &Path, 
     let scratch = fixture.root.0.join("owner control");
     fs::write(&scratch, b"owner control").expect("WriteFile (owner control)");
     profile_controls::file_owner(&scratch, &user, true);
+    profile_controls::set_owner_control_dacl(&scratch);
     let result = fixture.try_single(
         "owner-access",
-        format!("file\tWRITE_DAC\t{user}\t{package}\t{}", scratch.display()),
+        format!(
+            "file-control\tWRITE_DAC\t{user}\t{package}\t{}",
+            scratch.display()
+        ),
         false,
     );
     eprintln!("owner descriptor control: {result:?}");
@@ -294,22 +298,37 @@ fn assert_owner_access_refused(fixture: &Fixture, root: &Path, retained: &Path, 
             outcomes.push((format!("{api}({right})"), probe));
         }
     }
-    let control = result.expect("unconfined owner control");
-    control.expect(
-        &["CreateFileW(WRITE_DAC)"],
-        &[0],
-        "unconfined descriptor write",
+    let registry_control = fixture.try_single(
+        "owner-access",
+        format!("key\tWRITE_DAC\t{user}\t{package}\t{key}"),
+        false,
     );
-    assert!(
-        control
-            .detail
-            .as_deref()
-            .is_some_and(|detail| detail.contains("SetSecurityInfo(DACL)=0"))
-    );
+    eprintln!("unconfined registry descriptor control: {registry_control:?}");
+    for (control, api) in [
+        (result, "CreateFileW(WRITE_DAC)"),
+        (registry_control, "RegOpenKeyExW(WRITE_DAC)"),
+    ] {
+        let control = control.expect("unconfined owner control");
+        control.expect(&[api], &[0], "unconfined descriptor write");
+        assert_eq!(
+            control.detail.as_deref(),
+            Some("TokenUser matches owner SID=true SetSecurityInfo(DACL)=0")
+        );
+    }
     assert!(
         profile_controls::file_sddl(&scratch).contains(package),
         "control installed the package ACE"
     );
+    assert!(
+        profile_controls::registry_sddl(profile).contains(package),
+        "registry control installed the package ACE"
+    );
+    profile
+        .prepare()
+        .expect("repair registry descriptor after unconfined control");
+    profile
+        .verify()
+        .expect("verify registry after unconfined control");
     for (api, outcome) in outcomes {
         let report = outcome.expect("LPAC same-user owner probe");
         report.expect(&[&api], FILE_DENIALS, "same-user owner refusal");

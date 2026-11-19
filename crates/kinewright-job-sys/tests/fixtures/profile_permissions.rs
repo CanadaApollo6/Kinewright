@@ -100,14 +100,18 @@ pub(super) fn owner_access(target: &OsStr, output: &mut impl Write) -> io::Resul
         _ => return Err(io::Error::other("unknown owner access mask")),
     };
     let file = match *kind {
-        "file" => true,
+        "file" | "file-control" => true,
         "key" => false,
         _ => return Err(io::Error::other("unknown owner access object")),
     };
     let mask = if file { "FA" } else { "KA" };
-    let sddl = format!(
-        "O:{owner}D:P(A;;{mask};;;SY)(A;;{mask};;;BA)(A;;{mask};;;{owner})(A;;{mask};;;{package})"
-    );
+    let owner_ace = if *kind == "file-control" {
+        String::new()
+    } else {
+        format!("(A;;{mask};;;{owner})")
+    };
+    let sddl =
+        format!("O:{owner}D:P(A;;{mask};;;SY)(A;;{mask};;;BA){owner_ace}(A;;{mask};;;{package})");
     let descriptor = match OwnerDescriptor::new(&sddl) {
         Ok(descriptor) => descriptor,
         Err((api, code)) => return writeln!(output, "{api}\t{code}"),

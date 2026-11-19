@@ -57,7 +57,8 @@ mod child {
             SOCKET, WSACleanup, WSADATA, WSAGetLastError, WSAStartup, closesocket, connect, socket,
         },
         Storage::FileSystem::{
-            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle, ReadFile, WriteFile,
+            BY_HANDLE_FILE_INFORMATION, FILE_BEGIN, GetFileInformationByHandle, ReadFile,
+            SetFilePointerEx, WriteFile,
         },
         System::{
             Console::{
@@ -370,6 +371,13 @@ mod child {
                 "unlisted handle names a different object",
                 ERROR_INVALID_HANDLE,
             );
+        }
+        // SAFETY: the identity check established a live handle to the seekable test file.
+        if unsafe { SetFilePointerEx(handle, 0, ptr::null_mut(), FILE_BEGIN) } == 0 {
+            // SAFETY: capture the failure on this thread.
+            return ("SetFilePointerEx(unlisted canary)", unsafe {
+                GetLastError()
+            });
         }
         let expected = b"unlisted handle";
         let mut bytes = [0u8; 15];

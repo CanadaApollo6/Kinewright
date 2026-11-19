@@ -200,6 +200,27 @@ pub(super) fn file_owner(path: &Path, user: &str, assign: bool) {
     witness_owner(file.as_raw_handle(), SE_FILE_OBJECT, user, assign);
 }
 
+pub(super) fn set_owner_control_dacl(path: &Path) {
+    let (_descriptor, dacl) = descriptor("D:P(A;;FA;;;SY)");
+    let path = wide(path);
+    // SAFETY: the path names the fixture's scratch file and the DACL is live.
+    let code = unsafe {
+        SetNamedSecurityInfoW(
+            path.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            dacl,
+            ptr::null_mut(),
+        )
+    };
+    assert_eq!(
+        code, 0,
+        "SetNamedSecurityInfoW (implicit owner control) Win32 {code}"
+    );
+}
+
 fn witness_owner(
     handle: windows_sys::Win32::Foundation::HANDLE,
     kind: windows_sys::Win32::Security::Authorization::SE_OBJECT_TYPE,
