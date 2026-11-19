@@ -762,11 +762,12 @@ impl HostCommandOwner {
             return Err(refused("completion binding changed"));
         }
         if self.recovering || self.switch_frozen {
-            return Err(HostRefusal::new(
-                "recovery_frozen",
-                "task completion waits for recovery confirmation",
-            )
-            .into());
+            let message = if self.recovering && self.recovery.is_some() {
+                super::RECOVERY_REOPEN
+            } else {
+                "task completion waits for recovery confirmation"
+            };
+            return Err(HostRefusal::new("recovery_frozen", message).into());
         }
         if let Some(stored) = stored {
             if stored.decision != CommandDecision::Applied {

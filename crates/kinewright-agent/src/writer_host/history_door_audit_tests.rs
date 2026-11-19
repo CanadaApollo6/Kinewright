@@ -1161,7 +1161,19 @@ fn barrier_capacity_refusal_keeps_edits_reopenable(door: Door) {
             snapshot: HostSnapshot::capture(&core).unwrap(),
         })
         .unwrap();
-    assert_eq!(save.error.unwrap().code, "recovery_frozen");
+    let save_error = save.error.unwrap();
+    assert_eq!(save_error.code, "recovery_frozen");
+    assert_eq!(save_error.message, RECOVERY_REOPEN);
+    assert!(
+        save_error.message.contains("edits so far are saved")
+            && save_error.message.contains("Close and reopen the project")
+            && !save_error.message.contains('!')
+            && !save_error.message.to_ascii_lowercase().contains("barrier")
+            && !save_error.message.to_ascii_lowercase().contains("snapshot")
+            && !save_error.message.to_ascii_lowercase().contains("capacity"),
+        "FROZEN_SESSION_MESSAGE_VOICE: {}",
+        save_error.message
+    );
     checked(HostCommand::Shutdown);
     host.shutdown().unwrap();
     drop((command, endpoint, permit, gui, core));

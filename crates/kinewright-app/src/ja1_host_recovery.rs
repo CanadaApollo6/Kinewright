@@ -20,7 +20,31 @@ pub(super) struct RecoveredManual {
     issuer: Option<kinewright_agent::writer_host::HostIssuer>,
     client: HostClient,
     child: Option<Child>,
-    completion: Option<Result<CompletedRecovery, BundleError>>,
+    completion: Option<Result<CompletedRecovery, RecoveryFailure>>,
+}
+enum RecoveryFailure {
+    ReopenRequired,
+    Other(BundleError),
+}
+impl From<BundleError> for RecoveryFailure {
+    fn from(error: BundleError) -> Self {
+        Self::Other(error)
+    }
+}
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "map_err consumes the owned transport error at this boundary"
+)]
+fn barrier_error(error: kinewright_agent::writer_host::HostError) -> RecoveryFailure {
+    if matches!(
+        &error,
+        kinewright_agent::writer_host::HostError::Refused(refusal)
+            if refusal.code == "snapshot_capacity"
+    ) {
+        RecoveryFailure::ReopenRequired
+    } else {
+        RecoveryFailure::Other(host_error(error))
+    }
 }
 struct CompletedRecovery {
     permit: kinewright_project::operation_actor::ManualPermit,
@@ -57,6 +81,16 @@ fn checked(reply: HostReply) -> Result<HostReply, BundleError> {
     }
     Ok(reply)
 }
+fn barrier_checked(reply: HostReply) -> Result<HostReply, RecoveryFailure> {
+    if reply
+        .error
+        .as_ref()
+        .is_some_and(|error| error.code == "snapshot_capacity")
+    {
+        return Err(RecoveryFailure::ReopenRequired);
+    }
+    Ok(checked(reply)?)
+}
 #[allow(
     clippy::too_many_arguments,
     reason = "one bounded recovery transaction owns its actor, original evidence and cancellation"
@@ -75,7 +109,7 @@ fn run_barrier(
         HostReply,
         String,
     ),
-    BundleError,
+    RecoveryFailure,
 > {
     let retained = saved_plan
         .lock()
@@ -105,28 +139,28 @@ fn run_barrier(
             RecoveryPlan::Publish(barrier) | RecoveryPlan::Confirm(barrier) => barrier.clone(),
         };
         if matches!(plan, RecoveryPlan::Publish(_)) {
-            let published = checked(
+            let published = barrier_checked(
                 host.client
                     .request(HostCommand::PublishBarrier {
                         barrier: Box::new(barrier.clone()),
                     })
-                    .map_err(host_error)?,
+                    .map_err(barrier_error)?,
             )?;
             if published.history.as_ref() != Some(&barrier.after.history) {
-                return Err(BundleError::HistoryChanged);
+                return Err(BundleError::HistoryChanged.into());
             }
             endpoint.install(barrier.after.history.clone(), published.manual_ack)?;
             *saved_plan.lock().map_err(|_| BundleError::Unsettled)? =
                 Some(RecoveryPlan::Confirm(barrier.clone()));
         }
         let installed = HostSnapshot::from_history(endpoint.snapshot()?).map_err(host_error)?;
-        let reply = checked(
+        let reply = barrier_checked(
             host.client
                 .request(HostCommand::ConfirmBarrier {
                     barrier: Box::new(barrier.clone()),
                     installed,
                 })
-                .map_err(host_error)?,
+                .map_err(barrier_error)?,
         )?;
         if let Some(next) = reply.recovery.clone() {
             plan = RecoveryPlan::Publish(next);
@@ -400,7 +434,12 @@ impl HostAttachment {
             .ok_or(BundleError::HistoryChanged)?
         {
             Ok(completed) => completed,
-            Err(error) => return Ok(Some(self.paused_recovery_reply(&error))),
+            Err(RecoveryFailure::ReopenRequired) => {
+                return Ok(Some(self.reopen_required_recovery_reply()));
+            }
+            Err(RecoveryFailure::Other(error)) => {
+                return Ok(Some(self.paused_recovery_reply(&error)));
+            }
         };
         owner.finish_host_manual_recovery(&completed.digest)?;
         self.manual = Some(super::super::ManualProducerGate {
@@ -408,6 +447,7 @@ impl HostAttachment {
             permit: completed.permit,
         });
         self.cut = None;
+        self.recovery_pause = super::RecoveryPause::None;
         self.unknown_operation = false;
         self.pending_operation = None;
         self.recovery_originals.clear();
@@ -417,6 +457,20 @@ impl HostAttachment {
             .map_err(|_| BundleError::Unsettled)? = None;
         self.accept_status(completed.reply.status.clone());
         Ok(Some(completed.reply))
+    }
+
+    fn reopen_required_recovery_reply(&mut self) -> HostReply {
+        self.recovery_pause = super::RecoveryPause::ReopenRequired;
+        self.status.frozen = true;
+        self.status.message = super::RECOVERY_REOPEN_TEXT.into();
+        HostReply {
+            status: self.status.clone(),
+            error: Some(kinewright_agent::writer_host::HostRefusal::new(
+                "recovery_paused",
+                super::RECOVERY_REOPEN_TEXT,
+            )),
+            ..HostReply::default()
+        }
     }
 
     fn paused_recovery_reply(&mut self, error: &BundleError) -> HostReply {

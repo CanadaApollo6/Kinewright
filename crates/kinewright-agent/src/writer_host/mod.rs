@@ -1949,6 +1949,13 @@ impl HostCommandOwner {
         }
         Ok(())
     }
+    pub(super) fn recovery_frozen_message(&self) -> &'static str {
+        if self.recovery.is_some() {
+            RECOVERY_REOPEN
+        } else {
+            "This session is read-only while the project finishes checking its history."
+        }
+    }
     fn execute_inner(
         &mut self,
         command: HostCommand,
@@ -1974,11 +1981,7 @@ impl HostCommandOwner {
                     | HostCommand::Shutdown
             )
         {
-            return Err(HostRefusal::new(
-                "recovery_frozen",
-                "Editing remains read-only until both Cores confirm the durable recovery result.",
-            )
-            .into());
+            return Err(HostRefusal::new("recovery_frozen", self.recovery_frozen_message()).into());
         }
         #[cfg(test)]
         {

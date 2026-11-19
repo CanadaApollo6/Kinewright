@@ -154,6 +154,7 @@ impl HostCommand {
 }
 pub const HOST_COMMAND_CAPACITY: usize = 64;
 pub const RETENTION_LOST: &str = "The host could not re-establish this session's retained data. Your edits remain here. Saving and rescue are paused, including saving elsewhere. Close this editing context explicitly to end it.";
+pub const RECOVERY_REOPEN: &str = "Your edits so far are saved, and this session is read-only. Close and reopen the project to continue.";
 
 /// Resolved only from a privately issued attachment, never from request fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

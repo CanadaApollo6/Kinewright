@@ -1,5 +1,5 @@
 //! GUI client state for the shipping writer host. Source ownership stays in the GUI.
-use super::{Action, RETENTION_LOST_TEXT};
+use super::{Action, RECOVERY_REOPEN_TEXT, RETENTION_LOST_TEXT};
 use eframe::egui;
 use kinewright_agent::writer_host::{
     HostChoiceKind, HostClient, HostCommand, HostConfig, HostError, HostOrigin, HostReply,
@@ -51,6 +51,12 @@ enum SwitchState {
     Pending,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecoveryPause {
+    None,
+    ReopenRequired,
+}
+
 #[cfg_attr(
     all(test, target_os = "linux"),
     allow(
@@ -80,6 +86,7 @@ pub(super) struct HostAttachment {
     executable: PathBuf,
     context: std::sync::Weak<std::sync::atomic::AtomicBool>,
     recovery: Option<JoinHandle<Result<recovery::RecoveredManual, BundleError>>>,
+    recovery_pause: RecoveryPause,
     recovery_plan: std::sync::Arc<std::sync::Mutex<Option<recovery::RecoveryPlan>>>,
     recovery_originals: Vec<kinewright_project::operation_protocol::EncodedMessage>,
     pub client: HostClient,
@@ -424,6 +431,7 @@ impl HostAttachment {
             executable: executable.to_path_buf(),
             context: retained_context,
             recovery: None,
+            recovery_pause: RecoveryPause::None,
             recovery_plan: std::sync::Arc::default(),
             recovery_originals: vec![],
             client: client.with_manual_editor(manual_client.clone()),
@@ -494,6 +502,7 @@ impl HostAttachment {
             executable: PathBuf::new(),
             context,
             recovery: None,
+            recovery_pause: RecoveryPause::None,
             recovery_plan: std::sync::Arc::default(),
             recovery_originals: vec![],
             client,
@@ -1006,10 +1015,18 @@ impl HostAttachment {
         self.manual.is_none() && !self.status.frozen && self.status.choice.is_none()
     }
 
+    pub(super) fn recovery_reopen_required(&self) -> bool {
+        self.recovery_pause == RecoveryPause::ReopenRequired
+    }
+
     pub fn accept_status(&mut self, status: HostStatus) {
         self.client = self.client.with_roots(status.admitted_roots.clone());
         self.status = status;
         self.status.frozen |= self.unknown_operation;
+        if self.recovery_reopen_required() {
+            self.status.frozen = true;
+            self.status.message = RECOVERY_REOPEN_TEXT.into();
+        }
     }
 
     /// The frame thread polls only completed work or the child process handle.
@@ -1253,7 +1270,7 @@ impl HostAttachment {
         {
             ui.label(message);
         }
-        if pending > 0 {
+        if pending > 0 && !self.recovery_reopen_required() {
             ui.label(format!("{pending} manual edits pending durable save. Preview is local; these edits are not Saved yet."));
         }
         if self.manual_save_required() {

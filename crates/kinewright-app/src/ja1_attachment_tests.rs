@@ -3152,6 +3152,148 @@ fn s2h_begin_recovery_reply_loss_retries_original_plan() {
     s2h_fix3_barrier_reply("begin_recovery", false);
 }
 
+#[cfg(target_os = "linux")]
+fn hx_t2_barrier_capacity_ui(cap: u64) {
+    use kinewright_agent::writer_host::{
+        HostCommand, HostConfig, HostOrigin, SessionRoots, WriterHost,
+    };
+    use kinewright_core::{Marker, MarkerId, TimeCode};
+    let temp = temp();
+    let path = temp.path("hx-t2.kinewright");
+    let mut document = doc();
+    document.markers.push(Marker {
+        id: MarkerId(1),
+        position: TimeCode::ZERO,
+        // One tab takes three wire bytes in both the baseline and current document.
+        label: "\t".repeat(usize::try_from(cap / 6 + 1).unwrap()),
+        color_token: 0,
+    });
+    let core = Core::for_test(document).unwrap();
+    let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
+        temp.root(),
+        &core,
+        StorageLimits::default(),
+    )
+    .unwrap();
+    owner.first_save(&path, StorageLimits::default()).unwrap();
+    drop(owner.prepare_host_attachment().unwrap());
+
+    let writer = WriterHost::start(HostConfig {
+        data_dir: Some(temp.path("data")),
+        scheduler_settings: Some(temp.path("scheduler")),
+        project: "hx-t2-ui".into(),
+        path: Some(path.clone()),
+        roots: SessionRoots {
+            read: vec![temp.root().into()],
+            write: vec![temp.root().into()],
+        },
+        origin: HostOrigin::Headless,
+    })
+    .unwrap();
+    let mut app = Ja1Attachment::new(owner).unwrap();
+    let initial = app.owner.freeze_host_cut().unwrap();
+    app.owner.complete_host_cut(&initial, None, None).unwrap();
+    let context = Arc::downgrade(&app.originating_context);
+    let server = kinewright_agent::writer_host::SourceServer::start_context(|| Ok(())).unwrap();
+    app.host = Some(
+        host::HostAttachment::connected(
+            writer.client(),
+            None,
+            app.owner.current_inputs_ref().clone(),
+            server,
+            context,
+        )
+        .unwrap(),
+    );
+    app.start_host_manual().unwrap();
+
+    // Hold publication so the edit stays pending and triggers barrier recovery.
+    app.host.as_mut().unwrap().manual_publication_hold = true;
+    app.send_manual(Command::Do(Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: false,
+    }))
+    .unwrap();
+    app.settle_manual_for_test();
+    app.host.as_mut().unwrap().manual_publication_hold = false;
+    app.host.as_mut().unwrap().unknown_operation = true;
+    app.host
+        .as_mut()
+        .unwrap()
+        .begin_manual_recovery(&mut app.owner)
+        .unwrap();
+    s2h_fix3_wait(&mut app);
+
+    assert!(app.read_only());
+    assert_eq!(app.message, RECOVERY_REOPEN_TEXT);
+    assert_eq!(app.manual_refusal_reason(), RECOVERY_REOPEN_TEXT);
+    assert_eq!(
+        app.manual_persistent_status().as_deref(),
+        Some(RECOVERY_REOPEN_TEXT)
+    );
+    assert!(
+        !app.close_text().contains("it is not Saved"),
+        "HX_T2_CLOSE_TEXT_CONTRADICTION: {}",
+        app.close_text()
+    );
+    let ui_text = rendered(&app);
+    assert!(
+        ui_text.contains(RECOVERY_REOPEN_TEXT),
+        "HX_T2_UI_MESSAGE: {ui_text}"
+    );
+    assert!(
+        !ui_text.contains("are not Saved yet"),
+        "HX_T2_UI_CONTRADICTION: {ui_text}"
+    );
+    for forbidden in ["barrier", "snapshot", "capacity", "escaped bytes", "!"] {
+        assert!(
+            !app.message.to_ascii_lowercase().contains(forbidden),
+            "HX_T2_INTERNAL_TERM {forbidden}: {}",
+            app.message
+        );
+    }
+
+    // A later Status heartbeat must keep the reopen instruction visible.
+    let heartbeat = app
+        .host_client()
+        .unwrap()
+        .request(HostCommand::Status)
+        .unwrap();
+    app.accept_host_reply(heartbeat).unwrap();
+    assert_eq!(app.message, RECOVERY_REOPEN_TEXT);
+    assert!(rendered(&app).contains(RECOVERY_REOPEN_TEXT));
+
+    assert!(app.close());
+    drop(app);
+    writer.shutdown().unwrap();
+
+    let pool = kinewright_project::operation_history::HistoryPool::new(
+        kinewright_project::operation_history::PoolLimits::default(),
+    );
+    let reopened =
+        kinewright_project::editing_session::Ja1EditingSession::open(&path, &pool).unwrap();
+    let Event::QueryResult(QueryResult::Document(restored)) = reopened
+        .core()
+        .request(Command::Query(Query::Document))
+        .unwrap()
+    else {
+        unreachable!();
+    };
+    assert!(!restored.tracks[0].sync_lock);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hx_t2_publish_barrier_capacity_refusal_shows_close_and_reopen_message() {
+    hx_t2_barrier_capacity_ui(kinewright_agent::writer_host::PUBLISH_BARRIER_SNAPSHOT_BYTES);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hx_t2_confirm_barrier_capacity_refusal_shows_close_and_reopen_message() {
+    hx_t2_barrier_capacity_ui(kinewright_agent::writer_host::CONFIRM_BARRIER_SNAPSHOT_BYTES);
+}
+
 #[path = "ja1_s3_attachment_tests.rs"]
 mod s3;
 

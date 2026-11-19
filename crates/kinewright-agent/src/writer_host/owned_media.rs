@@ -64,11 +64,12 @@ impl HostCommandOwner {
         snapshot: &HostSnapshot,
     ) -> Result<(u64, u64), HostError> {
         if self.switch_frozen || self.recovering || self.choice.is_some() {
-            return Err(HostRefusal::new(
-                "input_frozen",
-                "Resolve the current save or selection before importing media.",
-            )
-            .into());
+            let message = if self.recovering && self.recovery.is_some() {
+                super::RECOVERY_REOPEN
+            } else {
+                "Resolve the current save or selection before importing media."
+            };
+            return Err(HostRefusal::new("input_frozen", message).into());
         }
         let current = self
             .manual

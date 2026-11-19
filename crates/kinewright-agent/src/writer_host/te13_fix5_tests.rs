@@ -533,6 +533,48 @@ fn te13_fix5_temporary_recovery_does_not_install_block() {
 }
 
 #[test]
+fn hx_t2_frozen_recovery_tool_reply_says_to_close_and_reopen() {
+    let p = te13_fix4_pending(CompletionStep::Freeze, false, false);
+    let client_id = "e".repeat(64);
+    let client = p.run.f.host.client().with_manual_editor(client_id.clone());
+    let begun = client
+        .request(HostCommand::BeginRecovery {
+            client: client_id.clone(),
+            frozen: None,
+            pending: vec![],
+        })
+        .unwrap();
+    assert!(begun.error.is_none(), "{:?}", begun.error);
+    assert!(begun.recovery.is_some());
+
+    let status_reply = p.run.editor.wire("task_status", serde_json::json!({}));
+    assert_eq!(status_reply.is_error, Some(true));
+    let status_text = c5_fix10_text(&status_reply);
+    assert!(
+        status_text.contains(&format!("task_scope: {RECOVERY_REOPEN}")),
+        "HX_T2_TASK_TOOL_REPLY: {status_text}"
+    );
+
+    let edit_reply = p.run.editor.wire(
+        "prepare_edit_plan",
+        serde_json::json!({ "expected_revision": 0, "operations": [] }),
+    );
+    assert_eq!(edit_reply.is_error, Some(true));
+    let edit_text = c5_fix10_text(&edit_reply);
+    assert!(
+        edit_text.contains(&format!("task_scope: {RECOVERY_REOPEN}")),
+        "HX_T2_EDIT_TOOL_REPLY: {edit_text}"
+    );
+
+    let manual_reply = client
+        .request(HostCommand::AcquireManual { client: client_id })
+        .unwrap();
+    let manual_error = manual_reply.error.unwrap();
+    assert_eq!(manual_error.code, "recovery_frozen");
+    assert_eq!(manual_error.message, RECOVERY_REOPEN);
+}
+
+#[test]
 fn te13_fix5_real_switch_then_exact_finish() {
     use kinewright_project::bundle_switch::SwitchTarget;
     let p = te13_fix4_pending(CompletionStep::Publication, false, false);
@@ -585,7 +627,11 @@ fn te13_fix5_real_switch_then_exact_finish() {
         (1, 1),
         "TE13_FIX5_SWITCH_FINISH_EXACTLY_ONCE"
     );
-    assert_eq!(host.lock().unwrap().core().snapshot_identity().unwrap(), selected_identity, "TE13_FIX5_SWITCH_EDIT_INTACT");
+    assert_eq!(
+        host.lock().unwrap().core().snapshot_identity().unwrap(),
+        selected_identity,
+        "TE13_FIX5_SWITCH_EDIT_INTACT"
+    );
 }
 
 #[test]
