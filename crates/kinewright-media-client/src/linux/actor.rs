@@ -73,8 +73,8 @@ impl Job {
                     {
                         self.payload = Some(pin);
                     }
-                    // A different/missing identity means that old payload has
-                    // already gone. Never sample or signal its replacement.
+                    // NotFound includes replacement during pinning. A different
+                    // or missing identity can no longer contribute payload RSS.
                     Ok(_) => {}
                     Err(error)
                         if error.kind() == std::io::ErrorKind::NotFound

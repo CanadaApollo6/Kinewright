@@ -75,7 +75,10 @@ impl ProcessHandle {
             .ok_or_else(|| invalid("invalid PID"))?;
         let fd = rustix::process::pidfd_open(native_pid, PidfdFlags::NONBLOCK)?;
         if start_time(pid)? != before {
-            return Err(invalid("process changed while pinning identity"));
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "process changed while pinning identity",
+            ));
         }
         Ok(Self {
             fd,
