@@ -152,29 +152,26 @@ pub(super) fn owner_access(target: &OsStr, output: &mut impl Write) -> io::Resul
             );
         }
     };
+    let setter = handle.setter();
     let mut detail = format!("TokenUser matches owner SID={same}");
     if access == WRITE_OWNER {
         let owner_code = handle.set_owner(&descriptor);
         let dacl_code = handle.set_dacl(&descriptor);
         let followup = match SecurityObject::open(path, file, WRITE_DAC) {
             Ok(writable) => format!(
-                "open WRITE_DAC=0 SetSecurityInfo(DACL)={}",
+                "open WRITE_DAC=0 {setter}(DACL)={}",
                 writable.set_dacl(&descriptor)
             ),
             Err(code) => format!("open WRITE_DAC={code}"),
         };
         write!(
             detail,
-            " SetSecurityInfo(OWNER)={owner_code} SetSecurityInfo(DACL via WRITE_OWNER)={dacl_code} {followup}"
+            " {setter}(OWNER)={owner_code} {setter}(DACL via WRITE_OWNER)={dacl_code} {followup}"
         )
         .expect("string formatting");
     } else {
-        write!(
-            detail,
-            " SetSecurityInfo(DACL)={}",
-            handle.set_dacl(&descriptor)
-        )
-        .expect("string formatting");
+        let dacl_code = handle.set_dacl(&descriptor);
+        write!(detail, " {setter}(DACL)={dacl_code}").expect("string formatting");
     }
     writeln!(output, "{api}({right})\t0\t{detail}")
 }
@@ -279,25 +276,42 @@ impl SecurityObject {
         Ok(Self { handle, file })
     }
 
-    fn object_type(&self) -> windows_sys::Win32::Security::Authorization::SE_OBJECT_TYPE {
-        use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SE_REGISTRY_KEY};
+    fn setter(&self) -> &'static str {
         if self.file {
-            SE_FILE_OBJECT
+            "NtSetSecurityObject"
         } else {
-            SE_REGISTRY_KEY
+            "SetSecurityInfo"
+        }
+    }
+
+    fn set_file_security(&self, information: u32, descriptor: &OwnerDescriptor) -> u32 {
+        use windows_sys::{
+            Wdk::Storage::FileSystem::NtSetSecurityObject, Win32::Foundation::RtlNtStatusToDosError,
+        };
+        // SAFETY: the file handle and self-relative descriptor are live during the call.
+        let status = unsafe { NtSetSecurityObject(self.handle, information, descriptor.raw) };
+        if status < 0 {
+            // SAFETY: translates the status code without accessing caller memory.
+            unsafe { RtlNtStatusToDosError(status) }
+        } else {
+            0
         }
     }
 
     fn set_dacl(&self, descriptor: &OwnerDescriptor) -> u32 {
         use windows_sys::Win32::Security::{
-            Authorization::SetSecurityInfo, DACL_SECURITY_INFORMATION,
-            PROTECTED_DACL_SECURITY_INFORMATION,
+            Authorization::{SE_REGISTRY_KEY, SetSecurityInfo},
+            DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
         };
+        if self.file {
+            // The D:P in the self-relative descriptor carries the protected DACL.
+            return self.set_file_security(DACL_SECURITY_INFORMATION, descriptor);
+        }
         // SAFETY: this is the fixture handle and its explicit canary DACL stays live for the write.
         unsafe {
             SetSecurityInfo(
                 self.handle,
-                self.object_type(),
+                SE_REGISTRY_KEY,
                 DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
                 ptr::null_mut(),
                 ptr::null_mut(),
@@ -309,13 +323,17 @@ impl SecurityObject {
 
     fn set_owner(&self, descriptor: &OwnerDescriptor) -> u32 {
         use windows_sys::Win32::Security::{
-            Authorization::SetSecurityInfo, OWNER_SECURITY_INFORMATION,
+            Authorization::{SE_REGISTRY_KEY, SetSecurityInfo},
+            OWNER_SECURITY_INFORMATION,
         };
+        if self.file {
+            return self.set_file_security(OWNER_SECURITY_INFORMATION, descriptor);
+        }
         // SAFETY: this is the fixture handle and the owner SID remains live.
         unsafe {
             SetSecurityInfo(
                 self.handle,
-                self.object_type(),
+                SE_REGISTRY_KEY,
                 OWNER_SECURITY_INFORMATION,
                 descriptor.owner,
                 ptr::null_mut(),

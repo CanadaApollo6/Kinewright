@@ -345,22 +345,20 @@ fn assert_owner_access_refused(fixture: &Fixture, root: &Path, retained: &Path, 
             outcomes.push((format!("{api}({right})"), probe));
         }
     }
-    let registry_control = fixture.try_single(
+    let key_control = fixture.try_single(
         "owner-access",
         format!("key\tWRITE_DAC\t{user}\t{package}\t{key}"),
         false,
     );
-    eprintln!("unconfined registry descriptor control: {registry_control:?}");
-    for (control, api) in [
-        (result, "NtOpenFile(WRITE_DAC)"),
-        (registry_control, "RegOpenKeyExW(WRITE_DAC)"),
+    eprintln!("unconfined registry descriptor control: {key_control:?}");
+    for (control, api, setter) in [
+        (result, "NtOpenFile(WRITE_DAC)", "NtSetSecurityObject"),
+        (key_control, "RegOpenKeyExW(WRITE_DAC)", "SetSecurityInfo"),
     ] {
         let control = control.expect("unconfined owner control");
         control.expect(&[api], &[0], "unconfined descriptor write");
-        assert_eq!(
-            control.detail.as_deref(),
-            Some("TokenUser matches owner SID=true SetSecurityInfo(DACL)=0")
-        );
+        let expected = format!("TokenUser matches owner SID=true {setter}(DACL)=0");
+        assert_eq!(control.detail.as_deref(), Some(expected.as_str()));
     }
     assert!(
         profile_controls::file_sddl(&scratch).contains(package),
