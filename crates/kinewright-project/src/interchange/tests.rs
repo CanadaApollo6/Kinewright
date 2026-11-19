@@ -9,6 +9,15 @@ use serde_json::json;
 
 use super::*;
 
+const FIXTURE_WATCHDOG: Duration = Duration::from_secs(2);
+
+fn wait_for_worker(started: &Receiver<()>, control: &PrepareControl) {
+    if let Err(error) = started.recv_timeout(FIXTURE_WATCHDOG) {
+        control.cancel();
+        panic!("Fixture worker did not reach the blocked operation: {error}");
+    }
+}
+
 fn otio(references: &[&str]) -> Vec<u8> {
     let children: Vec<_> = references.iter().map(|locator| json!({
         "OTIO_SCHEMA": "Clip.1",
@@ -44,7 +53,7 @@ struct Block {
 
 struct RecordingFs {
     main: Vec<u8>,
-    calls: Mutex<Vec<Call>>,
+    calls: Arc<Mutex<Vec<Call>>>,
     block: Option<Block>,
 }
 
@@ -52,7 +61,7 @@ impl RecordingFs {
     fn new(references: &[&str]) -> Self {
         Self {
             main: otio(references),
-            calls: Mutex::default(),
+            calls: Arc::default(),
             block: None,
         }
     }
@@ -230,17 +239,25 @@ fn abandoned_stats_are_replaced_and_offline_ids_are_last() {
         release: held,
         stopped,
     });
+    let control = PrepareControl::with_manual_deadlines();
+    let stat = Duration::from_millis(150);
     let options = ImportOptions {
         deadlines: MediaDeadlines {
-            stat: Duration::from_millis(150),
+            stat,
             ..MediaDeadlines::default()
         },
+        control: control.clone(),
         ..ImportOptions::default()
     };
-    let (prepared, _) =
-        prepare_with(Arc::new(fs), "timeline.otio", options, Preparation::LOCAL).unwrap();
+    let import = std::thread::spawn(move || {
+        prepare_with(Arc::new(fs), "timeline.otio", options, Preparation::LOCAL)
+    });
     for _ in slow {
-        did_start.recv().unwrap();
+        wait_for_worker(&did_start, &control);
+    }
+    control.advance_deadlines(stat);
+    let (prepared, _) = import.join().unwrap().unwrap();
+    for _ in slow {
         release.send(()).unwrap();
     }
     for _ in slow {
@@ -268,17 +285,23 @@ fn each_probe_deadline_abandons_and_stops_at_the_next_observation() {
             release: held,
             stopped,
         });
+        let control = PrepareControl::with_manual_deadlines();
+        let probe_deadline = Duration::from_millis(150);
         let options = ImportOptions {
             deadlines: MediaDeadlines {
-                hash_stall: Duration::from_millis(150),
-                metadata: Duration::from_millis(150),
+                hash_stall: probe_deadline,
+                metadata: probe_deadline,
                 ..MediaDeadlines::default()
             },
+            control: control.clone(),
             ..ImportOptions::default()
         };
-        let (prepared, _) =
-            prepare_with(Arc::new(fs), "timeline.otio", options, Preparation::LOCAL).unwrap();
-        did_start.recv().unwrap();
+        let import = std::thread::spawn(move || {
+            prepare_with(Arc::new(fs), "timeline.otio", options, Preparation::LOCAL)
+        });
+        wait_for_worker(&did_start, &control);
+        control.advance_deadlines(probe_deadline);
+        let (prepared, _) = import.join().unwrap().unwrap();
         release.send(()).unwrap();
         assert!(did_stop.recv().unwrap());
         assert_eq!(prepared.record().media.timed_out, 1);
@@ -780,29 +803,35 @@ fn abandoning_the_worker_budget_reports_undispatched_locators_as_timeouts() {
         release: held,
         stopped,
     });
-    let fs = Arc::new(fs);
+    // Keep the log without prolonging the lifetime of the worker notifications.
+    let calls = Arc::clone(&fs.calls);
+    let control = PrepareControl::with_manual_deadlines();
+    let stat = Duration::from_millis(150);
     let options = ImportOptions {
         deadlines: MediaDeadlines {
-            stat: Duration::from_millis(150),
+            stat,
             ..MediaDeadlines::default()
         },
+        control: control.clone(),
         ..ImportOptions::default()
     };
-    let (prepared, _) = prepare_with(
-        Arc::clone(&fs),
-        "timeline.otio",
-        options,
-        Preparation::LOCAL,
-    )
-    .unwrap();
+    let import = std::thread::spawn(move || {
+        prepare_with(Arc::new(fs), "timeline.otio", options, Preparation::LOCAL)
+    });
+    for batch in slow.chunks(PREPARE_WORKERS) {
+        for _ in batch {
+            wait_for_worker(&did_start, &control);
+        }
+        control.advance_deadlines(stat);
+    }
+    let (prepared, _) = import.join().unwrap().unwrap();
     for _ in slow {
-        did_start.recv().unwrap();
         release.send(()).unwrap();
     }
     for _ in slow {
         assert!(did_stop.recv().unwrap());
     }
-    let calls = fs.calls.lock().unwrap();
+    let calls = calls.lock().unwrap();
     assert_eq!(
         calls
             .iter()
@@ -1037,10 +1066,11 @@ fn stalled_io_outcome(
     let (arrived, at_call) = bounded(1);
     let (release, blocked) = bounded(1);
     let (finished, outcome) = bounded(1);
-    let control = PrepareControl::default();
+    let control = PrepareControl::with_manual_deadlines();
+    let stat = Duration::from_millis(100);
     let options = ImportOptions {
         deadlines: MediaDeadlines {
-            stat: Duration::from_millis(100),
+            stat,
             ..MediaDeadlines::default()
         },
         media_roots: (call == StalledIo::MediaRoot)
@@ -1070,12 +1100,14 @@ fn stalled_io_outcome(
         };
         finished.send(result).unwrap();
     });
-    at_call.recv().unwrap();
+    wait_for_worker(&at_call, &control);
     if cancel {
         control.cancel();
+    } else {
+        control.advance_deadlines(stat);
     }
     // A watchdog makes a synchronous-I/O mutation fail instead of hanging libtest.
-    let result = outcome.recv_timeout(Duration::from_secs(2));
+    let result = outcome.recv_timeout(FIXTURE_WATCHDOG);
     release.send(()).unwrap();
     request.join().unwrap();
     result.unwrap_or_else(|error| panic!("{call:?} did not leave the blocked filesystem: {error}"))

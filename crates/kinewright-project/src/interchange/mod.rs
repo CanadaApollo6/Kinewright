@@ -15,7 +15,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use kinewright_core::undo::{RoleBounds, initial_document_charge};
@@ -66,6 +66,8 @@ pub struct PrepareControl(Arc<Progress>);
 struct Progress {
     cancelled: AtomicBool,
     hashed: AtomicU64,
+    #[cfg(test)]
+    deadline_clock: Option<std::sync::Mutex<Instant>>,
 }
 
 impl PrepareControl {
@@ -85,6 +87,29 @@ impl PrepareControl {
 
     fn add_hashed(&self, bytes: u64) {
         self.0.hashed.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn deadline_now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(clock) = &self.0.deadline_clock {
+            return *clock.lock().unwrap();
+        }
+        #[cfg(not(test))]
+        let _ = self;
+        Instant::now()
+    }
+
+    #[cfg(test)]
+    fn with_manual_deadlines() -> Self {
+        Self(Arc::new(Progress {
+            deadline_clock: Some(std::sync::Mutex::new(Instant::now())),
+            ..Progress::default()
+        }))
+    }
+
+    #[cfg(test)]
+    fn advance_deadlines(&self, elapsed: Duration) {
+        *self.0.deadline_clock.as_ref().unwrap().lock().unwrap() += elapsed;
     }
 }
 

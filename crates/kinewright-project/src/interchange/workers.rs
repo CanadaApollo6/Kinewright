@@ -24,14 +24,22 @@ const CANCEL_POLL: Duration = Duration::from_millis(25);
 pub(super) struct Workers<'a> {
     control: &'a PrepareControl,
     deadlines: MediaDeadlines,
+    budget: WorkerBudget,
     abandoned: usize,
 }
 
 impl<'a> Workers<'a> {
-    pub(super) const fn new(control: &'a PrepareControl, deadlines: MediaDeadlines) -> Self {
+    pub(super) fn new(control: &'a PrepareControl, deadlines: MediaDeadlines) -> Self {
+        #[cfg(not(test))]
+        let budget = WorkerBudget::Process;
+        // Fixtures deliberately block workers past their deadline. Each preparation
+        // owns its count so an abandoned fixture worker cannot starve another test.
+        #[cfg(test)]
+        let budget = WorkerBudget::Fixture(Arc::default());
         Self {
             control,
             deadlines,
+            budget,
             abandoned: 0,
         }
     }
@@ -100,7 +108,7 @@ impl<'a> Workers<'a> {
             .min((MAX_ABANDONED - self.abandoned).saturating_sub(running))
             .min(PREPARE_WORKERS - running);
         while pool.len() < running + dispatch {
-            let Some(worker) = Worker::start(done.clone(), Arc::clone(work)) else {
+            let Some(worker) = Worker::start(&self.budget, done.clone(), Arc::clone(work)) else {
                 break;
             };
             pool.push(worker);
@@ -195,10 +203,11 @@ struct Completed<Output> {
 
 impl<Input: Send + 'static> Worker<Input> {
     fn start<Output: Send + 'static>(
+        budget: &WorkerBudget,
         done: Sender<Completed<Output>>,
         work: Arc<impl Fn(Input, &Ticket) -> Output + Send + Sync + 'static>,
     ) -> Option<Self> {
-        let permit = WorkerPermit::acquire()?;
+        let permit = WorkerPermit::acquire(budget)?;
         let (input, jobs) = bounded::<Job<Input>>(1);
         let thread = thread::Builder::new()
             .name("ix-locator".into())
@@ -228,21 +237,39 @@ impl<Input: Send + 'static> Worker<Input> {
     }
 }
 
-struct WorkerPermit;
+#[derive(Clone)]
+enum WorkerBudget {
+    Process,
+    #[cfg(test)]
+    Fixture(Arc<AtomicUsize>),
+}
+
+impl WorkerBudget {
+    fn live(&self) -> &AtomicUsize {
+        match self {
+            Self::Process => &LIVE_WORKERS,
+            #[cfg(test)]
+            Self::Fixture(live) => live,
+        }
+    }
+}
+
+struct WorkerPermit(WorkerBudget);
 
 impl WorkerPermit {
-    fn acquire() -> Option<Self> {
-        if LIVE_WORKERS.fetch_add(1, Ordering::Relaxed) < MAX_LIVE_WORKERS {
-            return Some(Self);
+    fn acquire(budget: &WorkerBudget) -> Option<Self> {
+        let live = budget.live();
+        if live.fetch_add(1, Ordering::Relaxed) < MAX_LIVE_WORKERS {
+            return Some(Self(budget.clone()));
         }
-        LIVE_WORKERS.fetch_sub(1, Ordering::Relaxed);
+        live.fetch_sub(1, Ordering::Relaxed);
         None
     }
 }
 
 impl Drop for WorkerPermit {
     fn drop(&mut self) {
-        LIVE_WORKERS.fetch_sub(1, Ordering::Relaxed);
+        self.0.live().fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -271,12 +298,13 @@ impl Ticket {
             Phase::Stat => deadlines.stat,
             Phase::Probe => deadlines.hash_stall,
         };
+        let changed = control.deadline_now();
         Self {
             stop: Arc::new(AtomicBool::new(false)),
             control,
             deadlines,
             state: Mutex::new(State {
-                changed: Instant::now(),
+                changed,
                 timeout,
                 hashed: 0,
             }),
@@ -285,7 +313,11 @@ impl Ticket {
 
     fn remaining(&self) -> Duration {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.timeout.saturating_sub(state.changed.elapsed())
+        let elapsed = self
+            .control
+            .deadline_now()
+            .saturating_duration_since(state.changed);
+        state.timeout.saturating_sub(elapsed)
     }
 
     pub(super) fn note_io_progress(&self) -> bool {
@@ -294,7 +326,7 @@ impl Ticket {
 
     fn update(&self, event: Option<ProbeEvent>) -> bool {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let now = Instant::now();
+        let now = self.control.deadline_now();
         if self.stop.load(Ordering::Relaxed)
             || self.control.is_cancelled()
             || now.duration_since(state.changed) >= state.timeout
@@ -327,5 +359,32 @@ impl ProbeObserver for Ticket {
         self.stop.load(Ordering::Relaxed)
             || self.control.is_cancelled()
             || self.remaining().is_zero()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixture_can_start_with_all_process_worker_slots_occupied() {
+        let process = WorkerBudget::Process;
+        let _permits: Vec<_> = (0..MAX_LIVE_WORKERS)
+            .map(|_| WorkerPermit::acquire(&process).unwrap())
+            .collect();
+        let control = PrepareControl::default();
+        let mut workers = Workers::new(&control, MediaDeadlines::default());
+        assert_eq!(
+            workers
+                .io(42, "fixture could not start", |value, _| Ok(value))
+                .unwrap(),
+            42
+        );
+
+        workers.budget = process;
+        let refusal = workers
+            .io((), "process budget full", |(), _| Ok(()))
+            .unwrap_err();
+        assert_eq!(refusal.code, RefusalCode::IoTimeout);
     }
 }
