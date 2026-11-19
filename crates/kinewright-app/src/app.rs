@@ -8512,13 +8512,19 @@ pub(crate) mod in1_tests {
             )),
             ..Default::default()
         };
-        let reason = "This timeline is too large to open: 9 MiB, limit 8 MiB.";
+        let reason = "This timeline would create a 9 MiB project, over the 8 MiB limit. \
+                      Export a shorter or simpler timeline, or split it into parts to open separately.";
         crate::recovery::with_ja_directory(recovery.clone(), || {
             loop {
                 let output = ctx.run_ui(input(), |ui| app.show_interchange(ui.ctx()));
                 let painted = crate::theme::painted_text(&output);
                 if painted.iter().any(|text| text == reason) {
-                    assert!(!painted.iter().any(|text| text == "Open"));
+                    assert!(
+                        !painted
+                            .iter()
+                            .any(|text| text == "Open" || text == "Cancel")
+                    );
+                    assert!(painted.iter().any(|text| text == "Close"));
                     break;
                 }
                 assert!(

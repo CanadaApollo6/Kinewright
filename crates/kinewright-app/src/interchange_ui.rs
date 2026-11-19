@@ -237,8 +237,8 @@ impl ImportDialog {
                 .show(ui, |ui| self.show_body(ui));
             ui.add_space(space::TWO);
             ui.horizontal(|ui| {
-                if !matches!(&self.state, Preparation::Refused(refusal) if refusal.code == RefusalCode::TooLarge)
-                {
+                let too_large = matches!(&self.state, Preparation::Refused(refusal) if refusal.code == RefusalCode::TooLarge);
+                if !too_large {
                     let button = ui.add_enabled(
                         matches!(self.state, Preparation::Ready(_)) && self.folder_picker.is_none(),
                         primary_button("Open"),
@@ -248,7 +248,9 @@ impl ImportDialog {
                     }
                     open = button.clicked();
                 }
-                cancel = ui.button("Cancel").clicked();
+                // With nothing to open, the only button dismisses the dialog.
+                let dismiss = if too_large { "Close" } else { "Cancel" };
+                cancel = ui.button(dismiss).clicked();
             });
         });
         if cancel || response.should_close() {

@@ -365,10 +365,10 @@ fn prepare_with(
 fn check_open_size(document: &Document) -> Result<(), Refusal> {
     const MIB: u64 = 1 << 20;
     let bounds = RoleBounds::ORDINARY;
-    let charge = initial_document_charge(document).map_err(|error| {
+    let charge = initial_document_charge(document).map_err(|_| {
         Refusal::new(
             RefusalCode::LoweringFailed,
-            format!("The timeline size could not be measured: {error}."),
+            "This timeline could not be checked before opening.",
         )
     })?;
     for (size, limit) in [
@@ -379,7 +379,8 @@ fn check_open_size(document: &Document) -> Result<(), Refusal> {
             return Err(Refusal::new(
                 RefusalCode::TooLarge,
                 format!(
-                    "This timeline is too large to open: {} MiB, limit {} MiB.",
+                    "This timeline would create a {} MiB project, over the {} MiB limit. \
+                     Export a shorter or simpler timeline, or split it into parts to open separately.",
                     size.div_ceil(MIB),
                     limit / MIB,
                 ),
