@@ -52,6 +52,19 @@ use windows_sys::Win32::{
     },
 };
 
+#[cfg(feature = "lpac-diagnostics")]
+#[path = "lpac_diagnostics/mod.rs"]
+mod diagnostics;
+
+#[test]
+#[ignore = "temporary hosted AppContainer profile experiment"]
+fn diagnose_lpac_creation_variants() {
+    #[cfg(feature = "lpac-diagnostics")]
+    diagnostics::run();
+    #[cfg(not(feature = "lpac-diagnostics"))]
+    panic!("enable lpac-diagnostics for the hosted profile experiment");
+}
+
 const TIMEOUT: Duration = Duration::from_secs(8);
 const MEMORY_BYTES: usize = 64 * 1024 * 1024;
 const SOURCE: &[u8] = b"LPAC source bytes";
@@ -300,6 +313,10 @@ fn closing_the_last_job_handle_ends_a_running_child() {
 }
 
 struct Fixture {
+    #[cfg(feature = "lpac-diagnostics")]
+    variant: diagnostics::Selection,
+    #[cfg(feature = "lpac-diagnostics")]
+    profile: Option<diagnostics::Profile>,
     exe: PathBuf,
     image_bytes: u64,
     source: PathBuf,
@@ -309,6 +326,23 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        #[cfg(feature = "lpac-diagnostics")]
+        {
+            let mut fixture = Self::stage();
+            fixture.variant = diagnostics::Selection::from_env();
+            if fixture.variant == diagnostics::Selection::Profile {
+                fixture.profile = Some(
+                    diagnostics::Profile::create(&fixture.sid)
+                        .unwrap_or_else(|error| panic!("{error}")),
+                );
+            }
+            fixture
+        }
+        #[cfg(not(feature = "lpac-diagnostics"))]
+        Self::stage()
+    }
+
+    fn stage() -> Self {
         let root = Temp::new();
         let directory = root.0.join("image directory");
         fs::create_dir(&directory).expect("CreateDirectoryW (private fixture image directory)");
@@ -321,6 +355,10 @@ impl Fixture {
         let source = root.0.join("source");
         fs::write(&source, SOURCE).expect("CreateFileW/WriteFile (fixture source)");
         Self {
+            #[cfg(feature = "lpac-diagnostics")]
+            variant: diagnostics::Selection::NoProfile,
+            #[cfg(feature = "lpac-diagnostics")]
+            profile: None,
             exe,
             image_bytes,
             source,
@@ -396,31 +434,40 @@ impl Fixture {
             if lpac {
                 let source = File::open(&self.source)
                     .map_err(|error| format!("{case} CreateFileW (read-only source): {error}"))?;
-                // SAFETY: querying all processor groups needs no pointer or handle.
-                let cpus = unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) };
-                if cpus == 0 {
-                    return Err(format!(
-                        "{case} GetActiveProcessorCount: {}",
-                        io::Error::last_os_error()
-                    ));
-                }
-                let limits = Limits {
-                    private_bytes: MEMORY_BYTES,
-                    cpu_rate: 10_000u32.div_ceil(cpus),
-                };
+                let limits = fixture_limits()?;
                 let args = [OsString::from(case), target.as_ref().to_os_string()];
-                media_lpac::launch(
+                let observer = |application: &OsStr, command_line: &OsStr, cwd: &OsStr| {
+                    self.inspect_launch(case, application, command_line, cwd);
+                };
+                #[cfg(feature = "lpac-diagnostics")]
+                let launched = if self.variant == diagnostics::Selection::ProfileProbe {
+                    media_lpac::diagnostic::launch_profile_canary(
+                        &self.exe,
+                        &args,
+                        (&source, &child_request, &child_reply),
+                        limits,
+                    )
+                } else {
+                    media_lpac::diagnostic::launch(
+                        &self.exe,
+                        &args,
+                        (&source, &child_request, &child_reply),
+                        limits,
+                        self.variant.launch_variant(),
+                        observer,
+                    )
+                };
+                #[cfg(not(feature = "lpac-diagnostics"))]
+                let launched = media_lpac::launch(
                     &self.exe,
                     &args,
                     &source,
                     &child_request,
                     &child_reply,
                     limits,
-                    |application, command_line, cwd| {
-                        self.inspect_launch(case, application, command_line, cwd);
-                    },
-                )
-                .map(Process::Lpac)
+                    observer,
+                );
+                launched.map(Process::Lpac)
             } else {
                 Command::new(&self.exe)
                     .args(["0", "0", "0", case])
@@ -484,8 +531,15 @@ impl Fixture {
                 self.image_dir().display()
             );
         }
+        let case = "ready";
+        #[cfg(feature = "lpac-diagnostics")]
+        let case = if lpac && self.variant == diagnostics::Selection::ParentEnvironment {
+            "ready-parent-environment"
+        } else {
+            case
+        };
         let result = self
-            .try_single("ready", self.image_dir(), lpac)
+            .try_single(case, self.image_dir(), lpac)
             .and_then(|report| {
                 if report.api == "ready" && report.code == 0 {
                     Ok(())
@@ -543,13 +597,33 @@ impl Fixture {
     }
 
     fn file_refusal(&self, case: &str, target: &Path) {
-        let report = self.single(case, target, true);
+        let report = self
+            .storage_probe(case, target)
+            .unwrap_or_else(|error| panic!("{error}"));
         report.expect(
             &["CreateFileW(canary)", "WriteFile(canary)"],
             FILE_DENIALS,
             &format!("{case} LPAC file refusal at {}", target.display()),
         );
     }
+    fn storage_probe(&self, case: &str, target: &Path) -> Result<Report, String> {
+        self.try_single(case, target, true)
+    }
+}
+
+fn fixture_limits() -> Result<Limits, String> {
+    // SAFETY: querying all processor groups needs no pointer or handle.
+    let cpus = unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) };
+    if cpus == 0 {
+        return Err(format!(
+            "GetActiveProcessorCount: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(Limits {
+        private_bytes: MEMORY_BYTES,
+        cpu_rate: 10_000u32.div_ceil(cpus),
+    })
 }
 
 fn copy_image(input: &Path, image: &Path) -> u64 {
@@ -748,7 +822,7 @@ impl Running {
             }
             let length = bytes.len();
             let available = available as usize;
-            if length + available > 512 {
+            if length + available > 4096 {
                 return Err(format!(
                     "{} PeekNamedPipe (reply) Win32 0: unexpected reply length",
                     self.context
@@ -814,17 +888,23 @@ impl Running {
 struct Report {
     api: String,
     code: u32,
+    #[cfg(feature = "lpac-diagnostics")]
+    detail: Option<String>,
 }
 
 impl Report {
     fn parse(context: &str, bytes: &[u8]) -> Result<Self, String> {
         let text = std::str::from_utf8(bytes)
             .map_err(|error| format!("{context} ReadFile (fixture report) Win32 0: {error}"))?;
-        let (api, code) = text.trim_end().split_once('\t').ok_or_else(|| {
+        let mut fields = text.trim_end().splitn(3, '\t');
+        let api = fields.next().unwrap_or_default();
+        let code = fields.next().ok_or_else(|| {
             format!("{context} ReadFile (fixture report) Win32 0: malformed report {text:?}")
         })?;
         Ok(Self {
             api: api.into(),
+            #[cfg(feature = "lpac-diagnostics")]
+            detail: fields.next().map(str::to_owned),
             code: code.parse().map_err(|error| {
                 format!(
                     "{context} ReadFile (fixture reply) Win32 0: invalid reported code: {error}"
@@ -955,40 +1035,50 @@ fn grant_image_access(directory: &Path, sid: &Sid) {
 }
 
 fn container_storage(sid: &OsStr) -> Option<PathBuf> {
+    match query_container_storage(sid) {
+        Ok(Some(path)) => {
+            assert!(
+                path.is_absolute(),
+                "GetAppContainerFolderPath HRESULT 0: expected an absolute path"
+            );
+            Some(path)
+        }
+        Ok(None) => panic!("GetAppContainerFolderPath HRESULT 0 returned a null path"),
+        Err(status) => {
+            let hr = status.cast_unsigned();
+            let code = hr & 0xffff;
+            assert!(
+                hr >> 16 == 0x8007
+                    && matches!(
+                        code,
+                        ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND | ERROR_NOT_FOUND
+                    ),
+                "GetAppContainerFolderPath (unregistered LPAC SID): HRESULT {hr:#010x}, Win32 {code}"
+            );
+            eprintln!(
+                "GetAppContainerFolderPath (unregistered LPAC SID): HRESULT {hr:#010x}, Win32 {code}"
+            );
+            None
+        }
+    }
+}
+
+fn query_container_storage(sid: &OsStr) -> Result<Option<PathBuf>, i32> {
     let sid = wide(sid);
     let mut buffer = ptr::null_mut();
     // SAFETY: sid is terminated and buffer receives the query's allocated path.
     let status = unsafe { GetAppContainerFolderPath(sid.as_ptr(), &raw mut buffer) };
     if status < 0 {
-        let hr = status.cast_unsigned();
-        let code = hr & 0xffff;
-        assert!(
-            hr >> 16 == 0x8007
-                && matches!(
-                    code,
-                    ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND | ERROR_NOT_FOUND
-                ),
-            "GetAppContainerFolderPath (unregistered LPAC SID): HRESULT {hr:#010x}, Win32 {code}"
-        );
-        eprintln!(
-            "GetAppContainerFolderPath (unregistered LPAC SID): HRESULT {hr:#010x}, Win32 {code}"
-        );
-        return None;
+        return Err(status);
     }
-    assert!(
-        !buffer.is_null(),
-        "GetAppContainerFolderPath returned a null path"
-    );
+    if buffer.is_null() {
+        return Ok(None);
+    }
     // SAFETY: success returns a terminated string allocated by the COM task allocator.
     let path = PathBuf::from(unsafe { copy_wide(buffer) });
     // SAFETY: the caller owns this allocation.
     unsafe { CoTaskMemFree(buffer.cast()) };
-    assert!(
-        path.is_absolute(),
-        "GetAppContainerFolderPath returned {}",
-        path.display()
-    );
-    Some(path)
+    Ok(Some(path))
 }
 
 fn check_storage_tree(fixture: &Fixture, path: &Path, checked: &mut BTreeSet<PathBuf>) {

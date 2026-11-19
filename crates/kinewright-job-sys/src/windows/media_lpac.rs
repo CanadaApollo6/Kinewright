@@ -57,7 +57,7 @@ use windows_sys::Win32::{
             ProcessChildProcessPolicy, ProcessDEPPolicy, ProcessDynamicCodePolicy,
             ProcessExtensionPointDisablePolicy, ProcessImageLoadPolicy,
             ProcessStrictHandleCheckPolicy, ProcessSystemCallDisablePolicy, ResumeThread,
-            STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
+            STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
         },
         WindowsProgramming::{
             PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT,
@@ -120,6 +120,7 @@ pub struct Child {
 /// Launch with exactly one read-only file, one request reader and one reply writer.
 /// The first three child arguments are the corresponding handle values in that order.
 /// The observer receives the exact application, command line, and directory before creation.
+/// The launcher derives the SID and leaves profile provisioning to the caller.
 ///
 /// # Errors
 /// Invalid inputs, unsupported creation attributes, or failed suspended inspection
@@ -133,6 +134,123 @@ pub fn launch(
     limits: Limits,
     before_create: impl FnOnce(&OsStr, &OsStr, &OsStr),
 ) -> io::Result<Child> {
+    begin(
+        program,
+        args,
+        Some((source, request, reply)),
+        limits,
+        Mode::Lpac,
+        before_create,
+    )?
+    .verify_and_resume()
+}
+
+#[derive(Clone, Copy)]
+enum Mode {
+    Lpac,
+    #[cfg(feature = "lpac-diagnostics")]
+    Plain,
+    #[cfg(feature = "lpac-diagnostics")]
+    SecurityOnly,
+    #[cfg(feature = "lpac-diagnostics")]
+    ParentEnvironment,
+}
+
+impl Mode {
+    fn opt_out(self) -> bool {
+        match self {
+            Self::Lpac => true,
+            #[cfg(feature = "lpac-diagnostics")]
+            Self::Plain | Self::SecurityOnly => false,
+            #[cfg(feature = "lpac-diagnostics")]
+            Self::ParentEnvironment => true,
+        }
+    }
+
+    fn parent_environment(self) -> bool {
+        match self {
+            Self::Lpac => false,
+            #[cfg(feature = "lpac-diagnostics")]
+            Self::Plain | Self::SecurityOnly => false,
+            #[cfg(feature = "lpac-diagnostics")]
+            Self::ParentEnvironment => true,
+        }
+    }
+}
+
+type Inputs<'a> = (&'a File, &'a PipeReader, &'a PipeWriter);
+
+fn duplicate_inputs((source, request, reply): Inputs<'_>) -> io::Result<(Handle, Handle, Handle)> {
+    Ok((
+        inherit(source.as_raw_handle(), FILE_GENERIC_READ, 0, "source")?,
+        inherit(request.as_raw_handle(), 0, DUPLICATE_SAME_ACCESS, "request")?,
+        inherit(reply.as_raw_handle(), 0, DUPLICATE_SAME_ACCESS, "reply")?,
+    ))
+}
+
+struct Suspended {
+    process: Option<Handle>,
+    thread: Handle,
+    job: Option<(Handle, Handle)>,
+    pid: u32,
+    sid: Sid,
+    limits: Limits,
+    mode: Mode,
+}
+
+impl Drop for Suspended {
+    fn drop(&mut self) {
+        if let Some(process) = &self.process {
+            // SAFETY: the owned handle refers to this fixture's unresumed process.
+            let ended = unsafe { TerminateProcess(process.0, 1) };
+            if ended == 0 {
+                eprintln!(
+                    "{}",
+                    last_error("TerminateProcess (suspended fixture cleanup)")
+                );
+            }
+            if let Err(error) = wait_process(process, Duration::from_secs(2)) {
+                eprintln!("{error}");
+            }
+        }
+    }
+}
+
+impl Suspended {
+    fn verify_and_resume(self) -> io::Result<Child> {
+        let process = self.process.as_ref().expect("suspended process");
+        let (job, _) = self.job.as_ref().expect("Job for witnessed launch");
+        inspect_token(process, &self.sid, self.mode.opt_out())?;
+        inspect_job(process, job, &self.limits)?;
+        inspect_mitigations(process)?;
+        self.resume()
+    }
+
+    fn resume(mut self) -> io::Result<Child> {
+        // SAFETY: the primary thread handle belongs to the inspected child.
+        let previous_count = unsafe { ResumeThread(self.thread.0) };
+        if previous_count == u32::MAX {
+            return Err(last_error("ResumeThread (verified AppContainer)"));
+        }
+        expect_value("ResumeThread suspend count", previous_count, 1)?;
+        let (job, port) = self.job.take().expect("inspected Job");
+        Ok(Child {
+            job,
+            process: self.process.take().expect("inspected process"),
+            port,
+            pid: self.pid,
+        })
+    }
+}
+
+fn begin(
+    program: &Path,
+    args: &[OsString],
+    inherited: Option<Inputs<'_>>,
+    limits: Limits,
+    mode: Mode,
+    before_create: impl FnOnce(&OsStr, &OsStr, &OsStr),
+) -> io::Result<Suspended> {
     let directory = program
         .parent()
         .filter(|path| path.is_absolute() && program.file_name().is_some())
@@ -144,17 +262,26 @@ pub fn launch(
     }
     let application = wide(program.as_os_str())?;
     let cwd = wide(directory.as_os_str())?;
-    let environment = system_environment()?;
+    let environment = if mode.parent_environment() {
+        None
+    } else {
+        Some(system_environment()?)
+    };
     let sid = derive_sid()?;
-    let (job, port) = configure_job(&limits)?;
-    let file = inherit(source.as_raw_handle(), FILE_GENERIC_READ, 0, "source")?;
-    let request = inherit(request.as_raw_handle(), 0, DUPLICATE_SAME_ACCESS, "request")?;
-    let reply = inherit(reply.as_raw_handle(), 0, DUPLICATE_SAME_ACCESS, "reply")?;
-    let handles = [file.0, request.0, reply.0];
+    let job = inherited
+        .as_ref()
+        .map(|_| configure_job(&limits))
+        .transpose()?;
+    let inherited = inherited.map(duplicate_inputs).transpose()?;
+    let handles = inherited
+        .as_ref()
+        .map(|(file, request, reply)| [file.0, request.0, reply.0]);
     let mut command = Vec::new();
     append_arg(&mut command, program.as_os_str())?;
-    for handle in handles {
-        append_arg(&mut command, OsStr::new(&(handle as usize).to_string()))?;
+    if let Some(handles) = handles {
+        for handle in handles {
+            append_arg(&mut command, OsStr::new(&(handle as usize).to_string()))?;
+        }
     }
     for arg in args {
         append_arg(&mut command, arg)?;
@@ -168,58 +295,63 @@ pub fn launch(
     let packages = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
     let child_policy = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
     let mitigation = MITIGATIONS;
-    let jobs = [job.0];
-    let attributes = Attributes::media()?;
+    let jobs = job.as_ref().map(|(handle, _)| [handle.0]);
+    let count = 1 + u32::from(mode.opt_out()) + if jobs.is_some() { 4 } else { 0 };
+    let attributes = Attributes::media(count)?;
     attributes.add(
         PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
         &capabilities,
         "SECURITY_CAPABILITIES",
     )?;
-    attributes.add(
-        PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
-        &packages,
-        "ALL_APPLICATION_PACKAGES_POLICY",
-    )?;
-    attributes.add(PROC_THREAD_ATTRIBUTE_JOB_LIST, &jobs, "JOB_LIST")?;
-    attributes.add(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &handles, "HANDLE_LIST")?;
-    attributes.add(
-        PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
-        &mitigation,
-        "MITIGATION_POLICY",
-    )?;
-    attributes.add(
-        PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
-        &child_policy,
-        "CHILD_PROCESS_POLICY",
-    )?;
-
+    if mode.opt_out() {
+        attributes.add(
+            PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
+            &packages,
+            "ALL_APPLICATION_PACKAGES_POLICY",
+        )?;
+    }
+    if let (Some(jobs), Some(handles)) = (&jobs, &handles) {
+        attributes.add(PROC_THREAD_ATTRIBUTE_JOB_LIST, jobs, "JOB_LIST")?;
+        attributes.add(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles, "HANDLE_LIST")?;
+        attributes.add(
+            PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
+            &mitigation,
+            "MITIGATION_POLICY",
+        )?;
+        attributes.add(
+            PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
+            &child_policy,
+            "CHILD_PROCESS_POLICY",
+        )?;
+    }
     before_create(
         &OsString::from_wide(&application[..application.len() - 1]),
         &OsString::from_wide(&command[..command.len() - 1]),
         &OsString::from_wide(&cwd[..cwd.len() - 1]),
     );
-    let info = create_suspended(&application, &mut command, &cwd, &environment, &attributes)?;
+    let info = create_suspended(
+        &application,
+        &mut command,
+        &cwd,
+        environment.as_deref(),
+        &attributes,
+        handles.is_some(),
+    )?;
     drop(attributes);
-    drop((file, request, reply));
-
-    let process = Handle(info.hProcess);
-    let thread = Handle(info.hThread);
-    inspect_token(&process, &sid)?;
-    inspect_job(&process, &job, &limits)?;
-    inspect_mitigations(&process)?;
-    // SAFETY: the primary thread handle belongs to the inspected child.
-    let previous_count = unsafe { ResumeThread(thread.0) };
-    if previous_count == u32::MAX {
-        return Err(last_error("ResumeThread (verified LPAC)"));
-    }
-    expect_value("ResumeThread suspend count", previous_count, 1)?;
-    Ok(Child {
+    drop(inherited);
+    Ok(Suspended {
+        process: Some(Handle(info.hProcess)),
+        thread: Handle(info.hThread),
         job,
-        process,
-        port,
         pid: info.dwProcessId,
+        sid,
+        limits,
+        mode,
     })
 }
+
+#[cfg(feature = "lpac-diagnostics")]
+pub mod diagnostic;
 
 fn system_environment() -> io::Result<Vec<u16>> {
     let root = std::env::var_os("SystemRoot")
@@ -252,8 +384,9 @@ fn create_suspended(
     application: &[u16],
     command: &mut [u16],
     cwd: &[u16],
-    environment: &[u16],
+    environment: Option<&[u16]>,
     attributes: &Attributes,
+    inherit_handles: bool,
 ) -> io::Result<PROCESS_INFORMATION> {
     let mut startup = STARTUPINFOEXW::default();
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>()
@@ -269,12 +402,12 @@ fn create_suspended(
             command.as_mut_ptr(),
             ptr::null(),
             ptr::null(),
-            1,
+            i32::from(inherit_handles),
             EXTENDED_STARTUPINFO_PRESENT
                 | CREATE_SUSPENDED
                 | CREATE_UNICODE_ENVIRONMENT
                 | DETACHED_PROCESS,
-            environment.as_ptr().cast(),
+            environment.map_or(ptr::null(), |block| block.as_ptr().cast()),
             cwd.as_ptr(),
             &raw const startup.StartupInfo,
             &raw mut info,
@@ -284,10 +417,10 @@ fn create_suspended(
 }
 
 impl Attributes {
-    fn media() -> io::Result<Self> {
+    fn media(count: u32) -> io::Result<Self> {
         let mut size = 0;
         // SAFETY: the documented size query writes size and takes a null list.
-        unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 6, 0, &raw mut size) };
+        unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), count, 0, &raw mut size) };
         let query = io::Error::last_os_error();
         if query.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER.cast_signed()) || size == 0 {
             return Err(os_error("InitializeProcThreadAttributeList (size)", &query));
@@ -295,9 +428,10 @@ impl Attributes {
         let mut storage = vec![0usize; size.div_ceil(size_of::<usize>())];
         let pointer = storage.as_mut_ptr().cast();
         // SAFETY: storage is aligned and contains at least size writable bytes.
-        check_step("InitializeProcThreadAttributeList (six entries)", unsafe {
-            InitializeProcThreadAttributeList(pointer, 6, 0, &raw mut size)
-        })?;
+        check_step(
+            "InitializeProcThreadAttributeList (creation entries)",
+            unsafe { InitializeProcThreadAttributeList(pointer, count, 0, &raw mut size) },
+        )?;
         Ok(Self {
             pointer,
             _storage: storage,
@@ -519,7 +653,7 @@ fn inspect_job(process: &Handle, job: &Handle, limits: &Limits) -> io::Result<()
     )
 }
 
-fn inspect_token(process: &Handle, expected: &Sid) -> io::Result<()> {
+fn inspect_token(process: &Handle, expected: &Sid, lpac: bool) -> io::Result<()> {
     let mut token = ptr::null_mut();
     // SAFETY: the process is live and token receives a newly owned handle.
     check_step("OpenProcessToken (suspended LPAC)", unsafe {
@@ -544,7 +678,7 @@ fn inspect_token(process: &Handle, expected: &Sid) -> io::Result<()> {
     expect_value(
         "GetTokenInformation TokenIsLessPrivilegedAppContainer",
         less_privileged,
-        1,
+        u32::from(lpac),
     )?;
 
     let sid = token_buffer(

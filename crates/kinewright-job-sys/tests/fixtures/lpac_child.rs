@@ -130,8 +130,14 @@ mod child {
         if start != *b"!" {
             return Err(io::Error::other("ReadFile (request): wrong handshake byte"));
         }
+        #[cfg(feature = "lpac-diagnostics")]
+        if case == "profile-registry" {
+            return super::profile_registry::report(target, output);
+        }
         let (api, code) = match case.to_str() {
-            Some("ready") => ready(target, source.is_some()),
+            Some("ready") => ready(target, source.is_some(), true),
+            #[cfg(feature = "lpac-diagnostics")]
+            Some("ready-parent-environment") => ready(target, source.is_some(), false),
             Some("source") => {
                 read_source(source.ok_or_else(|| io::Error::other("missing source handle"))?)
             }
@@ -199,7 +205,7 @@ mod child {
         }
     }
 
-    fn ready(expected_dir: &OsStr, lpac: bool) -> (&'static str, u32) {
+    fn ready(expected_dir: &OsStr, lpac: bool, minimal_environment: bool) -> (&'static str, u32) {
         let actual = match env::current_dir() {
             Ok(path) => path,
             Err(error) => return ("GetCurrentDirectoryW", result_code::<()>(Err(error))),
@@ -207,11 +213,10 @@ mod child {
         if actual != Path::new(expected_dir) {
             return ("GetCurrentDirectoryW(cwd mismatch)", 0);
         }
-        let mut vars = env::vars_os();
-        if !matches!(vars.next(), Some((key, value)) if key.eq_ignore_ascii_case("SystemRoot") && Path::new(&value).is_absolute())
-            || vars.next().is_some()
-        {
-            return ("GetEnvironmentStringsW(expected only SystemRoot)", 0);
+        let system_root =
+            env::var_os("SystemRoot").is_some_and(|value| Path::new(&value).is_absolute());
+        if !system_root || (minimal_environment && env::vars_os().count() != 1) {
+            return ("GetEnvironmentStringsW(unexpected startup environment)", 0);
         }
         // SAFETY: this query has no arguments. A pseudoconsole also returns a window handle.
         if !unsafe { GetConsoleWindow() }.is_null() {
@@ -384,5 +389,132 @@ mod child {
             unsafe { VirtualFree(memory, 0, MEM_RELEASE) };
             0
         }
+    }
+}
+
+#[cfg(all(windows, feature = "lpac-diagnostics"))]
+mod profile_registry {
+    use std::{
+        ffi::OsStr,
+        io::{self, Write},
+        mem::size_of_val,
+        os::windows::ffi::OsStrExt,
+        ptr,
+    };
+    use windows_sys::{
+        Wdk::System::Registry::{KeyNameInformation, NtQueryKey},
+        Win32::{
+            Foundation::ERROR_INVALID_DATA,
+            Security::Isolation::GetAppContainerRegistryLocation,
+            System::Registry::{
+                HKEY, KEY_CREATE_SUB_KEY, KEY_READ, KEY_WRITE, RegCloseKey, RegCreateKeyExW,
+                RegDeleteKeyW,
+            },
+        },
+    };
+
+    struct Key(HKEY);
+    impl Drop for Key {
+        fn drop(&mut self) {
+            // SAFETY: the API transferred ownership of this key handle.
+            unsafe { RegCloseKey(self.0) };
+        }
+    }
+
+    fn open(access: u32) -> Result<Key, i32> {
+        let mut root = ptr::null_mut();
+        // SAFETY: root is a writable out parameter for the current AppContainer's registry.
+        let status = unsafe { GetAppContainerRegistryLocation(access, &raw mut root) };
+        if status < 0 {
+            return Err(status);
+        }
+        if root.is_null() {
+            return Err(0x8000_ffff_u32.cast_signed());
+        }
+        Ok(Key(root))
+    }
+
+    fn key_name(key: &Key) -> String {
+        let mut data = [0u32; 512];
+        let mut returned = 0;
+        // SAFETY: the live key is borrowed, the aligned output is writable, and the length
+        // matches the buffer. KEY_NAME_INFORMATION starts with a DWORD byte count.
+        let status = unsafe {
+            NtQueryKey(
+                key.0,
+                KeyNameInformation,
+                data.as_mut_ptr().cast(),
+                size_of_val(&data).try_into().expect("bounded name buffer"),
+                &raw mut returned,
+            )
+        };
+        if status < 0 {
+            return format!(
+                "NtQueryKey(KeyNameInformation) NTSTATUS {:#010x}",
+                status.cast_unsigned()
+            );
+        }
+        let bytes = data[0] as usize;
+        if bytes == 0
+            || !bytes.is_multiple_of(2)
+            || bytes + 4 > (returned as usize).min(size_of_val(&data))
+        {
+            return format!("NtQueryKey(KeyNameInformation) Win32 {ERROR_INVALID_DATA}");
+        }
+        // SAFETY: successful NtQueryKey wrote bytes of UTF-16 after the DWORD header.
+        let name =
+            unsafe { std::slice::from_raw_parts(data.as_ptr().add(1).cast::<u16>(), bytes / 2) };
+        String::from_utf16_lossy(name)
+    }
+
+    pub fn report(target: &OsStr, output: &mut impl Write) -> io::Result<()> {
+        let read = open(KEY_READ);
+        let writable = open(KEY_CREATE_SUB_KEY);
+        let name = match (&read, &writable) {
+            (Ok(key), _) | (Err(_), Ok(key)) => key_name(key),
+            (Err(status), Err(_)) => format!(
+                "GetAppContainerRegistryLocation(KEY_READ) HRESULT {:#010x}",
+                status.cast_unsigned()
+            ),
+        };
+        let (step, code) = match writable {
+            Ok(root) => create_canary(&root, target),
+            Err(status) => (
+                "GetAppContainerRegistryLocation(KEY_CREATE_SUB_KEY) HRESULT",
+                status.cast_unsigned(),
+            ),
+        };
+        let message = format!("{step}\t{code}\t{name}\n");
+        output.write_all(message.as_bytes())?;
+        output.flush()
+    }
+
+    fn create_canary(root: &Key, target: &OsStr) -> (&'static str, u32) {
+        let target: Vec<u16> = target.encode_wide().chain([0]).collect();
+        let mut key = ptr::null_mut();
+        // SAFETY: root is owned, target is a unique terminated child name, and key is writable.
+        let status = unsafe {
+            RegCreateKeyExW(
+                root.0,
+                target.as_ptr(),
+                0,
+                ptr::null(),
+                0,
+                KEY_WRITE,
+                ptr::null(),
+                &raw mut key,
+                ptr::null_mut(),
+            )
+        };
+        if status != 0 {
+            return ("RegCreateKeyExW(profile canary)", status);
+        }
+        drop(Key(key));
+        // SAFETY: target names the canary just created relative to this exact profile root.
+        let cleanup = unsafe { RegDeleteKeyW(root.0, target.as_ptr()) };
+        if cleanup != 0 {
+            return ("RegCreateKeyExW(profile canary)=0; RegDeleteKeyW", cleanup);
+        }
+        ("RegCreateKeyExW(profile canary)", 0)
     }
 }
