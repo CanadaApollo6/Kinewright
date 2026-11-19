@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   windows-installer:
@@ -84,9 +84,11 @@ jobs:
       - name: Provision FFmpeg, test, build, and package
         run: |
           cargo test --workspace --locked
+          if ($LASTEXITCODE -ne 0) { throw "Workspace tests failed with exit code $LASTEXITCODE." }
 
           $env:RUSTFLAGS = '-C target-feature=+crt-static'
           cargo build --package kinewright-app --release --locked
+          if ($LASTEXITCODE -ne 0) { throw "Release build failed with exit code $LASTEXITCODE." }
 
           Write-Host 'Kinewright.exe runtime dependencies:'
           dumpbin /dependents .\target\release\kinewright-app.exe
@@ -112,26 +114,6 @@ jobs:
             dist/installer/*.sha256
           if-no-files-found: error
           retention-days: 30
-
-      - name: Publish GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $assets = @(Get-ChildItem -LiteralPath .\dist\installer -File | Select-Object -ExpandProperty FullName)
-          if ($assets.Count -ne 2) {
-            throw "Expected installer and checksum assets, found $($assets.Count)."
-          }
-
-          & gh release view $env:GITHUB_REF_NAME *> $null
-          $releaseExists = $LASTEXITCODE -eq 0
-          if ($releaseExists) {
-            & gh release upload $env:GITHUB_REF_NAME @assets --clobber
-          } else {
-            & gh release create $env:GITHUB_REF_NAME @assets --verify-tag --generate-notes --title "Kinewright $env:GITHUB_REF_NAME"
-          }
-          if ($LASTEXITCODE -ne 0) {
-            throw "GitHub release publication failed with exit code $LASTEXITCODE."
-          }
 
   linux-tarball:
     name: Linux tarball
@@ -211,15 +193,40 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  publish:
+    name: Publish GitHub release
+    needs: [windows-installer, linux-tarball]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download workflow artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: Kinewright-*-*-x64
+          path: release-artifacts
+
       - name: Publish GitHub release assets
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          mapfile -t assets < <(find ./dist/tarball -maxdepth 1 -type f | sort)
-          if [[ "${#assets[@]}" -ne 2 ]]; then
-            echo "Expected tarball and checksum assets, found ${#assets[@]}." >&2
+          shopt -s nullglob
+          version="${GITHUB_REF_NAME#v}"
+          installers=(release-artifacts/Kinewright-"${version}"-windows-x64/*.exe)
+          tarballs=(release-artifacts/Kinewright-"${version}"-linux-x64/*.tar.gz)
+          if [[ "${#installers[@]}" -ne 1 || "${#tarballs[@]}" -ne 1 ]]; then
+            echo 'Expected one Windows installer and one Linux tarball.' >&2
             exit 1
           fi
+          assets=("${installers[0]}" "${installers[0]}.sha256" "${tarballs[0]}" "${tarballs[0]}.sha256")
+          for asset in "${assets[@]}"; do
+            if [[ ! -f "$asset" ]]; then
+              echo "Missing release asset: $asset" >&2
+              exit 1
+            fi
+          done
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
           else
