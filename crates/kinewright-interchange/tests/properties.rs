@@ -387,35 +387,50 @@ fn xml_n(fps: u32, start: i64, span: i64) -> String {
     )
 }
 
+/// Reads the workspace lock file, so it needs no cargo, registry or network
+/// where the test runs. It follows every edge the lock file records from this
+/// crate (normal, build and development, on every platform), which is more
+/// than what links.
 #[test]
 fn shipping_dependency_graph_links_no_network_client() {
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-    let tree = std::process::Command::new(env!("CARGO"))
-        .args([
-            "tree",
-            "--offline",
-            "--locked",
-            "-e",
-            "normal",
-            "--manifest-path",
-        ])
-        .arg(manifest)
-        .output()
-        .unwrap();
-    assert!(
-        tree.status.success(),
-        "{}",
-        String::from_utf8_lossy(&tree.stderr)
-    );
-    let stdout = String::from_utf8(tree.stdout).unwrap();
-    let packages: BTreeSet<_> = stdout
-        .lines()
-        .filter_map(|line| {
-            line.trim_start_matches(|c: char| !c.is_ascii_alphabetic())
-                .split_whitespace()
+    let mut edges = std::collections::BTreeMap::<&str, BTreeSet<&str>>::new();
+    let mut package = None;
+    let mut in_dependencies = false;
+    for line in include_str!("../../../Cargo.lock").lines() {
+        if line == "[[package]]" {
+            package = None;
+            in_dependencies = false;
+        } else if let Some(name) = line.strip_prefix("name = \"") {
+            let name = name.trim_end_matches('"');
+            edges.entry(name).or_default();
+            package = Some(name);
+        } else if line == "dependencies = [" {
+            in_dependencies = true;
+        } else if line == "]" {
+            in_dependencies = false;
+        } else if in_dependencies {
+            let dependency = line
+                .trim()
+                .trim_matches(|c| c == '"' || c == ',')
+                .split(' ')
                 .next()
-        })
-        .collect();
+                .unwrap();
+            edges.get_mut(package.unwrap()).unwrap().insert(dependency);
+        }
+    }
+    let mut packages = BTreeSet::new();
+    let mut pending = vec!["kinewright-interchange"];
+    while let Some(name) = pending.pop() {
+        if packages.insert(name) {
+            pending.extend(edges[name].iter().copied());
+        }
+    }
+    for expected in ["kinewright-core", "roxmltree", "serde_json", "proptest"] {
+        assert!(
+            packages.contains(expected),
+            "the lock file walk reached {expected}"
+        );
+    }
     for banned in [
         "reqwest", "hyper", "tokio", "socket2", "rustls", "url", "curl", "mio",
     ] {
