@@ -1,4 +1,7 @@
-use std::{fmt, io};
+use std::{
+    fmt, io,
+    path::{Path, PathBuf},
+};
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_NOT_FOUND, ERROR_PATH_NOT_FOUND};
 
 /// The code returned by Windows, or a successful call whose result was refused.
@@ -23,6 +26,21 @@ pub enum Step {
     InspectChild,
 }
 
+/// The kind of object involved in a profile storage error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StorageKind {
+    File,
+    Directory,
+    RegistryKey,
+}
+
+#[derive(Debug)]
+struct StorageObject {
+    kind: StorageKind,
+    path: PathBuf,
+    access: u32,
+}
+
 /// A launch or profile error with its failing operation and native result.
 #[derive(Debug)]
 pub struct Error {
@@ -30,6 +48,7 @@ pub struct Error {
     pub api: String,
     pub code: Code,
     detail: String,
+    storage: Option<StorageObject>,
 }
 
 impl Error {
@@ -44,7 +63,25 @@ impl Error {
             api: api.into(),
             code,
             detail: detail.into(),
+            storage: None,
         }
+    }
+
+    /// The exact object named by a profile storage error, when available.
+    #[must_use]
+    pub fn storage_object(&self) -> Option<(StorageKind, &Path)> {
+        self.storage
+            .as_ref()
+            .map(|object| (object.kind, object.path.as_path()))
+    }
+
+    pub(super) fn at_storage(mut self, kind: StorageKind, path: &Path, access: u32) -> Self {
+        self.storage = Some(StorageObject {
+            kind,
+            path: path.into(),
+            access,
+        });
+        self
     }
 
     pub(super) fn last(step: Step, api: impl Into<String>, detail: impl Into<String>) -> Self {
@@ -111,7 +148,19 @@ impl fmt::Display for Error {
             Code::HResult(code) => write!(f, " HRESULT {:#010x}", code.cast_unsigned())?,
             Code::UnexpectedResult => write!(f, " unexpected result")?,
         }
-        write!(f, ": {}", self.detail)
+        if let Some(object) = &self.storage {
+            write!(
+                f,
+                ": {:?} [{}] requested access {:#010x}",
+                object.kind,
+                object.path.display(),
+                object.access
+            )?;
+        }
+        if !self.detail.is_empty() {
+            write!(f, ": {}", self.detail)?;
+        }
+        Ok(())
     }
 }
 

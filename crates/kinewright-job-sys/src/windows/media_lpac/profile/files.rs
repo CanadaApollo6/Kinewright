@@ -1,25 +1,20 @@
-use super::{Budget, Error, PackageSids, Sid, Step, acl};
+use super::{Access, Budget, Error, PackageSids, Sid, Step, StorageKind, acl};
 use std::{
     ffi::{OsStr, OsString},
     fs::{File, OpenOptions},
     io,
     mem::offset_of,
-    os::windows::{
-        ffi::OsStringExt,
-        fs::OpenOptionsExt,
-        io::{AsRawHandle, FromRawHandle},
-    },
+    os::windows::{ffi::OsStringExt, fs::OpenOptionsExt, io::AsRawHandle},
     path::{Path, PathBuf},
 };
 use windows_sys::Win32::{
-    Foundation::{ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE},
+    Foundation::ERROR_NO_MORE_FILES,
     Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO,
         FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ,
         FILE_SHARE_WRITE, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
-        GetFileInformationByHandle, GetFileInformationByHandleEx, READ_CONTROL, ReOpenFile,
-        WRITE_DAC,
+        GetFileInformationByHandle, GetFileInformationByHandleEx, READ_CONTROL,
     },
 };
 
@@ -37,124 +32,145 @@ pub(in super::super) struct Node {
     file: File,
     identity: Identity,
     directory: bool,
+    access: u32,
 }
 
 impl Node {
     pub(super) fn open_directory(path: &Path) -> Result<Self, Error> {
-        Self::open(path, true)
+        Self::open(path, true, Access::Verify)
     }
 
-    fn open(path: &Path, directory: bool) -> Result<Self, Error> {
-        // Attribute-only opens do not enforce the sharing mode.
-        let access = READ_CONTROL
-            | FILE_READ_ATTRIBUTES
-            | if directory {
-                FILE_LIST_DIRECTORY
-            } else {
-                FILE_READ_DATA
-            };
+    fn access_mask(directory: bool, mode: Access) -> u32 {
+        let data = if directory {
+            FILE_LIST_DIRECTORY
+        } else if matches!(mode, Access::Verify) {
+            // Pin file names during verification. Attribute-only opens do not enforce sharing.
+            FILE_READ_DATA
+        } else {
+            0
+        };
+        READ_CONTROL | FILE_READ_ATTRIBUTES | data | mode.write_dac()
+    }
+
+    fn kind(directory: bool) -> StorageKind {
+        if directory {
+            StorageKind::Directory
+        } else {
+            StorageKind::File
+        }
+    }
+
+    fn open(path: &Path, directory: bool, mode: Access) -> Result<Self, Error> {
+        let access = Self::access_mask(directory, mode);
+        let kind = Self::kind(directory);
+        let at_object = |error: Error| error.at_storage(kind, path, access);
         let file = OpenOptions::new()
             .access_mode(access)
             .share_mode(SHARE)
             .custom_flags(FLAGS)
             .open(path)
             .map_err(|error| {
-                Error::io(
-                    Step::ReadStorage,
-                    "CreateFileW",
-                    &error,
-                    path.display().to_string(),
-                )
+                let step = match mode {
+                    Access::Verify => Step::ReadStorage,
+                    Access::Prepare => Step::StorageAcl,
+                };
+                at_object(Error::io(step, "CreateFileW", &error, ""))
             })?;
-        let (identity, actual_directory) = checked_info(&file, path)?;
+        let (identity, actual_directory) = checked_info(&file).map_err(at_object)?;
         if directory != actual_directory {
-            return Err(identity_error(path));
+            return Err(at_object(identity_error()));
         }
         Ok(Self {
             path: path.into(),
             file,
             identity,
             directory,
+            access,
         })
     }
 
-    fn open_child(&self, name: &OsStr, file_index: u64, directory: bool) -> Result<Self, Error> {
+    fn open_child(
+        &self,
+        name: &OsStr,
+        file_index: u64,
+        directory: bool,
+        mode: Access,
+    ) -> Result<Self, Error> {
         let path = self.path.join(name);
-        let child = Self::open(&path, directory)?;
+        let child = Self::open(&path, directory, mode)?;
         if child.identity
             != (Identity {
                 volume: self.identity.volume,
                 index: file_index,
             })
         {
-            return Err(identity_error(&path));
+            return Err(child.at_object(identity_error()));
         }
         Ok(child)
     }
 
-    pub(super) fn named_directory(&self, name: &OsStr) -> Result<Self, Error> {
+    pub(super) fn named_directory(&self, name: &OsStr, mode: Access) -> Result<Self, Error> {
+        let invalid = || {
+            identity_error().at_storage(
+                StorageKind::Directory,
+                &self.path.join(name),
+                Self::access_mask(true, mode),
+            )
+        };
         let mut found = None;
         self.children(|entry, file_index, directory| {
             let entry = OsString::from_wide(entry);
             if entry.eq_ignore_ascii_case(name) {
                 if !directory {
-                    return Err(identity_error(&self.path.join(name)));
+                    return Err(invalid());
                 }
-                found = Some(self.open_child(name, file_index, true)?);
+                found = Some(self.open_child(name, file_index, true, mode)?);
                 return Ok(false);
             }
             Ok(true)
         })?;
-        found.ok_or_else(|| identity_error(&self.path.join(name)))
+        found.ok_or_else(invalid)
     }
 
-    fn confirm(&self, file: &File) -> Result<(), Error> {
-        if checked_info(file, &self.path)? != (self.identity, self.directory) {
-            return Err(identity_error(&self.path));
+    fn at_object(&self, error: Error) -> Error {
+        error.at_storage(Self::kind(self.directory), &self.path, self.access)
+    }
+
+    fn confirm(&self) -> Result<(), Error> {
+        let observed = checked_info(&self.file).map_err(|error| self.at_object(error))?;
+        if observed != (self.identity, self.directory) {
+            return Err(self.at_object(identity_error()));
         }
         Ok(())
     }
 
-    pub(super) fn acl_violation(
-        &self,
-        packages: &PackageSids<'_>,
-    ) -> Result<Option<String>, Error> {
-        self.confirm(&self.file)?;
-        acl::violation(&acl::Object::file(&self.file, &self.path), packages)
+    pub(super) fn acl_violation(&self, packages: &PackageSids<'_>) -> Result<Option<Error>, Error> {
+        self.confirm()?;
+        acl::violation(&self.object(), packages)
     }
 
     pub(super) fn protect(&self, packages: &PackageSids<'_>) -> Result<bool, Error> {
         if self.acl_violation(packages)?.is_none() {
             return Ok(false);
         }
-        // SAFETY: ReOpenFile reopens the checked object, not its path; the original stays open.
-        let raw = unsafe {
-            ReOpenFile(
-                self.file.as_raw_handle(),
-                READ_CONTROL | FILE_READ_ATTRIBUTES | WRITE_DAC,
-                SHARE,
-                FLAGS,
-            )
-        };
-        if raw == INVALID_HANDLE_VALUE {
-            return Err(Error::last(
-                Step::StorageAcl,
-                "ReOpenFile",
-                self.path.display().to_string(),
-            ));
-        }
-        // SAFETY: the successful call transferred ownership of a distinct handle.
-        let writable = unsafe { File::from_raw_handle(raw) };
-        self.confirm(&writable)?;
-        acl::protect(&acl::Object::file(&writable, &self.path), packages)?;
+        acl::protect(&self.object(), packages)?;
         Ok(true)
+    }
+
+    fn object(&self) -> acl::Object<'_> {
+        acl::Object::file(
+            &self.file,
+            &self.path,
+            Self::kind(self.directory),
+            self.access,
+        )
     }
 
     fn children(
         &self,
         mut visit: impl FnMut(&[u16], u64, bool) -> Result<bool, Error>,
     ) -> Result<(), Error> {
-        self.confirm(&self.file)?;
+        self.confirm()?;
         let mut storage = [0u64; 1024];
         let mut class = FileIdBothDirectoryRestartInfo;
         loop {
@@ -172,12 +188,12 @@ impl Node {
                 if error.raw_os_error() == Some(ERROR_NO_MORE_FILES.cast_signed()) {
                     return Ok(());
                 }
-                return Err(Error::io(
+                return Err(self.at_object(Error::io(
                     Step::ReadStorage,
                     "GetFileInformationByHandleEx (directory)",
                     &error,
-                    self.path.display().to_string(),
-                ));
+                    "",
+                )));
             }
             class = FileIdBothDirectoryInfo;
             let mut offset = 0;
@@ -187,7 +203,7 @@ impl Node {
                 if remaining < size_of::<FILE_ID_BOTH_DIR_INFO>()
                     || !offset.is_multiple_of(size_of::<u64>())
                 {
-                    return Err(identity_error(&self.path));
+                    return Err(self.at_object(identity_error()));
                 }
                 // SAFETY: this record lies in the aligned buffer just populated by Windows.
                 let raw = unsafe { storage.as_ptr().add(offset / size_of::<u64>()) };
@@ -201,7 +217,7 @@ impl Node {
                     || length > size - NAME_OFFSET
                     || !length.is_multiple_of(2)
                 {
-                    return Err(identity_error(&self.path));
+                    return Err(self.at_object(identity_error()));
                 }
                 // SAFETY: the variable UTF-16 name fits in the checked record and starts aligned.
                 let name = unsafe {
@@ -216,7 +232,7 @@ impl Node {
                 if !matches!(name, [46] | [46, 46]) {
                     if name.is_empty() || name.iter().any(|unit| matches!(*unit, 0 | 47 | 58 | 92))
                     {
-                        return Err(identity_error(&self.path));
+                        return Err(self.at_object(identity_error()));
                     }
                     if !visit(
                         name,
@@ -235,21 +251,21 @@ impl Node {
     }
 }
 
-fn checked_info(file: &File, path: &Path) -> Result<(Identity, bool), Error> {
+fn checked_info(file: &File) -> Result<(Identity, bool), Error> {
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     // SAFETY: file is live and info is writable.
     if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) } == 0 {
         return Err(Error::last(
             Step::ReadStorage,
             "GetFileInformationByHandle",
-            path.display().to_string(),
+            "",
         ));
     }
     if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(Error::unexpected(
             Step::ReadStorage,
             "GetFileInformationByHandle",
-            format!("reparse point {}", path.display()),
+            "reparse point",
         ));
     }
     let directory = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
@@ -257,7 +273,7 @@ fn checked_info(file: &File, path: &Path) -> Result<(Identity, bool), Error> {
         return Err(Error::unexpected(
             Step::ReadStorage,
             "GetFileInformationByHandle",
-            format!("multiply linked file {}", path.display()),
+            "multiply linked file",
         ));
     }
     Ok((
@@ -269,18 +285,15 @@ fn checked_info(file: &File, path: &Path) -> Result<(Identity, bool), Error> {
     ))
 }
 
-fn identity_error(path: &Path) -> Error {
+fn identity_error() -> Error {
     Error::unexpected(
         Step::ReadStorage,
         "GetFileInformationByHandle(Ex)",
-        format!(
-            "storage identity changed or directory record is invalid: {}",
-            path.display()
-        ),
+        "storage identity changed or directory record is invalid",
     )
 }
 
-pub(super) fn walk(root: Node, budget: &mut Budget) -> Result<Vec<Node>, Error> {
+pub(super) fn walk(root: Node, mode: Access, budget: &mut Budget) -> Result<Vec<Node>, Error> {
     budget.take("GetFileInformationByHandleEx")?;
     let mut nodes = vec![root];
     let mut index = 0;
@@ -294,6 +307,7 @@ pub(super) fn walk(root: Node, budget: &mut Budget) -> Result<Vec<Node>, Error> 
                     &OsString::from_wide(name),
                     file_index,
                     directory,
+                    mode,
                 )?);
                 Ok(true)
             })?;
@@ -314,7 +328,7 @@ pub(in super::super) fn check_launch_directory(path: &Path, sid: &Sid) -> Result
         ))
     })?;
     let packages = PackageSids::new(sid)?;
-    if acl::contains_package(&acl::Object::file(&node.file, path), &packages)? {
+    if acl::contains_package(&node.object(), &packages)? {
         return Err(Error::unexpected(
             Step::Environment,
             "GetSecurityInfo",

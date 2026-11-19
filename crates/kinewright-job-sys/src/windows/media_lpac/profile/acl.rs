@@ -1,4 +1,4 @@
-use super::{Code, Error, Sid, Step, sid_text, wide};
+use super::{Code, Error, Sid, Step, StorageKind, sid_text, wide};
 use std::{
     ffi::{OsStr, c_void},
     fs::File,
@@ -51,12 +51,12 @@ impl<'a> PackageSids<'a> {
 
 fn parse_sid(text: &str) -> Result<Local, Error> {
     let name = wide(OsStr::new(text))
-        .map_err(|error| Error::launch(error, Step::StorageAcl, "ConvertStringSidToSidW"))?;
+        .map_err(|error| Error::launch(error, Step::ProfileIdentity, "ConvertStringSidToSidW"))?;
     let mut sid = ptr::null_mut();
     // SAFETY: name is terminated and sid is writable.
     if unsafe { ConvertStringSidToSidW(name.as_ptr(), &raw mut sid) } == 0 {
         return Err(Error::last(
-            Step::StorageAcl,
+            Step::ProfileIdentity,
             "ConvertStringSidToSidW",
             text,
         ));
@@ -66,25 +66,39 @@ fn parse_sid(text: &str) -> Result<Local, Error> {
 
 pub(super) struct Object<'a> {
     handle: HANDLE,
-    kind: SE_OBJECT_TYPE,
-    label: std::borrow::Cow<'a, str>,
+    security_type: SE_OBJECT_TYPE,
+    kind: StorageKind,
+    path: &'a Path,
+    access: u32,
 }
 
 impl<'a> Object<'a> {
-    pub(super) fn file(file: &'a File, path: &'a Path) -> Self {
+    pub(super) fn file(file: &'a File, path: &'a Path, kind: StorageKind, access: u32) -> Self {
         Self {
             handle: file.as_raw_handle(),
-            kind: SE_FILE_OBJECT,
-            label: path.to_string_lossy(),
+            security_type: SE_FILE_OBJECT,
+            kind,
+            path,
+            access,
         }
     }
 
-    pub(super) fn key(handle: HANDLE, path: &'a str) -> Self {
+    pub(super) fn key(handle: HANDLE, path: &'a Path, access: u32) -> Self {
         Self {
             handle,
-            kind: SE_REGISTRY_KEY,
-            label: path.into(),
+            security_type: SE_REGISTRY_KEY,
+            kind: StorageKind::RegistryKey,
+            path,
+            access,
         }
+    }
+
+    fn at_object(&self, error: Error) -> Error {
+        error.at_storage(self.kind, self.path, self.access)
+    }
+
+    fn error(&self, api: &str, code: Code, detail: impl Into<String>) -> Error {
+        self.at_object(Error::new(Step::StorageAcl, api, code, detail))
     }
 
     fn read(&self) -> Result<(Local, *mut ACL), Error> {
@@ -93,7 +107,7 @@ impl<'a> Object<'a> {
         let code = unsafe {
             GetSecurityInfo(
                 self.handle,
-                self.kind,
+                self.security_type,
                 DACL_SECURITY_INFORMATION,
                 ptr::null_mut(),
                 ptr::null_mut(),
@@ -104,21 +118,11 @@ impl<'a> Object<'a> {
         };
         let descriptor = Local(descriptor);
         if code != 0 {
-            return Err(Error::new(
-                Step::StorageAcl,
-                "GetSecurityInfo",
-                Code::Win32(code),
-                self.label.as_ref(),
-            ));
+            return Err(self.error("GetSecurityInfo", Code::Win32(code), ""));
         }
         // SAFETY: a non-null DACL is backed by the live descriptor.
         if dacl.is_null() || unsafe { IsValidAcl(dacl) } == 0 {
-            return Err(Error::new(
-                Step::StorageAcl,
-                "IsValidAcl",
-                Code::Win32(ERROR_INVALID_ACL),
-                self.label.as_ref(),
-            ));
+            return Err(self.error("IsValidAcl", Code::Win32(ERROR_INVALID_ACL), ""));
         }
         Ok((descriptor, dacl))
     }
@@ -137,25 +141,21 @@ fn entries(
         let mut raw = ptr::null_mut();
         // SAFETY: the index names an ACE in a live ACL.
         if unsafe { GetAce(dacl, index, &raw mut raw) } == 0 {
-            return Err(Error::last(
+            return Err(object.at_object(Error::last(
                 Step::StorageAcl,
                 "GetAce",
-                format!("{} entry {index}", object.label),
-            ));
+                format!("entry {index}"),
+            )));
         }
         // SAFETY: GetAce supplied the header of this validated entry.
         let header = unsafe { &*raw.cast::<ACE_HEADER>() };
         let kind = u32::from(header.AceType);
         let offset = offset_of!(ACCESS_ALLOWED_ACE, SidStart);
         let invalid = || {
-            Error::new(
-                Step::StorageAcl,
+            object.error(
                 "GetAce",
                 Code::Win32(ERROR_INVALID_ACL),
-                format!(
-                    "{} unsupported or malformed entry {index}, type {kind}",
-                    object.label
-                ),
+                format!("unsupported or malformed entry {index}, type {kind}"),
             )
         };
         if !matches!(
@@ -189,35 +189,45 @@ fn entries(
 pub(super) fn violation(
     object: &Object<'_>,
     packages: &PackageSids<'_>,
-) -> Result<Option<String>, Error> {
+) -> Result<Option<Error>, Error> {
     let (descriptor, dacl) = object.read()?;
     let (mut control, mut revision) = (0, 0);
     // SAFETY: descriptor is live, and control and revision are writable.
     if unsafe { GetSecurityDescriptorControl(descriptor.0, &raw mut control, &raw mut revision) }
         == 0
     {
-        return Err(Error::last(
+        return Err(object.at_object(Error::last(
             Step::StorageAcl,
             "GetSecurityDescriptorControl",
-            object.label.as_ref(),
-        ));
+            "",
+        )));
     }
     let unprotected = control & SE_DACL_PROTECTED == 0;
     let matching = entries(object, dacl, packages)?;
-    let label = &object.label;
-    if let Some(&(index, sid)) = matching.first() {
-        let sid = sid_text(sid)
-            .map_err(|error| Error::launch(error, Step::StorageAcl, "ConvertSidToStringSidW"))?;
+    let detail = if let Some(&(index, sid)) = matching.first() {
+        let sid = sid_text(sid).map_err(|error| {
+            object.at_object(Error::launch(
+                error,
+                Step::StorageAcl,
+                "ConvertSidToStringSidW",
+            ))
+        })?;
         let protection = if unprotected {
             "unprotected DACL and "
         } else {
             ""
         };
-        return Ok(Some(format!(
-            "{label}: {protection}ACE {index} for package SID {sid}"
-        )));
-    }
-    Ok(unprotected.then(|| format!("{label}: unprotected DACL")))
+        format!("{protection}ACE {index} for package SID {sid}")
+    } else if unprotected {
+        "unprotected DACL".into()
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(object.error(
+        "GetSecurityInfo",
+        Code::UnexpectedResult,
+        detail,
+    )))
 }
 
 pub(super) fn contains_package(
@@ -233,18 +243,18 @@ pub(super) fn protect(object: &Object<'_>, packages: &PackageSids<'_>) -> Result
     for (index, _) in entries(object, dacl, packages)?.into_iter().rev() {
         // SAFETY: dacl is writable, and deleting in reverse keeps earlier indices valid.
         if unsafe { DeleteAce(dacl, index) } == 0 {
-            return Err(Error::last(
+            return Err(object.at_object(Error::last(
                 Step::StorageAcl,
                 "DeleteAce",
-                format!("{} entry {index}", object.label),
-            ));
+                format!("entry {index}"),
+            )));
         }
     }
     // SAFETY: the new DACL is live and leaves owner/group untouched.
     let code = unsafe {
         SetSecurityInfo(
             object.handle,
-            object.kind,
+            object.security_type,
             DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
             ptr::null_mut(),
             ptr::null_mut(),
@@ -253,12 +263,7 @@ pub(super) fn protect(object: &Object<'_>, packages: &PackageSids<'_>) -> Result
         )
     };
     if code != 0 {
-        return Err(Error::new(
-            Step::StorageAcl,
-            "SetSecurityInfo",
-            Code::Win32(code),
-            object.label.as_ref(),
-        ));
+        return Err(object.error("SetSecurityInfo", Code::Win32(code), ""));
     }
     Ok(())
 }

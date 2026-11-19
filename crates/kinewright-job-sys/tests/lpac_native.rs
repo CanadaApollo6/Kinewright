@@ -550,7 +550,19 @@ fn assert_refusal_then_prepare(fixture: &Fixture, stale: &VerifiedProfile<'_>, d
     eprintln!("verification refused: {observed}; launch refused: {rejected}");
     for error in [observed, rejected] {
         assert_eq!(error.step, Step::StorageAcl, "{error}");
-        assert!(error.to_string().contains(detail), "{error}");
+        let (kind, path) = error
+            .storage_object()
+            .expect("ACL error identifies its object");
+        let access = match kind {
+            media_lpac::StorageKind::RegistryKey => "0x00020009",
+            media_lpac::StorageKind::Directory | media_lpac::StorageKind::File => "0x00020081",
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("[{}] requested access {access}", path.display())),
+            "{error}"
+        );
+        assert!(message.contains(detail), "{error}");
     }
     assert_eq!(
         profile.prepare().expect("repair unsafe profile storage"),
@@ -937,10 +949,10 @@ impl TestProfile {
         api.remove()
             .unwrap_or_else(|error| panic!("remove stale profile: {error}"));
         let profile = Self { api, _lease: lease };
-        profile
-            .api
-            .prepare()
-            .unwrap_or_else(|error| panic!("prepare profile: {error}"));
+        profile.api.prepare().unwrap_or_else(|error| {
+            profile_controls::report_prepare_failure(&error);
+            panic!("prepare profile: {error}");
+        });
         profile
     }
 }

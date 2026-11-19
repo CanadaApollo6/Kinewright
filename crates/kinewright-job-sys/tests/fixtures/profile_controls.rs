@@ -1,5 +1,5 @@
 use super::{Fixture, Local, SPAWNING, TIMEOUT, copy_wide, env_path, wide};
-use kinewright_job_sys::media_lpac::Profile;
+use kinewright_job_sys::media_lpac::{Error, Profile, StorageKind};
 use std::{
     ffi::OsString,
     fs, io,
@@ -17,8 +17,9 @@ use windows_sys::Win32::{
             GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT, SE_REGISTRY_KEY,
             SetNamedSecurityInfoW, SetSecurityInfo,
         },
-        DACL_SECURITY_INFORMATION, GetTokenInformation, PROTECTED_DACL_SECURITY_INFORMATION,
-        SECURITY_CAPABILITIES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        DACL_SECURITY_INFORMATION, GetTokenInformation, OWNER_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, SECURITY_CAPABILITIES, TOKEN_QUERY, TOKEN_USER,
+        TokenUser,
     },
     Storage::FileSystem::READ_CONTROL,
     System::{
@@ -323,26 +324,94 @@ fn descriptor(text: &str) -> (Local, *mut ACL) {
 }
 
 fn sddl(descriptor: &Local) -> String {
+    try_sddl(descriptor, DACL_SECURITY_INFORMATION)
+        .expect("ConvertSecurityDescriptorToStringSecurityDescriptorW (DACL snapshot)")
+}
+
+fn try_sddl(descriptor: &Local, information: u32) -> io::Result<String> {
     let mut text = ptr::null_mut();
     // SAFETY: descriptor is live and text receives an owned string.
     let ok = unsafe {
         ConvertSecurityDescriptorToStringSecurityDescriptorW(
             descriptor.0,
             SDDL_REVISION_1,
-            DACL_SECURITY_INFORMATION,
+            information,
             &raw mut text,
             ptr::null_mut(),
         )
     };
-    assert_ne!(
-        ok, 0,
-        "ConvertSecurityDescriptorToStringSecurityDescriptorW"
-    );
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
     let _text = Local(text.cast());
     // SAFETY: the successful conversion supplied terminated UTF-16.
     unsafe { copy_wide(text) }
         .into_string()
-        .expect("ASCII DACL snapshot")
+        .map_err(|_| io::Error::other("invalid UTF-16 security descriptor"))
+}
+
+pub(super) fn report_prepare_failure(error: &Error) {
+    let Some((kind, path)) = error.storage_object() else {
+        eprintln!("prepare profile diagnostic: this failure did not identify a storage object");
+        return;
+    };
+    let (name, object_type) = if kind == StorageKind::RegistryKey {
+        let Ok(relative) = path.strip_prefix("HKEY_USERS") else {
+            eprintln!(
+                "prepare profile diagnostic: unexpected registry path {}",
+                path.display()
+            );
+            return;
+        };
+        let mut name = OsString::from(r"USERS\");
+        name.push(relative.as_os_str());
+        (wide(name), SE_REGISTRY_KEY)
+    } else {
+        (wide(path), SE_FILE_OBJECT)
+    };
+    let information = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    let (mut owner, mut raw) = (ptr::null_mut(), ptr::null_mut());
+    // SAFETY: name is terminated and both selected outputs are writable.
+    let code = unsafe {
+        GetNamedSecurityInfoW(
+            name.as_ptr(),
+            object_type,
+            information,
+            &raw mut owner,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &raw mut raw,
+        )
+    };
+    let descriptor = Local(raw);
+    if code != 0 {
+        eprintln!(
+            "prepare profile diagnostic [{kind:?} {}]: GetNamedSecurityInfoW Win32 {code} ({code:#010x}), owner and SDDL unavailable",
+            path.display()
+        );
+        return;
+    }
+    let mut text = ptr::null_mut();
+    let owner = if owner.is_null() {
+        "missing SID".to_owned()
+    } else {
+        // SAFETY: the owner SID is backed by the live descriptor and text is writable.
+        if unsafe { ConvertSidToStringSidW(owner, &raw mut text) } == 0 {
+            format!("ConvertSidToStringSidW: {}", io::Error::last_os_error())
+        } else {
+            let _text = Local(text.cast());
+            // SAFETY: conversion returned allocated NUL-terminated UTF-16.
+            unsafe { copy_wide(text) }.to_string_lossy().into_owned()
+        }
+    };
+    let sddl = try_sddl(&descriptor, information).unwrap_or_else(|error| {
+        format!("ConvertSecurityDescriptorToStringSecurityDescriptorW: {error}")
+    });
+    eprintln!(
+        "prepare profile diagnostic [{kind:?} {}]: owner={owner}; SDDL={sddl}",
+        path.display()
+    );
 }
 
 pub(super) fn file_sddl(path: &Path) -> String {

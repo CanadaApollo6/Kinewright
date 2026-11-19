@@ -68,7 +68,7 @@ mod error;
 mod profile;
 mod token;
 
-pub use error::{Code, Error, Step};
+pub use error::{Code, Error, Step, StorageKind};
 pub use profile::{Preparation, Profile, VerifiedProfile};
 use token::inspect_token;
 

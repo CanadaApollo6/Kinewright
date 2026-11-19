@@ -581,9 +581,11 @@ directory. Use `SECURITY_CAPABILITIES` with
 Preparation can run again at app startup. It never deletes directories,
 files, or named streams. Verify the profile root against the pinned
 `Packages` directory and check every descendant's identity. Refuse reparse
-points or changed identities. Apply protected DACLs to the checked objects
-by handle. Cover `Packages\<name>` and every retained descendant, and the
-profile registry storage key and every subkey. Remove every ACE for the
+points or changed identities. Open each storage object with `WRITE_DAC`
+during preparation and apply the protected DACL on the same checked handle.
+Verification opens storage read-only. Cover `Packages\<name>` and every
+retained descendant, and the profile registry storage key and every subkey.
+Remove every ACE for the
 container SID, ALL APPLICATION PACKAGES, and ALL RESTRICTED APPLICATION
 PACKAGES. Open the registry key by moniker under the current user's classes
 hive at `Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage`.

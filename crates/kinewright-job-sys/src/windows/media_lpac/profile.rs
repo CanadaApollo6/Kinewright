@@ -1,4 +1,4 @@
-use super::{Code, Error, Sid, Step, token::sid_text, wide};
+use super::{Code, Error, Sid, Step, StorageKind, token::sid_text, wide};
 use std::{
     ffi::{OsStr, OsString},
     io,
@@ -38,6 +38,21 @@ const NODE_LIMIT: usize = 256;
 const CLASSES_KEY: &str = r"Software\Classes";
 const STORAGE_KEY: &str =
     r"Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage";
+
+#[derive(Clone, Copy)]
+enum Access {
+    Verify,
+    Prepare,
+}
+
+impl Access {
+    fn write_dac(self) -> u32 {
+        match self {
+            Self::Verify => 0,
+            Self::Prepare => WRITE_DAC,
+        }
+    }
+}
 
 struct Budget(usize);
 impl Budget {
@@ -132,7 +147,7 @@ impl Profile {
         };
         let ac = path.ok_or_else(|| self.missing())?;
         let root = self.root(&ac)?;
-        let storage = Storage::open(self, root)?;
+        let storage = Storage::open(self, root, Access::Prepare)?;
         let packages = PackageSids::new(&sid)?;
         let changed = storage.protect(&packages)?;
         // Read through fresh handles so installation cannot report a cached ACL.
@@ -182,14 +197,10 @@ impl Profile {
     pub(super) fn check(&self) -> Result<(Sid, Storage), Error> {
         let sid = self.expected()?;
         let ac = self.registered()?;
-        let storage = Storage::open(self, self.root(&ac)?)?;
+        let storage = Storage::open(self, self.root(&ac)?, Access::Verify)?;
         let packages = PackageSids::new(&sid)?;
         if let Some(violation) = storage.acl_violation(&packages)? {
-            return Err(Error::unexpected(
-                Step::StorageAcl,
-                "GetSecurityInfo",
-                violation,
-            ));
+            return Err(violation);
         }
         Ok((sid, storage))
     }
@@ -343,7 +354,7 @@ pub(super) struct Storage {
 }
 
 impl Storage {
-    fn open(profile: &Profile, root: &Path) -> Result<Self, Error> {
+    fn open(profile: &Profile, root: &Path, access: Access) -> Result<Self, Error> {
         let packages = root.parent().ok_or_else(|| {
             Error::unexpected(
                 Step::ReadStorage,
@@ -356,15 +367,15 @@ impl Storage {
         let name = root
             .file_name()
             .expect("profile root validated by Profile::root");
-        let root = packages.named_directory(name)?;
+        let root = packages.named_directory(name, access)?;
         Ok(Self {
             _packages: packages,
-            files: files::walk(root, &mut budget)?,
-            registry: Key::walk(profile, &mut budget)?,
+            files: files::walk(root, access, &mut budget)?,
+            registry: Key::walk(profile, access, &mut budget)?,
         })
     }
 
-    fn acl_violation(&self, packages: &PackageSids<'_>) -> Result<Option<String>, Error> {
+    fn acl_violation(&self, packages: &PackageSids<'_>) -> Result<Option<Error>, Error> {
         let mut bad = None;
         for node in &self.files {
             let violation = node.acl_violation(packages)?;
@@ -384,10 +395,7 @@ impl Storage {
         }
         for key in self.registry.iter().rev() {
             if acl::violation(&key.object(), packages)?.is_some() {
-                // An empty name on a nonpredefined handle reopens that key, even if renamed.
-                let writable =
-                    Key::open_at(key.handle, &[0], key.path.clone(), READ_CONTROL | WRITE_DAC)?;
-                acl::protect(&writable.object(), packages)?;
+                acl::protect(&key.object(), packages)?;
                 changed = true;
             }
         }
@@ -397,11 +405,12 @@ impl Storage {
 
 struct Key {
     handle: HKEY,
-    path: String,
+    path: PathBuf,
+    access: u32,
 }
 
 impl Key {
-    fn walk(profile: &Profile, budget: &mut Budget) -> Result<Vec<Self>, Error> {
+    fn walk(profile: &Profile, access: Access, budget: &mut Budget) -> Result<Vec<Self>, Error> {
         budget.take("RegOpenKeyExW")?;
         // HKCU\Software\Classes is a system alias for the current user's classes hive.
         // Start at the hive itself so every component we open can reject links.
@@ -412,13 +421,18 @@ impl Key {
         let classes = Self::open_at(
             HKEY_USERS,
             &wide(OsStr::new(&hive)).map_err(input_error)?,
-            format!(r"HKEY_USERS\{hive}"),
+            PathBuf::from(format!(r"HKEY_USERS\{hive}")),
             0,
         )?;
-        let components = STORAGE_KEY
-            .split('\\')
-            .chain(std::iter::once(profile.name.as_str()));
-        let mut keys = vec![classes.open_path(components)?];
+        let parent = classes.open_path(STORAGE_KEY.split('\\'))?;
+        let name = OsStr::new(&profile.name);
+        let rights = READ_CONTROL | access.write_dac();
+        let mut keys = vec![Self::open_at(
+            parent.handle,
+            &wide(name).map_err(input_error)?,
+            parent.child_path(name),
+            rights,
+        )?];
         let mut parent_index = 0;
         while parent_index < keys.len() {
             let parent = &keys[parent_index];
@@ -444,12 +458,7 @@ impl Key {
                     break;
                 }
                 if code != 0 {
-                    return Err(Error::new(
-                        Step::ReadStorage,
-                        "RegEnumKeyExW",
-                        Code::Win32(code),
-                        &parent.path,
-                    ));
+                    return Err(parent.read_error("RegEnumKeyExW", Code::Win32(code), ""));
                 }
                 budget.take("RegEnumKeyExW")?;
                 let len = len as usize;
@@ -458,23 +467,14 @@ impl Key {
                     || name[len] != 0
                     || name[..len].iter().any(|unit| matches!(*unit, 0 | 92))
                 {
-                    return Err(Error::unexpected(
-                        Step::ReadStorage,
+                    return Err(parent.read_error(
                         "RegEnumKeyExW",
-                        &parent.path,
+                        Code::UnexpectedResult,
+                        "invalid subkey name",
                     ));
                 }
-                let path = format!(
-                    r"{}\{}",
-                    parent.path,
-                    OsString::from_wide(&name[..len]).to_string_lossy()
-                );
-                children.push(Self::open_at(
-                    parent.handle,
-                    &name[..=len],
-                    path,
-                    READ_CONTROL,
-                )?);
+                let path = parent.child_path(&OsString::from_wide(&name[..len]));
+                children.push(Self::open_at(parent.handle, &name[..=len], path, rights)?);
                 index += 1;
             }
             keys.extend(children);
@@ -483,39 +483,58 @@ impl Key {
         Ok(keys)
     }
 
+    fn child_path(&self, name: &OsStr) -> PathBuf {
+        let mut path = self.path.as_os_str().to_os_string();
+        path.push(r"\");
+        path.push(name);
+        path.into()
+    }
+
     fn open_path<'a>(
         mut self,
         components: impl IntoIterator<Item = &'a str>,
     ) -> Result<Self, Error> {
         for component in components {
-            let name = wide(OsStr::new(component)).map_err(input_error)?;
-            let path = format!(r"{}\{component}", self.path);
+            let component = OsStr::new(component);
+            let name = wide(component).map_err(input_error)?;
+            let path = self.child_path(component);
             self = Self::open_at(self.handle, &name, path, READ_CONTROL)?;
         }
         Ok(self)
     }
 
-    fn open_at(parent: HKEY, name: &[u16], path: String, rights: u32) -> Result<Self, Error> {
+    fn open_at(parent: HKEY, name: &[u16], path: PathBuf, rights: u32) -> Result<Self, Error> {
+        let access = rights | KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS;
         let mut handle = ptr::null_mut();
-        // SAFETY: parent is live and name is either the terminated subkey or the empty self name.
+        // SAFETY: parent is live and name is a terminated subkey name.
         let code = unsafe {
             RegOpenKeyExW(
                 parent,
                 name.as_ptr(),
                 REG_OPTION_OPEN_LINK,
-                rights | KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS,
+                access,
                 &raw mut handle,
             )
         };
         if code != 0 {
-            return Err(Error::new(
-                Step::ReadStorage,
-                "RegOpenKeyExW",
-                Code::Win32(code),
-                path,
-            ));
+            let step = if rights & WRITE_DAC != 0 {
+                Step::StorageAcl
+            } else {
+                Step::ReadStorage
+            };
+            return Err(
+                Error::new(step, "RegOpenKeyExW", Code::Win32(code), "").at_storage(
+                    StorageKind::RegistryKey,
+                    &path,
+                    access,
+                ),
+            );
         }
-        let key = Self { handle, path };
+        let key = Self {
+            handle,
+            path,
+            access,
+        };
         let link_value = wide(OsStr::new("SymbolicLinkValue")).map_err(input_error)?;
         let (mut kind, mut size) = (0, 0);
         // SAFETY: key is open and the terminated value name and outputs are live.
@@ -530,25 +549,28 @@ impl Key {
             )
         };
         if code != 0 && code != ERROR_FILE_NOT_FOUND {
-            return Err(Error::new(
-                Step::ReadStorage,
-                "RegQueryValueExW",
-                Code::Win32(code),
-                &key.path,
-            ));
+            return Err(key.read_error("RegQueryValueExW", Code::Win32(code), "SymbolicLinkValue"));
         }
         if code == 0 && kind == REG_LINK {
-            return Err(Error::unexpected(
-                Step::ReadStorage,
+            return Err(key.read_error(
                 "RegQueryValueExW",
-                format!("registry link {}", key.path),
+                Code::UnexpectedResult,
+                "registry link",
             ));
         }
         Ok(key)
     }
 
     fn object(&self) -> acl::Object<'_> {
-        acl::Object::key(self.handle, &self.path)
+        acl::Object::key(self.handle, &self.path, self.access)
+    }
+
+    fn read_error(&self, api: &str, code: Code, detail: &str) -> Error {
+        Error::new(Step::ReadStorage, api, code, detail).at_storage(
+            StorageKind::RegistryKey,
+            &self.path,
+            self.access,
+        )
     }
 }
 
@@ -608,7 +630,11 @@ mod tests {
             )
         };
         assert_eq!(code, 0, "RegCreateKeyExW [{path}] Win32 {code}");
-        Key { handle, path }
+        Key {
+            handle,
+            path: path.into(),
+            access: KEY_ALL_ACCESS,
+        }
     }
 
     #[test]
@@ -676,15 +702,15 @@ mod tests {
         // SAFETY: the successful open transferred the control handle.
         unsafe { RegCloseKey(child) };
 
+        let root_link = root.child_path(OsStr::new("link"));
         let Err(error) = root.open_path(["link", "leaf"]) else {
             panic!("verified registry walk followed a link");
         };
         assert_eq!(error.step, Step::ReadStorage);
-        assert!(
-            error
-                .to_string()
-                .contains(&format!(r"registry link {path}\link")),
-            "{error}"
+        assert_eq!(
+            error.storage_object(),
+            Some((StorageKind::RegistryKey, root_link.as_path()))
         );
+        assert!(error.to_string().contains("registry link"), "{error}");
     }
 }
