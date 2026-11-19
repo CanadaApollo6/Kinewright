@@ -208,7 +208,10 @@ pub use derived::{
 #[cfg(any(test, feature = "test-util"))]
 pub use engine::{AgentLaneHold, PreviewDecodeHold};
 pub use engine::{FfmpegMediaEngine, SessionMedia};
-pub use export::{NORMALIZATION_MAXIMUM_GAIN_HUNDREDTHS, NORMALIZATION_MINIMUM_GAIN_HUNDREDTHS};
+pub use export::{
+    NORMALIZATION_MAXIMUM_GAIN_HUNDREDTHS, NORMALIZATION_MINIMUM_GAIN_HUNDREDTHS, OwnedExport,
+    OwnedExportTarget,
+};
 pub use kinewright_core::{
     LutAvailabilityKind, LutAvailabilityStatus, MediaAvailabilityKind, MediaAvailabilityStatus,
     MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus, MediaCacheInventory,

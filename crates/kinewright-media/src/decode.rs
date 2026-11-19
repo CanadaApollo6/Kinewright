@@ -2080,12 +2080,18 @@ impl VideoDecoder {
                 None => media_input(path)?,
             })
         };
-        let stream = input
-            .streams()
-            .best(ffmpeg::media::Type::Video)
-            .ok_or_else(|| {
-                MediaError::Backend(format!("media {} has no video stream", path.display()))
-            })?;
+        let stream = match certified.and_then(crate::owned_io::CertifiedSource::selected_streams) {
+            Some((video, _)) => video
+                .and_then(|index| input.stream(index))
+                .filter(|stream| stream.parameters().medium() == ffmpeg::media::Type::Video)
+                .ok_or(MediaError::OwnedMediaOperationUnavailable)?,
+            None => input
+                .streams()
+                .best(ffmpeg::media::Type::Video)
+                .ok_or_else(|| {
+                    MediaError::Backend(format!("media {} has no video stream", path.display()))
+                })?,
+        };
         let stream_index = stream.index();
         let stream_time_base = stream.time_base();
         let stream_start = normalized_start(stream.start_time());
@@ -2134,7 +2140,7 @@ impl VideoDecoder {
         let flip_horizontal = if is_still_image_codec(decoder.id()) && no_audio {
             if let Some(orientation) = if let Some(source) = certified {
                 source
-                    .still_orientation()
+                    .still_orientation(stop)
                     .map_err(|error| MediaError::Backend(error.to_string()))?
             } else {
                 crate::still_orientation::still_file_orientation(path)

@@ -84,16 +84,43 @@ pub fn decode_audio_range(
     output_channels: u16,
     cancellation: &ExportCancellation,
 ) -> Result<Vec<f32>, MediaError> {
+    decode_audio_range_with_source(
+        path,
+        source_fps,
+        source_from..source_end,
+        output_rate,
+        output_channels,
+        cancellation,
+        None,
+    )
+}
+
+pub(crate) fn decode_audio_range_with_source(
+    path: &Path,
+    source_fps: Rational,
+    source_range: std::ops::Range<TimeCode>,
+    output_rate: u32,
+    output_channels: u16,
+    cancellation: &ExportCancellation,
+    source: Option<&crate::owned_io::CertifiedSource>,
+) -> Result<Vec<f32>, MediaError> {
     if cancellation.is_cancelled() {
         return Err(MediaError::Cancelled);
     }
-    let start_sample = frame_to_samples(source_from, output_rate, source_fps);
-    let end_sample = frame_to_samples(source_end, output_rate, source_fps);
+    let start_sample = frame_to_samples(source_range.start, output_rate, source_fps);
+    let end_sample = frame_to_samples(source_range.end, output_rate, source_fps);
     let expected = usize::try_from(end_sample.saturating_sub(start_sample))
         .unwrap_or(usize::MAX)
         .saturating_mul(usize::from(output_channels));
-    let mut decoder =
-        AudioDecoder::open(path, output_rate, output_channels, start_sample, end_sample)?;
+    let mut decoder = AudioDecoder::open_with_source_and_cancel(
+        path,
+        output_rate,
+        output_channels,
+        start_sample,
+        end_sample,
+        source,
+        source.map(|_| cancellation.shared_signal()),
+    )?;
     let mut samples = Vec::with_capacity(expected);
     while let Some(chunk) = decoder.next_chunk()? {
         if cancellation.is_cancelled() {
@@ -2239,6 +2266,16 @@ pub(crate) fn process_buffer_static(
     channels: usize,
     input: &[f32],
 ) -> Result<Vec<f32>, MediaError> {
+    process_buffer_static_with_check(effect, sample_rate, channels, input, || Ok(()))
+}
+
+pub(crate) fn process_buffer_static_with_check(
+    effect: &Effect,
+    sample_rate: u32,
+    channels: usize,
+    input: &[f32],
+    mut check: impl FnMut() -> Result<(), MediaError>,
+) -> Result<Vec<f32>, MediaError> {
     if channels == 0 {
         return Err(MediaError::Backend(
             "a static audio node needs at least one channel".to_owned(),
@@ -2249,7 +2286,10 @@ pub(crate) fn process_buffer_static(
     let silence = vec![0.0_f32; channels];
     let mut frame = vec![0.0_f32; channels];
     let mut output = Vec::with_capacity(input.len().saturating_add(latency_frames * channels));
-    for source in input.chunks_exact(channels) {
+    for (index, source) in input.chunks_exact(channels).enumerate() {
+        if index % 1_024 == 0 {
+            check()?;
+        }
         frame.copy_from_slice(source);
         runtime.process_frame(&mut frame, &silence, TimeCode::ZERO, sample_rate);
         output.extend_from_slice(&frame);
@@ -4829,8 +4869,31 @@ impl AudioDecoder {
         end_sample: u64,
         source: Option<&crate::owned_io::CertifiedSource>,
     ) -> Result<Self, MediaError> {
+        Self::open_with_source_and_cancel(
+            path,
+            output_rate,
+            output_channels,
+            target_sample,
+            end_sample,
+            source,
+            None,
+        )
+    }
+
+    fn open_with_source_and_cancel(
+        path: &Path,
+        output_rate: u32,
+        output_channels: u16,
+        target_sample: u64,
+        end_sample: u64,
+        source: Option<&crate::owned_io::CertifiedSource>,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<Self, MediaError> {
         let mut input = if let Some(source) = source {
-            crate::owned_io::DecodeInput::open(source, Arc::new(AtomicBool::new(false)))?
+            crate::owned_io::DecodeInput::open(
+                source,
+                cancel.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+            )?
         } else {
             crate::owned_io::DecodeInput::Legacy(media_input(path)?)
         };

@@ -202,6 +202,8 @@ impl DecodeInput {
 fn media_io_error(error: OwnedIoError) -> kinewright_core::MediaError {
     if let OwnedIoError::UnsupportedCodec(codec) = error {
         kinewright_core::MediaError::UnsupportedCodec { codec }
+    } else if matches!(error, OwnedIoError::Cancelled) {
+        kinewright_core::MediaError::Cancelled
     } else if matches!(error, OwnedIoError::TemporarilyUnavailable) {
         ReadAuthority::temporarily_unavailable()
     } else {
@@ -330,8 +332,9 @@ impl CertifiedSource {
 
     pub(crate) fn still_orientation(
         &self,
+        stop: Option<&Arc<AtomicBool>>,
     ) -> Result<Option<crate::still_orientation::StillOrientation>, OwnedIoError> {
-        let mut cursor = self.cursor(Arc::new(AtomicBool::new(false)))?;
+        let mut cursor = self.cursor_with_cancellation(stop.cloned())?;
         let mut header = vec![0_u8; AVIO_BUFFER_BYTES];
         let count = cursor.read(&mut header)?;
         Ok(crate::still_orientation::still_bytes_orientation(

@@ -258,3 +258,6 @@ kinewright_project operation_history::stored::session_model::long_generated_sess
 history_capacity_matrix twenty_thousand_clip_project_opens_edits_forks_merges_and_saves crates/kinewright-project/tests/history_capacity_matrix.rs linux-only # 104/0 Native product save, cold open, task cut, candidate merge and person publication at 20000 clips
 properties otio_fuzz_slow crates/kinewright-interchange/tests/properties.rs any # IX1 50,000 OTIO cases
 properties fcpxml_fuzz_slow crates/kinewright-interchange/tests/properties.rs any # IX1 50,000 FCPXML cases
+kinewright_media export::owned::tests::s5_owned_export_keeps_pinned_decodes_and_matches_ordinary_export crates/kinewright-media/src/export/owned_tests.rs any # Owned delivery equivalence and replaced AV, LUT, and still locators
+kinewright_media export::owned::tests::s5_owned_export_cancel_and_revocation_discard_partial_and_release_reservations crates/kinewright-media/src/export/owned_tests.rs any # Owned delivery cancellation and authority during encoding and before retention
+kinewright_media export::owned::tests::s5_owned_export_refuses_an_unrenderable_manifest_font_and_enforces_stage_limits crates/kinewright-media/src/export/owned_tests.rs any # Owned delivery typed font refusal and exclusive bounded staging

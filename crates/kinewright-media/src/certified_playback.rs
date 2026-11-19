@@ -3,7 +3,10 @@
 use super::{CertifiedSource, LifetimeGuard, ReadAuthority};
 use crate::LutLibrary;
 use kinewright_core::{AssetId, Document, MediaError};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, OnceLock},
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct PlaybackAuthority(Arc<()>);
@@ -26,6 +29,7 @@ pub struct PlaybackInputs {
     pub(crate) sources: BTreeMap<AssetId, CertifiedSource>,
     pub(crate) lut: Arc<LutLibrary>,
     pub(crate) lifetime: LifetimeGuard,
+    pub(crate) unsupported_export_font: Option<String>,
 }
 impl PlaybackInputs {
     pub fn with_read_authority(mut self, authority: ReadAuthority) -> Result<Self, MediaError> {
@@ -72,6 +76,9 @@ impl PlaybackInputs {
         )?;
         inputs.authority = self.authority.clone();
         inputs.read_authority.clone_from(&self.read_authority);
+        inputs
+            .unsupported_export_font
+            .clone_from(&self.unsupported_export_font);
         Ok(inputs)
     }
     /// The project owner supplies manifest-bound sources and resource leases.
@@ -123,8 +130,26 @@ impl PlaybackInputs {
             sources,
             lut,
             lifetime,
+            unsupported_export_font: None,
         })
     }
+    /// Record the font identities in the owner's checked input manifest.
+    /// The title renderer has one built-in face and consumes its immutable bytes.
+    #[must_use]
+    pub fn with_manifest_fonts<'a>(
+        mut self,
+        fonts: impl IntoIterator<Item = (&'a str, &'a str, u64)>,
+    ) -> Self {
+        static TITLE_FONT_DIGEST: OnceLock<String> = OnceLock::new();
+        let bytes = kinewright_core::title_font_bytes();
+        let digest = TITLE_FONT_DIGEST.get_or_init(|| crate::sha256_bytes(bytes));
+        self.unsupported_export_font = fonts.into_iter().find_map(|(id, hash, length)| {
+            (id != "font:Inter" || hash != digest.as_str() || length != bytes.len() as u64)
+                .then(|| format!("{id} (sha256 {hash})"))
+        });
+        self
+    }
+
     pub(crate) fn source(&self, id: AssetId) -> Result<CertifiedSource, MediaError> {
         self.check_read_authority()?;
         self.sources

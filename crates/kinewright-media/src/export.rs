@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     collections::{BTreeMap, HashMap},
     fs,
     path::{Path, PathBuf},
@@ -25,7 +26,7 @@ use kinewright_core::{
 
 use crate::{
     audio::{
-        AudioMixProcessor, ClipAudioShaping, decode_audio_range, detect_clicks,
+        AudioMixProcessor, ClipAudioShaping, decode_audio_range_with_source, detect_clicks,
         graph_latency_frames, limit_audio_mix, process_buffer_static, stage_latency_frames,
     },
     clock::{frame_to_samples, samples_to_frame},
@@ -33,6 +34,7 @@ use crate::{
     decode::backend,
     loudness::{LOUDNESS_GATING_BLOCK_FRAMES, LoudnessMeter, nearest_rank_index},
     lut_store::LutLibrary,
+    owned_io::PlaybackInputs,
     render::FrameRenderer,
     spectrum::{
         NOISE_PROFILE_HOP_FRAMES, NOISE_PROFILE_MINIMUM_FRAMES, NOISE_PROFILE_PERCENT,
@@ -41,6 +43,71 @@ use crate::{
     },
     timeline::timeline_audio_segments,
 };
+
+mod owned;
+pub(crate) use owned::export_owned_document;
+pub use owned::{OwnedExport, OwnedExportTarget};
+
+enum ExportSource<'a> {
+    Legacy(LegacyRenderContext),
+    Owned(&'a Arc<PlaybackInputs>),
+}
+
+struct ExportChecks<'a> {
+    settings: &'a ExportSettings,
+    inputs: Option<&'a PlaybackInputs>,
+    // Limit packets before the muxer can buffer them for interleaving.
+    packet_bytes_left: Cell<Option<u64>>,
+}
+
+impl<'a> ExportChecks<'a> {
+    const fn legacy(settings: &'a ExportSettings) -> Self {
+        Self {
+            settings,
+            inputs: None,
+            packet_bytes_left: Cell::new(None),
+        }
+    }
+
+    const fn owned(settings: &'a ExportSettings, inputs: &'a PlaybackInputs, bytes: u64) -> Self {
+        Self {
+            settings,
+            inputs: Some(inputs),
+            packet_bytes_left: Cell::new(Some(bytes)),
+        }
+    }
+
+    fn check(&self) -> Result<(), MediaError> {
+        if let Some(inputs) = self.inputs {
+            inputs.check_read_authority()?;
+        }
+        check_cancelled(self.settings)
+    }
+
+    fn packet(&self, packet: &ffmpeg::Packet) -> Result<(), MediaError> {
+        if let Some(left) = self.packet_bytes_left.get() {
+            self.check()?;
+            let remaining = left.checked_sub(packet.size() as u64).ok_or_else(|| {
+                MediaError::Backend("owned export coded payload exceeds staging limit".to_owned())
+            })?;
+            self.packet_bytes_left.set(Some(remaining));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn name_owned_refusal(error: MediaError, asset: kinewright_core::AssetId) -> MediaError {
+    if matches!(
+        error,
+        MediaError::OwnedMediaOperationUnavailable | MediaError::UnsupportedCodec { .. }
+    ) {
+        MediaError::OwnedExportInputUnavailable {
+            input: format!("media:{}", asset.0),
+        }
+    } else {
+        error
+    }
+}
 
 const AUDIO_RATE: u32 = 48_000;
 const AUDIO_CHANNELS: u16 = 2;
@@ -159,14 +226,14 @@ fn export_document_inner(
     if temporary.exists() {
         fs::remove_file(&temporary).map_err(backend)?;
     }
-    let result = export_to_temporary(
+    let result = encode_document(
         document,
-        &temporary,
-        settings,
+        &ExportChecks::legacy(settings),
         progress,
         gpu,
-        context,
+        ExportSource::Legacy(context),
         packet_duration,
+        || ffmpeg::format::output(&temporary).map_err(backend),
     );
     let report = match result {
         Ok(report) => report,
@@ -220,12 +287,21 @@ const TRUE_PEAK_CEILING_MINIMUM_TENTH_DB: i64 = -120;
 /// Returns a media error when the master cannot be measured, when the target's
 /// ceiling is outside the limiter node's range, when the node cannot be run
 /// over the master, or when the export was cancelled between passes.
+#[cfg(test)]
 fn normalize_master(
     mix: &mut Vec<f32>,
     target: LoudnessTarget,
     settings: &ExportSettings,
 ) -> Result<ExportAudioReport, MediaError> {
-    let before = LoudnessMeter::measure(mix, AUDIO_RATE, AUDIO_CHANNELS)?;
+    normalize_master_with_checks(mix, target, &ExportChecks::legacy(settings))
+}
+
+fn normalize_master_with_checks(
+    mix: &mut Vec<f32>,
+    target: LoudnessTarget,
+    checks: &ExportChecks<'_>,
+) -> Result<ExportAudioReport, MediaError> {
+    let before = measure_master(mix, checks)?;
     let skipped = |reason: String| ExportAudioReport {
         target,
         before,
@@ -254,23 +330,23 @@ fn normalize_master(
     }
 
     let ceiling_tenth_db = delivery_limiter_ceiling_tenth_db(target)?;
-    check_cancelled(settings)?;
-    apply_gain(mix, gain);
-    *mix = limit_to_delivery_ceiling(mix, ceiling_tenth_db)?;
+    checks.check()?;
+    gain_master(mix, gain, checks)?;
+    *mix = limit_to_delivery_ceiling(mix, ceiling_tenth_db, checks)?;
     let mut limiter_passes = 1_u8;
     let mut applied_gain_hundredths = gain;
-    let mut after = LoudnessMeter::measure(mix, AUDIO_RATE, AUDIO_CHANNELS)?;
+    let mut after = measure_master(mix, checks)?;
 
     if let Some(measured) = after.integrated_lufs_hundredths
         && measured < target.integrated_lufs_hundredths - target.tolerance_lu_hundredths
     {
-        check_cancelled(settings)?;
+        checks.check()?;
         let correction = target.integrated_lufs_hundredths - measured;
-        apply_gain(mix, correction);
-        *mix = limit_to_delivery_ceiling(mix, ceiling_tenth_db)?;
+        gain_master(mix, correction, checks)?;
+        *mix = limit_to_delivery_ceiling(mix, ceiling_tenth_db, checks)?;
         limiter_passes = 2;
         applied_gain_hundredths += correction;
-        after = LoudnessMeter::measure(mix, AUDIO_RATE, AUDIO_CHANNELS)?;
+        after = measure_master(mix, checks)?;
     }
 
     let on_target = after.integrated_lufs_hundredths.is_some_and(|measured| {
@@ -295,6 +371,33 @@ fn normalize_master(
         on_target,
         skipped_reason: None,
     })
+}
+
+fn measure_master(
+    mix: &[f32],
+    checks: &ExportChecks<'_>,
+) -> Result<kinewright_core::AudioLoudness, MediaError> {
+    if checks.inputs.is_none() {
+        return LoudnessMeter::measure(mix, AUDIO_RATE, AUDIO_CHANNELS);
+    }
+    let mut meter = LoudnessMeter::new(AUDIO_RATE, AUDIO_CHANNELS)?;
+    for chunk in mix.chunks(2_048) {
+        checks.check()?;
+        meter.push(chunk)?;
+    }
+    meter.finish()
+}
+
+fn gain_master(mix: &mut [f32], gain: i32, checks: &ExportChecks<'_>) -> Result<(), MediaError> {
+    if checks.inputs.is_none() {
+        apply_gain(mix, gain);
+    } else {
+        for chunk in mix.chunks_mut(2_048) {
+            checks.check()?;
+            apply_gain(chunk, gain);
+        }
+    }
+    Ok(())
 }
 
 /// AU3 §5.6 step 4: scale every sample by `gain_hundredths` hundredths of a
@@ -345,7 +448,11 @@ fn delivery_limiter_ceiling_tenth_db(target: LoudnessTarget) -> Result<i64, Medi
 /// Returns a media error when the node cannot be run over the buffer. The
 /// ceiling is validated by the caller through
 /// [`delivery_limiter_ceiling_tenth_db`] before the master is gained.
-fn limit_to_delivery_ceiling(mix: &[f32], ceiling_tenth_db: i64) -> Result<Vec<f32>, MediaError> {
+fn limit_to_delivery_ceiling(
+    mix: &[f32],
+    ceiling_tenth_db: i64,
+    checks: &ExportChecks<'_>,
+) -> Result<Vec<f32>, MediaError> {
     let limiter = Effect {
         enabled: true,
         enabled_curve: None,
@@ -362,21 +469,32 @@ fn limit_to_delivery_ceiling(mix: &[f32], ceiling_tenth_db: i64) -> Result<Vec<f
         ]),
         keyframes: BTreeMap::new(),
     };
-    process_buffer_static(&limiter, AUDIO_RATE, usize::from(AUDIO_CHANNELS), mix)
+    if checks.inputs.is_none() {
+        process_buffer_static(&limiter, AUDIO_RATE, usize::from(AUDIO_CHANNELS), mix)
+    } else {
+        crate::audio::process_buffer_static_with_check(
+            &limiter,
+            AUDIO_RATE,
+            usize::from(AUDIO_CHANNELS),
+            mix,
+            || checks.check(),
+        )
+    }
 }
 
 // Encoder and muxer setup must stay in one ownership scope through trailer finalization.
 #[allow(clippy::too_many_lines)]
-fn export_to_temporary(
+fn encode_document(
     document: &Document,
-    out: &Path,
-    settings: &ExportSettings,
+    checks: &ExportChecks<'_>,
     progress: &ProgressSink,
     gpu: GpuContext,
-    context: LegacyRenderContext,
+    source: ExportSource<'_>,
     packet_duration: VideoPacketDuration,
+    open_muxer: impl FnOnce() -> Result<ffmpeg::format::context::Output, MediaError>,
 ) -> Result<ExportReport, MediaError> {
-    check_cancelled(settings)?;
+    let settings = checks.settings;
+    checks.check()?;
     let total_frames = map_frames_with_rounding(
         document.duration,
         document.fps,
@@ -388,15 +506,15 @@ fn export_to_temporary(
         .map_err(|_| MediaError::Backend("export frame count is invalid".to_owned()))?;
     send_progress(progress, 0, total_frames);
 
-    let mut audio_mix = mix_audio(document, settings)?;
-    check_cancelled(settings)?;
+    let mut audio_mix = mix_audio_with_checks(document, checks)?;
+    checks.check()?;
     let audio = settings
         .loudness_normalization
-        .map(|target| normalize_master(&mut audio_mix, target, settings))
+        .map(|target| normalize_master_with_checks(&mut audio_mix, target, checks))
         .transpose()?;
 
     crate::quiet_ffmpeg_log();
-    let mut muxer = ffmpeg::format::output(out).map_err(backend)?;
+    let mut muxer = open_muxer()?;
     let global_header = muxer
         .format()
         .flags()
@@ -504,11 +622,20 @@ fn export_to_temporary(
         .time_base();
 
     let mut renderer = FrameRenderer::new(gpu);
-    renderer.set_legacy_media(Some(context.grant));
-    renderer.set_lut_library(context.library);
+    match source {
+        ExportSource::Legacy(context) => {
+            renderer.set_legacy_media(Some(context.grant));
+            renderer.set_lut_library(context.library);
+        }
+        ExportSource::Owned(inputs) => {
+            renderer.set_inputs(Some(Arc::clone(inputs)));
+            renderer.set_lut_library(Arc::clone(&inputs.lut));
+            renderer.set_export_stop(&settings.cancellation);
+        }
+    }
     let mut delivery_filter = delivery_filter_graph(settings.resolution, delivery_depth)?;
     for output_frame in 0..total_frames {
-        check_cancelled(settings)?;
+        checks.check()?;
         let output_at = TimeCode(i64::try_from(output_frame).unwrap_or(i64::MAX));
         let project_at =
             map_frames_with_rounding(output_at, settings.fps, document.fps, FrameRounding::Floor)
@@ -539,6 +666,7 @@ fn export_to_temporary(
             video_time_base,
             video_output_time_base,
             packet_duration,
+            checks,
         )?;
         send_progress(progress, output_frame.saturating_add(1), total_frames);
     }
@@ -550,17 +678,21 @@ fn export_to_temporary(
         video_time_base,
         video_output_time_base,
         packet_duration,
+        checks,
     )?;
 
     encode_audio(
         &audio_mix,
-        settings,
+        checks,
         &mut audio_encoder,
         &mut muxer,
         audio_stream_index,
         audio_time_base,
         audio_output_time_base,
     )?;
+    if checks.inputs.is_some() {
+        checks.check()?;
+    }
     muxer.write_trailer().map_err(backend)?;
     send_progress(progress, total_frames, total_frames);
     Ok(ExportReport { audio })
@@ -895,12 +1027,14 @@ fn drain_packets(
     encoder_time_base: ffmpeg::Rational,
     output_time_base: ffmpeg::Rational,
     packet_duration: VideoPacketDuration,
+    checks: &ExportChecks<'_>,
 ) -> Result<(), MediaError> {
     let mut packet = ffmpeg::Packet::empty();
     while encoder.receive_packet(&mut packet).is_ok() {
         packet.set_stream(stream_index);
         packet.set_duration(packet_duration.ticks());
         packet.rescale_ts(encoder_time_base, output_time_base);
+        checks.packet(&packet)?;
         packet.write_interleaved(muxer).map_err(backend)?;
     }
     Ok(())
@@ -908,7 +1042,7 @@ fn drain_packets(
 
 fn encode_audio(
     mix: &[f32],
-    settings: &ExportSettings,
+    checks: &ExportChecks<'_>,
     encoder: &mut ffmpeg::encoder::Audio,
     muxer: &mut ffmpeg::format::context::Output,
     stream_index: usize,
@@ -922,7 +1056,7 @@ fn encode_audio(
     let layout = encoder.channel_layout();
     let mut start = 0_usize;
     while start < total_sample_frames {
-        check_cancelled(settings)?;
+        checks.check()?;
         let sample_frames = frame_size.min(total_sample_frames - start);
         let mut frame = ffmpeg::frame::Audio::new(format, sample_frames, layout);
         frame.set_rate(AUDIO_RATE);
@@ -940,6 +1074,7 @@ fn encode_audio(
             stream_index,
             encoder_time_base,
             output_time_base,
+            checks,
         )?;
         start += sample_frames;
     }
@@ -950,6 +1085,7 @@ fn encode_audio(
         stream_index,
         encoder_time_base,
         output_time_base,
+        checks,
     )
 }
 
@@ -959,11 +1095,13 @@ fn drain_audio_packets(
     stream_index: usize,
     encoder_time_base: ffmpeg::Rational,
     output_time_base: ffmpeg::Rational,
+    checks: &ExportChecks<'_>,
 ) -> Result<(), MediaError> {
     let mut packet = ffmpeg::Packet::empty();
     while encoder.receive_packet(&mut packet).is_ok() {
         packet.set_stream(stream_index);
         packet.rescale_ts(encoder_time_base, output_time_base);
+        checks.packet(&packet)?;
         packet.write_interleaved(muxer).map_err(backend)?;
     }
     Ok(())
@@ -1063,10 +1201,17 @@ pub(crate) fn mix_audio(
     document: &Document,
     settings: &ExportSettings,
 ) -> Result<Vec<f32>, MediaError> {
-    mix_pass(
+    mix_audio_with_checks(document, &ExportChecks::legacy(settings))
+}
+
+fn mix_audio_with_checks(
+    document: &Document,
+    checks: &ExportChecks<'_>,
+) -> Result<Vec<f32>, MediaError> {
+    mix_pass_with_checks(
         document,
         TimeCode::ZERO..document.duration,
-        settings,
+        checks,
         MixCollect {
             stems: false,
             master: true,
@@ -1097,11 +1242,27 @@ pub(crate) fn mix_audio_stems(
     )
 }
 
-#[allow(clippy::too_many_lines)]
 pub(crate) fn mix_pass(
     document: &Document,
     range: std::ops::Range<TimeCode>,
     settings: &ExportSettings,
+    collect: MixCollect,
+    observer: &mut dyn MixObserver,
+) -> Result<MixStems, MediaError> {
+    mix_pass_with_checks(
+        document,
+        range,
+        &ExportChecks::legacy(settings),
+        collect,
+        observer,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn mix_pass_with_checks(
+    document: &Document,
+    range: std::ops::Range<TimeCode>,
+    checks: &ExportChecks<'_>,
     collect: MixCollect,
     observer: &mut dyn MixObserver,
 ) -> Result<MixStems, MediaError> {
@@ -1125,7 +1286,7 @@ pub(crate) fn mix_pass(
     };
     let segments = timeline_audio_segments(document, TimeCode::ZERO..segment_end)?;
     for segment in segments {
-        check_cancelled(settings)?;
+        checks.check()?;
         let clip = document.clip(segment.clip).ok_or_else(|| {
             MediaError::Backend(format!("timeline clip {} disappeared", segment.clip))
         })?;
@@ -1139,15 +1300,26 @@ pub(crate) fn mix_pass(
         let wanted_samples = wanted_frames
             .checked_mul(usize::from(AUDIO_CHANNELS))
             .ok_or_else(|| MediaError::Backend("audio clip is too large".to_owned()))?;
-        let mut decoded = decode_audio_range(
+        let source = checks
+            .inputs
+            .map(|inputs| inputs.source(asset.id))
+            .transpose()?;
+        let mut decoded = decode_audio_range_with_source(
             &asset.path,
             asset.fps,
-            segment.source.start,
-            segment.source.end,
+            segment.source,
             AUDIO_RATE,
             AUDIO_CHANNELS,
-            &settings.cancellation,
-        )?;
+            &checks.settings.cancellation,
+            source.as_ref(),
+        )
+        .map_err(|error| {
+            if source.is_some() {
+                name_owned_refusal(error, asset.id)
+            } else {
+                error
+            }
+        })?;
         decoded.resize(wanted_samples, 0.0);
         decoded.truncate(wanted_samples);
         let start = usize::try_from(start_frame)
@@ -1165,6 +1337,9 @@ pub(crate) fn mix_pass(
         for (sample_index, (destination, sample)) in
             track_mix.iter_mut().skip(start).zip(decoded).enumerate()
         {
+            if checks.inputs.is_some() && sample_index % 2_048 == 0 {
+                checks.check()?;
+            }
             let frame_offset = u64::try_from(sample_index / channel_count).unwrap_or(u64::MAX);
             let project_sample = start_frame.saturating_add(frame_offset);
             let gain = shaping.gain_at(project_sample);
@@ -1222,7 +1397,7 @@ pub(crate) fn mix_pass(
         .collect::<Vec<_>>();
     let mut start_frame = 0_u64;
     while start_frame < total_sample_frames {
-        check_cancelled(settings)?;
+        checks.check()?;
         let frame_count = usize::try_from(total_sample_frames - start_frame)
             .unwrap_or(usize::MAX)
             .min(1_024);

@@ -1715,6 +1715,7 @@ impl IncidentObservation {
             | MediaError::MediaAdmissionRequired
             | MediaError::MediaReadTemporarilyUnavailable
             | MediaError::OwnedMediaOperationUnavailable
+            | MediaError::OwnedExportInputUnavailable { .. }
             | MediaError::NotImplemented
             | MediaError::Cancelled
             | MediaError::MixSpectrumRangeTooShort { .. }

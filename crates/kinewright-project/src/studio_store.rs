@@ -2110,6 +2110,16 @@ impl FrozenContext {
             Arc::new(library),
             Arc::clone(self) as kinewright_media::owned_io::LifetimeGuard,
         )
+        .map(|inputs| {
+            inputs.with_manifest_fonts(self.resource_context.iter().filter_map(|resource| {
+                let entry = &resource.identity().entry;
+                (entry.object.record_kind == RecordKind::OwnedFont).then_some((
+                    entry.entry_id.as_str(),
+                    entry.object.sha256.as_str(),
+                    entry.object.byte_length,
+                ))
+            }))
+        })
         .and_then(|inputs| {
             if let Some(authority) = self.snapshot.pin.read_store().read_authority() {
                 inputs.with_read_authority(authority)
