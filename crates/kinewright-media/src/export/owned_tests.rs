@@ -285,6 +285,7 @@ fn target(path: &Path) -> OwnedExportTarget<'_> {
         staging_bytes: STAGING_BYTES,
         reserve_staging: &|_| Ok(Arc::new(())),
         reserve_working: &|_| Ok(Arc::new(())),
+        commit: &|install| install(),
     }
 }
 
@@ -347,6 +348,13 @@ fn decoded(fixture: &Fixture, path: &Path) -> Decoded {
     .unwrap();
     assert!(samples.iter().any(|sample| sample.abs() > 0.01));
     Decoded { pictures, samples }
+}
+
+fn media_refusal(result: Result<OwnedExport, OwnedExportError>) -> Option<MediaError> {
+    result.err().map(|error| match error {
+        OwnedExportError::Media(error) => error,
+        other => panic!("expected a media refusal, received {other:?}"),
+    })
 }
 
 #[test]
@@ -556,7 +564,7 @@ fn s5_owned_export_cancel_and_revocation_discard_partial_and_release_reservation
         } else {
             MediaError::Cancelled
         };
-        assert_eq!(result.err(), Some(expected));
+        assert_eq!(media_refusal(result), Some(expected));
         if !at_retain {
             assert!(
                 (1..u64::try_from(fixture.document.duration.0).unwrap())
@@ -608,7 +616,7 @@ fn s5_owned_export_refuses_an_unrenderable_manifest_font_and_enforces_stage_limi
     );
     let result = export_owned_document(&inputs, target(&out), &settings, &progress, gpu.clone());
     assert_eq!(
-        result.err(),
+        media_refusal(result),
         Some(MediaError::OwnedExportInputUnavailable {
             input: "font:Example (sha256 custom-digest)".into(),
         })
@@ -644,7 +652,7 @@ fn s5_owned_export_refuses_an_unrenderable_manifest_font_and_enforces_stage_limi
         gpu.clone(),
     );
     assert!(
-        matches!(payload_refusal, Err(MediaError::Backend(message)) if message.contains("staging limit"))
+        matches!(media_refusal(payload_refusal), Some(MediaError::Backend(message)) if message.contains("staging limit"))
     );
     // The packet payload fits here. The complete MP4, including its trailer, does not.
     let disk_refusal = export_owned_document(
@@ -658,7 +666,7 @@ fn s5_owned_export_refuses_an_unrenderable_manifest_font_and_enforces_stage_limi
         gpu.clone(),
     );
     assert!(
-        matches!(disk_refusal, Err(MediaError::Backend(message)) if !message.contains("coded payload"))
+        matches!(media_refusal(disk_refusal), Some(MediaError::Backend(message)) if !message.contains("coded payload"))
     );
     assert!(!out.exists());
     assert_stage_clean(&fixture.dir);
@@ -705,7 +713,7 @@ fn s5_owned_export_refuses_legacy_lut_before_opening_stage() {
         gpu.clone(),
     );
     assert_eq!(
-        result.err(),
+        media_refusal(result),
         Some(MediaError::OwnedExportInputUnavailable {
             input: "clip 1 effect 1 (cube_lut)".into(),
         })
@@ -744,7 +752,7 @@ fn s5_owned_export_refuses_missing_selected_video_and_missing_title_font() {
         gpu.clone(),
     );
     assert_eq!(
-        result.err(),
+        media_refusal(result),
         Some(MediaError::OwnedExportInputUnavailable {
             input: "font:Inter".into()
         })
@@ -762,11 +770,350 @@ fn s5_owned_export_refuses_missing_selected_video_and_missing_title_font() {
         gpu,
     );
     assert_eq!(
-        result.err(),
+        media_refusal(result),
         Some(MediaError::OwnedExportInputUnavailable {
             input: "media:1".into()
         })
     );
     assert!(!out.exists());
     assert_stage_clean(&fixture.dir);
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "The two gate orderings share a single staging fixture"
+)]
+fn s5_owned_export_install_serializes_with_cancellation_and_revocation() {
+    use std::{
+        sync::{Mutex, atomic::AtomicBool},
+        thread,
+        time::Duration,
+    };
+
+    let fixture = Fixture::new();
+    let gpu = fallback_gpu().context();
+    let out = fixture.dir.path("stage.mp4");
+    let wait = Duration::from_secs(10);
+    for (stop_first, revoke) in [(true, false), (true, true), (false, false)] {
+        let settings = fixture.settings();
+        let origin = MediaSourceOrigin::new_project();
+        let revoked = Arc::new(AtomicBool::new(false));
+        let owner = Arc::clone(&revoked);
+        let authority = ReadAuthority::new(
+            origin.legacy_media().unwrap(),
+            "commit-gate fixture".into(),
+            Arc::new(move || {
+                if owner.load(Relaxed) {
+                    return Err(MediaError::MediaReadTemporarilyUnavailable);
+                }
+                Ok(())
+            }),
+        );
+        let inputs = Arc::new(fixture.inputs().with_read_authority(authority).unwrap());
+        let (progress, _events) = crossbeam_channel::unbounded();
+        let gate = Mutex::new(());
+        let (ready, waiting) = crossbeam_channel::bounded(0);
+        let (resume, paused) = crossbeam_channel::bounded(0);
+        let hold = || {
+            ready.send_timeout((), wait).unwrap();
+            paused.recv_timeout(wait).unwrap();
+        };
+        let commit = |install: &mut dyn FnMut() -> Result<(), MediaError>| {
+            if stop_first {
+                hold();
+            }
+            let _gate = gate.lock().unwrap();
+            if !stop_first {
+                hold();
+            }
+            install()
+        };
+        let result = thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                export_owned_document(
+                    &inputs,
+                    OwnedExportTarget {
+                        commit: &commit,
+                        ..target(&out)
+                    },
+                    &settings,
+                    &progress,
+                    gpu.clone(),
+                )
+            });
+            waiting.recv_timeout(wait).unwrap();
+            if stop_first {
+                {
+                    let _gate = gate.lock().unwrap();
+                    if revoke {
+                        revoked.store(true, Relaxed);
+                    } else {
+                        settings.cancellation.cancel();
+                    }
+                }
+                resume.send_timeout((), wait).unwrap();
+            } else {
+                let (signal, attempted) = crossbeam_channel::bounded(0);
+                let gate = &gate;
+                let cancellation = &settings.cancellation;
+                scope.spawn(move || {
+                    assert!(matches!(
+                        gate.try_lock(),
+                        Err(std::sync::TryLockError::WouldBlock)
+                    ));
+                    signal.send_timeout((), wait).unwrap();
+                    let _gate = gate.lock().unwrap();
+                    cancellation.cancel();
+                });
+                attempted.recv_timeout(wait).unwrap();
+                assert!(!settings.cancellation.is_cancelled());
+                resume.send_timeout((), wait).unwrap();
+            }
+            worker.join().unwrap()
+        });
+        if stop_first {
+            let expected = if revoke {
+                MediaError::MediaReadTemporarilyUnavailable
+            } else {
+                MediaError::Cancelled
+            };
+            assert_eq!(media_refusal(result), Some(expected));
+            assert!(!out.exists());
+        } else {
+            let receipt = result.unwrap();
+            assert!(settings.cancellation.is_cancelled());
+            assert!(out.is_file());
+            fs::remove_file(&out).unwrap();
+            drop(receipt);
+        }
+        assert_stage_clean(&fixture.dir);
+    }
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn s5_owned_export_returns_unremoved_staging_with_its_charge() {
+    let fixture = Fixture::new();
+    let gpu = fallback_gpu().context();
+    let settings = fixture.settings();
+    let inputs = Arc::new(fixture.inputs());
+    let out = fixture.dir.path("stage.mp4");
+    let (progress, _events) = crossbeam_channel::unbounded();
+    let ledger = Arc::new(Ledger::default());
+    let disk = Arc::clone(&ledger);
+    let reserve_staging = move |bytes| Ok(disk.reserve(bytes));
+
+    for install in [false, true] {
+        let commit = |callback: &mut dyn FnMut() -> Result<(), MediaError>| {
+            if install {
+                callback()
+            } else {
+                Err(MediaError::Cancelled)
+            }
+        };
+        let result = export_with_cleanup(
+            &inputs,
+            OwnedExportTarget {
+                commit: &commit,
+                reserve_staging: &reserve_staging,
+                ..target(&out)
+            },
+            &settings,
+            &progress,
+            gpu.clone(),
+            |path| {
+                assert!(path.is_file());
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "test staging denial",
+                ))
+            },
+        );
+        assert_eq!(ledger.live.load(Relaxed), STAGING_BYTES);
+        let mut cleanup = if install {
+            let mut receipt = result.unwrap();
+            let cleanup = receipt.cleanup.take().unwrap();
+            fs::remove_file(&out).unwrap();
+            drop(receipt);
+            cleanup
+        } else {
+            let Err(OwnedExportError::Cleanup {
+                error: MediaError::Cancelled,
+                cleanup,
+            }) = result
+            else {
+                panic!("cancelled export must return the cleanup obligation");
+            };
+            assert!(!out.exists());
+            *cleanup
+        };
+        assert!(cleanup.path().is_file());
+        assert!(
+            cleanup
+                .to_string()
+                .contains(&cleanup.path().display().to_string())
+        );
+        assert_eq!(ledger.live.load(Relaxed), STAGING_BYTES);
+        cleanup.retry().unwrap();
+        assert!(!cleanup.path().exists());
+        assert_eq!(ledger.live.load(Relaxed), 0);
+        assert_stage_clean(&fixture.dir);
+    }
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn s5_owned_export_mix_cancellation_stops_between_mix_chunks() {
+    use super::super::{MixCollect, MixObserver, mix_pass_with_checks};
+
+    struct Observer<'a> {
+        cancellation: &'a ExportCancellation,
+        chunks: usize,
+    }
+    impl MixObserver for Observer<'_> {
+        fn master(&mut self, samples: &[f32]) -> Result<(), MediaError> {
+            assert!(!samples.is_empty());
+            self.chunks += 1;
+            self.cancellation.cancel();
+            Ok(())
+        }
+    }
+
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs();
+    let settings = fixture.settings();
+    let checks = ExportChecks::owned(&settings, &inputs, STAGING_BYTES);
+    let mut observer = Observer {
+        cancellation: &settings.cancellation,
+        chunks: 0,
+    };
+    let result = mix_pass_with_checks(
+        inputs.document(),
+        TimeCode::ZERO..inputs.document().duration,
+        &checks,
+        MixCollect {
+            stems: false,
+            master: true,
+        },
+        &mut observer,
+    );
+    assert_eq!(observer.chunks, 1);
+    assert_eq!(result.err(), Some(MediaError::Cancelled));
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn s5_owned_export_reserves_peak_generated_layers_before_rendering() {
+    use kinewright_core::{AutomationCurve, Keyframe, KeyframeInterpolation, Rational, SolidColor};
+
+    let mut fixture = Fixture::new();
+    let document = Arc::get_mut(&mut fixture.document).unwrap();
+    let title = document.tracks[2].clips[0].clone();
+    for n in 0..7 {
+        let mut clip = title.clone();
+        let id = 100 + n;
+        clip.id = ClipId(id);
+        clip.content = ClipContent::Solid(SolidColor {
+            r: 12,
+            g: 34,
+            b: 56,
+        });
+        if n >= 5 {
+            let value = i64::from(n == 5);
+            clip.enabled_curve = Some(AutomationCurve {
+                keyframes: vec![
+                    Keyframe {
+                        at: TimeCode::ZERO,
+                        value,
+                        interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
+                    },
+                    Keyframe {
+                        at: document.duration,
+                        value: 1 - value,
+                        interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
+                    },
+                ],
+            });
+        }
+        document.tracks.push(Track {
+            id: TrackId(id),
+            kind: TrackKind::Video,
+            name: None,
+            sync_lock: true,
+            clips: vec![clip],
+        });
+    }
+    let mut settings = fixture.settings();
+    settings.fps = Rational::new(12, 1).unwrap();
+    let baseline = working_bytes(&fixture.document, &settings, STAGING_BYTES);
+    let generated_layers = 7_u32;
+    let generated_bytes =
+        8 * u64::from(RESOLUTION.0) * u64::from(RESOLUTION.1) * u64::from(generated_layers);
+    let gpu = fallback_gpu().context();
+    let out = fixture.dir.path("stage.mp4");
+    let inputs = Arc::new(fixture.inputs());
+    let (progress, events) = crossbeam_channel::unbounded();
+
+    let reserve_small = move |bytes| {
+        if bytes > baseline {
+            Err("test quota".to_owned())
+        } else {
+            Ok(Arc::new(()) as LifetimeGuard)
+        }
+    };
+    let result = export_owned_document(
+        &inputs,
+        OwnedExportTarget {
+            reserve_working: &reserve_small,
+            ..target(&out)
+        },
+        &settings,
+        &progress,
+        gpu.clone(),
+    );
+    assert!(matches!(
+        result,
+        Err(OwnedExportError::WorkingReservation { generated_layers: 7, bytes, reason })
+            if bytes == baseline + generated_bytes && reason == "test quota"
+    ));
+    assert!(events.is_empty());
+    assert!(!out.exists());
+    assert_stage_clean(&fixture.dir);
+
+    let reserve_enough = move |bytes| {
+        assert_eq!(bytes, baseline + generated_bytes);
+        Ok(Arc::new(()) as LifetimeGuard)
+    };
+    let receipt = export_owned_document(
+        &inputs,
+        OwnedExportTarget {
+            reserve_working: &reserve_enough,
+            ..target(&out)
+        },
+        &settings,
+        &progress,
+        gpu,
+    )
+    .unwrap();
+    assert_eq!(crate::verify::presented_frame_count(&out).unwrap(), 9);
+    fs::remove_file(out).unwrap();
+    drop(receipt);
 }

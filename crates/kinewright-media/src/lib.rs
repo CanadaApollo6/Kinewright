@@ -210,7 +210,7 @@ pub use engine::{AgentLaneHold, PreviewDecodeHold};
 pub use engine::{FfmpegMediaEngine, SessionMedia};
 pub use export::{
     NORMALIZATION_MAXIMUM_GAIN_HUNDREDTHS, NORMALIZATION_MINIMUM_GAIN_HUNDREDTHS, OwnedExport,
-    OwnedExportTarget,
+    OwnedExportCleanup, OwnedExportCommitGate, OwnedExportError, OwnedExportTarget,
 };
 pub use kinewright_core::{
     LutAvailabilityKind, LutAvailabilityStatus, MediaAvailabilityKind, MediaAvailabilityStatus,

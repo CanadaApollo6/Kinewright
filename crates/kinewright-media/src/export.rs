@@ -46,7 +46,9 @@ use crate::{
 
 mod owned;
 pub(crate) use owned::export_owned_document;
-pub use owned::{OwnedExport, OwnedExportTarget};
+pub use owned::{
+    OwnedExport, OwnedExportCleanup, OwnedExportCommitGate, OwnedExportError, OwnedExportTarget,
+};
 
 enum ExportSource<'a> {
     Legacy(LegacyRenderContext),

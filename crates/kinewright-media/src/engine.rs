@@ -801,7 +801,7 @@ impl FfmpegMediaEngine {
         target: crate::OwnedExportTarget<'_>,
         settings: &ExportSettings,
         progress: &ProgressSink,
-    ) -> Result<crate::OwnedExport, MediaError> {
+    ) -> Result<crate::OwnedExport, crate::OwnedExportError> {
         self.decoders.scope(|| {
             crate::export::export_owned_document(
                 inputs,
