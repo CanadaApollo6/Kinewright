@@ -28,10 +28,11 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        ERROR_ACCESS_DENIED, ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_CHILD_PROCESS_BLOCKED,
-        ERROR_COMMITMENT_LIMIT, ERROR_FILE_NOT_FOUND, ERROR_INVALID_FUNCTION, ERROR_INVALID_HANDLE,
-        ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_ENOUGH_QUOTA, ERROR_NOT_FOUND, ERROR_PATH_NOT_FOUND,
-        ERROR_WORKING_SET_QUOTA, INVALID_HANDLE_VALUE, LocalFree, MAX_PATH, WAIT_TIMEOUT,
+        ERROR_ACCESS_DENIED, ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_BROKEN_PIPE,
+        ERROR_CHILD_PROCESS_BLOCKED, ERROR_COMMITMENT_LIMIT, ERROR_FILE_NOT_FOUND,
+        ERROR_INVALID_HANDLE, ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_ENOUGH_QUOTA, ERROR_NOT_FOUND,
+        ERROR_PATH_NOT_FOUND, ERROR_WORKING_SET_QUOTA, INVALID_HANDLE_VALUE, LocalFree, MAX_PATH,
+        STATUS_INVALID_HANDLE, WAIT_TIMEOUT,
     },
     Security::{
         ACL,
@@ -122,25 +123,36 @@ fn a_handle_outside_the_list_is_not_inherited() {
     let fixture = Fixture::new();
     let (_inheritable, target) = profile_controls::inherited_canary(&fixture);
     let control = profile_controls::ordinary_inheritance(&fixture, &target);
-    let confined = fixture.try_single("inherited-canary", &target, true);
-    eprintln!("ordinary inheritance control: {control:?}; LPAC unlisted handle: {confined:?}");
+    let mut confined = fixture.start("inherited-canary", &target, true);
+    let reply = confined.try_optional_reply();
+    let exit = confined.try_finish();
+    eprintln!(
+        "ordinary inheritance control: {control:?}; LPAC unlisted handle: {reply:?}, exit {exit:?}"
+    );
     assert_eq!(
         control.expect("ordinary inheriting control"),
         0,
         "control reads exact canary"
     );
-    confined.expect("LPAC handle probe").expect(
-        &[
-            "GetFileInformationByHandle(unlisted canary)",
-            "unlisted handle names a different object",
-        ],
-        &[
-            ERROR_INVALID_HANDLE,
-            ERROR_INVALID_FUNCTION,
-            ERROR_ACCESS_DENIED,
-        ],
-        "unlisted handle refusal",
-    );
+    let exit = exit.expect("LPAC handle probe exit");
+    match reply.expect("LPAC handle probe reply or closed pipe") {
+        Some(report) => {
+            report.expect(
+                &[
+                    "GetFileInformationByHandle(unlisted canary)",
+                    "unlisted handle names a different object",
+                ],
+                &[ERROR_INVALID_HANDLE],
+                "unlisted handle refusal",
+            );
+            assert_eq!(exit, 0, "GetExitCodeProcess after handle refusal reply");
+        }
+        None => assert_eq!(
+            exit,
+            STATUS_INVALID_HANDLE.cast_unsigned(),
+            "strict handle check expected STATUS_INVALID_HANDLE"
+        ),
+    }
 }
 
 #[test]
@@ -298,7 +310,7 @@ fn assert_owner_access_refused(fixture: &Fixture, root: &Path, retained: &Path, 
                 );
             }
             let api = if kind == "file" {
-                "CreateFileW"
+                "NtOpenFile"
             } else {
                 "RegOpenKeyExW"
             };
@@ -312,7 +324,7 @@ fn assert_owner_access_refused(fixture: &Fixture, root: &Path, retained: &Path, 
     );
     eprintln!("unconfined registry descriptor control: {registry_control:?}");
     for (control, api) in [
-        (result, "CreateFileW(WRITE_DAC)"),
+        (result, "NtOpenFile(WRITE_DAC)"),
         (registry_control, "RegOpenKeyExW(WRITE_DAC)"),
     ] {
         let control = control.expect("unconfined owner control");
@@ -1411,6 +1423,26 @@ impl Running {
     }
 
     fn try_reply(&mut self) -> Result<Report, String> {
+        self.try_optional_reply()?.ok_or_else(|| {
+            let error = io::Error::from_raw_os_error(ERROR_BROKEN_PIPE.cast_signed());
+            match &mut self.process {
+                Process::Lpac(child) => format!(
+                    "{} PeekNamedPipe(reply): {error}; child wait/exit {:?}",
+                    self.context,
+                    child
+                        .wait(Duration::from_millis(100))
+                        .map(|code| format!("{code:#010x}"))
+                ),
+                Process::Open(child) => format!(
+                    "{} PeekNamedPipe(reply): {error}; unconfined exit {:?}",
+                    self.context,
+                    child.0.try_wait()
+                ),
+            }
+        })
+    }
+
+    fn try_optional_reply(&mut self) -> Result<Option<Report>, String> {
         let start = Instant::now();
         let mut bytes = Vec::new();
         while start.elapsed() < TIMEOUT {
@@ -1428,20 +1460,15 @@ impl Running {
             };
             if ok == 0 {
                 let error = io::Error::last_os_error();
-                return Err(match &mut self.process {
-                    Process::Lpac(child) => format!(
-                        "{} PeekNamedPipe(reply): {error}; child wait/exit {:?}",
-                        self.context,
-                        child
-                            .wait(Duration::from_millis(100))
-                            .map(|code| format!("{code:#010x}"))
-                    ),
-                    Process::Open(child) => format!(
-                        "{} PeekNamedPipe(reply): {error}; unconfined exit {:?}",
-                        self.context,
-                        child.0.try_wait()
-                    ),
-                });
+                if bytes.is_empty() && error.raw_os_error() == Some(ERROR_BROKEN_PIPE.cast_signed())
+                {
+                    return Ok(None);
+                }
+                return Err(format!(
+                    "{} PeekNamedPipe(reply): {error}; {} reply bytes",
+                    self.context,
+                    bytes.len()
+                ));
             }
             if available == 0 {
                 thread::sleep(Duration::from_millis(5));
@@ -1460,7 +1487,7 @@ impl Running {
                 .read_exact(&mut bytes[length..])
                 .map_err(|error| format!("{} ReadFile (fixture reply): {error}", self.context))?;
             if bytes.ends_with(b"\n") {
-                return Report::parse(&self.context, &bytes);
+                return Report::parse(&self.context, &bytes).map(Some);
             }
         }
         Err(format!(

@@ -142,7 +142,7 @@ pub(super) fn owner_access(target: &OsStr, output: &mut impl Write) -> io::Resul
             descriptor.owner,
         )
     } != 0;
-    let api = if file { "CreateFileW" } else { "RegOpenKeyExW" };
+    let api = if file { "NtOpenFile" } else { "RegOpenKeyExW" };
     let handle = match SecurityObject::open(path, file, access) {
         Ok(handle) => handle,
         Err(code) => {
@@ -262,33 +262,11 @@ struct SecurityObject {
 
 impl SecurityObject {
     fn open(path: &str, file: bool, access: u32) -> Result<Self, u32> {
-        use windows_sys::Win32::{
-            Foundation::INVALID_HANDLE_VALUE,
-            Storage::FileSystem::{
-                CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-                FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-            },
-            System::Registry::{HKEY_USERS, RegOpenKeyExW},
-        };
-        let path = wide(OsStr::new(path));
+        use windows_sys::Win32::System::Registry::{HKEY_USERS, RegOpenKeyExW};
         let handle = if file {
-            // SAFETY: the path is a terminated name for a host-owned witness, without reparse traversal.
-            let handle = unsafe {
-                CreateFileW(
-                    path.as_ptr(),
-                    access,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                    ptr::null(),
-                    OPEN_EXISTING,
-                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-                    ptr::null_mut(),
-                )
-            };
-            if handle == INVALID_HANDLE_VALUE {
-                return Err(last_error());
-            }
-            handle
+            open_file_for_owner_probe(path, access)?
         } else {
+            let path = wide(OsStr::new(path));
             let mut handle = ptr::null_mut();
             // SAFETY: path is terminated and names the test user's storage key.
             let code =
@@ -346,6 +324,60 @@ impl SecurityObject {
             )
         }
     }
+}
+
+fn open_file_for_owner_probe(
+    path: &str,
+    access: u32,
+) -> Result<windows_sys::Win32::Foundation::HANDLE, u32> {
+    use windows_sys::{
+        Wdk::{
+            Foundation::OBJECT_ATTRIBUTES,
+            Storage::FileSystem::{FILE_OPEN_REPARSE_POINT, NtOpenFile},
+        },
+        Win32::{
+            Foundation::{
+                ERROR_FILENAME_EXCED_RANGE, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError,
+                UNICODE_STRING,
+            },
+            Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE},
+            System::IO::IO_STATUS_BLOCK,
+        },
+    };
+    let path = path.strip_prefix(r"\\?\").unwrap_or(path);
+    let mut name: Vec<u16> = format!(r"\??\{path}").encode_utf16().collect();
+    let length =
+        u16::try_from(size_of_val(name.as_slice())).map_err(|_| ERROR_FILENAME_EXCED_RANGE)?;
+    let name = UNICODE_STRING {
+        Length: length,
+        MaximumLength: length,
+        Buffer: name.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: u32::try_from(size_of::<OBJECT_ATTRIBUTES>()).expect("object attributes size"),
+        ObjectName: &raw const name,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        ..Default::default()
+    };
+    let mut status_block = IO_STATUS_BLOCK::default();
+    let mut handle = ptr::null_mut();
+    // SAFETY: the counted UTF-16 name, attributes and outputs remain live until the call returns.
+    // No synchronous I/O option adds SYNCHRONIZE to the requested descriptor right.
+    let status = unsafe {
+        NtOpenFile(
+            &raw mut handle,
+            access,
+            &raw const attributes,
+            &raw mut status_block,
+            FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN_REPARSE_POINT,
+        )
+    };
+    if status < 0 {
+        // SAFETY: status is the NTSTATUS from this open.
+        return Err(unsafe { RtlNtStatusToDosError(status) });
+    }
+    Ok(handle)
 }
 
 impl Drop for SecurityObject {
