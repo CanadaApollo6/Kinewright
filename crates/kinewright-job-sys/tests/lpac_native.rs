@@ -64,6 +64,7 @@ const TEST_PROFILE: &str = "kinewright.mediaprobe.launchtest";
 const TIMEOUT: Duration = Duration::from_secs(8);
 const MEMORY_BYTES: usize = 64 * 1024 * 1024;
 const SOURCE: &[u8] = b"LPAC source bytes";
+const RETAINED_AC_FOLDERS: [&str; 4] = ["INetCache", "INetCookies", "INetHistory", "Temp"];
 const EXIT_AFTER_MEMORY_LIMIT: u32 = ERROR_NOT_ENOUGH_MEMORY;
 const FILE_DENIALS: &[u32] = &[ERROR_ACCESS_DENIED];
 static SERIAL: AtomicU64 = AtomicU64::new(0);
@@ -223,6 +224,12 @@ fn existing_appcontainer_storage_refuses_create_growth_and_mutation() {
         checked.contains(&root),
         "installed profile root was checked"
     );
+    for name in RETAINED_AC_FOLDERS {
+        assert!(
+            checked.contains(&root.join("AC").join(name)),
+            "retained {name} was checked"
+        );
+    }
     let key = profile_controls::classes_key(&fixture.profile.api);
     fixture.refuse_registry_write(&key);
     eprintln!(
@@ -340,31 +347,42 @@ fn assert_owner_access_refused(fixture: &Fixture, root: &Path, retained: &Path, 
 }
 
 #[test]
-fn preparation_twice_keeps_the_profile_unchanged() {
+fn preparation_and_two_launches_leave_retained_acl_state_unchanged() {
     let fixture = Fixture::new();
     let root = fixture.profile_root();
-    let before = (
-        profile_controls::file_sddl(&root),
-        profile_controls::registry_sddl(&fixture.profile.api),
-    );
+    let snapshot = || {
+        let mut descriptors = vec![
+            profile_controls::file_sddl(&root),
+            profile_controls::file_sddl(&root.join("AC")),
+        ];
+        descriptors.extend(
+            RETAINED_AC_FOLDERS
+                .map(|name| profile_controls::file_sddl(&root.join("AC").join(name))),
+        );
+        descriptors.push(profile_controls::registry_sddl(&fixture.profile.api));
+        descriptors
+    };
+    let before = snapshot();
     assert_eq!(
         fixture.profile.api.prepare().expect("repeat preparation"),
         Preparation::Unchanged
     );
-    assert_eq!(
-        before,
-        (
-            profile_controls::file_sddl(&root),
-            profile_controls::registry_sddl(&fixture.profile.api)
-        )
-    );
-    fixture
-        .startup(true)
-        .expect("LPAC startup after no-op preparation");
+    assert_eq!(before, snapshot());
+    for _ in 0..2 {
+        fixture
+            .startup(true)
+            .expect("LPAC startup with retained AC storage");
+        fixture
+            .profile
+            .api
+            .verify()
+            .expect("verify retained storage after launch");
+        assert_eq!(before, snapshot());
+    }
 }
 
 #[test]
-fn a_package_grant_on_recreated_ac_blocks_verification_and_launch() {
+fn a_package_grant_on_retained_ac_blocks_verification_and_launch() {
     let fixture = Fixture::new();
     let verified = fixture
         .profile
@@ -372,7 +390,6 @@ fn a_package_grant_on_recreated_ac_blocks_verification_and_launch() {
         .verify()
         .expect("safe profile before tampering");
     let ac = fixture.profile_root().join("AC");
-    fs::create_dir_all(&ac).expect("CreateDirectoryW (recreate pruned AC)");
     grant_image_access(&ac, &fixture.sid);
     assert_refused_then_repaired(&fixture, &verified);
 }
@@ -397,6 +414,12 @@ fn a_package_grant_on_registry_storage_blocks_verification_and_launch() {
 }
 
 #[test]
+fn a_junction_at_the_profile_root_leaves_the_target_untouched() {
+    let fixture = Fixture::new();
+    assert_junction_refused(&fixture, &fixture.profile_root());
+}
+
+#[test]
 fn a_junction_at_ac_leaves_the_target_untouched() {
     let fixture = Fixture::new();
     let root = fixture.profile_root();
@@ -407,8 +430,7 @@ fn a_junction_at_ac_leaves_the_target_untouched() {
 fn junctions_at_known_ac_subfolders_leave_the_target_untouched() {
     let fixture = Fixture::new();
     let ac = fixture.profile_root().join("AC");
-    fs::create_dir_all(&ac).expect("CreateDirectoryW (junction test AC)");
-    for name in ["INetCache", "INetCookies", "INetHistory", "Temp"] {
+    for name in RETAINED_AC_FOLDERS {
         assert_junction_refused(&fixture, &ac.join(name));
     }
 }
@@ -421,7 +443,10 @@ fn assert_junction_refused(fixture: &Fixture, path: &Path) {
         profile_controls::file_sddl(&target),
         profile_controls::file_sddl(&cache),
     );
-    let _junction = profile_controls::junction(path, &target);
+    let saved = path.with_file_name(unique());
+    fs::rename(path, &saved).expect("MoveFileExW (preserve junction witness directory)");
+    let original = MovedDirectory { path, saved };
+    let junction = profile_controls::junction(path, &target);
     assert!(path.join("INetCache").is_dir(), "junction positive control");
     let rejected = fixture
         .profile
@@ -442,6 +467,25 @@ fn assert_junction_refused(fixture: &Fixture, path: &Path) {
             profile_controls::file_sddl(&cache)
         )
     );
+    drop(junction);
+    drop(original);
+    assert!(
+        path.is_dir(),
+        "original junction witness directory was restored"
+    );
+}
+
+struct MovedDirectory<'a> {
+    path: &'a Path,
+    saved: PathBuf,
+}
+
+impl Drop for MovedDirectory<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = fs::rename(&self.saved, self.path) {
+            eprintln!("MoveFileExW (restore junction witness directory): {error}");
+        }
+    }
 }
 
 #[test]
@@ -570,6 +614,51 @@ fn preparation_keeps_unexpected_ac_content_and_refuses_mutation() {
             fs::read(&file).expect("ReadFile (preserved content)"),
             b"baseline"
         );
+    }
+}
+
+#[test]
+fn preparation_preserves_a_directory_stream_and_the_child_cannot_write_it() {
+    let fixture = Fixture::new();
+    let directory = fixture.profile_root().join("AC").join("Temp");
+    let mut stream = directory.as_os_str().to_os_string();
+    stream.push(":keep");
+    let stream = PathBuf::from(stream);
+    let sentinel = b"retained stream data";
+    fs::write(&stream, sentinel).expect("WriteFile (test directory stream)");
+    grant_file_access(&directory, &fixture.sid, FILE_GENERIC_WRITE, 0);
+    assert_eq!(
+        fixture
+            .profile
+            .api
+            .prepare()
+            .expect("protect directory stream"),
+        Preparation::Prepared
+    );
+    fixture
+        .profile
+        .api
+        .verify()
+        .expect("verify directory with stream");
+    assert_eq!(
+        fs::read(&stream).expect("ReadFile (preserved directory stream)"),
+        sentinel
+    );
+    for (case, expected) in [
+        ("mutate", b"canaryed stream data".as_slice()),
+        ("replace", b"canary".as_slice()),
+    ] {
+        let control = fixture.single(case, &stream, false);
+        eprintln!("{case} unconfined directory stream control: {control:?}");
+        control.expect(
+            &["WriteFile(canary)"],
+            &[0],
+            "unconfined directory stream control",
+        );
+        assert_eq!(fs::read(&stream).unwrap(), expected);
+        fs::write(&stream, sentinel).expect("reset directory stream");
+        fixture.file_refusal(case, &stream);
+        assert_eq!(fs::read(&stream).unwrap(), sentinel);
     }
 }
 
@@ -793,12 +882,25 @@ fn a_job_memory_event_ends_a_child_that_exceeds_the_commit_cap() {
 #[test]
 fn closing_the_last_job_handle_ends_a_running_child() {
     let fixture = Fixture::new();
-    let mut running = fixture.start("hold", "", true);
-    running.reply().expect(
+    let mut running = fixture.start("hold-directory", "", true);
+    let ready = running.reply();
+    ready.expect(
         &["ReadFile(hold)"],
         &[0],
         "child waits with request pipe open",
     );
+    let projected = PathBuf::from(ready.detail.expect("child's projected LocalAppData"));
+    let directory = projected.ancestors().nth(3).expect("host launch directory");
+    assert!(
+        directory
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("kinewright-lpac-")
+    );
+    let refusal = fs::remove_dir(directory).expect_err("launch directory was not pinned");
+    eprintln!("RemoveDirectoryW (live LPAC directory): {refusal}");
+    assert!(matches!(refusal.raw_os_error(), Some(5 | 32)), "{refusal}");
     let Process::Lpac(child) = running.process else {
         unreachable!()
     };
@@ -811,6 +913,13 @@ fn closing_the_last_job_handle_ends_a_running_child() {
         .close_job(TIMEOUT)
         .unwrap_or_else(|e| panic!("CloseHandle(Job) then wait: {e}"));
     eprintln!("CloseHandle(Job): child signaled with exit code {exit:#010x}");
+    assert_eq!(
+        directory
+            .symlink_metadata()
+            .expect_err("launch directory survived child teardown")
+            .kind(),
+        io::ErrorKind::NotFound
+    );
 }
 
 struct TestProfile {

@@ -578,15 +578,16 @@ directory. Use `SECURITY_CAPABILITIES` with
 `PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT`.
 [Microsoft's LPAC launch contract](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer).
 
-Preparation can run again at app startup. Remove only known empty profile
-directories with nonrecursive delete disposition on the verified directory
-handles. Preserve unexpected content. Pin file identities and refuse reparse
+Preparation can run again at app startup. It never deletes directories,
+files, or named streams. Verify the profile root against the pinned
+`Packages` directory and check every descendant's identity. Refuse reparse
 points or changed identities. Apply protected DACLs to the checked objects
 by handle. Cover `Packages\<name>` and every retained descendant, and the
 profile registry storage key and every subkey. Remove every ACE for the
 container SID, ALL APPLICATION PACKAGES, and ALL RESTRICTED APPLICATION
 PACKAGES. Open the registry key by moniker under the current user's classes
 hive at `Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage`.
+Open each component below the classes hive separately and refuse registry links.
 Production code does not impersonate a thread. Before each launch, recheck
 registration, SID, and the protected, grant-free storage DACLs. The combined
 file and registry walk is capped at 256 nodes. An unreadable or over-cap tree
@@ -597,7 +598,9 @@ Use `STARTUPINFOEXW` with
 `EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT`,
 an explicit executable path, and the install directory as cwd. Pass
 `SystemRoot` and a fresh host-owned empty directory as `LOCALAPPDATA`.
-Windows rewrites the child environment for the profile. Detach from the
+Create it under the account's LocalAppData known folder and keep the checked
+directory handle open until the child exits. Windows rewrites the child
+environment for the profile. Detach from the
 console and inherit only the listed handles. Do not request elevation.
 Before `ResumeThread`, check `TokenIsAppContainer`, the expected AppContainer
 SID, zero `TokenCapabilities`, and low integrity. The suspended token must

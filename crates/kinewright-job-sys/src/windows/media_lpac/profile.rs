@@ -31,12 +31,13 @@ use windows_sys::Win32::{
 mod acl;
 mod files;
 use acl::PackageSids;
-use files::Node;
-pub(super) use files::check_launch_directory;
+pub(super) use files::{Node, check_launch_directory};
 
 const AC: &str = "AC";
 const NODE_LIMIT: usize = 256;
-const STORAGE_KEY: &str = r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage";
+const CLASSES_KEY: &str = r"Software\Classes";
+const STORAGE_KEY: &str =
+    r"Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage";
 
 struct Budget(usize);
 impl Budget {
@@ -110,7 +111,7 @@ impl Profile {
     /// The key path relative to the current user's registry hive.
     #[must_use]
     pub fn registry_path(&self) -> String {
-        format!(r"{STORAGE_KEY}\{}", self.name)
+        format!(r"{CLASSES_KEY}\{STORAGE_KEY}\{}", self.name)
     }
 
     /// Register this profile if needed and make its storage inaccessible to package SIDs.
@@ -131,23 +132,17 @@ impl Profile {
         };
         let ac = path.ok_or_else(|| self.missing())?;
         let root = self.root(&ac)?;
-        let storage = Storage::open(self, root, true)?;
+        let storage = Storage::open(self, root)?;
         let packages = PackageSids::new(&sid)?;
-        if storage.acl_violation(&packages)?.is_none() {
-            return Ok(if created {
-                Preparation::Prepared
-            } else {
-                Preparation::Unchanged
-            });
-        }
-
-        let storage = storage.prune()?;
-        storage.protect(&packages)?;
+        let changed = storage.protect(&packages)?;
         // Read through fresh handles so installation cannot report a cached ACL.
-        // Drop the preparation handles first, since some still have DELETE access.
         drop(storage);
         self.check()?;
-        Ok(Preparation::Prepared)
+        Ok(if created || changed {
+            Preparation::Prepared
+        } else {
+            Preparation::Unchanged
+        })
     }
 
     /// Verify registration, identity and storage in the current user's profile.
@@ -187,7 +182,7 @@ impl Profile {
     pub(super) fn check(&self) -> Result<(Sid, Storage), Error> {
         let sid = self.expected()?;
         let ac = self.registered()?;
-        let storage = Storage::open(self, self.root(&ac)?, false)?;
+        let storage = Storage::open(self, self.root(&ac)?)?;
         let packages = PackageSids::new(&sid)?;
         if let Some(violation) = storage.acl_violation(&packages)? {
             return Err(Error::unexpected(
@@ -348,7 +343,7 @@ pub(super) struct Storage {
 }
 
 impl Storage {
-    fn open(profile: &Profile, root: &Path, prepare: bool) -> Result<Self, Error> {
+    fn open(profile: &Profile, root: &Path) -> Result<Self, Error> {
         let packages = root.parent().ok_or_else(|| {
             Error::unexpected(
                 Step::ReadStorage,
@@ -357,24 +352,16 @@ impl Storage {
             )
         })?;
         let mut budget = Budget(0);
+        let packages = Node::open_directory(packages)?;
+        let name = root
+            .file_name()
+            .expect("profile root validated by Profile::root");
+        let root = packages.named_directory(name)?;
         Ok(Self {
-            _packages: Node::open_directory(packages)?,
-            files: files::walk(root, prepare, &mut budget)?,
+            _packages: packages,
+            files: files::walk(root, &mut budget)?,
             registry: Key::walk(profile, &mut budget)?,
         })
-    }
-
-    fn prune(mut self) -> Result<Self, Error> {
-        let mut retained = Vec::new();
-        // Descendants go first. A removed directory is closed before its parent is tried.
-        for node in self.files.into_iter().rev() {
-            if !node.prune()? {
-                retained.push(node);
-            }
-        }
-        retained.reverse();
-        self.files = retained;
-        Ok(self)
     }
 
     fn acl_violation(&self, packages: &PackageSids<'_>) -> Result<Option<String>, Error> {
@@ -390,9 +377,10 @@ impl Storage {
         Ok(bad)
     }
 
-    fn protect(&self, packages: &PackageSids<'_>) -> Result<(), Error> {
+    fn protect(&self, packages: &PackageSids<'_>) -> Result<bool, Error> {
+        let mut changed = false;
         for node in self.files.iter().rev() {
-            node.protect(packages)?;
+            changed |= node.protect(packages)?;
         }
         for key in self.registry.iter().rev() {
             if acl::violation(&key.object(), packages)?.is_some() {
@@ -400,9 +388,10 @@ impl Storage {
                 let writable =
                     Key::open_at(key.handle, &[0], key.path.clone(), READ_CONTROL | WRITE_DAC)?;
                 acl::protect(&writable.object(), packages)?;
+                changed = true;
             }
         }
-        Ok(())
+        Ok(changed)
     }
 }
 
@@ -414,9 +403,16 @@ struct Key {
 impl Key {
     fn walk(profile: &Profile, budget: &mut Budget) -> Result<Vec<Self>, Error> {
         budget.take("RegOpenKeyExW")?;
-        let path = profile.registry_path();
-        let name = wide(OsStr::new(&path)).map_err(input_error)?;
-        let mut keys = vec![Self::open_at(HKEY_CURRENT_USER, &name, path, READ_CONTROL)?];
+        let classes = Self::open_at(
+            HKEY_CURRENT_USER,
+            &wide(OsStr::new(CLASSES_KEY)).map_err(input_error)?,
+            CLASSES_KEY.into(),
+            0,
+        )?;
+        let components = STORAGE_KEY
+            .split('\\')
+            .chain(std::iter::once(profile.name.as_str()));
+        let mut keys = vec![classes.open_path(components)?];
         let mut parent_index = 0;
         while parent_index < keys.len() {
             let parent = &keys[parent_index];
@@ -481,6 +477,18 @@ impl Key {
         Ok(keys)
     }
 
+    fn open_path<'a>(
+        mut self,
+        components: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Self, Error> {
+        for component in components {
+            let name = wide(OsStr::new(component)).map_err(input_error)?;
+            let path = format!(r"{}\{component}", self.path);
+            self = Self::open_at(self.handle, &name, path, READ_CONTROL)?;
+        }
+        Ok(self)
+    }
+
     fn open_at(parent: HKEY, name: &[u16], path: String, rights: u32) -> Result<Self, Error> {
         let mut handle = ptr::null_mut();
         // SAFETY: parent is live and name is either the terminated subkey or the empty self name.
@@ -542,5 +550,134 @@ impl Drop for Key {
     fn drop(&mut self) {
         // SAFETY: this guard owns the key returned by RegOpenKeyExW.
         unsafe { RegCloseKey(self.handle) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use windows_sys::Win32::System::Registry::{
+        KEY_ALL_ACCESS, REG_OPTION_CREATE_LINK, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW,
+    };
+
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn NtDeleteKey(key: HKEY) -> i32;
+    }
+
+    struct Scratch(Vec<u16>);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            // SAFETY: this is the terminated name of the dedicated test subtree.
+            let code = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, self.0.as_ptr()) };
+            assert_eq!(code, 0, "RegDeleteTreeW (test subtree) Win32 {code}");
+        }
+    }
+
+    struct Link(Key);
+    impl Drop for Link {
+        fn drop(&mut self) {
+            // SAFETY: this deletes the source key by its owned handle, without resolving the link.
+            let status = unsafe { NtDeleteKey(self.0.handle) };
+            assert_eq!(status, 0, "NtDeleteKey (test link) NTSTATUS {status:#x}");
+        }
+    }
+
+    fn create_key(parent: HKEY, name: &[u16], path: String, options: u32) -> Key {
+        let mut handle = ptr::null_mut();
+        // SAFETY: parent is live, name is terminated and handle is writable.
+        let code = unsafe {
+            RegCreateKeyExW(
+                parent,
+                name.as_ptr(),
+                0,
+                ptr::null(),
+                options,
+                KEY_ALL_ACCESS,
+                ptr::null(),
+                &raw mut handle,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(code, 0, "RegCreateKeyExW [{path}] Win32 {code}");
+        Key { handle, path }
+    }
+
+    #[test]
+    fn registry_ancestry_rejects_an_intermediate_link() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = format!(
+            r"Software\Kinewright-LpacRegistryLink-{}-{now}",
+            std::process::id()
+        );
+        let name = wide(OsStr::new(&path)).unwrap();
+        let root = create_key(HKEY_CURRENT_USER, &name, path.clone(), 0);
+        let _scratch = Scratch(name);
+        let target = create_key(
+            root.handle,
+            &wide(OsStr::new("target")).unwrap(),
+            format!(r"{path}\target"),
+            0,
+        );
+        create_key(
+            target.handle,
+            &wide(OsStr::new("leaf")).unwrap(),
+            format!(r"{path}\target\leaf"),
+            0,
+        );
+        let link = Link(create_key(
+            root.handle,
+            &wide(OsStr::new("link")).unwrap(),
+            format!(r"{path}\link"),
+            REG_OPTION_CREATE_LINK,
+        ));
+        let sid = super::super::super::account_sid().unwrap();
+        let target: Vec<u16> = format!(r"\Registry\User\{sid}\{path}\target")
+            .encode_utf16()
+            .collect();
+        let value = wide(OsStr::new("SymbolicLinkValue")).unwrap();
+        // SAFETY: the linked destination and the source are both under the scratch key.
+        let code = unsafe {
+            RegSetValueExW(
+                link.0.handle,
+                value.as_ptr(),
+                0,
+                REG_LINK,
+                target.as_ptr().cast(),
+                u32::try_from(size_of_val(target.as_slice())).unwrap(),
+            )
+        };
+        assert_eq!(code, 0, "RegSetValueExW (test link) Win32 {code}");
+
+        let mut child = ptr::null_mut();
+        let through_link = wide(OsStr::new(r"link\leaf")).unwrap();
+        // SAFETY: this deliberately follows the scratch link to its known test target.
+        let code = unsafe {
+            RegOpenKeyExW(
+                root.handle,
+                through_link.as_ptr(),
+                0,
+                KEY_QUERY_VALUE,
+                &raw mut child,
+            )
+        };
+        assert_eq!(code, 0, "RegOpenKeyExW (link control) Win32 {code}");
+        // SAFETY: the successful open transferred the control handle.
+        unsafe { RegCloseKey(child) };
+
+        let Err(error) = root.open_path(["link", "leaf"]) else {
+            panic!("verified registry walk followed a link");
+        };
+        assert_eq!(error.step, Step::ReadStorage);
+        assert!(
+            error
+                .to_string()
+                .contains(&format!(r"registry link {path}\link")),
+            "{error}"
+        );
     }
 }

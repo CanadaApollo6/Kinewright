@@ -266,6 +266,7 @@ mod child {
             }
             Some("create") => file_write(target, "create"),
             Some("grow") => file_write(target, "grow"),
+            Some("replace") => file_write(target, "replace"),
             Some("mutate") => file_write(target, "mutate"),
             Some("registry") => registry(target),
             Some("connect") => return connect_loopback(parse(target)?, output),
@@ -283,7 +284,7 @@ mod child {
             ),
             Some("spawn") => spawn(target),
             Some("memory") => ("VirtualAlloc", allocate(parse(target)?)),
-            Some("hold") => ("ReadFile(hold)", 0),
+            Some("hold" | "hold-directory") => ("ReadFile(hold)", 0),
             _ => {
                 return Err(io::Error::other(format!(
                     "unknown fixture case {}",
@@ -295,12 +296,16 @@ mod child {
             // SAFETY: these APIs return the identifiers of this process and thread.
             let (pid, tid) = unsafe { (GetCurrentProcessId(), GetCurrentThreadId()) };
             format!("{api}\t{code}\t{pid}:{tid}\n")
+        } else if case == "hold-directory" {
+            let directory = env::var_os("LOCALAPPDATA")
+                .ok_or_else(|| io::Error::other("missing LOCALAPPDATA for directory witness"))?;
+            format!("{api}\t{code}\t{}\n", Path::new(&directory).display())
         } else {
             format!("{api}\t{code}\n")
         };
         output.write_all(report.as_bytes())?;
         output.flush()?;
-        if case == "hold" || case == "memory" {
+        if case == "hold" || case == "hold-directory" || case == "memory" {
             // The host must kill a waiting child. EOF is a distinct fixture failure.
             input.read_exact(&mut start)?;
         }
@@ -540,6 +545,7 @@ mod child {
         let result = match mode {
             "create" => options.write(true).create_new(true).open(target),
             "grow" => options.append(true).open(target),
+            "replace" => options.write(true).create(true).truncate(true).open(target),
             _ => options.write(true).open(target),
         };
         match result {

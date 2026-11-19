@@ -1,6 +1,6 @@
-use super::{AC, Budget, Error, PackageSids, Sid, Step, acl};
+use super::{Budget, Error, PackageSids, Sid, Step, acl};
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs::{File, OpenOptions},
     io,
     mem::offset_of,
@@ -14,19 +14,17 @@ use std::{
 use windows_sys::Win32::{
     Foundation::{ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE},
     Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_READ_DATA,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfo,
-        FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, GetFileInformationByHandle,
-        GetFileInformationByHandleEx, READ_CONTROL, ReOpenFile, SetFileInformationByHandle,
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO,
+        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
+        GetFileInformationByHandle, GetFileInformationByHandleEx, READ_CONTROL, ReOpenFile,
         WRITE_DAC,
     },
 };
 
 const FLAGS: u32 = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT;
 const SHARE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
-const EMPTY_AC_DIRECTORIES: &[&str] = &["INetCache", "INetCookies", "INetHistory", "Temp"];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Identity {
@@ -34,20 +32,19 @@ struct Identity {
     index: u64,
 }
 
-pub(super) struct Node {
+pub(in super::super) struct Node {
     path: PathBuf,
     file: File,
     identity: Identity,
     directory: bool,
-    can_prune: bool,
 }
 
 impl Node {
     pub(super) fn open_directory(path: &Path) -> Result<Self, Error> {
-        Self::open(path, true, false)
+        Self::open(path, true)
     }
 
-    fn open(path: &Path, directory: bool, prune: bool) -> Result<Self, Error> {
+    fn open(path: &Path, directory: bool) -> Result<Self, Error> {
         // Attribute-only opens do not enforce the sharing mode.
         let access = READ_CONTROL
             | FILE_READ_ATTRIBUTES
@@ -56,29 +53,19 @@ impl Node {
             } else {
                 FILE_READ_DATA
             };
-        let open = |extra| {
-            OpenOptions::new()
-                .access_mode(access | extra)
-                .share_mode(SHARE)
-                .custom_flags(FLAGS)
-                .open(path)
-        };
-        let (file, can_prune) = if prune {
-            match open(DELETE) {
-                Ok(file) => (Ok(file), true),
-                Err(_) => (open(0), false),
-            }
-        } else {
-            (open(0), false)
-        };
-        let file = file.map_err(|error| {
-            Error::io(
-                Step::ReadStorage,
-                "CreateFileW",
-                &error,
-                path.display().to_string(),
-            )
-        })?;
+        let file = OpenOptions::new()
+            .access_mode(access)
+            .share_mode(SHARE)
+            .custom_flags(FLAGS)
+            .open(path)
+            .map_err(|error| {
+                Error::io(
+                    Step::ReadStorage,
+                    "CreateFileW",
+                    &error,
+                    path.display().to_string(),
+                )
+            })?;
         let (identity, actual_directory) = checked_info(&file, path)?;
         if directory != actual_directory {
             return Err(identity_error(path));
@@ -88,8 +75,37 @@ impl Node {
             file,
             identity,
             directory,
-            can_prune,
         })
+    }
+
+    fn open_child(&self, name: &OsStr, file_index: u64, directory: bool) -> Result<Self, Error> {
+        let path = self.path.join(name);
+        let child = Self::open(&path, directory)?;
+        if child.identity
+            != (Identity {
+                volume: self.identity.volume,
+                index: file_index,
+            })
+        {
+            return Err(identity_error(&path));
+        }
+        Ok(child)
+    }
+
+    pub(super) fn named_directory(&self, name: &OsStr) -> Result<Self, Error> {
+        let mut found = None;
+        self.children(|entry, file_index, directory| {
+            let entry = OsString::from_wide(entry);
+            if entry.eq_ignore_ascii_case(name) {
+                if !directory {
+                    return Err(identity_error(&self.path.join(name)));
+                }
+                found = Some(self.open_child(name, file_index, true)?);
+                return Ok(false);
+            }
+            Ok(true)
+        })?;
+        found.ok_or_else(|| identity_error(&self.path.join(name)))
     }
 
     fn confirm(&self, file: &File) -> Result<(), Error> {
@@ -107,17 +123,16 @@ impl Node {
         acl::violation(&acl::Object::file(&self.file, &self.path), packages)
     }
 
-    pub(super) fn protect(&self, packages: &PackageSids<'_>) -> Result<(), Error> {
+    pub(super) fn protect(&self, packages: &PackageSids<'_>) -> Result<bool, Error> {
         if self.acl_violation(packages)?.is_none() {
-            return Ok(());
+            return Ok(false);
         }
-        let share = SHARE | if self.can_prune { FILE_SHARE_DELETE } else { 0 };
         // SAFETY: ReOpenFile reopens the checked object, not its path; the original stays open.
         let raw = unsafe {
             ReOpenFile(
                 self.file.as_raw_handle(),
                 READ_CONTROL | FILE_READ_ATTRIBUTES | WRITE_DAC,
-                share,
+                SHARE,
                 FLAGS,
             )
         };
@@ -131,32 +146,13 @@ impl Node {
         // SAFETY: the successful call transferred ownership of a distinct handle.
         let writable = unsafe { File::from_raw_handle(raw) };
         self.confirm(&writable)?;
-        acl::protect(&acl::Object::file(&writable, &self.path), packages)
-    }
-
-    pub(super) fn prune(&self) -> Result<bool, Error> {
-        if !self.can_prune {
-            return Ok(false);
-        }
-        self.confirm(&self.file)?;
-        let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
-        // SAFETY: this is the checked plain directory, opened for DELETE without reparse traversal.
-        // FileDispositionInfo can remove an empty directory only. Closing the handle completes it.
-        let ok = unsafe {
-            SetFileInformationByHandle(
-                self.file.as_raw_handle(),
-                FileDispositionInfo,
-                (&raw const disposition).cast(),
-                u32::try_from(size_of_val(&disposition)).expect("file disposition size"),
-            )
-        };
-        // A failed prune leaves this same object open for hardening.
-        Ok(ok != 0)
+        acl::protect(&acl::Object::file(&writable, &self.path), packages)?;
+        Ok(true)
     }
 
     fn children(
         &self,
-        mut visit: impl FnMut(&[u16], u64, bool) -> Result<(), Error>,
+        mut visit: impl FnMut(&[u16], u64, bool) -> Result<bool, Error>,
     ) -> Result<(), Error> {
         self.confirm(&self.file)?;
         let mut storage = [0u64; 1024];
@@ -222,11 +218,13 @@ impl Node {
                     {
                         return Err(identity_error(&self.path));
                     }
-                    visit(
+                    if !visit(
                         name,
                         entry.FileId.cast_unsigned(),
                         entry.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0,
-                    )?;
+                    )? {
+                        return Ok(());
+                    }
                 }
                 if next == 0 {
                     break;
@@ -282,9 +280,9 @@ fn identity_error(path: &Path) -> Error {
     )
 }
 
-pub(super) fn walk(root: &Path, prepare: bool, budget: &mut Budget) -> Result<Vec<Node>, Error> {
+pub(super) fn walk(root: Node, budget: &mut Budget) -> Result<Vec<Node>, Error> {
     budget.take("GetFileInformationByHandleEx")?;
-    let mut nodes = vec![Node::open_directory(root)?];
+    let mut nodes = vec![root];
     let mut index = 0;
     while index < nodes.len() {
         let parent = &nodes[index];
@@ -292,32 +290,12 @@ pub(super) fn walk(root: &Path, prepare: bool, budget: &mut Budget) -> Result<Ve
         if parent.directory {
             parent.children(|name, file_index, directory| {
                 budget.take("GetFileInformationByHandleEx")?;
-                let name = OsString::from_wide(name);
-                let path = parent.path.join(&name);
-                let is_ac = parent.path == root && name.eq_ignore_ascii_case(AC);
-                let is_ac_child = parent.path.parent() == Some(root)
-                    && parent
-                        .path
-                        .file_name()
-                        .is_some_and(|name| name.eq_ignore_ascii_case(AC));
-                let prunable = prepare
-                    && directory
-                    && (is_ac
-                        || (is_ac_child
-                            && EMPTY_AC_DIRECTORIES
-                                .iter()
-                                .any(|expected| name.eq_ignore_ascii_case(expected))));
-                let child = Node::open(&path, directory, prunable)?;
-                if child.identity
-                    != (Identity {
-                        volume: parent.identity.volume,
-                        index: file_index,
-                    })
-                {
-                    return Err(identity_error(&path));
-                }
-                children.push(child);
-                Ok(())
+                children.push(parent.open_child(
+                    &OsString::from_wide(name),
+                    file_index,
+                    directory,
+                )?);
+                Ok(true)
             })?;
         }
         nodes.extend(children);
@@ -326,7 +304,7 @@ pub(super) fn walk(root: &Path, prepare: bool, budget: &mut Budget) -> Result<Ve
     Ok(nodes)
 }
 
-pub(in super::super) fn check_launch_directory(path: &Path, sid: &Sid) -> Result<(), Error> {
+pub(in super::super) fn check_launch_directory(path: &Path, sid: &Sid) -> Result<Node, Error> {
     let node = Node::open_directory(path)?;
     node.children(|_, _, _| {
         Err(Error::unexpected(
@@ -343,5 +321,5 @@ pub(in super::super) fn check_launch_directory(path: &Path, sid: &Sid) -> Result
             format!("package ACE on launch directory {}", path.display()),
         ));
     }
-    Ok(())
+    Ok(node)
 }

@@ -1,6 +1,6 @@
 //! Verified `AppContainer` launcher for the Windows media boundary.
 
-use super::{Attributes, Handle, wide};
+use super::{Attributes, Handle, local_app_data, wide};
 use std::{
     ffi::{OsStr, OsString},
     fs::{self, File},
@@ -46,7 +46,7 @@ use windows_sys::Win32::{
         Threading::{
             CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DETACHED_PROCESS,
             EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
-            GetProcessMitigationPolicy, InitializeProcThreadAttributeList,
+            GetProcessMitigationPolicy, INFINITE, InitializeProcThreadAttributeList,
             PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
             PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
             PROC_THREAD_ATTRIBUTE_JOB_LIST, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
@@ -113,11 +113,18 @@ impl Drop for Sid {
 
 /// One verified, resumed child and the sole handle to its unnamed Job.
 pub struct Child {
-    job: Handle,
+    job: Option<Handle>,
     process: Handle,
     port: Handle,
     pid: u32,
     _local: LaunchDirectory,
+}
+
+impl Drop for Child {
+    fn drop(&mut self) {
+        drop(self.job.take());
+        wait_for_exit(&self.process);
+    }
 }
 
 /// The three handles inherited by the child, in command-line order.
@@ -151,18 +158,28 @@ pub fn launch(
         .map_err(|error| Error::launch(error, Step::InspectChild, "suspended child inspection"))
 }
 
-struct LaunchDirectory(PathBuf);
+struct LaunchDirectory {
+    path: PathBuf,
+    checked: Option<profile::Node>,
+}
 
 impl LaunchDirectory {
     fn create(sid: &Sid) -> Result<Self, Error> {
         static SERIAL: AtomicU64 = AtomicU64::new(0);
-        let temp = std::env::temp_dir();
-        let root = temp.canonicalize().map_err(|error| {
+        let parent = local_app_data().map_err(|error| {
+            Error::io(
+                Step::Environment,
+                "SHGetKnownFolderPath",
+                &error,
+                "LocalAppData",
+            )
+        })?;
+        let root = parent.canonicalize().map_err(|error| {
             Error::io(
                 Step::Environment,
                 "GetFinalPathNameByHandleW",
                 &error,
-                temp.display().to_string(),
+                parent.display().to_string(),
             )
         })?;
         let root = match root.components().next() {
@@ -185,12 +202,17 @@ impl LaunchDirectory {
             .as_nanos();
         for _ in 0..8 {
             let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
-            let path = root.join(format!("launch-{}-{now}-{serial}", std::process::id()));
+            let path = root.join(format!(
+                "kinewright-lpac-{}-{now}-{serial}",
+                std::process::id()
+            ));
             match fs::create_dir(&path) {
                 Ok(()) => {
-                    let directory = Self(path);
-                    profile::check_launch_directory(&directory.0, sid)?;
-                    return Ok(directory);
+                    let checked = profile::check_launch_directory(&path, sid)?;
+                    return Ok(Self {
+                        path,
+                        checked: Some(checked),
+                    });
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(error) => {
@@ -213,7 +235,8 @@ impl LaunchDirectory {
 
 impl Drop for LaunchDirectory {
     fn drop(&mut self) {
-        let _ = fs::remove_dir(&self.0);
+        drop(self.checked.take());
+        let _ = fs::remove_dir(&self.path);
     }
 }
 
@@ -252,17 +275,15 @@ struct Suspended {
 impl Drop for Suspended {
     fn drop(&mut self) {
         if let Some(process) = &self.process {
-            // SAFETY: the owned handle refers to this unresumed process.
-            let ended = unsafe { TerminateProcess(process.0, 1) };
-            if ended == 0 {
+            // SAFETY: this process belongs to the launch even if Job inspection failed.
+            if unsafe { TerminateProcess(process.0, 1) } == 0 {
                 eprintln!(
                     "{}",
                     last_error("TerminateProcess (suspended child cleanup)")
                 );
             }
-            if let Err(error) = wait_process(process, Duration::from_secs(2)) {
-                eprintln!("{error}");
-            }
+            drop(self.job.take());
+            wait_for_exit(process);
         }
     }
 }
@@ -286,7 +307,7 @@ impl Suspended {
         expect_value("ResumeThread suspend count", previous_count, 1)?;
         let (job, port) = self.job.take().expect("inspected Job");
         Ok(Child {
-            job,
+            job: Some(job),
             process: self.process.take().expect("inspected process"),
             port,
             pid: self.pid,
@@ -314,7 +335,7 @@ fn begin(
     }
     let application = wide(program.as_os_str())?;
     let cwd = wide(directory.as_os_str())?;
-    let environment = profile_environment(&local.0)?;
+    let environment = profile_environment(&local.path)?;
     let job = configure_job(&limits)?;
     let inherited = duplicate_inputs(inputs)?;
     let handles = [inherited.0.0, inherited.1.0, inherited.2.0];
@@ -818,12 +839,13 @@ impl Child {
             }
         }
         // SAFETY: the verified child is contained by this live Job.
+        let job = self.job.as_ref().expect("child Job");
         check_step("TerminateJobObject (observed memory limit)", unsafe {
-            TerminateJobObject(self.job.0, ERROR_NOT_ENOUGH_MEMORY)
+            TerminateJobObject(job.0, ERROR_NOT_ENOUGH_MEMORY)
         })?;
         let exit = self.wait(timeout)?;
         let accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = query_job(
-            &self.job,
+            job,
             JobObjectBasicAccountingInformation,
             "after memory termination",
         )?;
@@ -836,15 +858,26 @@ impl Child {
     }
 
     /// Close the sole Job handle and observe its effect through the process handle.
+    /// Teardown waits for exit before releasing the checked launch directory.
     ///
     /// # Errors
     /// Returns a native wait or exit-status failure, including timeout.
-    pub fn close_job(self, timeout: Duration) -> io::Result<u32> {
-        let job = self.job;
+    pub fn close_job(mut self, timeout: Duration) -> io::Result<u32> {
+        let job = self.job.take().expect("child Job");
         // SAFETY: the child owns the sole Job handle and closes it once here.
         check_step("CloseHandle (sole LPAC Job)", unsafe { CloseHandle(job.0) })?;
         std::mem::forget(job);
         wait_process(&self.process, timeout)
+    }
+}
+
+fn wait_for_exit(process: &Handle) {
+    // SAFETY: the live process handle grants SYNCHRONIZE. Closing its Job starts termination.
+    if unsafe { WaitForSingleObject(process.0, INFINITE) } != WAIT_OBJECT_0 {
+        eprintln!(
+            "{}",
+            last_error("WaitForSingleObject (LPAC directory cleanup)")
+        );
     }
 }
 
