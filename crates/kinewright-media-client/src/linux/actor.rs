@@ -340,8 +340,7 @@ impl Actor {
                 }
                 let timing = done.as_ref().ok().map(|done| done.timing);
                 let mut result = match done {
-                    Ok(done) if done.unproven => Err(Failure::Sandbox(Error::Crashed)),
-                    Ok(done) if uncaused && done.fallback && !request.degraded => {
+                    Ok(done) if uncaused && done.fallback && !unproven && !request.degraded => {
                         request.earlier_timing.add(done.timing);
                         request.degraded = true;
                         self.queue.continue_with(request, &self.status, now);
@@ -350,6 +349,9 @@ impl Actor {
                     Ok(done) => attribute(cause, done.result),
                     Err(_) => Err(cause.unwrap_or(Failure::Sandbox(Error::Crashed))),
                 };
+                if unproven && matches!(result, Ok(_) | Err(Failure::ProbeTimedOut(_))) {
+                    result = Err(Failure::Sandbox(Error::Crashed));
+                }
                 // This host-owned worker cannot finish until its cleanup guard
                 // has reaped the shim and verified native scope emptiness. Keep
                 // cleanup waits off the actor so other deadlines still fire.
@@ -680,7 +682,7 @@ mod ms_t10_tests {
         }
     }
 
-    fn settle_cleanup_crash(armed_timeout: bool, unproven: bool) -> Outcome {
+    fn settle_cleanup(armed_timeout: bool, unproven: bool, failure: Option<Error>) -> Outcome {
         let (_sender, receiver) = std::sync::mpsc::sync_channel(1);
         let mut actor = Actor::new(
             Config::new(
@@ -693,7 +695,7 @@ mod ms_t10_tests {
         );
         let (reply, result) = std::sync::mpsc::sync_channel(1);
         let queued = Instant::now();
-        let (running, finish_cleanup) = worker::cleanup_crash_fixture(unproven);
+        let (running, finish_cleanup) = worker::cleanup_fixture(unproven, failure);
         let pending = Pending {
             request: Request {
                 source: Box::new(Input(std::fs::File::open("/dev/null").unwrap())),
@@ -735,7 +737,7 @@ mod ms_t10_tests {
 
     #[test]
     fn ms_t10_cleanup_crash_survives_late_settlement() {
-        let result = settle_cleanup_crash(false, false);
+        let result = settle_cleanup(false, false, None);
         assert!(
             matches!(result, Err(Failure::Sandbox(Error::Crashed))),
             "{result:?}"
@@ -744,16 +746,25 @@ mod ms_t10_tests {
         // A nonzero exit first observed after arming the timeout can be due to
         // the actor's own cancellation, so the timeout remains the answer.
         assert!(matches!(
-            settle_cleanup_crash(true, false),
+            settle_cleanup(true, false, None),
             Err(Failure::ProbeTimedOut(_))
         ));
     }
 
     #[test]
     fn ms_t10_cleanup_crash_unproven_overrides_armed_timeout() {
-        let result = settle_cleanup_crash(true, true);
+        let result = settle_cleanup(true, true, None);
         assert!(
             matches!(result, Err(Failure::Sandbox(Error::Crashed))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn ms_t10_cleanup_unproven_preserves_unsupported_media() {
+        let result = settle_cleanup(false, true, Some(Error::UnsupportedMedia));
+        assert!(
+            matches!(result, Err(Failure::Sandbox(Error::UnsupportedMedia))),
             "{result:?}"
         );
     }

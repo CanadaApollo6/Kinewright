@@ -182,10 +182,14 @@ pub(super) struct Done {
 }
 
 #[cfg(test)]
-pub(super) fn cleanup_crash_fixture(unproven: bool) -> (Running, std::sync::mpsc::SyncSender<()>) {
-    // Supply validated metadata and let native cleanup observe a real nonzero exit.
+pub(super) fn cleanup_fixture(
+    unproven: bool,
+    failure: Option<Error>,
+) -> (Running, std::sync::mpsc::SyncSender<()>) {
+    static NEXT_GENERATION: AtomicU64 = AtomicU64::new(u64::MAX);
+    // Native cleanup observes a nonzero exit even if the probe produced metadata.
     let lifetime = File::open("/dev/null").unwrap();
-    let root = Root::create(u64::MAX - u64::from(unproven)).unwrap();
+    let root = Root::create(NEXT_GENERATION.fetch_sub(1, Ordering::Relaxed)).unwrap();
     let child = std::process::Command::new("/bin/false").spawn().unwrap();
     let (child, pin) = pin_child(child).unwrap();
     let mut lease = Lease {
@@ -210,13 +214,20 @@ pub(super) fn cleanup_crash_fixture(unproven: bool) -> (Running, std::sync::mpsc
     let (finish_cleanup, wait) = std::sync::mpsc::sync_channel(1);
     let thread = std::thread::spawn(move || {
         wait.recv().unwrap();
+        let result = match failure {
+            Some(error) => Err(Failure::Sandbox(error)),
+            None => Ok(super::admission::tests::fixture_probe()),
+        };
         let done = lease.finish(
-            Ok(super::admission::tests::fixture_probe()),
+            result,
             false,
             &worker_shared,
             Instant::now() + INITIAL_DEADLINE,
         );
-        assert!(matches!(done.result, Err(Failure::Sandbox(Error::Crashed))));
+        assert!(matches!(
+            done.result,
+            Err(Failure::Sandbox(error)) if error == failure.unwrap_or(Error::Crashed)
+        ));
         done
     });
     (
