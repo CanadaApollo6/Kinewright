@@ -110,6 +110,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ runner.os == 'Linux' && 'linux' || 'windows' }}
+          # CI-T4: only main saves the large Rust build cache; branches restore it.
+          # Two branches saving ~3.4 GB each exceeded the 10 GB repository limit and
+          # evicted the FFmpeg binaries that the Windows test shards restore.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
@@ -242,6 +246,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: recognition-${{ runner.os }}
+          # CI-T4: only main saves the large Rust build cache; branches restore it.
+          # Two branches saving ~3.4 GB each exceeded the 10 GB repository limit and
+          # evicted the FFmpeg binaries that the Windows test shards restore.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
