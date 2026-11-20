@@ -75,6 +75,8 @@ pub(crate) struct TranscriptService {
     root: CacheDirectory,
     #[cfg(any(test, feature = "test-util"))]
     inference_gate: InferenceGate,
+    #[cfg(test)]
+    before_profile_status: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 enum TranscriptWork {
     Locator(crate::locator::LocatorJob<TranscriptJob>),
@@ -186,14 +188,7 @@ impl TranscriptService {
                 None,
             );
         }
-        match requests.status(&path) {
-            TranscriptStatus::Ready(_) | TranscriptStatus::NoSpeech => {
-                TranscriptStatus::Transcribing {
-                    progress_percent: 100,
-                }
-            }
-            status => status,
-        }
+        dialogue_cache_miss_status(requests.status(&path))
     }
     pub(crate) fn new(data_dir: PathBuf) -> Result<Self, MediaError> {
         let data_dir = crate::data_dir::ensure_root(data_dir)?;
@@ -228,6 +223,8 @@ impl TranscriptService {
             root,
             #[cfg(any(test, feature = "test-util"))]
             inference_gate,
+            #[cfg(test)]
+            before_profile_status: std::sync::Mutex::default(),
         })
     }
     #[cfg(any(test, feature = "test-util"))]
@@ -331,14 +328,7 @@ impl TranscriptService {
                 }
             }
         }
-        match self.requests.status(&path) {
-            TranscriptStatus::Ready(_) | TranscriptStatus::NoSpeech => {
-                TranscriptStatus::Transcribing {
-                    progress_percent: 100,
-                }
-            }
-            status => status,
-        }
+        dialogue_cache_miss_status(self.requests.status(&path))
     }
     pub(crate) fn status(&self, path: &Path) -> TranscriptStatus {
         self.requests.status(path)
@@ -442,6 +432,13 @@ impl TranscriptService {
     ) -> TranscriptStatus {
         let _authority = crate::locator::LocatorAuthority::enter(&grant);
         self.profiles.invalidate_finished(&asset.path);
+        #[cfg(test)]
+        {
+            let before_status = self.before_profile_status.lock().unwrap().take();
+            if let Some(before_status) = before_status {
+                before_status();
+            }
+        }
         if matches!(
             self.profiles.status(&asset.path),
             TranscriptStatus::NotRequested
@@ -463,15 +460,10 @@ impl TranscriptService {
                     },
                     Some(grant),
                 );
-                return match self.profiles.status(&path) {
-                    TranscriptStatus::NoSpeech => TranscriptStatus::Transcribing {
-                        progress_percent: 100,
-                    },
-                    status => status,
-                };
+                return dialogue_cache_miss_status(self.profiles.status(&path));
             }
         }
-        self.profiles.status(&asset.path)
+        dialogue_cache_miss_status(self.profiles.status(&asset.path))
     }
     pub(crate) fn cache_stats(&self) -> Result<crate::derived_cache::CacheStats, MediaError> {
         self.root.inventory()
@@ -493,6 +485,18 @@ impl TranscriptService {
         })
     }
 }
+
+// A job can publish its result between the cache miss and the status read.
+// A finished status tells the caller to read the cache on its next poll.
+fn dialogue_cache_miss_status(status: TranscriptStatus) -> TranscriptStatus {
+    match status {
+        TranscriptStatus::Ready(_) | TranscriptStatus::NoSpeech => TranscriptStatus::Transcribing {
+            progress_percent: 100,
+        },
+        status => status,
+    }
+}
+
 struct TranscriptWorker {
     data_dir: PathBuf,
     requests: Requests,
@@ -1752,18 +1756,18 @@ mod tests {
 #[cfg(test)]
 mod measurement_tests {
     use super::*;
-    #[test]
-    fn dq_media_transcript_hit_fills_only_the_missing_profile_in_its_job() {
-        use crate::sound_profile::{ProfileIdentity, SoundMeasurement, SoundProfileCache};
-        use crate::test_support::{GeneratedMedia, TempDirectory, wav_f32};
+    use crate::{
+        sound_profile::{ProfileIdentity, SoundMeasurement, SoundProfileCache},
+        test_support::{GeneratedMedia, TempDirectory, wav_f32},
+    };
+
+    fn measured_asset() -> (GeneratedMedia, MediaAsset) {
         crate::initialize_ffmpeg().unwrap();
         let audio = GeneratedMedia::from_bytes(
             "dq-media-transcript-profile",
             "wav",
             &wav_f32(&vec![0.125; 3200], 16_000, 1),
         );
-        let data = TempDirectory::new("dq-media-transcript-profile-root");
-        let content = sha256_file(audio.path()).unwrap();
         let asset = MediaAsset {
             remote_locator: None,
             id: AssetId(1),
@@ -1774,12 +1778,73 @@ mod measurement_tests {
             kind: MediaKind::Audio,
             resolution: None,
             source_fingerprint: kinewright_core::MediaSourceFingerprint {
-                content_sha256: Some(content.clone()),
+                content_sha256: Some(sha256_file(audio.path()).unwrap()),
                 byte_len: Some(std::fs::metadata(audio.path()).unwrap().len()),
             },
             color_description: kinewright_core::ColorDescription::default(),
             assumed_from: None,
         };
+        (audio, asset)
+    }
+
+    #[test]
+    fn dq_t1_profile_finishes_between_cache_miss_and_status_read() {
+        let (_audio, asset) = measured_asset();
+        let data = TempDirectory::new("dq-t1-profile-race");
+        let service = TranscriptService::new(data.root().into()).unwrap();
+        let grant = kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .unwrap();
+        let _authority = crate::locator::LocatorAuthority::enter(&grant);
+        let recipe = Recipe {
+            identity: Identity::english(),
+            language: None,
+        };
+        let mut worker = TranscriptWorker::new(
+            data.root().into(),
+            service.root.clone(),
+            service.requests.clone(),
+        );
+        worker.profiles = service.profiles.clone();
+        let job = TranscriptJob {
+            source: None,
+            profile_only: true,
+            cancellation: service.profiles.admit(&asset.path, &recipe).unwrap(),
+            asset: asset.clone(),
+            model: &ENGLISH_MODEL,
+            recipe,
+        };
+        *service.before_profile_status.lock().unwrap() = Some(Box::new(move || {
+            worker.handle(&job, TranscriptWorker::transcribe_asset);
+            assert!(matches!(
+                worker.profiles.status(&job.asset.path),
+                TranscriptStatus::NoSpeech
+            ));
+        }));
+        let key = ProfileIdentity::new(&asset.source_fingerprint, 0).unwrap();
+        let cache = SoundProfileCache::new(data.root()).unwrap();
+        assert!(cache.load(&key).unwrap().is_none());
+        let status = service.request_profile(asset, grant);
+        assert!(
+            matches!(
+                status,
+                TranscriptStatus::Transcribing {
+                    progress_percent: 100
+                }
+            ),
+            "completed profile must prompt another cache read, got {status:?}"
+        );
+        let Some(SoundMeasurement::Measured { profile }) = cache.load(&key).unwrap() else {
+            panic!("the next read must see the finished profile");
+        };
+        assert_eq!(profile.duration_micros(), 200_000);
+    }
+
+    #[test]
+    fn dq_media_transcript_hit_fills_only_the_missing_profile_in_its_job() {
+        let (audio, asset) = measured_asset();
+        let data = TempDirectory::new("dq-media-transcript-profile-root");
+        let content = sha256_file(audio.path()).unwrap();
         let requests = Requests::new();
         let recipe = Recipe {
             identity: Identity::english(),
