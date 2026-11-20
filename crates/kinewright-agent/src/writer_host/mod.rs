@@ -1053,14 +1053,15 @@ struct BarrierRequestRef<'a> {
     roots: &'a SessionRoots,
     command: BarrierCommandRef<'a>,
 }
-fn exact_barrier_request_bytes(
+fn write_barrier_request(
+    writer: impl Write,
     project: &str,
     roots: &SessionRoots,
     editor: Option<&str>,
     operation: Option<u64>,
     door: BarrierCapacityDoor,
     selected: &RecoveryBarrier,
-) -> Result<usize, HostError> {
+) -> Result<(), HostError> {
     let command = match door {
         BarrierCapacityDoor::PublishBarrier => {
             BarrierCommandRef::PublishBarrier { barrier: selected }
@@ -1078,8 +1079,27 @@ fn exact_barrier_request_bytes(
         roots,
         command,
     };
+    serde_json::to_writer(writer, &request)?;
+    Ok(())
+}
+fn exact_barrier_request_bytes(
+    project: &str,
+    roots: &SessionRoots,
+    editor: Option<&str>,
+    operation: Option<u64>,
+    door: BarrierCapacityDoor,
+    selected: &RecoveryBarrier,
+) -> Result<usize, HostError> {
     let mut counter = CountingWriter(0);
-    serde_json::to_writer(&mut counter, &request)?;
+    write_barrier_request(
+        &mut counter,
+        project,
+        roots,
+        editor,
+        operation,
+        door,
+        selected,
+    )?;
     Ok(counter.0)
 }
 async fn recovery_capacity_request(
@@ -2151,7 +2171,7 @@ impl HostCommandOwner {
     fn note_barrier_capacity_refusal(
         &mut self,
         bearer: &str,
-        roots: &SessionRoots,
+        wire_roots: &SessionRoots,
         notice: &RecoveryCapacityNotice,
     ) -> Result<(), HostError> {
         let index = self.resolve_attachment(Some(bearer))?;
@@ -2163,14 +2183,17 @@ impl HostCommandOwner {
             )
             .into());
         }
-        let roots = roots.canonicalize()?;
-        Self::check_narrowed_roots(&grant.roots, &roots)?;
-        self.latch_barrier_capacity(notice.as_ref(), &roots)
+        let canonical_roots = wire_roots.canonicalize()?;
+        Self::check_narrowed_roots(&grant.roots, &canonical_roots)?;
+        // `wire_roots` is the client-sent `x-kinewright-roots` spelling;
+        // authority was checked on `canonical_roots` above, and `wire_roots`
+        // is used only to measure the serialized wire request size.
+        self.latch_barrier_capacity(notice.as_ref(), Some(wire_roots))
     }
     fn latch_barrier_capacity(
         &mut self,
         notice: BarrierCapacityRef<'_>,
-        roots: &SessionRoots,
+        wire_roots: Option<&SessionRoots>,
     ) -> Result<(), HostError> {
         if !self.recovering {
             return Err(HostRefusal::new("history_changed", "no active recovery").into());
@@ -2206,15 +2229,17 @@ impl HostCommandOwner {
         let exceeds_snapshot_cap = before_bytes > cap || after_bytes > cap;
         let exceeds_request_cap = if exceeds_snapshot_cap {
             false
-        } else {
+        } else if let Some(wire_roots) = wire_roots {
             exact_barrier_request_bytes(
                 &self.config.project,
-                roots,
+                wire_roots,
                 notice.has_editor.then_some(selected.client.as_str()),
                 notice.operation,
                 notice.door,
                 selected,
             )? > HOST_BODY_BYTES
+        } else {
+            false
         };
         if !exceeds_snapshot_cap && !exceeds_request_cap {
             return Err(HostRefusal::new(
@@ -2279,7 +2304,7 @@ impl HostCommandOwner {
                 has_editor: false,
                 operation: None,
             };
-            let _ = self.latch_barrier_capacity(notice, roots);
+            let _ = self.latch_barrier_capacity(notice, None);
             return Err(refusal.into());
         }
         #[cfg(test)]
