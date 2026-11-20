@@ -16,7 +16,7 @@ use std::{
         mpsc::{self, SyncSender},
     },
     thread::JoinHandle,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 enum Call {
@@ -66,7 +66,12 @@ impl Drop for Guard {
 impl Controller {
     /// Called only by the dedicated spawner. Bootstrap is bounded by socket
     /// timeouts; all subsequent blocking RPCs run on the controller worker.
-    pub fn start(path: &Path, generation: u64) -> Result<Self, Unavailable> {
+    pub fn start(
+        path: &Path,
+        generation: u64,
+        handshake: &mut Option<(Instant, Instant)>,
+    ) -> Result<Self, Unavailable> {
+        *handshake = None;
         let error = |reason| move |_| Phase::Supervisor.unavailable(reason);
         let (socket, inherited) =
             media_scope::socketpair().map_err(error(Reason::SupervisorSocket))?;
@@ -84,7 +89,10 @@ impl Controller {
         let mut guard = Guard { child, socket };
         let pin =
             Arc::new(ProcessHandle::open(guard.child.id()).map_err(error(Reason::SupervisorPin))?);
-        let initial = read_frame(&mut guard.socket).map_err(|error| {
+        let started = Instant::now();
+        let initial = read_frame(&mut guard.socket);
+        *handshake = Some((started, Instant::now()));
+        let initial = initial.map_err(|error| {
             let reason = match error.kind() {
                 io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => {
                     Reason::SupervisorHandshakeTimedOut

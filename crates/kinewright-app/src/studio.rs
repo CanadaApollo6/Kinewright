@@ -839,7 +839,8 @@ impl KinewrightApp {
             .as_ref()
             .is_none_or(|attachment| !attachment.read_only());
         if quiet_button(ui, "Current edit", manual_ready, false).clicked()
-            && self.focused().studio.selection.is_some()
+            && (self.focused().studio.selection.is_some()
+                || self.focused().studio.manual_failure.is_some())
         {
             self.return_to_current_edit();
         }
@@ -968,7 +969,7 @@ impl KinewrightApp {
             ));
         }
         let (dot, status) = if let Some(error) = &studio.failure {
-            (po0::DANGER, format!("Damaged or unavailable · {error}"))
+            (po0::DANGER, error.clone())
         } else if studio.selection.is_some() && bound.is_some_and(|cell| cell.stale) {
             (po0::TEXT_3, "Loading this version…".to_owned())
         } else if studio.selection.is_some() {

@@ -684,6 +684,7 @@ impl From<BundleError> for HostRefusal {
             BundleError::Capacity(_) => "storage_backpressure",
             BundleError::RunLimit | BundleError::RunAdmission(_) => "run_limit",
             BundleError::Unsupported(_) => "unsupported_bundle",
+            BundleError::MediaProbeTimedOut { .. } => "media_probe_timed_out",
             BundleError::Corrupt(_) => "damaged_bundle",
             BundleError::Unsettled => "unsettled",
         };

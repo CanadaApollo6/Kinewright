@@ -483,7 +483,10 @@ impl Ja1Attachment {
                     return Ok(());
                 }
                 Err(error) => {
-                    self.message = format!("Version damaged or unavailable: {error}");
+                    self.message = match &error {
+                        BundleError::MediaProbeTimedOut { .. } => error.to_string(),
+                        _ => format!("Version damaged or unavailable: {error}"),
+                    };
                     self.studio_error_ready = Some(self.message.clone());
                     return Err(error);
                 }

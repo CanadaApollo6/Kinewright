@@ -550,9 +550,13 @@ impl MediaReadWork {
                 *work
                     .state
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = MediaReadState::Ready(
-                    result.map(Arc::new).map_err(|_| media_failed().refusal()),
-                );
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    MediaReadState::Ready(result.map(Arc::new).map_err(|error| match error {
+                        HostError::Refused(refusal) if refusal.code == "media_probe_timed_out" => {
+                            refusal
+                        }
+                        _ => media_failed().refusal(),
+                    }));
             })
             .is_err()
         {

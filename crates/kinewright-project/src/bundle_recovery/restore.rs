@@ -133,13 +133,21 @@ impl ProjectBundle {
             }
             let owner = (manifest.project_id.clone(), manifest.session_id.clone());
             for entry in &manifest.entries {
-                input_leases.push(self.store.lease_input_for_owner(
-                    &crate::owned_inputs::OwnedInputRef {
-                        manifest_ref: reference.clone(),
-                        entry: entry.clone(),
-                    },
-                    &owner,
-                )?);
+                input_leases.push(
+                    self.store.lease_input_for_owner(
+                        &crate::owned_inputs::OwnedInputRef {
+                            manifest_ref: reference.clone(),
+                            entry: entry.clone(),
+                        },
+                        &owner,
+                        snapshot
+                            .document()
+                            .media_pool
+                            .iter()
+                            .find(|asset| entry.matches_media_asset(asset))
+                            .map(|asset| asset.path.as_path()),
+                    )?,
+                );
             }
         }
         let pin = self.store.pin(std::slice::from_ref(&reference))?;

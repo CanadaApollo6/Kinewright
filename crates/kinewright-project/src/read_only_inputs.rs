@@ -143,15 +143,16 @@ impl ReadOnlyInputs {
         let (document_value, document_charge) =
             read_record::<kinewright_core::Document>(&mut document, limits, reserve)?;
         crate::bundle_commit::validate_document_inputs(&document_value, &manifest_value)?;
-        if !document_value
+        let Some(asset) = document_value
             .media_pool
             .iter()
-            .any(|asset| binding.input.entry.matches_media_asset(asset))
-        {
+            .find(|asset| binding.input.entry.matches_media_asset(asset))
+        else {
             return Err(BundleError::Identity(
                 "read-only document input binding".into(),
             ));
-        }
+        };
+        let locator = asset.path.clone();
         let (table_value, table_charge) =
             read_record::<InputChunkTable>(&mut table, limits, reserve)?;
         table_value.validate_binding(&media.reference, limits)?;
@@ -195,7 +196,12 @@ impl ReadOnlyInputs {
         )
         .map_err(|error| BundleError::Corrupt(error.to_string()))?;
         Ok(Self {
-            media: CertifiedMediaInput::from_verified_source(source, interpretation, None)?,
+            media: CertifiedMediaInput::from_verified_source(
+                source,
+                &locator,
+                interpretation,
+                None,
+            )?,
             usage,
         })
     }

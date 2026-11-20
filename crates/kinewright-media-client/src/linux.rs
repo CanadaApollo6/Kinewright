@@ -21,7 +21,9 @@ use std::{
 mod actor;
 mod admission;
 mod controller;
+mod timing;
 mod worker;
+pub use timing::ProbeTiming;
 pub use worker::{Phase, diagnostics};
 
 pub const ACTIVE_PROBES: usize = 2;
@@ -204,7 +206,6 @@ pub enum UnavailableReason {
     ScopeCreateFailed,
     ScopeUnavailable(kinewright_media_ipc::ScopeUnavailableReason),
     ScopeVerifyFailed,
-    ScopeVerifyTimedOut,
     RequiredNamespacesUnavailable,
     NamespacePolicyDenied,
     EarlyEof,
@@ -270,6 +271,7 @@ impl std::error::Error for Unavailable {}
 #[derive(Debug)]
 pub enum Failure {
     Sandbox(MediaSandboxError),
+    ProbeTimedOut(ProbeTiming),
     Unavailable(Unavailable),
     Authority(MediaError),
     Busy(Busy),
@@ -283,6 +285,7 @@ impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Sandbox(error) => write!(f, "media sandbox: {error:?}"),
+            Self::ProbeTimedOut(timing) => write!(f, "media sandbox timed out: {timing}"),
             Self::Unavailable(error) => error.fmt(f),
             Self::Authority(error) => error.fmt(f),
             Self::Busy(Busy::QueueFull) => {

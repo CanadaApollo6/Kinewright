@@ -244,7 +244,7 @@ mod support {
                     "{outcome:?}"
                 ),
                 "deadline" => assert!(
-                    matches!(outcome, Err(Failure::Sandbox(MediaSandboxError::TimedOut))),
+                    matches!(outcome, Err(Failure::ProbeTimedOut(_))),
                     "{outcome:?}"
                 ),
                 "authority" => assert!(
@@ -449,10 +449,7 @@ mod support {
                 explicit_retry: false,
             });
             let elapsed = started.elapsed();
-            sampler.finish(
-                !matches!(outcome, Err(Failure::Sandbox(MediaSandboxError::TimedOut)))
-                    || elapsed > bound,
-            );
+            sampler.finish(!matches!(outcome, Err(Failure::ProbeTimedOut(_))) || elapsed > bound);
             let active = runtime.snapshot().active;
             println!(
                 "MS2_SILENT_PROBE held={held} degraded={} elapsed_ms={} active={active} outcome={outcome:?}",
@@ -468,7 +465,10 @@ mod support {
                 "silent helper ran the other resource mode"
             );
             assert!(
-                matches!(outcome, Err(Failure::Sandbox(MediaSandboxError::TimedOut))),
+                matches!(&outcome, Err(Failure::ProbeTimedOut(timing))
+                    if timing.phase == kinewright_media_client::Phase::Forked
+                        && !timing.helper_handshake.is_zero()
+                        && timing.request_to_reply.is_zero()),
                 "silent helper held={held}: {outcome:?}"
             );
             assert!(

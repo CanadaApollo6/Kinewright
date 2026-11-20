@@ -22,6 +22,7 @@ pub enum BundleError {
     RunLimit,
     RunAdmission(&'static str),
     Unsupported(String),
+    MediaProbeTimedOut { path: PathBuf, phases: String },
     Corrupt(String),
     Unsettled,
 }
@@ -55,6 +56,13 @@ impl fmt::Display for BundleError {
                 "storage_backpressure: {e}; wait and retry; if a run is active, Stop it to keep its work"
             ),
             Self::Unsupported(e) => write!(f, "unsupported_bundle: {e}"),
+            Self::MediaProbeTimedOut { path, phases } => write!(
+                f,
+                "Reading media “{}” did not finish in time. Try again. ({phases})",
+                path.file_name()
+                    .unwrap_or(path.as_os_str())
+                    .to_string_lossy()
+            ),
             Self::Corrupt(e) => write!(f, "damaged_bundle: {e}"),
             Self::Unsettled => f.write_str("publication requires reconciliation"),
         }

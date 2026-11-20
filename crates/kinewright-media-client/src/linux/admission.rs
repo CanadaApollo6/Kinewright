@@ -2,7 +2,8 @@
 //! no process, pipe, or scope authority. Healthy launches are bounded by the
 //! active slots and this queue; only unhealthy outcomes consume breaker tokens.
 use super::{
-    Busy, Failure, INITIAL_DEADLINE, Outcome, PENDING_PROBES, QUEUE_WAIT, Request, Status,
+    Busy, Failure, INITIAL_DEADLINE, Outcome, PENDING_PROBES, ProbeTiming, QUEUE_WAIT, Request,
+    Status,
 };
 use kinewright_media_ipc::MediaSandboxError as Error;
 use std::{
@@ -23,8 +24,27 @@ pub(super) struct Pending {
     /// Queue wait is bounded separately; the decode deadline starts at launch.
     pub queued: Instant,
     pub degraded: bool,
+    pub earlier_timing: ProbeTiming,
 }
 impl Pending {
+    pub fn admission_refusal(&self, closed: bool) -> Option<Failure> {
+        if closed || self.request.cancel.load(Ordering::Acquire) {
+            Some(Failure::Sandbox(Error::Cancelled))
+        } else {
+            self.request.source.check().err().map(Failure::Authority)
+        }
+    }
+
+    pub fn record_handshake(&mut self, handshake: Option<(Instant, Instant)>) {
+        if let Some((started, finished)) = handshake {
+            // Charge only the part of the handshake this request waited for.
+            self.earlier_timing.supervisor_handshake = self
+                .earlier_timing
+                .supervisor_handshake
+                .max(finished.saturating_duration_since(started.max(self.queued)));
+        }
+    }
+
     /// The decode window opens at launch, never at enqueue: time spent behind
     /// another source's slow decode is the queue's bound, not this one's.
     pub fn decode_deadline(&self, launched: Instant) -> Instant {
@@ -49,6 +69,7 @@ impl Health {
                 Self::Neutral
             }
             Err(Failure::Sandbox(error)) => Self::Unhealthy(*error),
+            Err(Failure::ProbeTimedOut(_)) => Self::Unhealthy(Error::TimedOut),
             // Keep the unavailable outcome's breaker charge and retry policy.
             Err(Failure::Unavailable(_)) => Self::Unhealthy(Error::SandboxUnavailable),
         }
@@ -408,6 +429,7 @@ mod tests {
                 reply,
                 queued,
                 degraded: false,
+                earlier_timing: ProbeTiming::default(),
             },
             receiver,
         )

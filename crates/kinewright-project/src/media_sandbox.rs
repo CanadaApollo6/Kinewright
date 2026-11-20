@@ -3,7 +3,10 @@
 //! is no in-process fallback on Linux; Windows keeps its probe until 1b.
 use crate::bundle::BundleError;
 use kinewright_media::owned_io::{CertifiedProbe, CertifiedSource};
-use std::sync::{Arc, atomic::AtomicBool};
+use std::{
+    path::Path,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 #[cfg(target_os = "linux")]
 pub use kinewright_media_client::{Config, Limits};
@@ -101,6 +104,7 @@ mod linux {
     }
 
     pub(crate) fn probe(
+        locator: &Path,
         source: &CertifiedSource,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<CertifiedProbe, BundleError> {
@@ -108,10 +112,11 @@ mod linux {
         let runtime = Some(test_runtime());
         #[cfg(not(any(test, feature = "ms2-test-bin-dir")))]
         let runtime = RUNTIME.get();
-        probe_with(runtime, source, cancel)
+        probe_with(runtime, locator, source, cancel)
     }
     pub(crate) fn probe_with(
         runtime: Option<&Runtime>,
+        locator: &Path,
         source: &CertifiedSource,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<CertifiedProbe, BundleError> {
@@ -147,7 +152,7 @@ mod linux {
             }),
             None => runtime.probe_until_deadline(pinned, video, audio),
         }
-        .map_err(|failure| sandbox_error(&failure))?;
+        .map_err(|failure| sandbox_error(&failure, locator))?;
         // Admission rechecks host authority and byte identity after the
         // helper is gone.
         source
@@ -157,8 +162,12 @@ mod linux {
         certified(probe)
     }
 
-    fn sandbox_error(failure: &Failure) -> BundleError {
+    fn sandbox_error(failure: &Failure, locator: &Path) -> BundleError {
         match failure {
+            Failure::ProbeTimedOut(timing) => BundleError::MediaProbeTimedOut {
+                path: locator.to_path_buf(),
+                phases: timing.to_string(),
+            },
             Failure::Busy(_) => BundleError::Contention(failure.to_string()),
             Failure::Unavailable(error) => unavailable(*error),
             Failure::Sandbox(MediaSandboxError::SandboxUnavailable) => BundleError::Corrupt(
@@ -176,6 +185,18 @@ mod linux {
         } else {
             BundleError::Contention(error.to_string())
         }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn ms_t10_authority_failure_is_still_corrupt() {
+        let failure =
+            Failure::Authority(kinewright_core::MediaError::MediaReadTemporarilyUnavailable);
+        let error = sandbox_error(&failure, Path::new("fixture.mov"));
+        assert!(
+            matches!(&error, BundleError::Corrupt(message) if *message == failure.to_string()),
+            "{error:?}"
+        );
     }
 
     #[cfg(test)]
@@ -214,7 +235,7 @@ mod linux {
                 "supervisor startup, ExecutableUnavailable",
             ),
         ] {
-            let error = sandbox_error(&phase.unavailable(reason).into());
+            let error = sandbox_error(&phase.unavailable(reason).into(), Path::new("fixture.mov"));
             assert!(matches!(error, BundleError::Unsupported(_)), "{error:?}");
             assert_eq!(
                 error.to_string(),
@@ -231,7 +252,7 @@ mod linux {
                 "supervisor startup, SupervisorSpawn",
             ),
         ] {
-            let error = sandbox_error(&phase.unavailable(reason).into());
+            let error = sandbox_error(&phase.unavailable(reason).into(), Path::new("fixture.mov"));
             assert!(matches!(error, BundleError::Contention(_)), "{error:?}");
             assert_eq!(
                 error.to_string(),
@@ -330,15 +351,17 @@ pub fn configure_media_sandbox_beside_executable() -> Result<(), BundleError> {
 }
 
 pub(crate) fn probe(
+    locator: &Path,
     source: &CertifiedSource,
     cancel: Option<Arc<AtomicBool>>,
 ) -> Result<CertifiedProbe, BundleError> {
     #[cfg(target_os = "linux")]
     {
-        linux::probe(source, cancel)
+        linux::probe(locator, source, cancel)
     }
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = locator;
         source
             .probe_with_cancellation(cancel)
             .map_err(|error| BundleError::Corrupt(error.to_string()))
