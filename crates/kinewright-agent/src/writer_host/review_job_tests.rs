@@ -453,9 +453,14 @@ fn s5_review_reopens_the_root_selected_by_the_artifact_publication() {
             1,
             "crash left a stage"
         );
-        let (host, client) = s5_review_host(temp.root());
+        let (mut host, mut client) = s5_review_host(temp.root());
         if cut == "published-artifact" {
             s5_review_refuses_changed_reopened_bytes(&host, &client, &temp);
+            // A refused hash invalidates the cached store graph. Reopen after
+            // restoring the fixture bytes so the new owner reads that graph.
+            drop(client);
+            drop(host);
+            (host, client) = s5_review_host(temp.root());
         }
         let status = s5_review_call(&client, ReviewControl::Status).unwrap();
         assert_eq!(status.token.generation, 1);

@@ -4,7 +4,10 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use ffmpeg_next as ffmpeg;
@@ -186,9 +189,11 @@ fn export_with_cleanup(
     let (temporary, file) = Stage::create(target.destination)?;
     let mut repeated = false;
     let result = (|| {
+        let exceeded_limit = Arc::new(AtomicBool::new(false));
         let writer = BoundedStage {
             file: file.try_clone().map_err(backend)?,
             limit: target.staging_bytes,
+            exceeded_limit: Arc::clone(&exceeded_limit),
         };
         let encoded = encode_document(
             document,
@@ -204,6 +209,10 @@ fn export_with_cleanup(
             },
         );
         checks.check()?;
+        // FFmpeg can collapse a write callback's EFBIG into a generic EIO.
+        if exceeded_limit.load(Ordering::Relaxed) {
+            return Err(MediaError::Backend("owned export staging limit".into()));
+        }
         let report = encoded?;
         file.sync_all().map_err(backend)?;
         drop(file);
@@ -469,12 +478,14 @@ fn remove_stage_file(path: &Path) -> io::Result<()> {
 struct BoundedStage {
     file: File,
     limit: u64,
+    exceeded_limit: Arc<AtomicBool>,
 }
 
 impl Write for BoundedStage {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let start = self.file.stream_position()?;
         if start.saturating_add(bytes.len() as u64) > self.limit {
+            self.exceeded_limit.store(true, Ordering::Relaxed);
             return Err(io::Error::new(
                 io::ErrorKind::FileTooLarge,
                 "owned export staging limit",
@@ -492,6 +503,7 @@ impl Seek for BoundedStage {
     fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
         let offset = self.file.seek(position)?;
         if offset > self.limit {
+            self.exceeded_limit.store(true, Ordering::Relaxed);
             return Err(io::Error::new(
                 io::ErrorKind::FileTooLarge,
                 "owned export staging limit",
