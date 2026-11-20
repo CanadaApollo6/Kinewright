@@ -305,9 +305,13 @@ impl ProjectBundle {
 }
 
 impl Ja1EditingSession {
+    pub fn approved_rulebook_ref(&self) -> Result<Option<&ObjectRef>, BundleError> {
+        Ok(self.active_bundle()?.approved_rulebook())
+    }
+
     pub fn frozen_rulebook(&self) -> Result<FrozenRulebook, BundleError> {
         Ok(FrozenRulebook {
-            revision: self.active_bundle()?.approved_rulebook().cloned(),
+            revision: self.approved_rulebook_ref()?.cloned(),
         })
     }
 

@@ -83,7 +83,7 @@ impl HostCommandOwner {
                 let proposal: Proposal = serde_json::from_value(arguments)?;
                 MetadataChange::ProposeRulebook(RulebookProposal {
                     proposed_by: attempt.identity.clone(),
-                    parent: frozen.revision.clone(),
+                    parent: self.owner()?.approved_rulebook_ref()?.cloned(),
                     rule: proposal.rule,
                 })
             }

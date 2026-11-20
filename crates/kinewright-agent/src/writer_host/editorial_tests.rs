@@ -173,6 +173,82 @@ fn s5_rulebook_changes_only_briefs_prepared_after_person_approval() {
 }
 
 #[test]
+fn s5_running_director_can_propose_again_after_approval() {
+    let mut f = Fixture::new();
+    let key = s5_version(&f);
+    let (_, parent, director) = c4_director(&f);
+    let (review_attempt, _, reviewer) = s5_child(&f, &director, &parent, Role::Reviewer);
+    let frozen = serde_json::json!({"revision":null,"rules":[]});
+    assert_eq!(s5_brief_rules(&f, &parent), frozen);
+    assert_eq!(s5_brief_rules(&f, &review_attempt), frozen);
+
+    let decision = s5_propose(&f, &director);
+    holder(&mut f);
+    ok(
+        f.editor
+            .request(HostCommand::DecideRulebook { decision })
+            .unwrap(),
+        "S5_FIRST_RULE_APPROVED",
+    );
+    let (after_first, _, _) = s5_child(&f, &director, &parent, Role::Reviewer);
+    let first = s5_brief_rules(&f, &after_first)["revision"].clone();
+    assert!(first.is_object());
+
+    s5_accepted(
+        &director,
+        "propose_rulebook_revision",
+        serde_json::json!({"rule":"Keep the closing beat."}),
+    );
+    let (proposal, pending) = s5_editorial(&f, None).rulebook_proposal.unwrap();
+    assert_eq!(serde_json::to_value(&pending.parent).unwrap(), first);
+    assert_eq!(pending.proposed_by, parent);
+    ok(
+        f.editor
+            .request(HostCommand::DecideRulebook {
+                decision: kinewright_project::editorial::RulebookDecision {
+                    proposal,
+                    approve: true,
+                },
+            })
+            .unwrap(),
+        "S5_SECOND_RULE_APPROVED",
+    );
+    assert!(s5_editorial(&f, None).rulebook_proposal.is_none());
+    let (after_second, _, _) = s5_child(&f, &director, &parent, Role::Reviewer);
+    let approved = s5_brief_rules(&f, &after_second);
+    assert_ne!(approved["revision"], first);
+    assert_eq!(
+        approved["rules"],
+        serde_json::json!(["Keep the spoken promise.", "Keep the closing beat."])
+    );
+    assert_eq!(s5_brief_rules(&f, &parent), frozen);
+    assert_eq!(s5_brief_rules(&f, &review_attempt), frozen);
+    assert_eq!(
+        s5_brief_rules(&f, &after_first)["revision"],
+        first,
+        "S5_FIRST_REVISION_STAYS_FROZEN"
+    );
+
+    let args = s5_audit_args(&key);
+    let mut wrong_revision = args.clone();
+    wrong_revision["rulebook_ref"] = approved["revision"].clone();
+    assert_eq!(
+        s5_refusal(
+            &reviewer,
+            "record_editorial_audit",
+            wrong_revision,
+            "editorial audit frozen rulebook",
+        ),
+        None,
+        "S5_AUDIT_REQUIRES_ORIGINAL_REVISION"
+    );
+    s5_accepted(&reviewer, "record_editorial_audit", args);
+    let audit = s5_editorial(&f, Some(key)).editorial_audit.unwrap();
+    assert_eq!(audit.review.attempt, review_attempt);
+    assert_eq!(audit.rulebook_ref(), None);
+}
+
+#[test]
 fn s5_agent_cannot_approve_its_proposal() {
     let f = Fixture::new();
     let (_run, parent, director) = c4_director(&f);
