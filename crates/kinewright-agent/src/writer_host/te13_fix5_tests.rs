@@ -532,137 +532,146 @@ fn te13_fix5_temporary_recovery_does_not_install_block() {
     te13_fix4_replay(&p);
 }
 
-fn assert_hx_t2_host_sites(
-    p: &Te13Fix4Pending,
-    pending_completion: &Option<super::super::orchestration::PendingPublication>,
-    client: &HostClient,
-    client_id: &str,
-    start_request: &ScopedOrchestrationRequest,
-    snapshot: &HostSnapshot,
-    reopen: bool,
-    label: &str,
-) {
-    let expected = |earlier: &'static str| if reopen { RECOVERY_REOPEN } else { earlier };
+struct HxT2SiteProbe<'a> {
+    p: &'a Te13Fix4Pending,
+    pending_completion: &'a super::super::orchestration::PendingPublication,
+    client: &'a HostClient,
+    client_id: &'a str,
+    start_request: &'a ScopedOrchestrationRequest,
+    snapshot: &'a HostSnapshot,
+}
 
-    let save_error = client
-        .request(HostCommand::Save {
-            snapshot: snapshot.clone(),
-        })
-        .unwrap()
-        .error
-        .unwrap();
-    assert_eq!(save_error.code, "recovery_frozen", "{label} save code");
-    assert_eq!(
-        save_error.message,
-        expected("Editing remains read-only until both Cores confirm the durable recovery result.",),
-        "{label} save message"
-    );
+impl HxT2SiteProbe<'_> {
+    fn assert_sites(&self, reopen: bool, label: &str) {
+        let expected = |earlier: &'static str| if reopen { RECOVERY_REOPEN } else { earlier };
 
-    let http_manual_error = client
-        .request(HostCommand::AcquireManual {
-            client: client_id.to_owned(),
-        })
-        .unwrap()
-        .error
-        .unwrap();
-    assert_eq!(
-        http_manual_error.code, "recovery_frozen",
-        "{label} http manual code"
-    );
-    assert_eq!(
-        http_manual_error.message,
-        expected("Editing remains read-only until both Cores confirm the durable recovery result.",),
-        "{label} http manual message"
-    );
-
-    let orchestration_error = client
-        .request(HostCommand::DispatchOrchestration {
-            request: Box::new(start_request.clone()),
-        })
-        .unwrap()
-        .error
-        .unwrap();
-    assert_eq!(
-        orchestration_error.code, "recovery_frozen",
-        "{label} orchestration code"
-    );
-    assert_eq!(
-        orchestration_error.message,
-        expected("orchestration writes wait for recovery confirmation"),
-        "{label} orchestration message"
-    );
-
-    {
-        let host = p.run.f.host.owner.upgrade().unwrap();
-        let mut owner = host.lock().unwrap();
-
-        let manual_error = owner
-            .acquire_manual(client_id.to_owned())
-            .unwrap_err()
-            .refusal();
-        assert_eq!(manual_error.code, "recovery_frozen", "{label} manual code");
-        assert_eq!(
-            manual_error.message,
-            expected("shared recovery has not been confirmed"),
-            "{label} manual message"
-        );
-
-        let index = owner
-            .resolve_attachment(Some(&p.client.bootstrap.auth.bearer()))
+        let save_error = self
+            .client
+            .request(HostCommand::Save {
+                snapshot: self.snapshot.clone(),
+            })
+            .unwrap()
+            .error
             .unwrap();
-        owner.hooks.pending.clone_from(pending_completion);
-        let completion_error = owner
-            .reconcile_completion_substep(index, &p.request)
-            .unwrap_err()
-            .refusal();
+        assert_eq!(save_error.code, "recovery_frozen", "{label} save code");
         assert_eq!(
-            completion_error.code, "recovery_frozen",
-            "{label} completion code"
-        );
-        assert_eq!(
-            completion_error.message,
-            expected("task completion waits for recovery confirmation"),
-            "{label} completion message"
+            save_error.message,
+            expected(
+                "Editing remains read-only until both Cores confirm the durable recovery result.",
+            ),
+            "{label} save message"
         );
 
-        let mut media_reply = HostReply::default();
-        let media_error = owner
-            .prepare_media_interpretation(
-                client_id,
-                &history_marker(77),
-                snapshot,
-                &mut media_reply,
-            )
-            .unwrap_err()
-            .refusal();
-        assert_eq!(media_error.code, "input_frozen", "{label} owned media code");
+        let http_manual_error = self
+            .client
+            .request(HostCommand::AcquireManual {
+                client: self.client_id.to_owned(),
+            })
+            .unwrap()
+            .error
+            .unwrap();
         assert_eq!(
-            media_error.message,
-            expected("Resolve the current save or selection before importing media."),
-            "{label} owned media message"
+            http_manual_error.code, "recovery_frozen",
+            "{label} http manual code"
         );
-    }
+        assert_eq!(
+            http_manual_error.message,
+            expected(
+                "Editing remains read-only until both Cores confirm the durable recovery result.",
+            ),
+            "{label} http manual message"
+        );
 
-    let expected_mcp = expected("task attachment changed");
-    for (tool, args) in [
-        ("task_status", serde_json::json!({})),
-        (
-            "prepare_edit_plan",
-            serde_json::json!({ "expected_revision": 0, "operations": [] }),
-        ),
-    ] {
-        let reply = p.run.editor.wire(tool, args);
-        assert_eq!(reply.is_error, Some(true), "{label} {tool} error flag");
-        let text = c5_fix10_text(&reply);
-        assert!(
-            text.contains(&format!("task_scope: {expected_mcp}")),
-            "{label} {tool} reply: {text}"
+        let orchestration_error = self
+            .client
+            .request(HostCommand::DispatchOrchestration {
+                request: Box::new(self.start_request.clone()),
+            })
+            .unwrap()
+            .error
+            .unwrap();
+        assert_eq!(
+            orchestration_error.code, "recovery_frozen",
+            "{label} orchestration code"
         );
-        if !reopen {
-            assert!(
-                !text.contains(RECOVERY_REOPEN) && !text.contains("Close and reopen"),
-                "{label} {tool} leaked reopen sentence: {text}"
+        assert_eq!(
+            orchestration_error.message,
+            expected("orchestration writes wait for recovery confirmation"),
+            "{label} orchestration message"
+        );
+
+        {
+            let host = self.p.run.f.host.owner.upgrade().unwrap();
+            let mut owner = host.lock().unwrap();
+
+            let manual_error = owner
+                .acquire_manual(self.client_id.to_owned())
+                .unwrap_err()
+                .refusal();
+            assert_eq!(manual_error.code, "recovery_frozen", "{label} manual code");
+            assert_eq!(
+                manual_error.message,
+                expected("shared recovery has not been confirmed"),
+                "{label} manual message"
             );
+
+            let index = owner
+                .resolve_attachment(Some(&self.p.client.bootstrap.auth.bearer()))
+                .unwrap();
+            owner.hooks.pending = Some(self.pending_completion.clone());
+            let completion_error = owner
+                .reconcile_completion_substep(index, &self.p.request)
+                .unwrap_err()
+                .refusal();
+            assert_eq!(
+                completion_error.code, "recovery_frozen",
+                "{label} completion code"
+            );
+            assert_eq!(
+                completion_error.message,
+                expected("task completion waits for recovery confirmation"),
+                "{label} completion message"
+            );
+
+            let mut media_reply = HostReply::default();
+            let media_error = owner
+                .prepare_media_interpretation(
+                    self.client_id,
+                    &history_marker(77),
+                    self.snapshot,
+                    &mut media_reply,
+                )
+                .unwrap_err()
+                .refusal();
+            assert_eq!(media_error.code, "input_frozen", "{label} owned media code");
+            assert_eq!(
+                media_error.message,
+                expected("Resolve the current save or selection before importing media."),
+                "{label} owned media message"
+            );
+        }
+
+        let expected_mcp = expected("task attachment changed");
+        for (tool, args) in [
+            ("task_status", serde_json::json!({})),
+            (
+                "prepare_edit_plan",
+                serde_json::json!({ "expected_revision": 0, "operations": [] }),
+            ),
+        ] {
+            let reply = self.p.run.editor.wire(tool, args);
+            assert_eq!(reply.is_error, Some(true), "{label} {tool} error flag");
+            let text = c5_fix10_text(&reply);
+            assert!(
+                text.contains(&format!("task_scope: {expected_mcp}")),
+                "{label} {tool} reply: {text}"
+            );
+            if !reopen {
+                assert!(
+                    !text.contains(RECOVERY_REOPEN) && !text.contains("Close and reopen"),
+                    "{label} {tool} leaked reopen sentence: {text}"
+                );
+            }
         }
     }
 }
@@ -672,8 +681,7 @@ fn hx_t2_capacity_refusal_host_sites(door_name: &str, cap: u64, confirm_door: bo
 
     let p = te13_fix4_pending(CompletionStep::Freeze, false, false);
     let host = p.run.f.host.owner.upgrade().unwrap();
-    let pending_completion = host.lock().unwrap().hooks.pending.clone();
-    assert!(pending_completion.is_some());
+    let pending_completion = host.lock().unwrap().hooks.pending.clone().unwrap();
     let start_request = p.run.f.start_request(&p.run.f.editor);
     let client_id = "e".repeat(64);
     let client = p.run.f.host.client().with_manual_editor(client_id.clone());
@@ -727,18 +735,18 @@ fn hx_t2_capacity_refusal_host_sites(door_name: &str, cap: u64, confirm_door: bo
         );
     }
 
+    let probe = HxT2SiteProbe {
+        p: &p,
+        pending_completion: &pending_completion,
+        client: &client,
+        client_id: &client_id,
+        start_request: &start_request,
+        snapshot: &small_snapshot,
+    };
+
     // Before any barrier is refused with snapshot_capacity, even a large
     // recovery keeps the earlier wording at every site.
-    assert_hx_t2_host_sites(
-        &p,
-        &pending_completion,
-        &client,
-        &client_id,
-        &start_request,
-        &small_snapshot,
-        false,
-        &format!("{door_name} before refusal"),
-    );
+    probe.assert_sites(false, &format!("{door_name} before refusal"));
 
     let oversized = if confirm_door {
         let published = client
@@ -747,16 +755,7 @@ fn hx_t2_capacity_refusal_host_sites(door_name: &str, cap: u64, confirm_door: bo
             })
             .unwrap();
         assert!(published.error.is_none(), "{:?}", published.error);
-        assert_hx_t2_host_sites(
-            &p,
-            &pending_completion,
-            &client,
-            &client_id,
-            &start_request,
-            &small_snapshot,
-            false,
-            "confirm_barrier after publish",
-        );
+        probe.assert_sites(false, "confirm_barrier after publish");
         HostCommand::ConfirmBarrier {
             barrier: Box::new(barrier),
             installed: installed_snapshot,
@@ -772,16 +771,7 @@ fn hx_t2_capacity_refusal_host_sites(door_name: &str, cap: u64, confirm_door: bo
             matches!(viewer_err, HostError::Refused(ref r) if r.code == "snapshot_capacity"),
             "viewer capacity check: {viewer_err:?}"
         );
-        assert_hx_t2_host_sites(
-            &p,
-            &pending_completion,
-            &client,
-            &client_id,
-            &start_request,
-            &small_snapshot,
-            false,
-            "viewer cannot latch recovery capacity",
-        );
+        probe.assert_sites(false, "viewer cannot latch recovery capacity");
         HostCommand::PublishBarrier {
             barrier: Box::new(barrier),
         }
@@ -793,16 +783,7 @@ fn hx_t2_capacity_refusal_host_sites(door_name: &str, cap: u64, confirm_door: bo
         "{door_name} expected snapshot_capacity, got {error:?}"
     );
 
-    assert_hx_t2_host_sites(
-        &p,
-        &pending_completion,
-        &client,
-        &client_id,
-        &start_request,
-        &small_snapshot,
-        true,
-        &format!("{door_name} after refusal"),
-    );
+    probe.assert_sites(true, &format!("{door_name} after refusal"));
 }
 
 #[test]
@@ -819,8 +800,7 @@ fn hx_t2_confirm_barrier_recovery_tool_reply_says_to_close_and_reopen() {
 fn hx_t2_ordinary_and_retriable_recovery_keep_earlier_wording_until_confirmed() {
     let p = te13_fix4_pending(CompletionStep::Freeze, false, false);
     let host = p.run.f.host.owner.upgrade().unwrap();
-    let pending_completion = host.lock().unwrap().hooks.pending.clone();
-    assert!(pending_completion.is_some());
+    let pending_completion = host.lock().unwrap().hooks.pending.clone().unwrap();
     let start_request = p.run.f.start_request(&p.run.f.editor);
     let client_id = "e".repeat(64);
     let client = p.run.f.host.client().with_manual_editor(client_id.clone());
@@ -836,17 +816,16 @@ fn hx_t2_ordinary_and_retriable_recovery_keep_earlier_wording_until_confirmed() 
     assert!(begun.error.is_none(), "{:?}", begun.error);
     let barrier = begun.recovery.unwrap();
     let snapshot = barrier.after.clone();
+    let probe = HxT2SiteProbe {
+        p: &p,
+        pending_completion: &pending_completion,
+        client: &client,
+        client_id: &client_id,
+        start_request: &start_request,
+        snapshot: &snapshot,
+    };
 
-    assert_hx_t2_host_sites(
-        &p,
-        &pending_completion,
-        &client,
-        &client_id,
-        &start_request,
-        &snapshot,
-        false,
-        "after ordinary BeginRecovery",
-    );
+    probe.assert_sites(false, "after ordinary BeginRecovery");
 
     let published = client
         .request(HostCommand::PublishBarrier {
@@ -880,16 +859,7 @@ fn hx_t2_ordinary_and_retriable_recovery_keep_earlier_wording_until_confirmed() 
         owner.next_manual_generation = saved_generation;
     }
 
-    assert_hx_t2_host_sites(
-        &p,
-        &pending_completion,
-        &client,
-        &client_id,
-        &start_request,
-        &snapshot,
-        false,
-        "after acquire_manual failure inside ConfirmBarrier",
-    );
+    probe.assert_sites(false, "after acquire_manual failure inside ConfirmBarrier");
 
     let confirmed = client
         .request(HostCommand::ConfirmBarrier {
