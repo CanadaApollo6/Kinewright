@@ -156,6 +156,26 @@ fn s5_review_artifact(host: &WriterHost, token: &ReviewToken) -> ReviewArtifact 
     (*evidence).clone()
 }
 
+fn s5_review_kept_versions(
+    host: &WriterHost,
+) -> Vec<(
+    kinewright_project::studio_records::SnapshotKey,
+    kinewright_project::bundle_records::ObjectRef,
+)> {
+    let owner = host.owner.upgrade().unwrap();
+    let owner = owner.lock().unwrap();
+    let bundle = owner.owner().unwrap().review_bundle().unwrap();
+    let index = bundle.version_index().unwrap();
+    index
+        .snapshots
+        .values()
+        .map(|descriptor| {
+            bundle.store().verify(&descriptor.checkpoint_ref).unwrap();
+            (descriptor.key.clone(), descriptor.checkpoint_ref.clone())
+        })
+        .collect()
+}
+
 fn s5_review_hold(
     host: &WriterHost,
     point: ReviewPoint,
@@ -290,6 +310,114 @@ fn s5_review_pending_and_durable_stop_fence_the_real_install_gate() {
     all(target_os = "linux", not(feature = "slow-tests")),
     ignore = "slow tier: cargo test --features slow-tests"
 )]
+fn s5_review_stop_after_installation_never_publishes_after_acknowledgement() {
+    use std::sync::atomic::Ordering;
+    let temp = kinewright_media::test_support::TempDirectory::new("review-race");
+    s5_review_seed(temp.root());
+    let (host, client) = s5_review_host(temp.root());
+    let key = s5_review_version(&host);
+    // Hold once inside the real gate (after installation, owner lock held)
+    // and once before publication takes the owner lock again.
+    let held = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let release = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    {
+        let (held, release) = (held.clone(), release.clone());
+        host.owner
+            .upgrade()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .review_fixture_probe(move |at| {
+                let step = match at {
+                    ReviewPoint::AfterInstall => 1,
+                    ReviewPoint::BeforePublication => 2,
+                    _ => return,
+                };
+                held.store(step, Ordering::Release);
+                let until = std::time::Instant::now() + Duration::from_secs(30);
+                while release.load(Ordering::Acquire) < step {
+                    assert!(
+                        std::time::Instant::now() < until,
+                        "race hold never released"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            });
+    }
+    let token = s5_review_start(&client, &key);
+    c4_wait(
+        || held.load(Ordering::Acquire) == 1,
+        "REVIEW_INSTALL_INSIDE_GATE",
+    );
+    let acknowledged = std::thread::scope(|scope| {
+        let stop = scope.spawn(|| s5_review_call(&client, ReviewControl::Stop(token.clone())));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!stop.is_finished(), "REVIEW_STOP_WAITS_FOR_THE_GATE");
+        release.store(1, Ordering::Release);
+        c4_wait(
+            || held.load(Ordering::Acquire) == 2,
+            "REVIEW_INSTALLED_EXPORT_SUCCEEDED",
+        );
+        stop.join().unwrap().unwrap()
+    });
+    release.store(2, Ordering::Release);
+    assert!(matches!(
+        acknowledged.phase,
+        ReviewPhase::Stopping | ReviewPhase::Stopped
+    ));
+    let shared = host.owner.upgrade().unwrap();
+    c4_wait(
+        || {
+            shared
+                .lock()
+                .unwrap()
+                .review_fixture_worker()
+                .is_none_or(|(_, done)| done)
+        },
+        "REVIEW_WORKER_RETIRED",
+    );
+    let stopped = s5_review_call(&client, ReviewControl::Stop(token)).unwrap();
+    assert_eq!(stopped.phase, ReviewPhase::Stopped, "REVIEW_STOP_TERMINAL");
+    let owner = shared.lock().unwrap();
+    assert!(
+        owner
+            .owner()
+            .unwrap()
+            .read_snapshot(&key)
+            .unwrap()
+            .descriptor
+            .review_evidence_ref
+            .is_none(),
+        "REVIEW_NO_PUBLICATION_AFTER_STOP"
+    );
+    assert_eq!(
+        owner
+            .owner()
+            .unwrap()
+            .store()
+            .unwrap()
+            .usage()
+            .unwrap()
+            .reserved_copy_bytes,
+        0,
+        "REVIEW_RETIRED_STAGE_RELEASED"
+    );
+    drop(owner);
+    assert_eq!(
+        std::fs::read_dir(temp.path("project.kinewright-assets/studio/review-staging"))
+            .unwrap()
+            .count(),
+        0,
+        "REVIEW_INSTALLED_STAGE_RECLAIMED"
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn s5_review_capacity_failures_keep_saved_work_and_allow_retry_or_stop() {
     for artifact_failure in [false, true] {
         let temp = kinewright_media::test_support::TempDirectory::new("review-capacity");
@@ -322,6 +450,7 @@ fn s5_review_capacity_failures_keep_saved_work_and_allow_retry_or_stop() {
             );
             (settings, history)
         };
+        let kept = s5_review_kept_versions(&host);
         let queued = s5_review_call(
             &client,
             ReviewControl::Queue {
@@ -344,6 +473,11 @@ fn s5_review_capacity_failures_keep_saved_work_and_allow_retry_or_stop() {
                 "{reason}"
             );
         }
+        assert_eq!(
+            s5_review_kept_versions(&host),
+            kept,
+            "REVIEW_CAPACITY_KEEPS_VERSIONS"
+        );
         {
             let owner = shared.lock().unwrap();
             assert_eq!(owner.core().snapshot_identity().unwrap(), history);
@@ -615,6 +749,24 @@ fn s5_review_edits_undo_copy_and_checker_attempt_stay_bound_to_the_frozen_versio
                 .descriptor
                 .identity
         );
+        let bundle = owner.owner().unwrap().review_bundle().unwrap();
+        let job = bundle.review_job().unwrap().unwrap();
+        assert_eq!(
+            (&job.token, &job.phase),
+            (&token, &ReviewPhase::Encoding),
+            "REVIEW_PROGRESS_NAMES_FROZEN_VERSION"
+        );
+        let request = bundle
+            .store()
+            .read_record::<kinewright_project::review_job::ReviewRequest>(&job.request_ref)
+            .unwrap();
+        assert_eq!(
+            request.document_ref,
+            bundle.read_snapshot(&key).unwrap().descriptor.document_ref,
+            "REVIEW_REQUEST_NAMES_FROZEN_DOCUMENT"
+        );
+        drop(request);
+        drop(job);
         owner
             .owner_mut()
             .unwrap()
