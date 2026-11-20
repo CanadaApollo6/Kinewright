@@ -48,6 +48,8 @@ pub enum OwnedExportError {
         error: MediaError,
         cleanup: Box<OwnedExportCleanup>,
     },
+    #[error("owned export commit callback invoked more than once after installation")]
+    RepeatedCommit(Box<OwnedExport>),
 }
 
 /// An unremoved staging name and its reservation. Keep it until retry succeeds.
@@ -113,12 +115,29 @@ pub struct OwnedExportTarget<'a> {
     pub commit: &'a OwnedExportCommitGate<'a>,
 }
 
-/// Completed staging and its byte reservation. Keep this receipt until the
-/// caller has imported or removed the staged file.
-pub struct OwnedExport {
+/// The staged output, and any extra name that still needs removal.
+#[must_use]
+#[derive(Debug)]
+pub enum OwnedExport {
+    Clean(OwnedExportReceipt),
+    Cleanup {
+        receipt: OwnedExportReceipt,
+        cleanup: OwnedExportCleanup,
+    },
+}
+
+/// Keep this receipt until the installed staging name is removed.
+pub struct OwnedExportReceipt {
     pub report: ExportReport,
-    pub cleanup: Option<OwnedExportCleanup>,
     _staging: LifetimeGuard,
+}
+
+impl fmt::Debug for OwnedExportReceipt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OwnedExportReceipt")
+            .field("report", &self.report)
+            .finish_non_exhaustive()
+    }
 }
 
 pub(crate) fn export_owned_document(
@@ -165,6 +184,7 @@ fn export_with_cleanup(
         })?;
 
     let (temporary, file) = Stage::create(target.destination)?;
+    let mut repeated = false;
     let result = (|| {
         let writer = BoundedStage {
             file: file.try_clone().map_err(backend)?,
@@ -188,8 +208,15 @@ fn export_with_cleanup(
         file.sync_all().map_err(backend)?;
         drop(file);
 
+        let mut invoked = false;
         let mut installed = false;
         let result = (target.commit)(&mut || {
+            if std::mem::replace(&mut invoked, true) {
+                repeated = true;
+                return Err(MediaError::Backend(
+                    "owned export commit callback invoked more than once".into(),
+                ));
+            }
             inputs
                 .sources
                 .values()
@@ -202,12 +229,22 @@ fn export_with_cleanup(
         if installed {
             return Ok(report);
         }
+        if repeated {
+            return Err(MediaError::Backend(
+                "owned export commit callback invoked more than once".into(),
+            ));
+        }
         result?;
         Err(MediaError::Backend(
             "owned export commit gate skipped installation".into(),
         ))
     })();
-    temporary.finish(result, staging, remove)
+    let outcome = temporary.finish(result, staging, remove)?;
+    if repeated {
+        Err(OwnedExportError::RepeatedCommit(Box::new(outcome)))
+    } else {
+        Ok(outcome)
+    }
 }
 
 fn refuse_path_effects(document: &Document) -> Result<(), MediaError> {
@@ -398,12 +435,18 @@ impl Stage {
             charge: Some(staging),
         };
         match result {
-            Ok(report) => Ok(OwnedExport {
-                report,
-                cleanup: removal
-                    .err()
-                    .map(|error| obligation(error, Arc::clone(&staging))),
-                _staging: staging,
+            Ok(report) => Ok(match removal {
+                Ok(()) => OwnedExport::Clean(OwnedExportReceipt {
+                    report,
+                    _staging: staging,
+                }),
+                Err(error) => OwnedExport::Cleanup {
+                    cleanup: obligation(error, Arc::clone(&staging)),
+                    receipt: OwnedExportReceipt {
+                        report,
+                        _staging: staging,
+                    },
+                },
             }),
             Err(error) => Err(match removal {
                 Ok(()) => error.into(),
