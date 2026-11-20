@@ -400,7 +400,7 @@ fn refuse(item: &Pending, failure: Failure, fresh: bool, status: &Status) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::{
         fs::File,
@@ -701,7 +701,7 @@ mod tests {
         }
         assert!(!circuit.paused());
     }
-    fn fixture_probe() -> kinewright_media_ipc::ValidatedProbe {
+    pub(in crate::linux) fn fixture_probe() -> kinewright_media_ipc::ValidatedProbe {
         use kinewright_core::{
             ColorBitDepth, ColorMatrix, ColorPrimaries, ColorProvenance, ColorRange, ColorTransfer,
             ColorWhitePoint,

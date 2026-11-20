@@ -180,6 +180,55 @@ pub(super) struct Done {
     /// released, and the actor keeps its decode slot reserved.
     pub unproven: bool,
 }
+
+#[cfg(test)]
+pub(super) fn cleanup_crash_fixture(unproven: bool) -> (Running, std::sync::mpsc::SyncSender<()>) {
+    // Supply validated metadata and let native cleanup observe a real nonzero exit.
+    let lifetime = File::open("/dev/null").unwrap();
+    let root = Root::create(u64::MAX - u64::from(unproven)).unwrap();
+    let child = std::process::Command::new("/bin/false").spawn().unwrap();
+    let (child, pin) = pin_child(child).unwrap();
+    let mut lease = Lease {
+        child,
+        pin: Arc::clone(&pin),
+        controller: Handle::disconnected_fixture(Arc::clone(&pin)),
+        scope: None,
+        group: None,
+        _lifetime: lifetime,
+        _root: root,
+        complete: false,
+        reaped: false,
+        unproven,
+        trace: Trace::claim(pin.pid()),
+        #[cfg(feature = "slow-tests")]
+        shim_smaps: None,
+        #[cfg(feature = "slow-tests")]
+        seams: Seams::new(None, None),
+    };
+    let shared = Arc::new(Shared::default());
+    let worker_shared = Arc::clone(&shared);
+    let (finish_cleanup, wait) = std::sync::mpsc::sync_channel(1);
+    let thread = std::thread::spawn(move || {
+        wait.recv().unwrap();
+        let done = lease.finish(
+            Ok(super::admission::tests::fixture_probe()),
+            false,
+            &worker_shared,
+            Instant::now() + INITIAL_DEADLINE,
+        );
+        assert!(matches!(done.result, Err(Failure::Sandbox(Error::Crashed))));
+        done
+    });
+    (
+        Running {
+            pin,
+            shared,
+            thread,
+        },
+        finish_cleanup,
+    )
+}
+
 pub(super) struct Launch<'a> {
     pub helper: &'a Path,
     pub limits: Limits,

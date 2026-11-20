@@ -68,7 +68,7 @@ impl Job {
                 self.cause = Some(Failure::Sandbox(Error::Cancelled));
                 self.kill_at = Some(now + CANCEL_GRACE);
                 self.running.shared.cancel.store(true, Ordering::Release);
-            } else if now >= self.deadline {
+            } else if now >= self.deadline && !self.running.thread.is_finished() {
                 self.cause = Some(Failure::ProbeTimedOut(self.running.shared.timing()));
                 self.kill_at = Some(now + CANCEL_GRACE);
                 self.running.shared.cancel.store(true, Ordering::Release);
@@ -340,9 +340,8 @@ impl Actor {
                 }
                 let timing = done.as_ref().ok().map(|done| done.timing);
                 let mut result = match done {
-                    // A fallback run whose scope emptiness is unproven keeps
-                    // its slot and gets its failure, like the retry below.
-                    Ok(done) if uncaused && done.fallback && !unproven && !request.degraded => {
+                    Ok(done) if done.unproven => Err(Failure::Sandbox(Error::Crashed)),
+                    Ok(done) if uncaused && done.fallback && !request.degraded => {
                         request.earlier_timing.add(done.timing);
                         request.degraded = true;
                         self.queue.continue_with(request, &self.status, now);
@@ -679,6 +678,84 @@ mod ms_t10_tests {
         fn check(&self) -> Result<(), kinewright_core::MediaError> {
             Ok(())
         }
+    }
+
+    fn settle_cleanup_crash(armed_timeout: bool, unproven: bool) -> Outcome {
+        let (_sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let mut actor = Actor::new(
+            Config::new(
+                "/dev/null".into(),
+                "/dev/null".into(),
+                super::super::Limits::PROBE,
+            ),
+            receiver,
+            Arc::default(),
+        );
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        let queued = Instant::now();
+        let (running, finish_cleanup) = worker::cleanup_crash_fixture(unproven);
+        let pending = Pending {
+            request: Request {
+                source: Box::new(Input(std::fs::File::open("/dev/null").unwrap())),
+                video: None,
+                audio: None,
+                cancel: Arc::default(),
+                explicit_retry: false,
+            },
+            reply,
+            queued,
+            degraded: false,
+            earlier_timing: ProbeTiming::default(),
+        };
+        let mut job = Job::launched(pending, running, queued);
+        if armed_timeout {
+            job.deadline = queued;
+            job.check_deadline_and_authority(queued);
+        }
+        finish_cleanup.send(()).unwrap();
+        while !job.running.thread.is_finished() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let completed = Instant::now();
+        if !armed_timeout {
+            // Cleanup finished before the cutoff, but the actor missed that tick.
+            job.deadline = completed + TICK;
+            // The first crash already spent this source's automatic retry.
+            actor
+                .queue
+                .circuit
+                .record([0; 32], Health::Unhealthy(Error::Crashed), queued);
+        }
+        actor.active.push(job);
+        actor.settle(completed + TICK * 2);
+        assert_eq!(actor.unproven, usize::from(unproven));
+        assert_eq!(actor.cleanup_failure, unproven.then_some(Error::Crashed));
+        result.try_recv().unwrap()
+    }
+
+    #[test]
+    fn ms_t10_cleanup_crash_survives_late_settlement() {
+        let result = settle_cleanup_crash(false, false);
+        assert!(
+            matches!(result, Err(Failure::Sandbox(Error::Crashed))),
+            "{result:?}"
+        );
+
+        // A nonzero exit first observed after arming the timeout can be due to
+        // the actor's own cancellation, so the timeout remains the answer.
+        assert!(matches!(
+            settle_cleanup_crash(true, false),
+            Err(Failure::ProbeTimedOut(_))
+        ));
+    }
+
+    #[test]
+    fn ms_t10_cleanup_crash_unproven_overrides_armed_timeout() {
+        let result = settle_cleanup_crash(true, true);
+        assert!(
+            matches!(result, Err(Failure::Sandbox(Error::Crashed))),
+            "{result:?}"
+        );
     }
 
     #[test]

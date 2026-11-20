@@ -34,6 +34,20 @@ pub(super) struct Handle {
     pub available: bool,
     pending_stops: Arc<AtomicUsize>,
 }
+
+#[cfg(test)]
+impl Handle {
+    pub(super) fn disconnected_fixture(pin: Arc<ProcessHandle>) -> Self {
+        Self {
+            sender: mpsc::sync_channel(0).0,
+            pin,
+            generation: 1,
+            available: false,
+            pending_stops: Arc::default(),
+        }
+    }
+}
+
 pub(super) struct Controller {
     pub handle: Handle,
     worker: JoinHandle<Result<(), Error>>,
@@ -122,6 +136,7 @@ impl Controller {
             .name("media-scopes".into())
             .spawn(move || {
                 let result = serve(&mut guard.socket, generation, &receiver, &worker_stops);
+                drop(receiver);
                 guard.finish(&worker_pin);
                 result
             })
