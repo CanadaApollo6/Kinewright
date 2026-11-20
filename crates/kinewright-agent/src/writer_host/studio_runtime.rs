@@ -142,6 +142,7 @@ struct State {
     recovery_generation: u64,
     failed_recovery_generation: u64,
     retry_at: Option<std::time::Instant>,
+    probe_timeout: Option<super::HostRefusal>,
     recovery_worker: Option<JoinHandle<()>>,
     blocked: Option<(RunId, Option<u64>, String)>,
     claim: Option<(RunId, Arc<Mutex<MachineClaim>>)>,
@@ -154,15 +155,22 @@ struct RecoveryExit {
     wake: Arc<super::HostLifecycle>,
     generation: u64,
     retry_delay: Duration,
-    outcome: Option<Result<(), String>>,
+    outcome: Option<io::Result<()>>,
 }
 impl Drop for RecoveryExit {
     fn drop(&mut self) {
-        let (recovered, status) = match self.outcome.take().unwrap_or_else(|| {
-            Err("cleanup pending: startup recovery stopped unexpectedly; the host will retry recovery".into())
-        }) {
-            Ok(()) => (true, None),
-            Err(reason) => (false, Some(reason)),
+        let (recovered, status, probe_timeout) = match self.outcome.take() {
+            Some(Ok(())) => (true, None, None),
+            Some(Err(error)) => {
+                let probe_timeout = error.get_ref()
+                    .and_then(|source| source.downcast_ref::<super::HostError>())
+                    .and_then(|error| match error {
+                        super::HostError::Refused(refusal) if refusal.is_media_probe_timeout() => Some(refusal.clone()),
+                        _ => None,
+                    });
+                (false, Some(format!("cleanup pending: {error}")), probe_timeout)
+            }
+            None => (false, Some("cleanup pending: startup recovery stopped unexpectedly; the host will retry recovery".into()), None),
         };
         {
             let mut owner = self
@@ -182,7 +190,9 @@ impl Drop for RecoveryExit {
             if !recovered {
                 state.failed_recovery_generation = self.generation;
             }
-            state.retry_at = (!recovered).then(|| std::time::Instant::now() + self.retry_delay);
+            state.retry_at = (!recovered && probe_timeout.is_none())
+                .then(|| std::time::Instant::now() + self.retry_delay);
+            state.probe_timeout = probe_timeout;
         }
         self.wake.changed.notify_waiters();
     }
@@ -249,6 +259,11 @@ impl StudioRuntime {
     pub(super) fn startup_pending(&self) -> bool {
         self.state.lock().map_or(true, |state| !state.recovered)
     }
+    pub(super) fn startup_needs_probe_retry(&self) -> bool {
+        self.state
+            .lock()
+            .is_ok_and(|state| state.probe_timeout.is_some())
+    }
     /// Await this recovery attempt, not a person resolving a persistent block.
     /// No owner lock or ordinary request permit is held across the wait.
     pub(super) fn startup_wait_bound(&self) -> Duration {
@@ -268,7 +283,7 @@ impl StudioRuntime {
                 "Another request is waiting for startup recovery. This request has not been dispatched.",
             ));
         };
-        let generation = self.begin_recovery().map_err(|_| {
+        let generation = self.begin_recovery(true).map_err(|_| {
             super::HostRefusal::new(
                 "startup_wait_failed",
                 "Startup recovery could not begin. This request has not been dispatched.",
@@ -294,10 +309,10 @@ impl StudioRuntime {
                         return Err(super::HostRefusal::stopping());
                     }
                     if generation != 0 && state.failed_recovery_generation >= generation {
-                        return Err(super::HostRefusal::new(
+                        return Err(state.probe_timeout.clone().unwrap_or_else(|| super::HostRefusal::new(
                             "startup_wait_failed",
                             "Startup recovery failed. This request has not been dispatched; it can retry when the host is ready.",
-                        ));
+                        )));
                     }
                     if state.recovered || !state.recovering {
                         return Ok(());
@@ -342,8 +357,8 @@ impl StudioRuntime {
         .bind_for_task(attempt, endpoint)
     }
 
-    /// Called only by post-discovery updates. It never blocks an HTTP request.
-    fn begin_recovery(&self) -> io::Result<u64> {
+    /// Starts or joins an attempt. Only a waiting command can retry a probe timeout.
+    fn begin_recovery(&self, explicit: bool) -> io::Result<u64> {
         let mut state = self
             .state
             .lock()
@@ -352,6 +367,7 @@ impl StudioRuntime {
             || self.lifecycle.stopping()
             || state.recovered
             || state.recovering
+            || (!explicit && state.probe_timeout.is_some())
             || state
                 .retry_at
                 .is_some_and(|at| at > std::time::Instant::now())
@@ -410,8 +426,7 @@ impl StudioRuntime {
                         witness(RecoveryPhase::Restored);
                     }
                     let recovered = result.is_ok();
-                    completion.outcome =
-                        Some(result.map_err(|error| format!("cleanup pending: {error}")));
+                    completion.outcome = Some(result);
                     drop(completion);
                     if let Some(runtime) = runtime.upgrade() {
                         #[cfg(any(test, feature = "test-util"))]
@@ -447,7 +462,7 @@ impl StudioRuntime {
         }
     }
     pub(super) fn drive(&self) -> io::Result<()> {
-        self.begin_recovery()?;
+        self.begin_recovery(false)?;
         let host = self
             .host
             .upgrade()
@@ -734,7 +749,7 @@ impl StudioRuntime {
         Ok(())
     }
     pub(super) fn update(&self) {
-        let _ = self.begin_recovery();
+        let _ = self.begin_recovery(false);
         let recovered = self
             .state
             .lock()
@@ -910,6 +925,7 @@ struct Observer {
     #[cfg(any(test, feature = "test-util"))]
     witness: Option<Arc<RuntimeWitness>>,
 }
+
 impl crate::SessionObserver for Observer {
     fn prepare_studio_stop(
         &mut self,
@@ -1302,5 +1318,80 @@ impl crate::orchestration::adapters::GuardianLauncher for EvaluationLauncher {
             Some(scripted) => scripted.launch(attempt, invocation),
             None => self.native.launch(attempt, invocation),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::writer_host::{HostConfig, HostError, HostOrigin, SessionRoots};
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    use kinewright_project::bundle::BundleError;
+
+    #[test]
+    fn ms_t10_reopen_timeout_waits_for_explicit_retry() {
+        let temp = TempDirectory::new_in(&workspace_target_dir(), "ms-t10-reopen-timeout");
+        let host = Arc::new(Mutex::new(
+            HostCommandOwner::open(HostConfig {
+                data_dir: Some(temp.path("data")),
+                scheduler_settings: Some(temp.path("scheduler")),
+                project: "ms-t10".into(),
+                path: None,
+                roots: SessionRoots {
+                    read: vec![temp.root().into()],
+                    write: vec![temp.root().into()],
+                },
+                origin: HostOrigin::Headless,
+            })
+            .unwrap(),
+        ));
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fault_attempts = Arc::clone(&attempts);
+        let runtime = StudioRuntime::new(
+            &host,
+            RuntimePorts {
+                fixture_claim: Some(temp.path("claim")),
+                recovery_retry_delay: Duration::ZERO,
+                recovery_fault: Some(Arc::new(move || {
+                    if fault_attempts.fetch_add(1, Ordering::AcqRel) == 0 {
+                        // recover_run carries the typed writer-host error in io::Error.
+                        return Err(io::Error::other(HostError::from(
+                            BundleError::MediaProbeTimedOut {
+                                path: "reopen.mov".into(),
+                                phases: "phase=helper ProbeResult".into(),
+                            },
+                        )));
+                    }
+                    Ok(())
+                })),
+                ..RuntimePorts::default()
+            },
+        );
+        let tokio = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let wait = || {
+            tokio.block_on(async {
+                tokio::time::timeout(Duration::from_secs(10), runtime.wait_for_startup())
+                    .await
+                    .unwrap()
+            })
+        };
+        let first = wait().unwrap_err();
+        let status = host.lock().unwrap().native_recovery_status.clone().unwrap();
+        assert!(status.contains("reopen.mov"), "{status}");
+        runtime.update();
+        runtime.update();
+        assert_eq!(
+            runtime.state.lock().unwrap().recovery_generation,
+            1,
+            "ordinary updates retried a timed-out media probe"
+        );
+        assert_eq!(first.code, "media_probe_timed_out");
+        assert!(!first.retry_after_recovery());
+        wait().unwrap();
+        assert_eq!(attempts.load(Ordering::Acquire), 2);
+        assert!(!runtime.startup_pending());
     }
 }

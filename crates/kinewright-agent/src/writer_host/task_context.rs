@@ -338,6 +338,8 @@ struct MediaReadInput {
     assembly_gate: Option<Arc<(std::sync::Barrier, std::sync::Barrier)>>,
     #[cfg(test)]
     outcome: Option<Arc<std::sync::atomic::AtomicU8>>,
+    #[cfg(test)]
+    certification_failure: Option<kinewright_project::bundle::BundleError>,
 }
 pub(super) struct RenderedMediaRead {
     source: kinewright_project::owned_inputs::CertifiedMediaInput,
@@ -552,9 +554,7 @@ impl MediaReadWork {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) =
                     MediaReadState::Ready(result.map(Arc::new).map_err(|error| match error {
-                        HostError::Refused(refusal) if refusal.code == "media_probe_timed_out" => {
-                            refusal
-                        }
+                        HostError::Refused(refusal) if refusal.is_media_probe_timeout() => refusal,
                         _ => media_failed().refusal(),
                     }));
             })
@@ -583,6 +583,10 @@ impl MediaReadInput {
         #[cfg(test)]
         let assembly_gate = self.assembly_gate;
         check_context_cancel(Some(cancel.as_ref()))?;
+        #[cfg(test)]
+        if let Some(error) = self.certification_failure {
+            return Err(error.into());
+        }
         let source = if self.source.verify_unchanged().is_ok() {
             self.source
         } else {
@@ -1220,6 +1224,8 @@ impl HostCommandOwner {
             assembly_gate: self.hooks.context_media_assembly_gate.take(),
             #[cfg(test)]
             outcome: self.hooks.context_media_outcome.take(),
+            #[cfg(test)]
+            certification_failure: self.hooks.context_media_certification_failure.take(),
         };
         let work = Arc::new(MediaReadWork {
             lifecycle: Arc::downgrade(&self.lifecycle),

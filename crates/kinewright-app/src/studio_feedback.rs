@@ -931,6 +931,9 @@ impl FeedbackPort for HostFeedback<'_> {
                 Err(HostError::Refused(error)) if error.retry_after_recovery() => {
                     return RunStart::RecoveryUnknown(error.message);
                 }
+                Err(HostError::Refused(error)) if error.is_media_probe_timeout() => {
+                    return RunStart::Refused(error.message);
+                }
                 Err(error) => return RunStart::Unknown(error.to_string()),
             };
         if let Some(error) = reply.error {

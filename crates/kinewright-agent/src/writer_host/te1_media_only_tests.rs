@@ -281,6 +281,38 @@ fn te1_media_only_move_stamp(path: &std::path::Path) {
 }
 
 #[test]
+fn ms_t10_task_hook_returns_media_probe_timeout() {
+    let (f, run, _child, core, mcp, _) = te14_media_fixture();
+    f.host.runtime.stop();
+    let owner = f.host.owner.upgrade().unwrap();
+    owner
+        .lock()
+        .unwrap()
+        .hooks
+        .context_media_certification_failure = Some(
+        kinewright_project::bundle::BundleError::MediaProbeTimedOut {
+            path: "evidence.mov".into(),
+            phases: "phase=helper ProbeResult".into(),
+        },
+    );
+    let request = te1_media_only_frame_request(&core, 0);
+    let before = f.projection(&run).tasks[1].progress.decisions.len();
+    let failed = mcp.wire("read_task_evidence", request.clone());
+    assert_eq!(failed.is_error, Some(true));
+    let wire = serde_json::to_string(&failed).unwrap();
+    for expected in ["media_probe_timed_out", "evidence.mov", "Try again."] {
+        assert!(wire.contains(expected), "{wire}");
+    }
+    assert_eq!(f.projection(&run).tasks[1].progress.decisions.len(), before);
+    let retry = te14_outcome(mcp.wire("read_task_evidence", request));
+    assert!(
+        serde_json::to_string(&retry)
+            .unwrap()
+            .contains("owned_frame_sample")
+    );
+}
+
+#[test]
 fn te1_media_only_failed_read_can_retry_after_decoder_capacity_returns() {
     use std::sync::{
         Arc,

@@ -193,6 +193,8 @@ pub(super) struct Hooks {
     #[cfg(test)]
     pub context_media_outcome: Option<Arc<std::sync::atomic::AtomicU8>>,
     #[cfg(test)]
+    pub context_media_certification_failure: Option<BundleError>,
+    #[cfg(test)]
     pub context_reply_gate: Option<ContextReplyGate>,
     #[cfg(test)]
     pub completion_status_read_failure: bool,
