@@ -969,3 +969,189 @@ fn te14_fix1_child_expansion_preserves_original_owned_bytes() {
         assert_eq!(actual, expected, "TE14_FIX1_RAW_RECORD_EXACT");
     }
 }
+
+fn te_t1_switched_fixture() -> (
+    C5Fix10Run,
+    HostClient,
+    String,
+    kinewright_project::bundle_switch::SwitchAttachmentIdentity,
+) {
+    let r = c5_fix10_run();
+    r.f.host.runtime.stop();
+    let client_id = "e".repeat(64);
+    let target = {
+        let host = r.f.host.owner.upgrade().unwrap();
+        let mut owner = host.lock().unwrap();
+        owner.acquire_manual(client_id.clone()).unwrap();
+        let project = owner.owner_mut().unwrap();
+        let mut branch = project
+            .fork_durable_branch(
+                "te-t1 switch target",
+                kinewright_project::editing_session::DurableBranchRole::Session,
+            )
+            .unwrap();
+        project.persist_durable_branch(&mut branch).unwrap();
+        let target = branch.branch_id().clone();
+        project.close_durable_branch(&branch).unwrap();
+        target
+    };
+    let editor = r.f.editor.with_manual_editor(client_id.clone());
+    let prepared = editor
+        .request(HostCommand::PrepareSwitch {
+            target: kinewright_project::bundle_switch::SwitchTarget::WorkingBranch {
+                branch: target,
+            },
+        })
+        .unwrap();
+    assert!(prepared.error.is_none(), "{:?}", prepared.error);
+    let switched = editor
+        .request(HostCommand::Switch {
+            envelope: Box::new(prepared.switch_envelope.unwrap()),
+        })
+        .unwrap();
+    assert!(switched.error.is_none(), "{:?}", switched.error);
+    let installed = switched
+        .switch_attachment
+        .as_ref()
+        .unwrap()
+        .identity()
+        .unwrap();
+    (r, editor, client_id, installed)
+}
+
+#[test]
+fn te_t1_confirm_switch_succeeds_after_unrelated_run_accounting_write() {
+    let (r, editor, client_id, installed) = te_t1_switched_fixture();
+    let host = r.f.host.owner.upgrade().unwrap();
+    let before = host
+        .lock()
+        .unwrap()
+        .owner()
+        .unwrap()
+        .current_switch_identity()
+        .unwrap();
+    assert_eq!(before, installed);
+
+    // A refused task MCP call during the switch freeze records its refusal via
+    // publish_run_accounting, advancing the project root without touching the
+    // selected branch.
+    let refused = r.editor.wire("task_status", serde_json::json!({}));
+    assert_eq!(refused.is_error, Some(true));
+
+    let after = host
+        .lock()
+        .unwrap()
+        .owner()
+        .unwrap()
+        .current_switch_identity()
+        .unwrap();
+    assert_eq!(
+        after.root_generation,
+        installed.root_generation + 1,
+        "TE_T1_ROOT_GENERATION_ADVANCED"
+    );
+    assert_ne!(
+        after.root_sha256, installed.root_sha256,
+        "TE_T1_ROOT_SHA_CHANGED"
+    );
+    assert_eq!(after.project, installed.project);
+    assert_eq!(after.switch_generation, installed.switch_generation);
+    assert_eq!(after.current, installed.current);
+
+    let confirmed = editor
+        .request(HostCommand::ConfirmSwitch {
+            client: client_id,
+            installed: Box::new(installed),
+        })
+        .unwrap();
+    assert!(confirmed.error.is_none(), "{:?}", confirmed.error);
+    assert!(confirmed.manual_lease.is_some(), "TE_T1_LEASE_GRANTED");
+    assert!(confirmed.manual_inputs.is_some(), "TE_T1_INPUTS_GRANTED");
+    let owner = host.lock().unwrap();
+    assert!(!owner.switch_frozen);
+    assert!(owner.manual.is_some());
+}
+
+#[test]
+fn te_t1_confirm_switch_refuses_changed_generation_branch_inputs_or_live_digest() {
+    let (r, editor, client_id, installed) = te_t1_switched_fixture();
+    let host = r.f.host.owner.upgrade().unwrap();
+
+    let mut wrong_project = installed.clone();
+    wrong_project.project = serde_json::from_value(serde_json::json!("f".repeat(32))).unwrap();
+    let mut wrong_switch_generation = installed.clone();
+    wrong_switch_generation.switch_generation = installed.switch_generation + 1;
+    let mut wrong_head = installed.clone();
+    wrong_head.current.head = serde_json::from_value(serde_json::json!("e".repeat(32))).unwrap();
+    let mut wrong_checkpoint = installed.clone();
+    wrong_checkpoint.current.checkpoint.sha256 = "d".repeat(64);
+    let mut wrong_inputs = installed.clone();
+    wrong_inputs.current.inputs.sha256 = "c".repeat(64);
+    let mut wrong_history_digest = installed.clone();
+    wrong_history_digest.current.history_digest.core[0] ^= 0xff;
+
+    for (label, candidate) in [
+        ("different project", wrong_project),
+        ("different switch_generation", wrong_switch_generation),
+        ("changed head", wrong_head),
+        ("changed checkpoint", wrong_checkpoint),
+        ("changed input manifest", wrong_inputs),
+        ("changed history_digest", wrong_history_digest),
+    ] {
+        let reply = editor
+            .request(HostCommand::ConfirmSwitch {
+                client: client_id.clone(),
+                installed: Box::new(candidate),
+            })
+            .unwrap();
+        let error = reply
+            .error
+            .unwrap_or_else(|| panic!("TE_T1 expected refusal for {label}"));
+        assert_eq!(error.code, "switch_changed", "TE_T1 {label}");
+        let owner = host.lock().unwrap();
+        assert!(owner.switch_frozen, "TE_T1 stays frozen for {label}");
+        assert!(owner.manual.is_none(), "TE_T1 grants no lease for {label}");
+    }
+
+    // Advance the live Core without saving so the durable switch identity still
+    // matches `installed` on every field while the live history digest differs.
+    {
+        let mut owner = host.lock().unwrap();
+        let cut = owner.owner().unwrap().freeze_manual_barrier().unwrap();
+        owner
+            .owner_mut()
+            .unwrap()
+            .resume_manual_barrier(&cut)
+            .unwrap();
+        owner
+            .core()
+            .request(kinewright_core::Command::Do(history_marker(555)))
+            .unwrap();
+        owner.owner().unwrap().freeze_manual_barrier().unwrap();
+        assert_eq!(
+            owner.owner().unwrap().current_switch_identity().unwrap(),
+            installed
+        );
+        assert_ne!(
+            owner.core().snapshot_identity().unwrap(),
+            installed.current.history_digest
+        );
+    }
+
+    let reply = editor
+        .request(HostCommand::ConfirmSwitch {
+            client: client_id,
+            installed: Box::new(installed),
+        })
+        .unwrap();
+    let error = reply
+        .error
+        .expect("TE_T1 expected refusal for live history digest mismatch");
+    assert_eq!(
+        error.code, "switch_changed",
+        "TE_T1 live history digest mismatch"
+    );
+    let owner = host.lock().unwrap();
+    assert!(owner.switch_frozen);
+    assert!(owner.manual.is_none());
+}
