@@ -264,9 +264,6 @@ impl HostCommandOwner {
         installed: &HostSnapshot,
         reply: &mut HostReply,
     ) -> Result<(), HostError> {
-        if self.recovery_capacity_frozen {
-            return Err(HostRefusal::new("recovery_frozen", super::RECOVERY_REOPEN).into());
-        }
         installed.verify()?;
         let key = confirmation_digest(barrier)?;
         if let Some((original, confirmed)) = &self.confirmed_recovery
@@ -361,6 +358,9 @@ impl HostCommandOwner {
         // source capture; duplicate confirmation never needs that full holder.
         reply.history = Some(selected.after.history);
         self.confirmed_recovery = Some((key, reply.clone()));
+        if self.message.contains(super::RECOVERY_REOPEN) {
+            self.message.clear();
+        }
         Ok(())
     }
 }

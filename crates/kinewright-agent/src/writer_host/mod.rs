@@ -231,7 +231,7 @@ impl HostClient {
         operation: Option<u64>,
     ) -> Result<HostReply, HostError> {
         if let Err(refusal) = command.check_snapshot_capacity() {
-            self.note_barrier_capacity_refusal(&command, None);
+            self.note_barrier_capacity_refusal(&command, operation);
             return Err(refusal.into());
         }
         let request = HostRequest {
@@ -248,7 +248,7 @@ impl HostClient {
             .check_request_capacity(body.len(), request.command.ingress_bytes())
         {
             if refusal.code == "snapshot_capacity" {
-                self.note_barrier_capacity_refusal(&request.command, Some(body.len()));
+                self.note_barrier_capacity_refusal(&request.command, operation);
             }
             return Err(refusal.into());
         }
@@ -262,7 +262,7 @@ impl HostClient {
         }
         Ok(reply)
     }
-    fn note_barrier_capacity_refusal(&self, command: &HostCommand, request_bytes: Option<usize>) {
+    fn note_barrier_capacity_refusal(&self, command: &HostCommand, operation: Option<u64>) {
         let (door, barrier) = match command {
             HostCommand::PublishBarrier { barrier } => {
                 (BarrierCapacityDoor::PublishBarrier, barrier.as_ref())
@@ -279,7 +279,8 @@ impl HostClient {
             checkpoint_ref: &barrier.checkpoint_ref,
             before_sha256: &barrier.before.history_sha256,
             after_sha256: &barrier.after.history_sha256,
-            request_bytes,
+            has_editor: self.editor.as_deref() == Some(barrier.client.as_str()),
+            operation,
         };
         if let Ok(body) = serde_json::to_vec(&notice) {
             let _ = self.post("recovery-capacity", &body);
@@ -983,8 +984,10 @@ struct BarrierCapacityRef<'a> {
     checkpoint_ref: &'a ObjectRef,
     before_sha256: &'a str,
     after_sha256: &'a str,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    has_editor: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    request_bytes: Option<usize>,
+    operation: Option<u64>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -996,7 +999,9 @@ struct RecoveryCapacityNotice {
     before_sha256: String,
     after_sha256: String,
     #[serde(default)]
-    request_bytes: Option<usize>,
+    has_editor: bool,
+    #[serde(default)]
+    operation: Option<u64>,
 }
 impl RecoveryCapacityNotice {
     fn as_ref(&self) -> BarrierCapacityRef<'_> {
@@ -1007,9 +1012,74 @@ impl RecoveryCapacityNotice {
             checkpoint_ref: &self.checkpoint_ref,
             before_sha256: &self.before_sha256,
             after_sha256: &self.after_sha256,
-            request_bytes: self.request_bytes,
+            has_editor: self.has_editor,
+            operation: self.operation,
         }
     }
+}
+struct CountingWriter(usize);
+impl Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(buf.len())
+            .ok_or_else(|| std::io::Error::other("request byte count overflow"))?;
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+#[derive(Serialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+enum BarrierCommandRef<'a> {
+    PublishBarrier {
+        barrier: &'a RecoveryBarrier,
+    },
+    ConfirmBarrier {
+        barrier: &'a RecoveryBarrier,
+        installed: &'a HostSnapshot,
+    },
+}
+#[derive(Serialize)]
+struct BarrierRequestRef<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    editor: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation: Option<u64>,
+    protocol: u32,
+    project: &'a str,
+    roots: &'a SessionRoots,
+    command: BarrierCommandRef<'a>,
+}
+fn exact_barrier_request_bytes(
+    project: &str,
+    roots: &SessionRoots,
+    editor: Option<&str>,
+    operation: Option<u64>,
+    door: BarrierCapacityDoor,
+    selected: &RecoveryBarrier,
+) -> Result<usize, HostError> {
+    let command = match door {
+        BarrierCapacityDoor::PublishBarrier => {
+            BarrierCommandRef::PublishBarrier { barrier: selected }
+        }
+        BarrierCapacityDoor::ConfirmBarrier => BarrierCommandRef::ConfirmBarrier {
+            barrier: selected,
+            installed: &selected.after,
+        },
+    };
+    let request = BarrierRequestRef {
+        editor,
+        operation,
+        protocol: HOST_PROTOCOL,
+        project,
+        roots,
+        command,
+    };
+    let mut counter = CountingWriter(0);
+    serde_json::to_writer(&mut counter, &request)?;
+    Ok(counter.0)
 }
 async fn recovery_capacity_request(
     State(state): State<Arc<HttpState>>,
@@ -2118,6 +2188,13 @@ impl HostCommandOwner {
             )
             .into());
         }
+        if notice.operation.is_some() && !notice.has_editor {
+            return Err(HostRefusal::new(
+                "history_changed",
+                "foreground operation requires manual editor identity",
+            )
+            .into());
+        }
         let before_bytes = selected.before.history.snapshot.escaped_body_bytes();
         let after_bytes = selected.after.history.snapshot.escaped_body_bytes();
         let cap = match notice.door {
@@ -2125,22 +2202,17 @@ impl HostCommandOwner {
             BarrierCapacityDoor::ConfirmBarrier => CONFIRM_BARRIER_SNAPSHOT_BYTES,
         };
         let exceeds_snapshot_cap = before_bytes > cap || after_bytes > cap;
-        let exceeds_request_cap = if let Some(request_bytes) = notice.request_bytes {
-            let snapshots = match notice.door {
-                BarrierCapacityDoor::PublishBarrier => before_bytes.saturating_add(after_bytes),
-                BarrierCapacityDoor::ConfirmBarrier => before_bytes
-                    .saturating_add(after_bytes)
-                    .saturating_add(after_bytes),
-            };
-            let roots_bytes = serde_json::to_vec(roots)?.len() as u64;
-            let ack_bytes = serde_json::to_vec(&selected.acknowledged)?.len() as u64;
-            let upper_bound = snapshots
-                .saturating_add(roots_bytes)
-                .saturating_add(ack_bytes)
-                .saturating_add(3 * SNAPSHOT_WIRE_HEADER_BYTES);
-            request_bytes > HOST_BODY_BYTES && upper_bound > HOST_BODY_BYTES as u64
-        } else {
+        let exceeds_request_cap = if exceeds_snapshot_cap {
             false
+        } else {
+            exact_barrier_request_bytes(
+                &self.config.project,
+                roots,
+                notice.has_editor.then_some(selected.client.as_str()),
+                notice.operation,
+                notice.door,
+                selected,
+            )? > HOST_BODY_BYTES
         };
         if !exceeds_snapshot_cap && !exceeds_request_cap {
             return Err(HostRefusal::new(
@@ -2150,7 +2222,6 @@ impl HostCommandOwner {
             .into());
         }
         self.recovery_capacity_frozen = true;
-        self.message = RECOVERY_REOPEN.into();
         Ok(())
     }
     fn execute_inner(
@@ -2203,7 +2274,8 @@ impl HostCommandOwner {
                 checkpoint_ref: &barrier.checkpoint_ref,
                 before_sha256: &barrier.before.history_sha256,
                 after_sha256: &barrier.after.history_sha256,
-                request_bytes: None,
+                has_editor: false,
+                operation: None,
             };
             let _ = self.latch_barrier_capacity(notice, roots);
             return Err(refusal.into());
@@ -3029,6 +3101,8 @@ impl HostCommandOwner {
             status.frozen = true;
             status.message = RETENTION_LOST.into();
             status.destination_change = Some(RETENTION_LOST.into());
+        } else if self.recovering && self.recovery_capacity_frozen {
+            status.message = RECOVERY_REOPEN.into();
         }
         status.choice = match &self.choice {
             Some(Choice::Rescue { .. }) => Some(HostChoiceKind::Rescue),
