@@ -152,7 +152,7 @@ fn quad_uv(p: &LayerParams, ndc: [f32; 2]) -> [f32; 2] {
 /// run forward, corners snapped to 8 sub-pixel bits (the D3D-mandated grid
 /// Vulkan drivers share), edge functions with the top-left tie rule.
 #[allow(clippy::cast_precision_loss, clippy::float_cmp)]
-fn rasterized(p: &LayerParams, size: [f32; 2], pixel: [usize; 2]) -> bool {
+pub(crate) fn rasterized(p: &LayerParams, size: [f32; 2], pixel: [usize; 2]) -> bool {
     let anchor = [p.anchor_x * 2.0 - 1.0, 1.0 - p.anchor_y * 2.0];
     let corner = |x: f32, y: f32| {
         let c = [(x - anchor[0]) * p.scale_x, (y - anchor[1]) * p.scale_y];
@@ -334,15 +334,19 @@ fn shade(
         }
         alpha *= if p.mask_invert > 0.5 { 1.0 - m } else { m };
     }
-    if p.coverage_on > 0.5 {
-        let axis = usize::from(p.coverage_axis > 0.5);
-        #[allow(clippy::cast_precision_loss)]
-        let centre = pixel[axis] as f64 + 0.5;
-        let below = centre < f64::from(p.coverage_edge) * f64::from(extent[axis]);
-        let keep = below == (p.coverage_on < 1.5);
-        alpha *= f32::from(u8::from(keep));
-    }
+    alpha *= f32::from(u8::from(transition_covers(p, extent, pixel)));
     [rgb[0], rgb[1], rgb[2], alpha]
+}
+
+pub(crate) fn transition_covers(p: &LayerParams, extent: [f32; 2], pixel: [usize; 2]) -> bool {
+    if p.coverage_on <= 0.5 {
+        return true;
+    }
+    let axis = usize::from(p.coverage_axis > 0.5);
+    #[allow(clippy::cast_precision_loss)]
+    let centre = pixel[axis] as f64 + 0.5;
+    let below = centre < f64::from(p.coverage_edge) * f64::from(extent[axis]);
+    below == (p.coverage_on < 1.5)
 }
 
 /// Composite `layers` bottom-to-top on the CPU, as `render_working` does.

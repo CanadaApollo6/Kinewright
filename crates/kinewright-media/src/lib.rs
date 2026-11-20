@@ -224,7 +224,10 @@ pub use lut_store::{
     LUT_MAX_FILE_BYTES, LUT_STORE_LUTS_DIRECTORY, LUT_STORE_SUFFIX, LutAssetImport, LutLibrary,
     LutStore, LutStoreError, LutStoreErrorCode, metadata_mismatch,
 };
-pub use review_geometry::{OverlayGeometry, review_overlay_geometry};
+pub use review_geometry::{
+    OverlayGeometry, review_layer_can_reshape_below, review_layer_reshapes_below_at,
+    review_overlay_geometry,
+};
 pub use room_tone_store::{
     ROOM_TONE_ASSET_FRAMES_PER_SECOND, ROOM_TONE_CHANNELS, ROOM_TONE_MAX_CAPTURE_MILLISECONDS,
     ROOM_TONE_MAX_FILE_BYTES, ROOM_TONE_MINIMUM_CAPTURE_MILLISECONDS,

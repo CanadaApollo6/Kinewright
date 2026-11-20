@@ -1,10 +1,9 @@
 //! CPU-side projection of an authored overlay's bounds through the compositor.
-use crate::compositor::params_for;
-use crate::timeline::{
-    TransitionRenderParams, evaluated_effects, title_alpha, transition_render_params,
-};
+use crate::compositor::{LayerParams, params_for_at, pixel_coverage_edge};
+use crate::timeline::{title_alpha, transition_render_params};
 use kinewright_core::{
-    Clip, ClipContent, Document, MediaError, TimeCode, TitlePixelBounds, TransitionAxis,
+    Clip, ClipContent, Document, Effect, EffectUniform as U, MediaError, TimeCode,
+    TitlePixelBounds, TransitionShading, effect_descriptor, transition_descriptor,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,27 +29,116 @@ pub fn review_overlay_geometry(
     if let ClipContent::Title(title) = &clip.content {
         transition.alpha *= title_alpha(document, clip, title, at)?;
     }
-    let effects = evaluated_effects(clip, at);
-    Ok(project(bounds, raster, &effects, transition))
+    let local = TimeCode(at.0 - clip.timeline_start.0);
+    if clip.effects.iter().any(|effect| {
+        effect.is_enabled_at(local) && effect_parameters_reshape(effect, Some(local), false)
+    }) {
+        return Ok(OverlayGeometry::Unresolved);
+    }
+    Ok(project(
+        bounds,
+        raster,
+        params_for_at(&clip.effects, transition, Some(local)),
+    ))
+}
+
+/// Whether a layer can reshape the already-composited picture during its range.
+#[must_use]
+pub fn review_layer_can_reshape_below(clip: &Clip) -> bool {
+    clip.transition_in.as_ref().is_some_and(|transition| {
+        transition.duration.0 > 1
+            && transition_descriptor(&transition.name)
+                .is_some_and(|desc| matches!(desc.shading, TransitionShading::Push { .. }))
+    }) || (matches!(clip.content, ClipContent::Adjustment)
+        && clip.effects.iter().any(|effect| {
+            (effect.enabled || effect.enabled_curve.is_some())
+                && effect_parameters_reshape(effect, None, true)
+        }))
+}
+
+/// Whether this layer can reshape the backdrop at one project frame.
+#[must_use]
+pub fn review_layer_reshapes_below_at(clip: &Clip, at: TimeCode) -> bool {
+    let local = TimeCode(at.0 - clip.timeline_start.0);
+    clip.is_enabled_at(local)
+        && (transition_render_params(clip, at).backdrop.is_some()
+            || (matches!(clip.content, ClipContent::Adjustment)
+                && clip.effects.iter().any(|effect| {
+                    effect.is_enabled_at(local)
+                        && effect_parameters_reshape(effect, Some(local), true)
+                })))
+}
+
+fn effect_parameters_reshape(
+    effect: &Effect,
+    local: Option<TimeCode>,
+    include_transforms: bool,
+) -> bool {
+    effect_descriptor(&effect.name).is_none_or(|desc| {
+        desc.parameters.iter().any(|parameter| {
+            match parameter.uniform {
+                U::Brightness
+                | U::Contrast
+                | U::Saturation
+                | U::Opacity
+                | U::PrimaryExposure
+                | U::PrimaryTemperature
+                | U::PrimaryTint
+                | U::PrimaryContrast
+                | U::PrimaryPivot
+                | U::Blacks
+                | U::Shadows
+                | U::Highlights
+                | U::Whites
+                | U::PrimarySaturation
+                | U::LutPreset
+                | U::LutIntensity
+                | U::ExternalLutIntensity
+                | U::ColorNode
+                | U::AnchorX
+                | U::AnchorY => false,
+                U::Scale
+                | U::ScaleX
+                | U::ScaleY
+                | U::ScaleFine
+                | U::OffsetX
+                | U::OffsetY
+                | U::OffsetXBasisPoints
+                | U::OffsetYBasisPoints
+                | U::Rotation => {
+                    include_transforms
+                        && match local {
+                            Some(at) => effect
+                                .integer_parameter_at(parameter.name, at)
+                                .is_some_and(|value| value != parameter.neutral),
+                            None => {
+                                effect
+                                    .static_integer_parameter(parameter.name)
+                                    .is_some_and(|value| value != parameter.neutral)
+                                    || effect.keyframes.get(parameter.name).is_some_and(|curve| {
+                                        curve
+                                            .keyframes
+                                            .iter()
+                                            .any(|key| key.value != parameter.neutral)
+                                    })
+                            }
+                        }
+                }
+                // Crops, reframes, masks, keys and any unclassified uniform
+                // require a visibility proof beyond a transformed rectangle.
+                _ => true,
+            }
+        })
+    })
 }
 
 fn project(
     bounds: TitlePixelBounds,
     raster: (u32, u32),
-    effects: &[kinewright_core::Effect],
-    transition: TransitionRenderParams,
+    mut params: LayerParams,
 ) -> OverlayGeometry {
-    let params = params_for(effects, transition);
     if params.opacity <= 0.0 || params.scale_x == 0.0 || params.scale_y == 0.0 {
         return OverlayGeometry::Hidden;
-    }
-    if effects.iter().any(|effect| {
-        matches!(
-            effect.name.as_str(),
-            "crop" | "reframe" | "mask" | "chroma_key"
-        )
-    }) {
-        return OverlayGeometry::Unresolved;
     }
     let width = f64::from(raster.0);
     let height = f64::from(raster.1);
@@ -78,13 +166,15 @@ fn project(
     if ![left, top, right, bottom].into_iter().all(f64::is_finite) {
         return OverlayGeometry::Unresolved;
     }
-    if let Some(coverage) = transition.coverage {
-        let (low, high, extent) = match coverage.axis {
-            TransitionAxis::Horizontal => (&mut left, &mut right, width),
-            TransitionAxis::Vertical => (&mut top, &mut bottom, height),
+    if params.coverage_on > 0.5 {
+        pixel_coverage_edge(&mut params, raster.0, raster.1);
+        let (low, high) = if params.coverage_axis > 0.5 {
+            (&mut top, &mut bottom)
+        } else {
+            (&mut left, &mut right)
         };
-        let column = (f64::from(coverage.edge) * extent - 0.5).ceil();
-        if coverage.below_edge {
+        let column = f64::from(params.coverage_edge) - 0.5;
+        if params.coverage_on < 1.5 {
             *high = high.min(column);
         } else {
             *low = low.max(column);
@@ -113,4 +203,109 @@ fn project(
         bottom: (bottom + margin).ceil().min(height) as i32,
     };
     OverlayGeometry::Visible(pixels)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compositor::twin::{rasterized, transition_covers};
+
+    fn rasterized_bounds(raster: (u16, u16), params: &LayerParams) -> Option<TitlePixelBounds> {
+        let size = [f32::from(raster.0), f32::from(raster.1)];
+        let mut result: Option<TitlePixelBounds> = None;
+        for y in 0..raster.1 {
+            for x in 0..raster.0 {
+                let pixel = [usize::from(x), usize::from(y)];
+                if !rasterized(params, size, pixel) || !transition_covers(params, size, pixel) {
+                    continue;
+                }
+                let (x, y) = (i32::from(x), i32::from(y));
+                let bounds = result.get_or_insert(TitlePixelBounds {
+                    left: x,
+                    top: y,
+                    right: x + 1,
+                    bottom: y + 1,
+                });
+                bounds.left = bounds.left.min(x);
+                bounds.top = bounds.top.min(y);
+                bounds.right = bounds.right.max(x + 1);
+                bounds.bottom = bounds.bottom.max(y + 1);
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn output_review_fix1_geometry_matches_compositor_cpu_twin() {
+        for raster in [(33_u16, 21_u16), (19, 35)] {
+            let full = TitlePixelBounds {
+                left: 0,
+                top: 0,
+                right: i32::from(raster.0),
+                bottom: i32::from(raster.1),
+            };
+            for [anchor_x, anchor_y] in [[0.5, 0.5], [0.15, 0.73]] {
+                for [scale_x, scale_y] in [[1.0, 1.0], [-0.8, 1.32]] {
+                    for rotation in [0.0, 0.41] {
+                        for [offset_x, offset_y] in [[0.0, 0.0], [0.29, -0.33]] {
+                            for [on, axis, edge] in
+                                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.52], [2.0, 1.0, 0.39]]
+                            {
+                                let mut params = params_for_at(
+                                    &[],
+                                    crate::TransitionRenderParams::default(),
+                                    None,
+                                );
+                                params.anchor_x = anchor_x;
+                                params.anchor_y = anchor_y;
+                                params.scale_x = scale_x;
+                                params.scale_y = scale_y;
+                                params.rotation = rotation;
+                                params.offset_x = offset_x;
+                                params.offset_y = offset_y;
+                                params.frame_aspect = f32::from(raster.1) / f32::from(raster.0);
+                                params.coverage_on = on;
+                                params.coverage_axis = axis;
+                                params.coverage_edge = edge;
+                                let actual =
+                                    rasterized_bounds(raster, &params).expect("visible test quad");
+                                let OverlayGeometry::Visible(expected) =
+                                    project(full, (raster.0.into(), raster.1.into()), params)
+                                else {
+                                    panic!("a rasterized quad must have expected bounds");
+                                };
+                                assert!(
+                                    expected.contains(actual),
+                                    "{params:?} {actual:?} outside {expected:?}"
+                                );
+                                let excess = [
+                                    actual.left - expected.left,
+                                    actual.top - expected.top,
+                                    expected.right - actual.right,
+                                    expected.bottom - actual.bottom,
+                                ];
+                                assert!(
+                                    rotation != 0.0 || excess.into_iter().all(|edge| edge <= 2),
+                                    "{params:?} {actual:?} vs {expected:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn output_review_fix1_unknown_upper_effect_is_conservative() {
+        let effect = Effect {
+            id: kinewright_core::EffectId(1),
+            name: "future_geometry".into(),
+            parameters: std::collections::BTreeMap::new(),
+            keyframes: std::collections::BTreeMap::new(),
+            enabled: true,
+            enabled_curve: None,
+        };
+        assert!(effect_parameters_reshape(&effect, None, true));
+    }
 }

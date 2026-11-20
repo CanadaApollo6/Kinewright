@@ -311,7 +311,7 @@ pub fn visual_layers_at(
     Ok(layers)
 }
 
-pub(crate) fn evaluated_effects(clip: &Clip, project_at: TimeCode) -> Vec<Effect> {
+fn evaluated_effects(clip: &Clip, project_at: TimeCode) -> Vec<Effect> {
     let local_at = project_at
         .checked_sub(clip.timeline_start)
         .unwrap_or(TimeCode::ZERO);

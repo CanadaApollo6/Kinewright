@@ -3937,8 +3937,16 @@ fn legacy_stage_active(effects: &[Effect]) -> bool {
     })
 }
 
-#[allow(clippy::too_many_lines)]
 pub(crate) fn params_for(effects: &[Effect], transition: TransitionRenderParams) -> LayerParams {
+    params_for_at(effects, transition, None)
+}
+
+#[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
+pub(crate) fn params_for_at(
+    effects: &[Effect],
+    transition: TransitionRenderParams,
+    local: Option<kinewright_core::TimeCode>,
+) -> LayerParams {
     let mut params = LayerParams {
         opacity: transition.alpha.clamp(0.0, 1.0),
         fade_mix: transition.fade_mix.clamp(0.0, 1.0),
@@ -3951,14 +3959,15 @@ pub(crate) fn params_for(effects: &[Effect], transition: TransitionRenderParams)
         // static-flag test is the whole skip. `evaluated_effects` filters
         // first; this arm covers the `LayerParams` half for direct
         // `Compositor` users (the grade/LUT byte path does not filter).
-        if !effect.enabled {
+        if !local.map_or(effect.enabled, |at| effect.is_enabled_at(at)) {
             continue;
         }
         let Some(descriptor) = effect_descriptor(&effect.name) else {
             continue;
         };
         for parameter in descriptor.parameters {
-            let value = parameter_value(effect, parameter);
+            let keyed = local.and_then(|at| effect.keyframes.get(parameter.name)?.value_at(at));
+            let value = keyed.map_or_else(|| parameter_value(effect, parameter), |v| v as f32);
             match parameter.uniform {
                 EffectUniform::Brightness => params.brightness += value / 100.0,
                 EffectUniform::Contrast => params.contrast *= 1.0 + value / 100.0,
@@ -4000,12 +4009,12 @@ pub(crate) fn params_for(effects: &[Effect], transition: TransitionRenderParams)
                 EffectUniform::ReframeFocusX => params.reframe_focus_x = value / 100.0,
                 EffectUniform::ReframeFocusY => params.reframe_focus_y = value / 100.0,
                 EffectUniform::ReframeFocusXBasisPoints => {
-                    if effect.parameters.contains_key(parameter.name) {
+                    if keyed.is_some() || effect.parameters.contains_key(parameter.name) {
                         params.reframe_focus_x = value / 10_000.0;
                     }
                 }
                 EffectUniform::ReframeFocusYBasisPoints => {
-                    if effect.parameters.contains_key(parameter.name) {
+                    if keyed.is_some() || effect.parameters.contains_key(parameter.name) {
                         params.reframe_focus_y = value / 10_000.0;
                     }
                 }
