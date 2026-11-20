@@ -67,7 +67,7 @@ pub(crate) struct Studio {
     return_at: TimeCode,
     compare_open: bool,
     pub(crate) position: TimeCode,
-    pub(crate) failure: Option<String>,
+    pub(crate) failure: Option<StudioFailure>,
     pub(crate) cpu_frame: Option<kinewright_core::FrameTexture>,
     /// The presenter frame id of `cpu_frame`, so a proof hashes only the bound image.
     pub(crate) cpu_frame_id: Option<u64>,
@@ -88,13 +88,43 @@ pub(crate) struct Studio {
     neutral: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StudioFailure {
+    message: String,
+    media_probe_timeout: bool,
+}
+
+impl From<String> for StudioFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            media_probe_timeout: false,
+        }
+    }
+}
+
+impl StudioFailure {
+    pub(crate) fn from_bundle(
+        message: String,
+        error: &kinewright_project::bundle::BundleError,
+    ) -> Self {
+        Self {
+            message,
+            media_probe_timeout: matches!(
+                error,
+                kinewright_project::bundle::BundleError::MediaProbeTimedOut { .. }
+            ),
+        }
+    }
+}
+
 /// A failed Current-edit acquisition, tied to the scope it tried. A newer
 /// scope lifts it at once; a temporary failure is tried again after a
 /// growing wait, at most `MANUAL_RETRIES` times (S3 C11 fu1).
 #[derive(Debug)]
 pub(crate) struct ManualFailure {
     pub(crate) scope: Option<(u64, kinewright_project::bundle_records::ObjectRef)>,
-    message: String,
+    message: StudioFailure,
     attempts: u32,
     retry_at: Option<std::time::Instant>,
 }
@@ -113,7 +143,7 @@ impl Studio {
         &mut self,
         scope: Option<(u64, kinewright_project::bundle_records::ObjectRef)>,
         temporary: bool,
-        message: String,
+        message: StudioFailure,
     ) {
         let attempts = self
             .manual_failure
@@ -143,7 +173,7 @@ impl Studio {
             (newer || due).then(|| (newer, failed.message.clone()))
         });
         if let Some((newer, message)) = lift {
-            if self.failure.as_deref() == Some(message.as_str()) {
+            if self.failure.as_ref() == Some(&message) {
                 self.failure = None;
             }
             if newer {
@@ -550,7 +580,7 @@ impl KinewrightApp {
         if let Some(context) = context
             && let Err(error) = self.install_studio_context(context)
         {
-            self.focused_mut().studio.failure = Some(error);
+            self.focused_mut().studio.failure = Some(error.into());
         }
         if self.focused().studio.manual_scope != current_scope {
             self.focused_mut()
@@ -969,7 +999,12 @@ impl KinewrightApp {
             ));
         }
         let (dot, status) = if let Some(error) = &studio.failure {
-            (po0::DANGER, error.clone())
+            let status = if error.media_probe_timeout {
+                error.message.clone()
+            } else {
+                format!("Damaged or unavailable · {}", error.message)
+            };
+            (po0::DANGER, status)
         } else if studio.selection.is_some() && bound.is_some_and(|cell| cell.stale) {
             (po0::TEXT_3, "Loading this version…".to_owned())
         } else if studio.selection.is_some() {

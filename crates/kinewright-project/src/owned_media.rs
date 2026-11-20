@@ -567,7 +567,7 @@ impl ProjectStore {
             manifest.entries.push(entry);
         }
         manifest.entries.sort_by(|a, b| a.entry_id.cmp(&b.entry_id));
-        let sealed = self.admit_record(&manifest)?;
+        let sealed = self.admit_media_interpretation_manifest(&manifest, asset)?;
         Ok(PreparedOwnedMedia {
             asset: asset.clone(),
             inputs_ref: sealed.reference.clone(),
@@ -699,8 +699,9 @@ impl ProjectStore {
     pub(crate) fn certify_media_entry_until_deadline(
         &self,
         entry: &OwnedInputEntry,
+        locator: Option<&Path>,
     ) -> Result<CertifiedMediaInput, BundleError> {
-        self.certify_media_entry_in_context(entry, None, None, None)
+        self.certify_media_entry_in_context(entry, locator, None, None)
     }
     fn certify_media_entry_in_context(
         &self,
@@ -943,7 +944,7 @@ mod tests {
         for _ in 0..2 {
             let source = owner
                 .store()
-                .certify_media_entry_until_deadline(&entry)
+                .certify_media_entry_until_deadline(&entry, None)
                 .unwrap();
             let mut decoder = source.open_audio(Arc::new(AtomicBool::new(false))).unwrap();
             assert!(decoder.next_frame().unwrap().is_some());
@@ -1372,7 +1373,7 @@ mod tests {
         let (_asset, entry, _pins) = import(&mut owner, 1, 3456);
         let original = owner
             .store()
-            .certify_media_entry_until_deadline(&entry)
+            .certify_media_entry_until_deadline(&entry, None)
             .unwrap();
         assert!(!original.certification_was_cold());
         let root = owner.store().resolved_root().unwrap();
@@ -1386,7 +1387,7 @@ mod tests {
         let expected = owner.store().open_input_descriptor(&entry.object).err();
         let refused = owner
             .store()
-            .certify_media_entry_until_deadline(&entry)
+            .certify_media_entry_until_deadline(&entry, None)
             .err();
         std::fs::set_permissions(objects, permissions).unwrap();
         let expected = expected.expect("fixture must refuse the temporary directory permission");
@@ -1407,7 +1408,7 @@ mod tests {
         original.verify_unchanged().unwrap();
         let warm = owner
             .store()
-            .certify_media_entry_until_deadline(&entry)
+            .certify_media_entry_until_deadline(&entry, None)
             .unwrap();
         assert!(
             !warm.certification_was_cold(),

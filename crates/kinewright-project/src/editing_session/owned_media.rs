@@ -77,12 +77,15 @@ impl Ja1EditingSession {
             .find(|entry| entry.matches_media_asset(asset))
             .ok_or(BundleError::HistoryBarrierInvariant)?
             .clone();
-        let retained = self
-            .store()?
-            .lease_input(&crate::owned_inputs::OwnedInputRef {
+        let store = self.store()?;
+        let retained = store.lease_input_for_owner(
+            &crate::owned_inputs::OwnedInputRef {
                 manifest_ref: prepared.inputs_ref.clone(),
                 entry: retained_entry,
-            })?;
+            },
+            &store.input_owner(),
+            Some(&asset.path),
+        )?;
         if self.destination.is_none() {
             self.apply_local_input_operation(
                 Operation::SetAssetColorDescription {
@@ -267,12 +270,15 @@ impl Ja1EditingSession {
             .find(|entry| entry.matches_media_asset(&prepared.asset))
             .ok_or(BundleError::HistoryBarrierInvariant)?
             .clone();
-        let retained = self
-            .store()?
-            .lease_input(&crate::owned_inputs::OwnedInputRef {
+        let store = self.store()?;
+        let retained = store.lease_input_for_owner(
+            &crate::owned_inputs::OwnedInputRef {
                 manifest_ref: prepared.inputs_ref.clone(),
                 entry,
-            })?;
+            },
+            &store.input_owner(),
+            Some(path),
+        )?;
         let operation = Operation::AddAsset {
             asset: prepared.asset.clone(),
         };

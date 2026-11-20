@@ -190,11 +190,8 @@ pub(crate) fn attach(app: &mut KinewrightApp, owner: Ja1EditingSession) {
     ignore = "slow tier: cargo test --features slow-tests"
 )]
 fn ms_t10_studio_probe_timeout_keeps_the_project_editable() {
-    use std::os::unix::fs::{PermissionsExt, symlink};
-
-    const TEST: &str = "studio::tests::ms_t10_studio_probe_timeout_keeps_the_project_editable";
-    const FIXTURE: &str = "KINEWRIGHT_MS_T10_FIXTURE";
-    if let Some(directory) = std::env::var_os(FIXTURE) {
+    let test = "studio::tests::ms_t10_studio_probe_timeout_keeps_the_project_editable";
+    if let Some(marker) = ms_t10_silent_helper(test) {
         let mut fixture = fixtures();
         let context = &fixture.contexts[0];
         let path = &context.document.media_pool[0].path;
@@ -207,7 +204,6 @@ fn ms_t10_studio_probe_timeout_keeps_the_project_editable() {
             .unwrap();
         let (mut app, _) = in1_harness(context.document.clone());
         attach(&mut app, owner);
-        let marker = std::path::Path::new(&directory).join("stall");
         std::fs::write(&marker, []).unwrap();
         let error = app
             .focused_mut()
@@ -227,7 +223,14 @@ fn ms_t10_studio_probe_timeout_keeps_the_project_editable() {
             "{error:?}"
         );
         app.sync_studio_selection();
-        let message = app.focused().studio.failure.as_deref().unwrap();
+        let message = app
+            .focused()
+            .studio
+            .failure
+            .as_ref()
+            .unwrap()
+            .message
+            .as_str();
         assert!(
             message.starts_with(&format!(
                 "Reading media “{}” did not finish in time. Try again.",
@@ -262,9 +265,50 @@ fn ms_t10_studio_probe_timeout_keeps_the_project_editable() {
             .apply(Action::StudioSelect(key.clone()))
             .unwrap();
         in1_shutdown(&mut app);
-        return;
     }
+}
 
+#[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn ms_t10_colour_timeout_names_the_asset() {
+    let test = "studio::tests::ms_t10_colour_timeout_names_the_asset";
+    if let Some(marker) = ms_t10_silent_helper(test) {
+        let mut fixture = fixtures();
+        let mut asset = fixture.contexts[0].document.media_pool[0].clone();
+        asset.color_description.provenance = kinewright_core::ColorProvenance::UserOverride;
+        let mut owner = fixture.owners.remove(0);
+        std::fs::write(&marker, []).unwrap();
+        let error = owner.apply_owned_media_interpretation(&asset).unwrap_err();
+        std::fs::remove_file(marker).unwrap();
+        assert!(
+            matches!(&error, kinewright_project::bundle::BundleError::MediaProbeTimedOut { path, .. }
+                if *path == asset.path),
+            "{error:?}"
+        );
+        owner.apply_owned_media_interpretation(&asset).unwrap();
+    }
+}
+
+#[test]
+fn ms_t10_unavailable_version_keeps_its_status_prefix() {
+    let (mut app, _) = in1_harness(Document::default());
+    app.focused_mut().studio.failure = Some(String::from("version unavailable").into());
+    assert_eq!(
+        app.plate_label().2,
+        "Damaged or unavailable · version unavailable"
+    );
+    in1_shutdown(&mut app);
+}
+
+fn ms_t10_silent_helper(test: &str) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    const FIXTURE: &str = "KINEWRIGHT_MS_T10_FIXTURE";
+    if let Some(directory) = std::env::var_os(FIXTURE) {
+        return Some(std::path::Path::new(&directory).join("stall"));
+    }
     let directory = TempDirectory::new_in(&workspace_target_dir(), "ms-t10-silent-helper");
     let binaries = std::env::var_os("KINEWRIGHT_MS2_TEST_BIN_DIR")
         .map_or_else(
@@ -288,7 +332,7 @@ fn ms_t10_studio_probe_timeout_keeps_the_project_editable() {
     ).unwrap();
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", TEST, "--include-ignored", "--nocapture"])
+        .args(["--exact", test, "--include-ignored", "--nocapture"])
         .env(FIXTURE, directory.root())
         .env("KINEWRIGHT_MS2_TEST_BIN_DIR", directory.root())
         .output()
@@ -305,6 +349,7 @@ fn ms_t10_studio_probe_timeout_keeps_the_project_editable() {
     {
         eprintln!("{line}");
     }
+    None
 }
 
 pub(crate) fn wait_frame(

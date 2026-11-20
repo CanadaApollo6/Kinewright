@@ -191,7 +191,7 @@ fn admit_through_the_helper((name, bytes, kind, resolution): Case) {
     // host's interpretation match against the admitted entry.
     let admitted = owner
         .store()
-        .certify_media_entry_until_deadline(&entry)
+        .certify_media_entry_until_deadline(&entry, None)
         .unwrap();
     let source = admitted.playback_source();
     let confined = super::probe(Path::new(name), &source, None).unwrap();
@@ -271,7 +271,7 @@ fn ms2_unconfigured_admission_is_sandbox_unavailable() {
     let (_, entry) = import(&mut owner, &wav, "tone.wav").unwrap();
     let source = owner
         .store()
-        .certify_media_entry_until_deadline(&entry)
+        .certify_media_entry_until_deadline(&entry, None)
         .unwrap()
         .playback_source();
     let (result, in_process) = observe_stream_info_probes(|| {
