@@ -36,6 +36,42 @@ pub(crate) fn at_test_hook(point: &str) {
         }
     });
 }
+#[cfg(all(test, target_os = "linux"))]
+type PathHook = (PathBuf, Box<dyn FnMut(&str)>);
+#[cfg(all(test, target_os = "linux"))]
+thread_local! { static PATH_HOOK: RefCell<Option<PathHook>> = const { RefCell::new(None) }; }
+/// Run a test callback when one specific path reaches a verification point on this thread.
+/// # Panics
+/// Refuses nesting; the callback and operation may propagate their own panic.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn at_path_barrier<T>(
+    path: &std::path::Path,
+    callback: impl FnMut(&str) + 'static,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            PATH_HOOK.with_borrow_mut(|hook| *hook = None);
+        }
+    }
+    PATH_HOOK.with_borrow_mut(|hook| {
+        assert!(hook.is_none());
+        *hook = Some((path.to_path_buf(), Box::new(callback)));
+    });
+    let _reset = Reset;
+    run()
+}
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn at_path_hook(point: &str, path: &std::path::Path) {
+    PATH_HOOK.with_borrow_mut(|hook| {
+        if let Some((expected_path, callback)) = hook
+            && path == expected_path.as_path()
+        {
+            callback(point);
+        }
+    });
+}
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct SyncProfile {

@@ -534,11 +534,14 @@ impl HostCommandOwner {
                 if (self.recovering || self.switch_frozen)
                     && !self.completion_owner_recovery(index, &command)
                 {
-                    return Err(HostRefusal::new(
-                        "recovery_frozen",
-                        "orchestration writes wait for recovery confirmation",
-                    )
-                    .into());
+                    let message = if self.recovering {
+                        self.recovery_frozen_message(
+                            "orchestration writes wait for recovery confirmation",
+                        )
+                    } else {
+                        "orchestration writes wait for recovery confirmation"
+                    };
+                    return Err(HostRefusal::new("recovery_frozen", message).into());
                 }
             }
             for pin in &self.pins {

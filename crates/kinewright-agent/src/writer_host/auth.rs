@@ -296,7 +296,7 @@ impl super::HostCommandOwner {
             })
     }
 
-    fn check_narrowed_roots(
+    pub(super) fn check_narrowed_roots(
         admitted: &SessionRoots,
         roots: &SessionRoots,
     ) -> Result<(), HostError> {

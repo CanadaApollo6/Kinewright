@@ -3016,7 +3016,18 @@ impl ProjectStore {
         if file.metadata()?.len() != reference.byte_length {
             return Err(BundleError::Corrupt("owned byte length changed".into()));
         }
-        verify_owned_bytes(&mut file, reference, usage)?;
+        #[cfg(all(test, target_os = "linux"))]
+        crate::io_observer::at_path_hook(
+            "owned_verification_before_hash",
+            Path::new(&reference.sha256),
+        );
+        let verified = verify_owned_bytes(&mut file, reference, usage);
+        #[cfg(all(test, target_os = "linux"))]
+        crate::io_observer::at_path_hook(
+            "owned_verification_after_hash",
+            Path::new(&reference.sha256),
+        );
+        verified?;
         file.seek(SeekFrom::Start(0))?;
         Ok(file)
     }

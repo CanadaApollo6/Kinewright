@@ -532,6 +532,734 @@ fn te13_fix5_temporary_recovery_does_not_install_block() {
     te13_fix4_replay(&p);
 }
 
+struct HxT2SiteProbe<'a> {
+    p: &'a Te13Fix4Pending,
+    pending_completion: &'a super::super::orchestration::PendingPublication,
+    client: &'a HostClient,
+    client_id: &'a str,
+    start_request: &'a ScopedOrchestrationRequest,
+    snapshot: &'a HostSnapshot,
+}
+
+impl HxT2SiteProbe<'_> {
+    fn assert_sites(&self, reopen: bool, label: &str) {
+        let expected = |earlier: &'static str| if reopen { RECOVERY_REOPEN } else { earlier };
+
+        let save_error = self
+            .client
+            .request(HostCommand::Save {
+                snapshot: self.snapshot.clone(),
+            })
+            .unwrap()
+            .error
+            .unwrap();
+        assert_eq!(save_error.code, "recovery_frozen", "{label} save code");
+        assert_eq!(
+            save_error.message,
+            expected(
+                "Editing remains read-only until both Cores confirm the durable recovery result.",
+            ),
+            "{label} save message"
+        );
+
+        let http_manual_error = self
+            .client
+            .request(HostCommand::AcquireManual {
+                client: self.client_id.to_owned(),
+            })
+            .unwrap()
+            .error
+            .unwrap();
+        assert_eq!(
+            http_manual_error.code, "recovery_frozen",
+            "{label} http manual code"
+        );
+        assert_eq!(
+            http_manual_error.message,
+            expected(
+                "Editing remains read-only until both Cores confirm the durable recovery result.",
+            ),
+            "{label} http manual message"
+        );
+
+        let orchestration_error = self
+            .client
+            .request(HostCommand::DispatchOrchestration {
+                request: Box::new(self.start_request.clone()),
+            })
+            .unwrap()
+            .error
+            .unwrap();
+        assert_eq!(
+            orchestration_error.code, "recovery_frozen",
+            "{label} orchestration code"
+        );
+        assert_eq!(
+            orchestration_error.message,
+            expected("orchestration writes wait for recovery confirmation"),
+            "{label} orchestration message"
+        );
+
+        {
+            let host = self.p.run.f.host.owner.upgrade().unwrap();
+            let mut owner = host.lock().unwrap();
+
+            let manual_error = owner
+                .acquire_manual(self.client_id.to_owned())
+                .unwrap_err()
+                .refusal();
+            assert_eq!(manual_error.code, "recovery_frozen", "{label} manual code");
+            assert_eq!(
+                manual_error.message,
+                expected("shared recovery has not been confirmed"),
+                "{label} manual message"
+            );
+
+            let index = owner
+                .resolve_attachment(Some(&self.p.client.bootstrap.auth.bearer()))
+                .unwrap();
+            owner.hooks.pending = Some(self.pending_completion.clone());
+            let completion_error = owner
+                .reconcile_completion_substep(index, &self.p.request)
+                .unwrap_err()
+                .refusal();
+            assert_eq!(
+                completion_error.code, "recovery_frozen",
+                "{label} completion code"
+            );
+            assert_eq!(
+                completion_error.message,
+                expected("task completion waits for recovery confirmation"),
+                "{label} completion message"
+            );
+
+            let mut media_reply = HostReply::default();
+            let media_error = owner
+                .prepare_media_interpretation(
+                    self.client_id,
+                    &history_marker(77),
+                    self.snapshot,
+                    &mut media_reply,
+                )
+                .unwrap_err()
+                .refusal();
+            assert_eq!(media_error.code, "input_frozen", "{label} owned media code");
+            assert_eq!(
+                media_error.message,
+                expected("Resolve the current save or selection before importing media."),
+                "{label} owned media message"
+            );
+        }
+
+        let expected_mcp = expected("task attachment changed");
+        for (tool, args) in [
+            ("task_status", serde_json::json!({})),
+            (
+                "prepare_edit_plan",
+                serde_json::json!({ "expected_revision": 0, "operations": [] }),
+            ),
+        ] {
+            let reply = self.p.run.editor.wire(tool, args);
+            assert_eq!(reply.is_error, Some(true), "{label} {tool} error flag");
+            let text = c5_fix10_text(&reply);
+            assert!(
+                text.contains(&format!("task_scope: {expected_mcp}")),
+                "{label} {tool} reply: {text}"
+            );
+            if !reopen {
+                assert!(
+                    !text.contains(RECOVERY_REOPEN) && !text.contains("Close and reopen"),
+                    "{label} {tool} leaked reopen sentence: {text}"
+                );
+            }
+        }
+    }
+}
+
+fn hx_t2_capacity_refusal_host_sites(door_name: &str, cap: u64, confirm_door: bool) {
+    use kinewright_core::{Command, Marker, MarkerId, Operation, TimeCode};
+
+    let p = te13_fix4_pending(CompletionStep::Freeze, false, false);
+    let host = p.run.f.host.owner.upgrade().unwrap();
+    let pending_completion = host.lock().unwrap().hooks.pending.clone().unwrap();
+    let start_request = p.run.f.start_request(&p.run.f.editor);
+    let client_id = "e".repeat(64);
+    let client = p.run.f.host.client().with_manual_editor(client_id.clone());
+
+    // Grow only the manual branch just past `cap` in bounded steps so the task
+    // and candidate branches stay small and the earlier barrier reply stays
+    // inside `HOST_BODY_BYTES`. Each tab takes three wire bytes in both the
+    // undo operation and the current document.
+    let mut remaining_tabs = usize::try_from(cap / 6 + 1).unwrap();
+    let chunk = 100_000_usize;
+    {
+        let mut owner = host.lock().unwrap();
+        let mut index = 0_u64;
+        while remaining_tabs > 0 {
+            let len = remaining_tabs.min(chunk);
+            remaining_tabs -= len;
+            owner
+                .core()
+                .request(Command::Do(Operation::AddMarker {
+                    marker: Marker {
+                        id: MarkerId(100 + index),
+                        position: TimeCode::ZERO,
+                        label: "\t".repeat(len),
+                        color_token: 0,
+                    },
+                }))
+                .unwrap();
+            index += 1;
+        }
+        owner.owner_mut().unwrap().save_active().unwrap();
+    }
+    let small_snapshot =
+        HostSnapshot::capture(&Core::for_test(Document::default()).unwrap()).unwrap();
+    let frozen = locked_host_snapshot_for_test(&host);
+
+    let begun = client
+        .request(HostCommand::BeginRecovery {
+            client: client_id.clone(),
+            frozen: Some(frozen),
+            pending: vec![],
+        })
+        .unwrap();
+    assert!(begun.error.is_none(), "{:?}", begun.error);
+    let barrier = begun.recovery.unwrap();
+    let installed_snapshot = barrier.after.clone();
+    assert!(installed_snapshot.history.snapshot.escaped_body_bytes() > cap);
+    if confirm_door {
+        assert!(
+            installed_snapshot.history.snapshot.escaped_body_bytes()
+                <= PUBLISH_BARRIER_SNAPSHOT_BYTES
+        );
+    }
+
+    let probe = HxT2SiteProbe {
+        p: &p,
+        pending_completion: &pending_completion,
+        client: &client,
+        client_id: &client_id,
+        start_request: &start_request,
+        snapshot: &small_snapshot,
+    };
+
+    // Before any barrier is refused with snapshot_capacity, even a large
+    // recovery keeps the earlier wording at every site.
+    probe.assert_sites(false, &format!("{door_name} before refusal"));
+
+    let oversized = if confirm_door {
+        let published = client
+            .request(HostCommand::PublishBarrier {
+                barrier: Box::new(barrier.clone()),
+            })
+            .unwrap();
+        assert!(published.error.is_none(), "{:?}", published.error);
+        probe.assert_sites(false, "confirm_barrier after publish");
+        HostCommand::ConfirmBarrier {
+            barrier: Box::new(barrier),
+            installed: installed_snapshot,
+        }
+    } else {
+        let viewer = p.run.f.actor(AttachmentRole::Viewer, "hx-t2-viewer");
+        let viewer_err = viewer
+            .request(HostCommand::PublishBarrier {
+                barrier: Box::new(barrier.clone()),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(viewer_err, HostError::Refused(ref r) if r.code == "snapshot_capacity"),
+            "viewer capacity check: {viewer_err:?}"
+        );
+        probe.assert_sites(false, "viewer cannot latch recovery capacity");
+        HostCommand::PublishBarrier {
+            barrier: Box::new(barrier),
+        }
+    };
+
+    let error = client.request(oversized).unwrap_err();
+    assert!(
+        matches!(error, HostError::Refused(ref r) if r.code == "snapshot_capacity"),
+        "{door_name} expected snapshot_capacity, got {error:?}"
+    );
+
+    probe.assert_sites(true, &format!("{door_name} after refusal"));
+}
+
+#[test]
+fn hx_t2_frozen_recovery_tool_reply_says_to_close_and_reopen() {
+    hx_t2_capacity_refusal_host_sites("publish_barrier", PUBLISH_BARRIER_SNAPSHOT_BYTES, false);
+}
+
+#[test]
+fn hx_t2_confirm_barrier_recovery_tool_reply_says_to_close_and_reopen() {
+    hx_t2_capacity_refusal_host_sites("confirm_barrier", CONFIRM_BARRIER_SNAPSHOT_BYTES, true);
+}
+
+#[test]
+fn hx_t2_ordinary_and_retriable_recovery_keep_earlier_wording_until_confirmed() {
+    let p = te13_fix4_pending(CompletionStep::Freeze, false, false);
+    let host = p.run.f.host.owner.upgrade().unwrap();
+    let pending_completion = host.lock().unwrap().hooks.pending.clone().unwrap();
+    let start_request = p.run.f.start_request(&p.run.f.editor);
+    let client_id = "e".repeat(64);
+    let client = p.run.f.host.client().with_manual_editor(client_id.clone());
+    let frozen = locked_host_snapshot_for_test(&host);
+
+    let begun = client
+        .request(HostCommand::BeginRecovery {
+            client: client_id.clone(),
+            frozen: Some(frozen),
+            pending: vec![],
+        })
+        .unwrap();
+    assert!(begun.error.is_none(), "{:?}", begun.error);
+    let barrier = begun.recovery.unwrap();
+    let snapshot = barrier.after.clone();
+    let probe = HxT2SiteProbe {
+        p: &p,
+        pending_completion: &pending_completion,
+        client: &client,
+        client_id: &client_id,
+        start_request: &start_request,
+        snapshot: &snapshot,
+    };
+
+    probe.assert_sites(false, "after ordinary BeginRecovery");
+
+    let published = client
+        .request(HostCommand::PublishBarrier {
+            barrier: Box::new(barrier.clone()),
+        })
+        .unwrap();
+    assert!(published.error.is_none(), "{:?}", published.error);
+
+    let saved_generation = {
+        let mut owner = host.lock().unwrap();
+        let saved = owner.next_manual_generation;
+        owner.next_manual_generation = u64::MAX;
+        saved
+    };
+    let failed_confirm = client
+        .request(HostCommand::ConfirmBarrier {
+            barrier: Box::new(barrier.clone()),
+            installed: snapshot.clone(),
+        })
+        .unwrap();
+    assert!(
+        failed_confirm.error.is_some(),
+        "acquire_manual inside ConfirmBarrier must fail when generation is exhausted"
+    );
+    {
+        let mut owner = host.lock().unwrap();
+        assert!(owner.recovering);
+        assert!(owner.recovery.is_some());
+        assert!(owner.manual.is_none());
+        assert!(!owner.recovery_capacity_frozen);
+        owner.next_manual_generation = saved_generation;
+    }
+
+    probe.assert_sites(false, "after acquire_manual failure inside ConfirmBarrier");
+
+    let confirmed = client
+        .request(HostCommand::ConfirmBarrier {
+            barrier: Box::new(barrier),
+            installed: snapshot,
+        })
+        .unwrap();
+    assert!(confirmed.error.is_none(), "{:?}", confirmed.error);
+    let lease = confirmed.manual_lease.unwrap();
+
+    let gui_pool = kinewright_project::operation_history::HistoryPool::new(
+        kinewright_project::operation_history::PoolLimits::default(),
+    );
+    let mut gui = confirmed
+        .history
+        .unwrap()
+        .validate(&gui_pool)
+        .unwrap()
+        .open()
+        .unwrap();
+    let mut producer =
+        kinewright_project::operation_protocol::Producer::bind(lease.clone(), &mut gui).unwrap();
+    producer
+        .execute(
+            &mut gui,
+            kinewright_project::operation_protocol::Action::Do {
+                operations: vec![history_marker(99)],
+                gesture: None,
+            },
+            kinewright_project::operation_actor::CommandContext {
+                creation: kinewright_project::operation_history::CreationOrigin {
+                    branch: lease.state.seed().branch.clone(),
+                    batch: kinewright_project::bundle_records::BatchId::fresh().unwrap(),
+                },
+                inputs: vec![lease.inputs.clone()],
+                approval: None,
+                transition: None,
+            },
+        )
+        .unwrap();
+    let committed = client
+        .request(HostCommand::CommitHistory {
+            client: client_id,
+            messages: producer.pending(),
+        })
+        .unwrap();
+    assert!(committed.error.is_none(), "{:?}", committed.error);
+    assert_eq!(committed.manual_ack.len(), 1);
+}
+
+struct HxT2NearConfirmFixture {
+    p: Te13Fix4Pending,
+    host: Arc<Mutex<HostCommandOwner>>,
+    pending_completion: super::super::orchestration::PendingPublication,
+    start_request: ScopedOrchestrationRequest,
+    client_id: String,
+    client: HostClient,
+    small_snapshot: HostSnapshot,
+    barrier: RecoveryBarrier,
+    installed_snapshot: HostSnapshot,
+    fitting_roots: SessionRoots,
+    overflow_roots: SessionRoots,
+}
+
+fn hx_t2_near_confirm_barrier_fixture() -> HxT2NearConfirmFixture {
+    use kinewright_core::{Command, Marker, MarkerId, Operation, TimeCode};
+
+    let p = te13_fix4_pending(CompletionStep::Freeze, false, false);
+    let host = p.run.f.host.owner.upgrade().unwrap();
+    let pending_completion = host.lock().unwrap().hooks.pending.clone().unwrap();
+    let start_request = p.run.f.start_request(&p.run.f.editor);
+    let client_id = "e".repeat(64);
+    let client = p.run.f.host.client().with_manual_editor(client_id.clone());
+
+    let mut remaining_tabs =
+        usize::try_from((CONFIRM_BARRIER_SNAPSHOT_BYTES - 20_000) / 6).unwrap();
+    let chunk = 100_000_usize;
+    let mut index = 0_u64;
+    {
+        let mut owner = host.lock().unwrap();
+        while remaining_tabs > 0 {
+            let len = remaining_tabs.min(chunk);
+            remaining_tabs -= len;
+            owner
+                .core()
+                .request(Command::Do(Operation::AddMarker {
+                    marker: Marker {
+                        id: MarkerId(100 + index),
+                        position: TimeCode::ZERO,
+                        label: "\t".repeat(len),
+                        color_token: 0,
+                    },
+                }))
+                .unwrap();
+            index += 1;
+        }
+        owner.owner_mut().unwrap().save_active().unwrap();
+    }
+    let current_bytes = locked_host_snapshot_for_test(&host)
+        .history
+        .snapshot
+        .escaped_body_bytes();
+    if let Some(gap) = CONFIRM_BARRIER_SNAPSHOT_BYTES.checked_sub(current_bytes + 2_000) {
+        let extra_tabs = usize::try_from(gap / 6).unwrap();
+        if extra_tabs > 0 {
+            let mut owner = host.lock().unwrap();
+            owner
+                .core()
+                .request(Command::Do(Operation::AddMarker {
+                    marker: Marker {
+                        id: MarkerId(100 + index),
+                        position: TimeCode::ZERO,
+                        label: "\t".repeat(extra_tabs),
+                        color_token: 0,
+                    },
+                }))
+                .unwrap();
+            owner.owner_mut().unwrap().save_active().unwrap();
+        }
+    }
+
+    let small_snapshot =
+        HostSnapshot::capture(&Core::for_test(Document::default()).unwrap()).unwrap();
+    let frozen = locked_host_snapshot_for_test(&host);
+    let begun = client
+        .request(HostCommand::BeginRecovery {
+            client: client_id.clone(),
+            frozen: Some(frozen),
+            pending: vec![],
+        })
+        .unwrap();
+    assert!(begun.error.is_none(), "{:?}", begun.error);
+    let barrier = begun.recovery.unwrap();
+    let installed_snapshot = barrier.after.clone();
+    let before_bytes = barrier.before.history.snapshot.escaped_body_bytes();
+    let after_bytes = barrier.after.history.snapshot.escaped_body_bytes();
+    assert!(before_bytes <= CONFIRM_BARRIER_SNAPSHOT_BYTES);
+    assert!(after_bytes <= CONFIRM_BARRIER_SNAPSHOT_BYTES);
+
+    let published = client
+        .request(HostCommand::PublishBarrier {
+            barrier: Box::new(barrier.clone()),
+        })
+        .unwrap();
+    assert!(published.error.is_none(), "{:?}", published.error);
+
+    let mut long_dir = p.run.f.temp.root().to_path_buf();
+    let segment = "\\".repeat(200);
+    for _ in 0..12 {
+        long_dir.push(&segment);
+    }
+    std::fs::create_dir_all(&long_dir).unwrap();
+    let long_dir = long_dir.canonicalize().unwrap();
+
+    let base_roots = client.bootstrap().roots;
+    let max_extra = 64 - base_roots.read.len() - base_roots.write.len();
+    let roots_with_copies = |copies: usize| {
+        let mut candidate = base_roots.clone();
+        candidate
+            .read
+            .extend(std::iter::repeat_n(long_dir.clone(), copies));
+        candidate
+    };
+    let exact_1 = exact_barrier_request_bytes(
+        &client.endpoint().project,
+        &roots_with_copies(1),
+        Some(&client_id),
+        None,
+        BarrierCapacityDoor::ConfirmBarrier,
+        &barrier,
+    )
+    .unwrap();
+    let exact_2 = exact_barrier_request_bytes(
+        &client.endpoint().project,
+        &roots_with_copies(2),
+        Some(&client_id),
+        None,
+        BarrierCapacityDoor::ConfirmBarrier,
+        &barrier,
+    )
+    .unwrap();
+    let step = exact_2 - exact_1;
+    let fitting_copies = 1 + (HOST_BODY_BYTES - exact_1) / step;
+    let overflow_copies = fitting_copies + 1;
+    assert!(overflow_copies <= max_extra);
+
+    let fitting_roots = roots_with_copies(fitting_copies);
+    let overflow_roots = roots_with_copies(overflow_copies);
+    let fitting_exact = exact_barrier_request_bytes(
+        &client.endpoint().project,
+        &fitting_roots,
+        Some(&client_id),
+        None,
+        BarrierCapacityDoor::ConfirmBarrier,
+        &barrier,
+    )
+    .unwrap();
+    let overflow_exact = exact_barrier_request_bytes(
+        &client.endpoint().project,
+        &overflow_roots,
+        Some(&client_id),
+        None,
+        BarrierCapacityDoor::ConfirmBarrier,
+        &barrier,
+    )
+    .unwrap();
+    let snapshots = before_bytes
+        .saturating_add(after_bytes)
+        .saturating_add(after_bytes);
+    let ack_bytes = serde_json::to_vec(&barrier.acknowledged).unwrap().len() as u64;
+    let fitting_roots_bytes = serde_json::to_vec(&fitting_roots).unwrap().len() as u64;
+    let old_upper_bound = snapshots
+        .saturating_add(fitting_roots_bytes)
+        .saturating_add(ack_bytes)
+        .saturating_add(3 * SNAPSHOT_WIRE_HEADER_BYTES);
+    assert!(fitting_exact <= HOST_BODY_BYTES);
+    assert!(old_upper_bound > HOST_BODY_BYTES as u64);
+    assert!(overflow_exact > HOST_BODY_BYTES);
+
+    HxT2NearConfirmFixture {
+        p,
+        host,
+        pending_completion,
+        start_request,
+        client_id,
+        client,
+        small_snapshot,
+        barrier,
+        installed_snapshot,
+        fitting_roots,
+        overflow_roots,
+    }
+}
+
+#[test]
+fn hx_t2_exact_request_measure_rejects_old_upper_bound_false_latch() {
+    let f = hx_t2_near_confirm_barrier_fixture();
+    let exact = exact_barrier_request_bytes(
+        &f.client.endpoint().project,
+        &f.fitting_roots,
+        Some(&f.client_id),
+        None,
+        BarrierCapacityDoor::ConfirmBarrier,
+        &f.barrier,
+    )
+    .unwrap();
+    let actual_wire_len = serde_json::to_vec(&HostRequest {
+        editor: Some(f.client_id.clone()),
+        operation: None,
+        protocol: HOST_PROTOCOL,
+        project: f.client.endpoint().project.clone(),
+        roots: f.fitting_roots.clone(),
+        command: HostCommand::ConfirmBarrier {
+            barrier: Box::new(f.barrier.clone()),
+            installed: f.installed_snapshot.clone(),
+        },
+    })
+    .unwrap()
+    .len();
+    assert_eq!(exact, actual_wire_len);
+    assert!(actual_wire_len <= HOST_BODY_BYTES);
+
+    let fitting_client = f.client.with_roots(f.fitting_roots);
+    let notice = BarrierCapacityRef {
+        door: BarrierCapacityDoor::ConfirmBarrier,
+        client: &f.barrier.client,
+        switch_generation: f.barrier.switch_generation,
+        checkpoint_ref: &f.barrier.checkpoint_ref,
+        before_sha256: &f.barrier.before.history_sha256,
+        after_sha256: &f.barrier.after.history_sha256,
+        has_editor: true,
+        operation: None,
+    };
+    let notice_body = serde_json::to_vec(&notice).unwrap();
+    let response = fitting_client.post("recovery-capacity", &notice_body);
+    assert!(
+        !f.host.lock().unwrap().recovery_capacity_frozen,
+        "exact host measure must not latch when request fits HOST_BODY_BYTES"
+    );
+    assert!(
+        matches!(response, Err(HostError::Refused(ref r)) if r.code == "attachment_refused"),
+        "fitting recovery must refuse capacity latch, got {response:?}"
+    );
+
+    let probe = HxT2SiteProbe {
+        p: &f.p,
+        pending_completion: &f.pending_completion,
+        client: &f.client,
+        client_id: &f.client_id,
+        start_request: &f.start_request,
+        snapshot: &f.small_snapshot,
+    };
+    probe.assert_sites(false, "fitting notice exceeding only old upper bound");
+
+    let confirmed = fitting_client
+        .request(HostCommand::ConfirmBarrier {
+            barrier: Box::new(f.barrier),
+            installed: f.installed_snapshot,
+        })
+        .unwrap();
+    assert!(confirmed.error.is_none(), "{:?}", confirmed.error);
+    assert!(confirmed.manual_lease.is_some());
+}
+
+#[test]
+fn hx_t2_fitting_confirm_barrier_succeeds_after_latch_and_accepts_edit() {
+    let f = hx_t2_near_confirm_barrier_fixture();
+    let wide_client = f.client.with_roots(f.overflow_roots);
+
+    let overflow_error = wide_client
+        .request(HostCommand::ConfirmBarrier {
+            barrier: Box::new(f.barrier.clone()),
+            installed: f.installed_snapshot.clone(),
+        })
+        .unwrap_err();
+    assert!(
+        matches!(overflow_error, HostError::Refused(ref r) if r.code == "snapshot_capacity"),
+        "expected snapshot_capacity on wide ConfirmBarrier, got {overflow_error:?}"
+    );
+    assert!(
+        f.host.lock().unwrap().recovery_capacity_frozen,
+        "exact host measure must latch when serialized ConfirmBarrier exceeds HOST_BODY_BYTES"
+    );
+
+    let probe = HxT2SiteProbe {
+        p: &f.p,
+        pending_completion: &f.pending_completion,
+        client: &f.client,
+        client_id: &f.client_id,
+        start_request: &f.start_request,
+        snapshot: &f.small_snapshot,
+    };
+    probe.assert_sites(true, "after ConfirmBarrier request-door latch");
+
+    // Narrowing roots back to the compact client lets the same barrier fit.
+    let confirmed = f
+        .client
+        .request(HostCommand::ConfirmBarrier {
+            barrier: Box::new(f.barrier),
+            installed: f.installed_snapshot,
+        })
+        .unwrap();
+    assert!(confirmed.error.is_none(), "{:?}", confirmed.error);
+    assert!(!confirmed.status.frozen);
+    assert!(
+        !confirmed.status.message.contains(RECOVERY_REOPEN),
+        "confirmed recovery must no longer show reopen sentence: {}",
+        confirmed.status.message
+    );
+    {
+        let owner = f.host.lock().unwrap();
+        assert!(!owner.recovering);
+        assert!(
+            owner.recovery_capacity_frozen,
+            "capacity latch stays set even after a fitting confirmation ends recovery"
+        );
+    }
+
+    let lease = confirmed.manual_lease.unwrap();
+    let gui_pool = kinewright_project::operation_history::HistoryPool::new(
+        kinewright_project::operation_history::PoolLimits::default(),
+    );
+    let mut gui = confirmed
+        .history
+        .unwrap()
+        .validate(&gui_pool)
+        .unwrap()
+        .open()
+        .unwrap();
+    let mut producer =
+        kinewright_project::operation_protocol::Producer::bind(lease.clone(), &mut gui).unwrap();
+    producer
+        .execute(
+            &mut gui,
+            kinewright_project::operation_protocol::Action::Do {
+                operations: vec![history_marker(199)],
+                gesture: None,
+            },
+            kinewright_project::operation_actor::CommandContext {
+                creation: kinewright_project::operation_history::CreationOrigin {
+                    branch: lease.state.seed().branch.clone(),
+                    batch: kinewright_project::bundle_records::BatchId::fresh().unwrap(),
+                },
+                inputs: vec![lease.inputs.clone()],
+                approval: None,
+                transition: None,
+            },
+        )
+        .unwrap();
+    let committed = f
+        .client
+        .request(HostCommand::CommitHistory {
+            client: f.client_id,
+            messages: producer.pending(),
+        })
+        .unwrap();
+    assert!(committed.error.is_none(), "{:?}", committed.error);
+    assert_eq!(committed.manual_ack.len(), 1);
+}
+
 #[test]
 fn te13_fix5_real_switch_then_exact_finish() {
     use kinewright_project::bundle_switch::SwitchTarget;
@@ -585,7 +1313,11 @@ fn te13_fix5_real_switch_then_exact_finish() {
         (1, 1),
         "TE13_FIX5_SWITCH_FINISH_EXACTLY_ONCE"
     );
-    assert_eq!(host.lock().unwrap().core().snapshot_identity().unwrap(), selected_identity, "TE13_FIX5_SWITCH_EDIT_INTACT");
+    assert_eq!(
+        host.lock().unwrap().core().snapshot_identity().unwrap(),
+        selected_identity,
+        "TE13_FIX5_SWITCH_EDIT_INTACT"
+    );
 }
 
 #[test]

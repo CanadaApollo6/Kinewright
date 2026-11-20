@@ -409,7 +409,7 @@ impl Ja1Attachment {
             if self.manual_edits_pending() {
                 text.push_str(" A hand edit's final value is still waiting to be applied. It is kept only in this window and is not Saved. Cancel keeps this project open so the edit can finish. Discard closes the project and can lose its unsaved work, including this value.");
             }
-            if host.pending_count() > 0 {
+            if host.pending_count() > 0 && !host.recovery_reopen_required() {
                 text.push_str(" Manual edits are still waiting for a durable acknowledgement. Closing can discard this pending work; it is not Saved.");
             }
             return text;
@@ -744,6 +744,12 @@ impl Ja1Attachment {
     pub fn manual_refusal_reason(&self) -> &str {
         if self.retention_lost {
             RETENTION_LOST_TEXT
+        } else if self
+            .host
+            .as_ref()
+            .is_some_and(host::HostAttachment::recovery_reopen_required)
+        {
+            RECOVERY_REOPEN_TEXT
         } else if self.manual_save_required() {
             MANUAL_SAVE_REQUIRED_TEXT
         } else {
@@ -813,6 +819,9 @@ impl Ja1Attachment {
     }
     pub(crate) fn manual_persistent_status(&self) -> Option<String> {
         let host = self.host.as_ref()?;
+        if host.recovery_reopen_required() {
+            return Some(RECOVERY_REOPEN_TEXT.into());
+        }
         if self.host_reply_failed || host.edits.notice().is_some() {
             self.manual_edit_status()
         } else {
@@ -1147,9 +1156,13 @@ impl Ja1Attachment {
         host.edits.abandon_unaccepted();
         self.frozen = true;
         self.panel_open = true;
-        self.message = format!(
-            "The host reply was not confirmed. Your edits remain here, read-only. Retry to reconcile the original request. {error}"
-        );
+        self.message = if host.recovery_reopen_required() {
+            RECOVERY_REOPEN_TEXT.into()
+        } else {
+            format!(
+                "The host reply was not confirmed. Your edits remain here, read-only. Retry to reconcile the original request. {error}"
+            )
+        };
     }
 
     #[allow(
@@ -1357,7 +1370,10 @@ impl Ja1Attachment {
         self.frozen = reply.status.frozen
             || self.owner.core().attachment_state() != Ok(AttachmentState::Live);
         host.accept_status(reply.status);
-        if host.unknown_operation {
+        if host.recovery_reopen_required() {
+            self.frozen = true;
+            self.message = RECOVERY_REOPEN_TEXT.into();
+        } else if host.unknown_operation {
             self.frozen = true;
             self.message = "The host reply was not confirmed. Your edits remain here, read-only. Retry to reconcile the original request.".into();
         } else {
@@ -2116,6 +2132,7 @@ impl Ja1Attachment {
     }
 }
 const RETENTION_LOST_TEXT: &str = kinewright_agent::writer_host::RETENTION_LOST;
+const RECOVERY_REOPEN_TEXT: &str = kinewright_agent::writer_host::RECOVERY_REOPEN;
 
 fn copy_text(status: &CopyStatus) -> String {
     match status {

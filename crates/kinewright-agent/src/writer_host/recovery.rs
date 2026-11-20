@@ -358,6 +358,9 @@ impl HostCommandOwner {
         // source capture; duplicate confirmation never needs that full holder.
         reply.history = Some(selected.after.history);
         self.confirmed_recovery = Some((key, reply.clone()));
+        if self.message.contains(super::RECOVERY_REOPEN) {
+            self.message.clear();
+        }
         Ok(())
     }
 }

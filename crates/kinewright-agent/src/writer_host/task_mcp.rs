@@ -921,10 +921,14 @@ impl HostCommandOwner {
             || scope.expired()
             || scope.owner_epoch != self.owner()?.store()?.owner_epoch()
             || authority.project != self.owner()?.active_manual_project()?
-            || self.recovering
             || self.switch_frozen
         {
             return Err(refused("task attachment changed"));
+        }
+        if self.recovering {
+            return Err(refused(
+                self.recovery_frozen_message("task attachment changed"),
+            ));
         }
         for pin in &self.pins {
             if !self.attachments[index].roots.permits(&pin.anchor, true) {

@@ -15,6 +15,12 @@ pub(super) struct SwitchConfirmation {
     )>,
 }
 
+fn same_selected_branch(left: &SwitchAttachmentIdentity, right: &SwitchAttachmentIdentity) -> bool {
+    left.project == right.project
+        && left.switch_generation == right.switch_generation
+        && left.current == right.current
+}
+
 impl HostCommandOwner {
     pub(super) fn prepare_switch(
         &mut self,
@@ -149,9 +155,7 @@ impl HostCommandOwner {
         let current = self.owner()?.current_switch_identity()?;
         let continuation = self.confirmed_switch.as_ref().is_some_and(|confirmation| {
             confirmation.installed == *installed
-                && confirmation.current.project == current.project
-                && confirmation.current.switch_generation == current.switch_generation
-                && confirmation.current.current == current.current
+                && same_selected_branch(&confirmation.current, &current)
         });
         if let Some(confirmation) = &self.confirmed_switch
             && continuation
@@ -173,7 +177,7 @@ impl HostCommandOwner {
         if !self.switch_frozen
             || self.manual.is_some()
             || self.owner()?.has_unresolved_publication()
-            || (current != *installed && !continuation)
+            || (!same_selected_branch(&current, installed) && !continuation)
             || self
                 .owner()?
                 .core()

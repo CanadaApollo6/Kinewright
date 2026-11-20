@@ -228,7 +228,7 @@ impl HostCommandOwner {
         if self.recovering {
             return Err(HostRefusal::new(
                 "recovery_frozen",
-                "shared recovery has not been confirmed",
+                self.recovery_frozen_message("shared recovery has not been confirmed"),
             )
             .into());
         }
