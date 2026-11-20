@@ -920,6 +920,8 @@ struct HxT2NearConfirmFixture {
     small_snapshot: HostSnapshot,
     barrier: RecoveryBarrier,
     installed_snapshot: HostSnapshot,
+    long_dir: std::path::PathBuf,
+    overflow_copies: usize,
     fitting_roots: SessionRoots,
     overflow_roots: SessionRoots,
 }
@@ -1089,6 +1091,8 @@ fn hx_t2_near_confirm_barrier_fixture() -> HxT2NearConfirmFixture {
         small_snapshot,
         barrier,
         installed_snapshot,
+        long_dir,
+        overflow_copies,
         fitting_roots,
         overflow_roots,
     }
@@ -1097,30 +1101,75 @@ fn hx_t2_near_confirm_barrier_fixture() -> HxT2NearConfirmFixture {
 #[test]
 fn hx_t2_exact_request_measure_rejects_old_upper_bound_false_latch() {
     let f = hx_t2_near_confirm_barrier_fixture();
-    let exact = exact_barrier_request_bytes(
-        &f.client.endpoint().project,
-        &f.fitting_roots,
-        Some(&f.client_id),
-        None,
+    for door in [
+        BarrierCapacityDoor::PublishBarrier,
         BarrierCapacityDoor::ConfirmBarrier,
-        &f.barrier,
-    )
-    .unwrap();
-    let actual_wire_len = serde_json::to_vec(&HostRequest {
-        editor: Some(f.client_id.clone()),
-        operation: None,
-        protocol: HOST_PROTOCOL,
-        project: f.client.endpoint().project.clone(),
-        roots: f.fitting_roots.clone(),
-        command: HostCommand::ConfirmBarrier {
-            barrier: Box::new(f.barrier.clone()),
-            installed: f.installed_snapshot.clone(),
-        },
-    })
-    .unwrap()
-    .len();
-    assert_eq!(exact, actual_wire_len);
-    assert!(actual_wire_len <= HOST_BODY_BYTES);
+    ] {
+        for editor in [None, Some(f.client_id.as_str())] {
+            for operation in [None, Some(42_u64)] {
+                let mut measured_wire = Vec::new();
+                write_barrier_request(
+                    &mut measured_wire,
+                    &f.client.endpoint().project,
+                    &f.fitting_roots,
+                    editor,
+                    operation,
+                    door,
+                    &f.barrier,
+                )
+                .unwrap();
+                let exact = exact_barrier_request_bytes(
+                    &f.client.endpoint().project,
+                    &f.fitting_roots,
+                    editor,
+                    operation,
+                    door,
+                    &f.barrier,
+                )
+                .unwrap();
+                let command = match door {
+                    BarrierCapacityDoor::PublishBarrier => HostCommand::PublishBarrier {
+                        barrier: Box::new(f.barrier.clone()),
+                    },
+                    BarrierCapacityDoor::ConfirmBarrier => HostCommand::ConfirmBarrier {
+                        barrier: Box::new(f.barrier.clone()),
+                        installed: f.installed_snapshot.clone(),
+                    },
+                };
+                let actual_wire = serde_json::to_vec(&HostRequest {
+                    editor: editor.map(str::to_owned),
+                    operation,
+                    protocol: HOST_PROTOCOL,
+                    project: f.client.endpoint().project.clone(),
+                    roots: f.fitting_roots.clone(),
+                    command,
+                })
+                .unwrap();
+                assert_eq!(exact, measured_wire.len());
+                assert_eq!(
+                    exact,
+                    actual_wire.len(),
+                    "length mismatch for {door:?} editor={} operation={operation:?}",
+                    editor.is_some()
+                );
+                let first_diff = measured_wire
+                    .iter()
+                    .zip(&actual_wire)
+                    .position(|(a, b)| a != b);
+                assert!(
+                    first_diff.is_none() && measured_wire.len() == actual_wire.len(),
+                    "byte mismatch at {first_diff:?} for {door:?} editor={} operation={operation:?}",
+                    editor.is_some()
+                );
+                if door == BarrierCapacityDoor::ConfirmBarrier
+                    && editor.is_some()
+                    && operation.is_none()
+                {
+                    assert!(actual_wire.len() <= HOST_BODY_BYTES);
+                }
+            }
+        }
+    }
 
     let fitting_client = f.client.with_roots(f.fitting_roots);
     let notice = BarrierCapacityRef {
@@ -1162,6 +1211,198 @@ fn hx_t2_exact_request_measure_rejects_old_upper_bound_false_latch() {
         .unwrap();
     assert!(confirmed.error.is_none(), "{:?}", confirmed.error);
     assert!(confirmed.manual_lease.is_some());
+}
+
+#[test]
+fn hx_t8_long_symlink_root_overflow_latches_barrier_capacity() {
+    let f = hx_t2_near_confirm_barrier_fixture();
+    let base_roots = f.client.bootstrap().roots;
+    let with_repeated_root = |root: &std::path::Path| {
+        let mut roots = base_roots.clone();
+        roots
+            .read
+            .extend(std::iter::repeat_n(root.to_path_buf(), f.overflow_copies));
+        roots
+    };
+    let notice_body = serde_json::to_vec(&BarrierCapacityRef {
+        door: BarrierCapacityDoor::ConfirmBarrier,
+        client: &f.barrier.client,
+        switch_generation: f.barrier.switch_generation,
+        checkpoint_ref: &f.barrier.checkpoint_ref,
+        before_sha256: &f.barrier.before.history_sha256,
+        after_sha256: &f.barrier.after.history_sha256,
+        has_editor: true,
+        operation: None,
+    })
+    .unwrap();
+
+    // A symlink whose wire spelling starts inside the admitted root but whose
+    // canonical target lies outside must still be refused by authority checks.
+    let outside = kinewright_media::test_support::TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "hx-t8-outside",
+    );
+    let escape_link = f.long_dir.join("escape");
+    std::os::unix::fs::symlink(outside.root(), &escape_link).unwrap();
+    let escape_roots = with_repeated_root(&escape_link);
+    assert!(
+        exact_barrier_request_bytes(
+            &f.client.endpoint().project,
+            &escape_roots,
+            Some(&f.client_id),
+            None,
+            BarrierCapacityDoor::ConfirmBarrier,
+            &f.barrier,
+        )
+        .unwrap()
+            > HOST_BODY_BYTES
+    );
+    let escape_response = f
+        .client
+        .with_roots(escape_roots)
+        .post("recovery-capacity", &notice_body);
+    assert!(
+        matches!(escape_response, Err(HostError::Refused(ref r)) if r.code == "attachment_refused"),
+        "unadmitted canonical target must be refused, got {escape_response:?}"
+    );
+    assert!(
+        !f.host.lock().unwrap().recovery_capacity_frozen,
+        "wire spelling must never grant authority to latch"
+    );
+
+    // A long symlink resolving to a short admitted directory makes the wire
+    // ConfirmBarrier overflow HOST_BODY_BYTES while canonical roots fit.
+    let short_target = f.p.run.f.temp.path("t");
+    std::fs::create_dir(&short_target).unwrap();
+    let long_link = f.long_dir.join("l");
+    std::os::unix::fs::symlink(&short_target, &long_link).unwrap();
+    let long_link_roots = with_repeated_root(&long_link);
+    let canonical_roots = long_link_roots.canonicalize().unwrap();
+    let wire_bytes = exact_barrier_request_bytes(
+        &f.client.endpoint().project,
+        &long_link_roots,
+        Some(&f.client_id),
+        None,
+        BarrierCapacityDoor::ConfirmBarrier,
+        &f.barrier,
+    )
+    .unwrap();
+    let canonical_bytes = exact_barrier_request_bytes(
+        &f.client.endpoint().project,
+        &canonical_roots,
+        Some(&f.client_id),
+        None,
+        BarrierCapacityDoor::ConfirmBarrier,
+        &f.barrier,
+    )
+    .unwrap();
+    assert!(wire_bytes > HOST_BODY_BYTES);
+    assert!(canonical_bytes <= HOST_BODY_BYTES);
+
+    let overflow_error = f
+        .client
+        .with_roots(long_link_roots)
+        .request(HostCommand::ConfirmBarrier {
+            barrier: Box::new(f.barrier.clone()),
+            installed: f.installed_snapshot.clone(),
+        })
+        .unwrap_err();
+    assert!(
+        matches!(overflow_error, HostError::Refused(ref r) if r.code == "snapshot_capacity"),
+        "expected snapshot_capacity on overflowing long-symlink ConfirmBarrier, got {overflow_error:?}"
+    );
+    assert!(
+        f.host.lock().unwrap().recovery_capacity_frozen,
+        "host must latch when real wire request with symlink roots exceeds HOST_BODY_BYTES"
+    );
+
+    let probe = HxT2SiteProbe {
+        p: &f.p,
+        pending_completion: &f.pending_completion,
+        client: &f.client,
+        client_id: &f.client_id,
+        start_request: &f.start_request,
+        snapshot: &f.small_snapshot,
+    };
+    probe.assert_sites(true, "after long-symlink ConfirmBarrier overflow");
+}
+
+#[test]
+fn hx_t8_short_symlink_root_fitting_request_does_not_false_latch() {
+    let f = hx_t2_near_confirm_barrier_fixture();
+    let short_link = f.p.run.f.temp.path("s");
+    std::os::unix::fs::symlink(&f.long_dir, &short_link).unwrap();
+    let mut short_link_roots = f.client.bootstrap().roots;
+    short_link_roots
+        .read
+        .extend(std::iter::repeat_n(short_link, f.overflow_copies));
+    let canonical_roots = short_link_roots.canonicalize().unwrap();
+    let wire_bytes = exact_barrier_request_bytes(
+        &f.client.endpoint().project,
+        &short_link_roots,
+        Some(&f.client_id),
+        None,
+        BarrierCapacityDoor::ConfirmBarrier,
+        &f.barrier,
+    )
+    .unwrap();
+    let canonical_bytes = exact_barrier_request_bytes(
+        &f.client.endpoint().project,
+        &canonical_roots,
+        Some(&f.client_id),
+        None,
+        BarrierCapacityDoor::ConfirmBarrier,
+        &f.barrier,
+    )
+    .unwrap();
+    assert!(wire_bytes <= HOST_BODY_BYTES);
+    assert!(canonical_bytes > HOST_BODY_BYTES);
+
+    let short_link_client = f.client.with_roots(short_link_roots);
+    let notice_body = serde_json::to_vec(&BarrierCapacityRef {
+        door: BarrierCapacityDoor::ConfirmBarrier,
+        client: &f.barrier.client,
+        switch_generation: f.barrier.switch_generation,
+        checkpoint_ref: &f.barrier.checkpoint_ref,
+        before_sha256: &f.barrier.before.history_sha256,
+        after_sha256: &f.barrier.after.history_sha256,
+        has_editor: true,
+        operation: None,
+    })
+    .unwrap();
+    let response = short_link_client.post("recovery-capacity", &notice_body);
+    assert!(
+        matches!(response, Err(HostError::Refused(ref r)) if r.code == "attachment_refused"),
+        "fitting wire request must refuse capacity latch, got {response:?}"
+    );
+    assert!(
+        !f.host.lock().unwrap().recovery_capacity_frozen,
+        "canonical expansion must not falsely latch a fitting wire request"
+    );
+
+    let probe = HxT2SiteProbe {
+        p: &f.p,
+        pending_completion: &f.pending_completion,
+        client: &f.client,
+        client_id: &f.client_id,
+        start_request: &f.start_request,
+        snapshot: &f.small_snapshot,
+    };
+    probe.assert_sites(
+        false,
+        "short symlink to long admitted target fits wire request",
+    );
+
+    let confirmed = short_link_client
+        .request(HostCommand::ConfirmBarrier {
+            barrier: Box::new(f.barrier),
+            installed: f.installed_snapshot,
+        })
+        .unwrap();
+    assert!(confirmed.error.is_none(), "{:?}", confirmed.error);
+    assert!(confirmed.manual_lease.is_some());
+    assert!(!confirmed.status.frozen);
+    assert!(!confirmed.status.message.contains(RECOVERY_REOPEN));
 }
 
 #[test]
