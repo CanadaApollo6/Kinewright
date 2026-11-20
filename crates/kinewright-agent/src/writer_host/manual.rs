@@ -224,7 +224,11 @@ impl HostCommandOwner {
             .into());
         }
         if self.recovering {
-            return Err(HostRefusal::new("recovery_frozen", self.recovery_frozen_message()).into());
+            return Err(HostRefusal::new(
+                "recovery_frozen",
+                self.recovery_frozen_message("shared recovery has not been confirmed"),
+            )
+            .into());
         }
         if self.manual.is_some() {
             return Err(HostRefusal::new(

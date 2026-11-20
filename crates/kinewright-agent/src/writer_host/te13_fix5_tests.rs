@@ -532,46 +532,412 @@ fn te13_fix5_temporary_recovery_does_not_install_block() {
     te13_fix4_replay(&p);
 }
 
-#[test]
-fn hx_t2_frozen_recovery_tool_reply_says_to_close_and_reopen() {
+fn assert_hx_t2_host_sites(
+    p: &Te13Fix4Pending,
+    pending_completion: &Option<super::super::orchestration::PendingPublication>,
+    client: &HostClient,
+    client_id: &str,
+    start_request: &ScopedOrchestrationRequest,
+    snapshot: &HostSnapshot,
+    reopen: bool,
+    label: &str,
+) {
+    let expected = |earlier: &'static str| if reopen { RECOVERY_REOPEN } else { earlier };
+
+    let save_error = client
+        .request(HostCommand::Save {
+            snapshot: snapshot.clone(),
+        })
+        .unwrap()
+        .error
+        .unwrap();
+    assert_eq!(save_error.code, "recovery_frozen", "{label} save code");
+    assert_eq!(
+        save_error.message,
+        expected("Editing remains read-only until both Cores confirm the durable recovery result.",),
+        "{label} save message"
+    );
+
+    let http_manual_error = client
+        .request(HostCommand::AcquireManual {
+            client: client_id.to_owned(),
+        })
+        .unwrap()
+        .error
+        .unwrap();
+    assert_eq!(
+        http_manual_error.code, "recovery_frozen",
+        "{label} http manual code"
+    );
+    assert_eq!(
+        http_manual_error.message,
+        expected("Editing remains read-only until both Cores confirm the durable recovery result.",),
+        "{label} http manual message"
+    );
+
+    let orchestration_error = client
+        .request(HostCommand::DispatchOrchestration {
+            request: Box::new(start_request.clone()),
+        })
+        .unwrap()
+        .error
+        .unwrap();
+    assert_eq!(
+        orchestration_error.code, "recovery_frozen",
+        "{label} orchestration code"
+    );
+    assert_eq!(
+        orchestration_error.message,
+        expected("orchestration writes wait for recovery confirmation"),
+        "{label} orchestration message"
+    );
+
+    {
+        let host = p.run.f.host.owner.upgrade().unwrap();
+        let mut owner = host.lock().unwrap();
+
+        let manual_error = owner
+            .acquire_manual(client_id.to_owned())
+            .unwrap_err()
+            .refusal();
+        assert_eq!(manual_error.code, "recovery_frozen", "{label} manual code");
+        assert_eq!(
+            manual_error.message,
+            expected("shared recovery has not been confirmed"),
+            "{label} manual message"
+        );
+
+        let index = owner
+            .resolve_attachment(Some(&p.client.bootstrap.auth.bearer()))
+            .unwrap();
+        owner.hooks.pending.clone_from(pending_completion);
+        let completion_error = owner
+            .reconcile_completion_substep(index, &p.request)
+            .unwrap_err()
+            .refusal();
+        assert_eq!(
+            completion_error.code, "recovery_frozen",
+            "{label} completion code"
+        );
+        assert_eq!(
+            completion_error.message,
+            expected("task completion waits for recovery confirmation"),
+            "{label} completion message"
+        );
+
+        let mut media_reply = HostReply::default();
+        let media_error = owner
+            .prepare_media_interpretation(
+                client_id,
+                &history_marker(77),
+                snapshot,
+                &mut media_reply,
+            )
+            .unwrap_err()
+            .refusal();
+        assert_eq!(media_error.code, "input_frozen", "{label} owned media code");
+        assert_eq!(
+            media_error.message,
+            expected("Resolve the current save or selection before importing media."),
+            "{label} owned media message"
+        );
+    }
+
+    let expected_mcp = expected("task attachment changed");
+    for (tool, args) in [
+        ("task_status", serde_json::json!({})),
+        (
+            "prepare_edit_plan",
+            serde_json::json!({ "expected_revision": 0, "operations": [] }),
+        ),
+    ] {
+        let reply = p.run.editor.wire(tool, args);
+        assert_eq!(reply.is_error, Some(true), "{label} {tool} error flag");
+        let text = c5_fix10_text(&reply);
+        assert!(
+            text.contains(&format!("task_scope: {expected_mcp}")),
+            "{label} {tool} reply: {text}"
+        );
+        if !reopen {
+            assert!(
+                !text.contains(RECOVERY_REOPEN) && !text.contains("Close and reopen"),
+                "{label} {tool} leaked reopen sentence: {text}"
+            );
+        }
+    }
+}
+
+fn hx_t2_capacity_refusal_host_sites(door_name: &str, cap: u64, confirm_door: bool) {
+    use kinewright_core::{Command, Marker, MarkerId, Operation, TimeCode};
+
     let p = te13_fix4_pending(CompletionStep::Freeze, false, false);
+    let host = p.run.f.host.owner.upgrade().unwrap();
+    let pending_completion = host.lock().unwrap().hooks.pending.clone();
+    assert!(pending_completion.is_some());
+    let start_request = p.run.f.start_request(&p.run.f.editor);
     let client_id = "e".repeat(64);
     let client = p.run.f.host.client().with_manual_editor(client_id.clone());
+
+    // Grow only the manual branch just past `cap` in bounded steps so the task
+    // and candidate branches stay small and the earlier barrier reply stays
+    // inside `HOST_BODY_BYTES`. Each tab takes three wire bytes in both the
+    // undo operation and the current document.
+    let mut remaining_tabs = usize::try_from(cap / 6 + 1).unwrap();
+    let chunk = 100_000_usize;
+    {
+        let mut owner = host.lock().unwrap();
+        let mut index = 0_u64;
+        while remaining_tabs > 0 {
+            let len = remaining_tabs.min(chunk);
+            remaining_tabs -= len;
+            owner
+                .core()
+                .request(Command::Do(Operation::AddMarker {
+                    marker: Marker {
+                        id: MarkerId(100 + index),
+                        position: TimeCode::ZERO,
+                        label: "\t".repeat(len),
+                        color_token: 0,
+                    },
+                }))
+                .unwrap();
+            index += 1;
+        }
+        owner.owner_mut().unwrap().save_active().unwrap();
+    }
+    let small_snapshot =
+        HostSnapshot::capture(&Core::for_test(Document::default()).unwrap()).unwrap();
+    let frozen = locked_host_snapshot_for_test(&host);
+
     let begun = client
         .request(HostCommand::BeginRecovery {
             client: client_id.clone(),
-            frozen: None,
+            frozen: Some(frozen),
             pending: vec![],
         })
         .unwrap();
     assert!(begun.error.is_none(), "{:?}", begun.error);
-    assert!(begun.recovery.is_some());
+    let barrier = begun.recovery.unwrap();
+    let installed_snapshot = barrier.after.clone();
+    assert!(installed_snapshot.history.snapshot.escaped_body_bytes() > cap);
+    if confirm_door {
+        assert!(
+            installed_snapshot.history.snapshot.escaped_body_bytes()
+                <= PUBLISH_BARRIER_SNAPSHOT_BYTES
+        );
+    }
 
-    let status_reply = p.run.editor.wire("task_status", serde_json::json!({}));
-    assert_eq!(status_reply.is_error, Some(true));
-    let status_text = c5_fix10_text(&status_reply);
+    // Before any barrier is refused with snapshot_capacity, even a large
+    // recovery keeps the earlier wording at every site.
+    assert_hx_t2_host_sites(
+        &p,
+        &pending_completion,
+        &client,
+        &client_id,
+        &start_request,
+        &small_snapshot,
+        false,
+        &format!("{door_name} before refusal"),
+    );
+
+    let oversized = if confirm_door {
+        let published = client
+            .request(HostCommand::PublishBarrier {
+                barrier: Box::new(barrier.clone()),
+            })
+            .unwrap();
+        assert!(published.error.is_none(), "{:?}", published.error);
+        assert_hx_t2_host_sites(
+            &p,
+            &pending_completion,
+            &client,
+            &client_id,
+            &start_request,
+            &small_snapshot,
+            false,
+            "confirm_barrier after publish",
+        );
+        HostCommand::ConfirmBarrier {
+            barrier: Box::new(barrier),
+            installed: installed_snapshot,
+        }
+    } else {
+        let viewer = p.run.f.actor(AttachmentRole::Viewer, "hx-t2-viewer");
+        let viewer_err = viewer
+            .request(HostCommand::PublishBarrier {
+                barrier: Box::new(barrier.clone()),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(viewer_err, HostError::Refused(ref r) if r.code == "snapshot_capacity"),
+            "viewer capacity check: {viewer_err:?}"
+        );
+        assert_hx_t2_host_sites(
+            &p,
+            &pending_completion,
+            &client,
+            &client_id,
+            &start_request,
+            &small_snapshot,
+            false,
+            "viewer cannot latch recovery capacity",
+        );
+        HostCommand::PublishBarrier {
+            barrier: Box::new(barrier),
+        }
+    };
+
+    let error = client.request(oversized).unwrap_err();
     assert!(
-        status_text.contains(&format!("task_scope: {RECOVERY_REOPEN}")),
-        "HX_T2_TASK_TOOL_REPLY: {status_text}"
+        matches!(error, HostError::Refused(ref r) if r.code == "snapshot_capacity"),
+        "{door_name} expected snapshot_capacity, got {error:?}"
     );
 
-    let edit_reply = p.run.editor.wire(
-        "prepare_edit_plan",
-        serde_json::json!({ "expected_revision": 0, "operations": [] }),
+    assert_hx_t2_host_sites(
+        &p,
+        &pending_completion,
+        &client,
+        &client_id,
+        &start_request,
+        &small_snapshot,
+        true,
+        &format!("{door_name} after refusal"),
     );
-    assert_eq!(edit_reply.is_error, Some(true));
-    let edit_text = c5_fix10_text(&edit_reply);
-    assert!(
-        edit_text.contains(&format!("task_scope: {RECOVERY_REOPEN}")),
-        "HX_T2_EDIT_TOOL_REPLY: {edit_text}"
-    );
+}
 
-    let manual_reply = client
-        .request(HostCommand::AcquireManual { client: client_id })
+#[test]
+fn hx_t2_frozen_recovery_tool_reply_says_to_close_and_reopen() {
+    hx_t2_capacity_refusal_host_sites("publish_barrier", PUBLISH_BARRIER_SNAPSHOT_BYTES, false);
+}
+
+#[test]
+fn hx_t2_confirm_barrier_recovery_tool_reply_says_to_close_and_reopen() {
+    hx_t2_capacity_refusal_host_sites("confirm_barrier", CONFIRM_BARRIER_SNAPSHOT_BYTES, true);
+}
+
+#[test]
+fn hx_t2_ordinary_and_retriable_recovery_keep_earlier_wording_until_confirmed() {
+    let p = te13_fix4_pending(CompletionStep::Freeze, false, false);
+    let host = p.run.f.host.owner.upgrade().unwrap();
+    let pending_completion = host.lock().unwrap().hooks.pending.clone();
+    assert!(pending_completion.is_some());
+    let start_request = p.run.f.start_request(&p.run.f.editor);
+    let client_id = "e".repeat(64);
+    let client = p.run.f.host.client().with_manual_editor(client_id.clone());
+    let frozen = locked_host_snapshot_for_test(&host);
+
+    let begun = client
+        .request(HostCommand::BeginRecovery {
+            client: client_id.clone(),
+            frozen: Some(frozen),
+            pending: vec![],
+        })
         .unwrap();
-    let manual_error = manual_reply.error.unwrap();
-    assert_eq!(manual_error.code, "recovery_frozen");
-    assert_eq!(manual_error.message, RECOVERY_REOPEN);
+    assert!(begun.error.is_none(), "{:?}", begun.error);
+    let barrier = begun.recovery.unwrap();
+    let snapshot = barrier.after.clone();
+
+    assert_hx_t2_host_sites(
+        &p,
+        &pending_completion,
+        &client,
+        &client_id,
+        &start_request,
+        &snapshot,
+        false,
+        "after ordinary BeginRecovery",
+    );
+
+    let published = client
+        .request(HostCommand::PublishBarrier {
+            barrier: Box::new(barrier.clone()),
+        })
+        .unwrap();
+    assert!(published.error.is_none(), "{:?}", published.error);
+
+    let saved_generation = {
+        let mut owner = host.lock().unwrap();
+        let saved = owner.next_manual_generation;
+        owner.next_manual_generation = u64::MAX;
+        saved
+    };
+    let failed_confirm = client
+        .request(HostCommand::ConfirmBarrier {
+            barrier: Box::new(barrier.clone()),
+            installed: snapshot.clone(),
+        })
+        .unwrap();
+    assert!(
+        failed_confirm.error.is_some(),
+        "acquire_manual inside ConfirmBarrier must fail when generation is exhausted"
+    );
+    {
+        let mut owner = host.lock().unwrap();
+        assert!(owner.recovering);
+        assert!(owner.recovery.is_some());
+        assert!(owner.manual.is_none());
+        assert!(!owner.recovery_capacity_frozen);
+        owner.next_manual_generation = saved_generation;
+    }
+
+    assert_hx_t2_host_sites(
+        &p,
+        &pending_completion,
+        &client,
+        &client_id,
+        &start_request,
+        &snapshot,
+        false,
+        "after acquire_manual failure inside ConfirmBarrier",
+    );
+
+    let confirmed = client
+        .request(HostCommand::ConfirmBarrier {
+            barrier: Box::new(barrier),
+            installed: snapshot,
+        })
+        .unwrap();
+    assert!(confirmed.error.is_none(), "{:?}", confirmed.error);
+    let lease = confirmed.manual_lease.unwrap();
+
+    let gui_pool = kinewright_project::operation_history::HistoryPool::new(
+        kinewright_project::operation_history::PoolLimits::default(),
+    );
+    let mut gui = confirmed
+        .history
+        .unwrap()
+        .validate(&gui_pool)
+        .unwrap()
+        .open()
+        .unwrap();
+    let mut producer =
+        kinewright_project::operation_protocol::Producer::bind(lease.clone(), &mut gui).unwrap();
+    producer
+        .execute(
+            &mut gui,
+            kinewright_project::operation_protocol::Action::Do {
+                operations: vec![history_marker(99)],
+                gesture: None,
+            },
+            kinewright_project::operation_actor::CommandContext {
+                creation: kinewright_project::operation_history::CreationOrigin {
+                    branch: lease.state.seed().branch.clone(),
+                    batch: kinewright_project::bundle_records::BatchId::fresh().unwrap(),
+                },
+                inputs: vec![lease.inputs.clone()],
+                approval: None,
+                transition: None,
+            },
+        )
+        .unwrap();
+    let committed = client
+        .request(HostCommand::CommitHistory {
+            client: client_id,
+            messages: producer.pending(),
+        })
+        .unwrap();
+    assert!(committed.error.is_none(), "{:?}", committed.error);
+    assert_eq!(committed.manual_ack.len(), 1);
 }
 
 #[test]

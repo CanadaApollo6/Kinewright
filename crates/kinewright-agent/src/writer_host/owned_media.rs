@@ -64,8 +64,10 @@ impl HostCommandOwner {
         snapshot: &HostSnapshot,
     ) -> Result<(u64, u64), HostError> {
         if self.switch_frozen || self.recovering || self.choice.is_some() {
-            let message = if self.recovering && self.recovery.is_some() {
-                super::RECOVERY_REOPEN
+            let message = if self.recovering {
+                self.recovery_frozen_message(
+                    "Resolve the current save or selection before importing media.",
+                )
             } else {
                 "Resolve the current save or selection before importing media."
             };

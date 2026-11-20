@@ -264,6 +264,9 @@ impl HostCommandOwner {
         installed: &HostSnapshot,
         reply: &mut HostReply,
     ) -> Result<(), HostError> {
+        if self.recovery_capacity_frozen {
+            return Err(HostRefusal::new("recovery_frozen", super::RECOVERY_REOPEN).into());
+        }
         installed.verify()?;
         let key = confirmation_digest(barrier)?;
         if let Some((original, confirmed)) = &self.confirmed_recovery

@@ -762,8 +762,8 @@ impl HostCommandOwner {
             return Err(refused("completion binding changed"));
         }
         if self.recovering || self.switch_frozen {
-            let message = if self.recovering && self.recovery.is_some() {
-                super::RECOVERY_REOPEN
+            let message = if self.recovering {
+                self.recovery_frozen_message("task completion waits for recovery confirmation")
             } else {
                 "task completion waits for recovery confirmation"
             };

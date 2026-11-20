@@ -532,8 +532,10 @@ impl HostCommandOwner {
                 if (self.recovering || self.switch_frozen)
                     && !self.completion_owner_recovery(index, &command)
                 {
-                    let message = if self.recovering && self.recovery.is_some() {
-                        super::RECOVERY_REOPEN
+                    let message = if self.recovering {
+                        self.recovery_frozen_message(
+                            "orchestration writes wait for recovery confirmation",
+                        )
                     } else {
                         "orchestration writes wait for recovery confirmation"
                     };

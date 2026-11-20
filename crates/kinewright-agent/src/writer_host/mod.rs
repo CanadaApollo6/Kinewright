@@ -230,7 +230,10 @@ impl HostClient {
         command: HostCommand,
         operation: Option<u64>,
     ) -> Result<HostReply, HostError> {
-        command.check_snapshot_capacity()?;
+        if let Err(refusal) = command.check_snapshot_capacity() {
+            self.note_barrier_capacity_refusal(&command, None);
+            return Err(refusal.into());
+        }
         let request = HostRequest {
             editor: self.editor.clone(),
             operation,
@@ -240,9 +243,15 @@ impl HostClient {
             command,
         };
         let body = serde_json::to_vec(&request)?;
-        request
+        if let Err(refusal) = request
             .command
-            .check_request_capacity(body.len(), request.command.ingress_bytes())?;
+            .check_request_capacity(body.len(), request.command.ingress_bytes())
+        {
+            if refusal.code == "snapshot_capacity" {
+                self.note_barrier_capacity_refusal(&request.command, Some(body.len()));
+            }
+            return Err(refusal.into());
+        }
         let response = self.post("host", &body)?;
         let reply: HostReply = serde_json::from_slice(&response)?;
         if operation.is_some()
@@ -252,6 +261,29 @@ impl HostClient {
             return Err(error.clone().into());
         }
         Ok(reply)
+    }
+    fn note_barrier_capacity_refusal(&self, command: &HostCommand, request_bytes: Option<usize>) {
+        let (door, barrier) = match command {
+            HostCommand::PublishBarrier { barrier } => {
+                (BarrierCapacityDoor::PublishBarrier, barrier.as_ref())
+            }
+            HostCommand::ConfirmBarrier { barrier, .. } => {
+                (BarrierCapacityDoor::ConfirmBarrier, barrier.as_ref())
+            }
+            _ => return,
+        };
+        let notice = BarrierCapacityRef {
+            door,
+            client: &barrier.client,
+            switch_generation: barrier.switch_generation,
+            checkpoint_ref: &barrier.checkpoint_ref,
+            before_sha256: &barrier.before.history_sha256,
+            after_sha256: &barrier.after.history_sha256,
+            request_bytes,
+        };
+        if let Ok(body) = serde_json::to_vec(&notice) {
+            let _ = self.post("recovery-capacity", &body);
+        }
     }
     /// Admit one destination chosen explicitly by the person. Connector/MCP ingress refuses
     /// this command; returned roots only enable this exact retained destination capability.
@@ -562,6 +594,7 @@ impl WriterHost {
         let router = axum::Router::new()
             .route("/issuer", post(issuer::issuer_request))
             .route("/host", post(host_request))
+            .route("/recovery-capacity", post(recovery_capacity_request))
             .route("/voice", post(voice::upload_request))
             .route("/snapshot-lease", post(snapshot_lease::lease_request))
             .route("/mcp", post(mcp_request))
@@ -935,6 +968,91 @@ fn startup_refusal(error: &HostRefusal) -> Response {
     let mut response = json_response(error);
     *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
     response
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BarrierCapacityDoor {
+    PublishBarrier,
+    ConfirmBarrier,
+}
+#[derive(Debug, Clone, Copy, Serialize)]
+struct BarrierCapacityRef<'a> {
+    door: BarrierCapacityDoor,
+    client: &'a str,
+    switch_generation: u64,
+    checkpoint_ref: &'a ObjectRef,
+    before_sha256: &'a str,
+    after_sha256: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_bytes: Option<usize>,
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryCapacityNotice {
+    door: BarrierCapacityDoor,
+    client: String,
+    switch_generation: u64,
+    checkpoint_ref: ObjectRef,
+    before_sha256: String,
+    after_sha256: String,
+    #[serde(default)]
+    request_bytes: Option<usize>,
+}
+impl RecoveryCapacityNotice {
+    fn as_ref(&self) -> BarrierCapacityRef<'_> {
+        BarrierCapacityRef {
+            door: self.door,
+            client: &self.client,
+            switch_generation: self.switch_generation,
+            checkpoint_ref: &self.checkpoint_ref,
+            before_sha256: &self.before_sha256,
+            after_sha256: &self.after_sha256,
+            request_bytes: self.request_bytes,
+        }
+    }
+}
+async fn recovery_capacity_request(
+    State(state): State<Arc<HttpState>>,
+    request: Request,
+) -> Response {
+    let bearer = match check_host_headers(request.headers(), &state) {
+        Ok(bearer) => bearer,
+        Err(status) => return status.into_response(),
+    };
+    let roots = request
+        .headers()
+        .get("x-kinewright-roots")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| serde_json::from_str::<SessionRoots>(v).ok());
+    let Some(roots) = roots else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let Ok(bytes) = to_bytes(request.into_body(), HOST_ENVELOPE_BYTES).await else {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    };
+    let Ok(notice) = serde_json::from_slice::<RecoveryCapacityNotice>(&bytes) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if state.lifecycle.stopping() {
+        return startup_refusal(&HostRefusal::stopping());
+    }
+    let result = tokio::task::spawn_blocking(move || {
+        let Ok(mut owner) = state.owner.lock() else {
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        };
+        match owner.note_barrier_capacity_refusal(&bearer, &roots, &notice) {
+            Ok(()) => StatusCode::OK,
+            Err(HostError::Refused(refusal)) if refusal.code == "role_refused" => {
+                StatusCode::FORBIDDEN
+            }
+            Err(_) => StatusCode::CONFLICT,
+        }
+    })
+    .await;
+    match result {
+        Ok(status) => status.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 fn json_response(value: &impl Serialize) -> Response {
     match serde_json::to_vec(value) {
@@ -1466,6 +1584,7 @@ pub struct HostCommandOwner {
     manual_root_fault: Option<(&'static str, usize)>,
     next_manual_generation: u64,
     recovering: bool,
+    recovery_capacity_frozen: bool,
     recovery: Option<RecoveryBarrier>,
     recovery_request: Option<String>,
     foreground_reply: Option<(String, u64, String, HostReply)>,
@@ -1662,6 +1781,7 @@ impl HostCommandOwner {
             manual_root_fault: None,
             next_manual_generation: 1,
             recovering: false,
+            recovery_capacity_frozen: false,
             recovery: None,
             recovery_request: None,
             foreground_reply: None,
@@ -1949,12 +2069,89 @@ impl HostCommandOwner {
         }
         Ok(())
     }
-    pub(super) fn recovery_frozen_message(&self) -> &'static str {
-        if self.recovery.is_some() {
+    pub(super) fn recovery_frozen_message(&self, fallback: &'static str) -> &'static str {
+        if self.recovery_capacity_frozen {
             RECOVERY_REOPEN
         } else {
-            "This session is read-only while the project finishes checking its history."
+            fallback
         }
+    }
+    fn note_barrier_capacity_refusal(
+        &mut self,
+        bearer: &str,
+        roots: &SessionRoots,
+        notice: &RecoveryCapacityNotice,
+    ) -> Result<(), HostError> {
+        let index = self.resolve_attachment(Some(bearer))?;
+        let grant = &self.attachments[index];
+        if grant.role != AttachmentRole::Editor {
+            return Err(HostRefusal::new(
+                "role_refused",
+                "command is outside this attachment role",
+            )
+            .into());
+        }
+        let roots = roots.canonicalize()?;
+        Self::check_narrowed_roots(&grant.roots, &roots)?;
+        self.latch_barrier_capacity(notice.as_ref(), &roots)
+    }
+    fn latch_barrier_capacity(
+        &mut self,
+        notice: BarrierCapacityRef<'_>,
+        roots: &SessionRoots,
+    ) -> Result<(), HostError> {
+        if !self.recovering {
+            return Err(HostRefusal::new("history_changed", "no active recovery").into());
+        }
+        let Some(selected) = &self.recovery else {
+            return Err(HostRefusal::new("history_changed", "no selected recovery").into());
+        };
+        if selected.client != notice.client
+            || selected.switch_generation != notice.switch_generation
+            || selected.checkpoint_ref != *notice.checkpoint_ref
+            || selected.before.history_sha256 != notice.before_sha256
+            || selected.after.history_sha256 != notice.after_sha256
+        {
+            return Err(HostRefusal::new(
+                "history_changed",
+                "recovery barrier differs from active recovery",
+            )
+            .into());
+        }
+        let before_bytes = selected.before.history.snapshot.escaped_body_bytes();
+        let after_bytes = selected.after.history.snapshot.escaped_body_bytes();
+        let cap = match notice.door {
+            BarrierCapacityDoor::PublishBarrier => PUBLISH_BARRIER_SNAPSHOT_BYTES,
+            BarrierCapacityDoor::ConfirmBarrier => CONFIRM_BARRIER_SNAPSHOT_BYTES,
+        };
+        let exceeds_snapshot_cap = before_bytes > cap || after_bytes > cap;
+        let exceeds_request_cap = if let Some(request_bytes) = notice.request_bytes {
+            let snapshots = match notice.door {
+                BarrierCapacityDoor::PublishBarrier => before_bytes.saturating_add(after_bytes),
+                BarrierCapacityDoor::ConfirmBarrier => before_bytes
+                    .saturating_add(after_bytes)
+                    .saturating_add(after_bytes),
+            };
+            let roots_bytes = serde_json::to_vec(roots)?.len() as u64;
+            let ack_bytes = serde_json::to_vec(&selected.acknowledged)?.len() as u64;
+            let upper_bound = snapshots
+                .saturating_add(roots_bytes)
+                .saturating_add(ack_bytes)
+                .saturating_add(3 * SNAPSHOT_WIRE_HEADER_BYTES);
+            request_bytes > HOST_BODY_BYTES && upper_bound > HOST_BODY_BYTES as u64
+        } else {
+            false
+        };
+        if !exceeds_snapshot_cap && !exceeds_request_cap {
+            return Err(HostRefusal::new(
+                "history_changed",
+                "active recovery barrier fits its capacity door",
+            )
+            .into());
+        }
+        self.recovery_capacity_frozen = true;
+        self.message = RECOVERY_REOPEN.into();
+        Ok(())
     }
     fn execute_inner(
         &mut self,
@@ -1981,7 +2178,35 @@ impl HostCommandOwner {
                     | HostCommand::Shutdown
             )
         {
-            return Err(HostRefusal::new("recovery_frozen", self.recovery_frozen_message()).into());
+            return Err(HostRefusal::new(
+                "recovery_frozen",
+                self.recovery_frozen_message(
+                    "Editing remains read-only until both Cores confirm the durable recovery result.",
+                ),
+            )
+            .into());
+        }
+        if let Some((door, barrier)) = match &command {
+            HostCommand::PublishBarrier { barrier } => {
+                Some((BarrierCapacityDoor::PublishBarrier, barrier.as_ref()))
+            }
+            HostCommand::ConfirmBarrier { barrier, .. } => {
+                Some((BarrierCapacityDoor::ConfirmBarrier, barrier.as_ref()))
+            }
+            _ => None,
+        } && let Err(refusal) = command.check_snapshot_capacity()
+        {
+            let notice = BarrierCapacityRef {
+                door,
+                client: &barrier.client,
+                switch_generation: barrier.switch_generation,
+                checkpoint_ref: &barrier.checkpoint_ref,
+                before_sha256: &barrier.before.history_sha256,
+                after_sha256: &barrier.after.history_sha256,
+                request_bytes: None,
+            };
+            let _ = self.latch_barrier_capacity(notice, roots);
+            return Err(refusal.into());
         }
         #[cfg(test)]
         {
