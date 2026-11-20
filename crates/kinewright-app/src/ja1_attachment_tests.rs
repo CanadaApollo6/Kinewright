@@ -3061,15 +3061,22 @@ fn s2h_fix3_app(dirty: bool) -> (TempDirectory, Ja1Attachment, PathBuf) {
 
 #[cfg(target_os = "linux")]
 fn s2h_fix3_wait(app: &mut Ja1Attachment) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    // HX-T9: this only guards against a hang. Recovery of the HX-T2 barrier
+    // fixtures (snapshots at the barrier size) took over 20 s in loaded CI shards.
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(120);
     while app.host.as_ref().unwrap().recovery_running() && std::time::Instant::now() < deadline {
         app.poll_host();
         std::thread::park_timeout(std::time::Duration::from_millis(5));
     }
     assert!(
         !app.host.as_ref().unwrap().recovery_running(),
-        "recovery timed out"
+        "recovery timed out after {:?}",
+        started.elapsed()
     );
+    if started.elapsed() > std::time::Duration::from_secs(20) {
+        eprintln!("HX_T9_SLOW_RECOVERY {:?}", started.elapsed());
+    }
 }
 
 #[cfg(target_os = "linux")]
