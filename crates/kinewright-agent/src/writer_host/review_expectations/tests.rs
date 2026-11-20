@@ -469,7 +469,7 @@ fn output_review_matching_caption_with_digits_is_eligible() {
         word("Version", 100_000, 300_000),
         word("3.5", 400_000, 800_000),
     ];
-    let record = caption_record("VERSION 3.5", &kept);
+    let record = caption_record("Version 3.5", &kept);
     assert!(delivery_eligibility(&record).is_empty());
     assert!(record.overlays.is_resolved());
 }
@@ -881,6 +881,22 @@ fn output_review_fix1_controls_and_marks_refuse_numeric_comparison() {
             "{written:?}"
         );
     }
+}
+
+#[test]
+fn output_review_fix2_numeric_caption_preserves_unit_and_prose_case() {
+    let kept = [word("5", 100_000, 200_000), word("mW", 300_000, 400_000)];
+    assert_eq!(
+        delivery_eligibility(&caption_record("5 MW", &kept)),
+        caption_exception(EligibilityReason::CaptionWordsDisagree)
+    );
+    let kept = [word("5", 100_000, 200_000), word("MW", 300_000, 400_000)];
+    assert!(delivery_eligibility(&caption_record("5 MW", &kept)).is_empty());
+    let kept = [word("costs", 100_000, 200_000), word("5", 300_000, 400_000)];
+    assert_eq!(
+        delivery_eligibility(&caption_record("Costs 5", &kept)),
+        caption_exception(EligibilityReason::CaptionWordsDisagree)
+    );
 }
 
 fn test_effect(name: &str, parameter: &str, value: i64) -> Effect {

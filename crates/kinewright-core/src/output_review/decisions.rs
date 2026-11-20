@@ -229,9 +229,8 @@ fn uncomparable_text(text: &str) -> bool {
 
 fn normalized_tokens(text: &str, numeric: bool) -> Vec<String> {
     if numeric {
-        // Every punctuation mark, symbol and non-ASCII separator survives
-        // numeric comparison. Parentheses may denote a negative amount, and
-        // even a trailing period or exclamation mark may change the value.
+        // Case, punctuation, symbols and non-ASCII separators can all
+        // change a quantity, including the case of a separate unit token.
         return text
             .split_ascii_whitespace()
             .map(|token| {
@@ -243,10 +242,8 @@ fn normalized_tokens(text: &str, numeric: bool) -> Vec<String> {
                     // A leading unary minus has the same meaning as ASCII
                     // minus. Preserve dashes and operators inside the token.
                     format!("-{magnitude}")
-                } else if token.chars().any(char::is_numeric) {
-                    token.to_owned()
                 } else {
-                    token.to_lowercase()
+                    token.to_owned()
                 }
             })
             .collect();
