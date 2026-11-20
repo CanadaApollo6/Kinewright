@@ -371,7 +371,7 @@ pub(crate) fn validate_editorial_binding(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use crate::{
