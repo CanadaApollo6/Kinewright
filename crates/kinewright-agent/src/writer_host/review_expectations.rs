@@ -105,8 +105,8 @@ pub fn derive_review_expectations(
     let duration = document.duration;
     let output_frames =
         map_frames_with_rounding(duration, document.fps, settings.fps, FrameRounding::Ceil)?;
+    let evidence = timing::derive(input, &mut work)?;
     let overlays = overlays::derive(input, annotations, &mut work)?;
-    let evidence = timing::derive(input)?;
     let intended_pauses = intended_pauses(document, annotations)?;
     Ok(ReviewExpectations {
         identity: ReviewCutIdentity {

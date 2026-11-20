@@ -1140,6 +1140,91 @@ fn output_review_fix1_derivation_admits_the_full_work_budget() {
     assert!(run.bounds.is_ok());
 }
 
+fn later_landmarks() -> Vec<SourceAvLandmark> {
+    (0..u32::try_from(kinewright_core::output_review::MAX_REVIEW_LANDMARKS).unwrap())
+        .map(|id| SourceAvLandmark {
+            id,
+            audio_at: us(1_100_000),
+            video_at: us(1_100_000),
+            uncertainty: us(0),
+        })
+        .collect()
+}
+
+fn repeated_first_second(count: i64) -> Track {
+    track(
+        1,
+        (0..count)
+            .map(|i| clip(100 + u64::try_from(i).unwrap(), 1, i * 30, 0, 30))
+            .collect(),
+    )
+}
+
+#[test]
+fn output_review_fix2_out_of_range_landmark_scans_exceed_the_work_limit() {
+    let document = doc(
+        vec![asset(1, MediaKind::AudioVideo)],
+        vec![repeated_first_second(
+            i64::try_from(MAX_REVIEW_CLIPS).unwrap(),
+        )],
+    );
+    let landmarks = later_landmarks();
+    let mut evidence = transcript(&[]);
+    evidence.landmarks = &landmarks;
+    assert_bound(
+        &derive(&document, &manifest(&document), &[evidence], &annotations()),
+        "derivation_work",
+        MAX_REVIEW_DERIVATION_WORK,
+    );
+}
+
+#[test]
+fn output_review_fix2_full_work_budget_includes_timing_and_overlays() {
+    const REPEATS: i64 = 160;
+    // Registration and timing for this fixture charge 1,377,350 units.
+    // The fading title uses one unit per output frame.
+    const FRAMES: i64 = 622_650;
+    let mut document = doc(
+        vec![asset(1, MediaKind::AudioVideo)],
+        vec![
+            repeated_first_second(REPEATS),
+            track(2, vec![fading_title(FRAMES)]),
+        ],
+    );
+    let manifest = manifest(&document);
+    let landmarks = later_landmarks();
+    let mut evidence = transcript(&[]);
+    evidence.landmarks = &landmarks;
+    evidence.recognized_source = Some(us(0)..us(1_000_000));
+    let evidence = [evidence];
+    let started = std::time::Instant::now();
+    let result = derive(&document, &manifest, &evidence, &annotations()).unwrap();
+    eprintln!(
+        "mixed derivation at {MAX_REVIEW_DERIVATION_WORK} work units ({FRAMES} overlay frames, {REPEATS} repeats x {} source landmarks): {:?}",
+        landmarks.len(),
+        started.elapsed()
+    );
+    assert_eq!(result.segments.len(), usize::try_from(REPEATS * 2).unwrap());
+    assert!(matches!(
+        result.av_landmarks,
+        ReviewInventory::NotDetermined { known } if known.is_empty()
+    ));
+    let run = &result.overlays.titles.known().next().unwrap().visible[0];
+    assert_eq!(
+        run.output,
+        times(TimeCode(1)..TimeCode(FRAMES), document.fps).unwrap()
+    );
+    assert!(run.bounds.is_ok());
+
+    document.duration = TimeCode(FRAMES + 1);
+    document.tracks[1].clips[0].source_range.end = document.duration;
+    assert_bound(
+        &derive(&document, &manifest, &evidence, &annotations()),
+        "derivation_work",
+        MAX_REVIEW_DERIVATION_WORK,
+    );
+}
+
 #[test]
 fn output_review_fix1_disabled_element_retains_annotations() {
     use kinewright_core::output_review::OffOutputAnnotation;

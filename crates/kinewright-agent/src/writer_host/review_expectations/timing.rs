@@ -1,6 +1,6 @@
 use super::{
-    ReviewExpectationError, ReviewExpectationInput, ReviewTranscript, bound, clip_end, inventory,
-    output_frames, parse_digest, pin_for, times, union_windows,
+    DerivationWork, ReviewExpectationError, ReviewExpectationInput, ReviewTranscript, bound,
+    clip_end, inventory, output_frames, parse_digest, pin_for, times, union_windows,
 };
 use kinewright_core::output_review::{
     AbsenceProof, AvLandmark, KeptWord, MAX_REVIEW_LANDMARKS, MAX_REVIEW_SEGMENTS,
@@ -27,19 +27,25 @@ pub(super) struct TimingEvidence {
 
 pub(super) fn derive(
     input: &ReviewExpectationInput<'_>,
+    work: &mut DerivationWork,
 ) -> Result<TimingEvidence, ReviewExpectationError> {
-    let transcripts = admitted_transcripts(input)?;
-    let audio = audio_segments(input.document)?;
-    let video = video_segments(input, audio.len())?;
-    let landmarks = landmarks(input, &audio, &video, &transcripts)?;
+    let transcripts = admitted_transcripts(input, work)?;
+    let audio = audio_segments(input.document, work)?;
+    let video = video_segments(input, audio.len(), work)?;
+    let landmarks = landmarks(input, &audio, &video, &transcripts, work)?;
     let mut words = Vec::new();
     let mut uncovered_speech_segments = Vec::new();
     let mut used = BTreeMap::new();
+    work.charge(
+        audio
+            .len()
+            .saturating_mul(1 + 2 * search_work(transcripts.len())),
+    )?;
     for segment in &audio {
         let transcript = transcripts.get(&segment.asset).copied();
         if let Some(transcript) = transcript {
             used.insert(segment.asset, transcript.identity);
-            append_words(segment, transcript, &mut words)?;
+            append_words(segment, transcript, &mut words, work)?;
         }
         if !transcript
             .and_then(|t| t.recognized_source.as_ref())
@@ -50,7 +56,10 @@ pub(super) fn derive(
             uncovered_speech_segments.push(segment.id);
         }
     }
+    work.charge(sort_work(uncovered_speech_segments.len()))?;
     uncovered_speech_segments.sort_unstable();
+    // One sort for words, one for windows, and linear window extraction/union.
+    work.charge(2 * sort_work(words.len()) + 2 * words.len())?;
     words.sort_unstable_by_key(|word| (word.output.start, word.segment, word.word_index));
     let windows = union_windows(words.iter().map(|word| word.output.clone()).collect());
     let complete = uncovered_speech_segments.is_empty();
@@ -61,6 +70,7 @@ pub(super) fn derive(
     };
     let kept_words = inventory(words, complete, proof);
     let speech_windows = inventory(windows, complete, proof);
+    work.charge(sort_work(audio.len() + video.len()) + video.len() + used.len())?;
     let mut segments = audio;
     segments.extend(video);
     segments.sort_unstable_by_key(|segment| (segment.output.start, segment.id));
@@ -74,8 +84,19 @@ pub(super) fn derive(
     })
 }
 
+// Linear scans use one unit per candidate. Weight indexed searches and sorts
+// by the bit length of the input so repeated lookups and ordering are charged.
+fn search_work(len: usize) -> usize {
+    (usize::BITS - len.leading_zeros()) as usize
+}
+
+fn sort_work(len: usize) -> usize {
+    len.saturating_mul(search_work(len))
+}
+
 fn admitted_transcripts<'a>(
     input: &ReviewExpectationInput<'a>,
+    work: &mut DerivationWork,
 ) -> Result<BTreeMap<AssetId, &'a ReviewTranscript<'a>>, ReviewExpectationError> {
     let mut transcripts = BTreeMap::new();
     let mut words = 0_usize;
@@ -86,6 +107,11 @@ fn admitted_transcripts<'a>(
         bound("source_words", words, MAX_REVIEW_WORDS)?;
         landmarks = landmarks.saturating_add(transcript.landmarks.len());
         bound("source_landmarks", landmarks, MAX_REVIEW_LANDMARKS)?;
+        work.charge(
+            1 + search_work(input.transcripts.len())
+                + input.document.media_pool.len()
+                + input.input_manifest.entries.len(),
+        )?;
         let invalid = || ReviewExpectationError::TranscriptBinding(identity.asset);
         let asset = input.document.asset(identity.asset).ok_or_else(invalid)?;
         let entry = pin_for(input.input_manifest, asset).ok_or_else(invalid)?;
@@ -106,6 +132,7 @@ fn admitted_transcripts<'a>(
         {
             return Err(invalid_timing());
         }
+        work.charge(2 * transcript.words.len())?;
         for word in transcript.words {
             bound("word_text_bytes", word.text.len(), MAX_REVIEW_WORD_BYTES)?;
             if word.text.trim().is_empty()
@@ -120,6 +147,7 @@ fn admitted_transcripts<'a>(
         }) {
             return Err(invalid_timing());
         }
+        work.charge(transcript.landmarks.len() + sort_work(transcript.landmarks.len()))?;
         let mut landmark_ids = std::collections::BTreeSet::new();
         for landmark in transcript.landmarks {
             if interpretation.video.is_none()
@@ -134,12 +162,28 @@ fn admitted_transcripts<'a>(
     Ok(transcripts)
 }
 
-fn audio_segments(document: &Document) -> Result<Vec<ReviewSegment>, ReviewExpectationError> {
+fn audio_segments(
+    document: &Document,
+    work: &mut DerivationWork,
+) -> Result<Vec<ReviewSegment>, ReviewExpectationError> {
     if document.duration == TimeCode::ZERO {
         return Ok(Vec::new());
     }
+    // Clip registration has already charged both timeline enable scans.
+    // Account separately for the linear asset lookups in the shared mapper.
+    let media_clips = document
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .filter(|clip| clip.content.is_media())
+        .count();
+    let assets = document.media_pool.len();
+    work.charge(media_clips.saturating_mul(assets))?;
+    let segments = timeline_audio_segments(document, TimeCode::ZERO..document.duration)?;
+    let mix_tracks = 2 * document.audio_mix.tracks.len();
+    work.charge(segments.len().saturating_mul(1 + assets + mix_tracks))?;
     let mut mapped = Vec::new();
-    for segment in timeline_audio_segments(document, TimeCode::ZERO..document.duration)? {
+    for segment in segments {
         if !document.track_audible(segment.track) {
             continue;
         }
@@ -182,6 +226,7 @@ fn audio_segments(document: &Document) -> Result<Vec<ReviewSegment>, ReviewExpec
 fn video_segments(
     input: &ReviewExpectationInput<'_>,
     audio_count: usize,
+    work: &mut DerivationWork,
 ) -> Result<Vec<ReviewSegment>, ReviewExpectationError> {
     let document = input.document;
     let mut mapped = Vec::new();
@@ -195,6 +240,7 @@ fn video_segments(
             .iter()
             .filter(|clip| matches!(clip.content, ClipContent::Media | ClipContent::Freeze(_)))
         {
+            work.charge(1 + 2 * document.media_pool.len())?;
             let asset = document
                 .asset(clip.asset)
                 .ok_or(kinewright_core::OpError::MissingAsset(clip.asset))?;
@@ -223,7 +269,9 @@ fn video_segments(
             };
             let end = clip_end(document, clip)?;
             let duration = TimeCode(end.0 - clip.timeline_start.0);
-            for (start, end) in enabled_clip_runs(clip, TimeCode::ZERO, duration) {
+            let runs = enabled_clip_runs(clip, TimeCode::ZERO, duration);
+            work.charge(runs.len())?;
+            for (start, end) in runs {
                 let project = TimeCode(clip.timeline_start.0 + start.0)
                     ..TimeCode(clip.timeline_start.0 + end.0);
                 let output = output_frames(project.clone(), document.fps, input.settings.fps)?;
@@ -284,15 +332,17 @@ fn append_words(
     segment: &ReviewSegment,
     transcript: &ReviewTranscript<'_>,
     kept: &mut Vec<KeptWord>,
+    work: &mut DerivationWork,
 ) -> Result<(), ReviewExpectationError> {
     let words = transcript.words;
+    work.charge(2 * search_work(words.len()))?;
     let first =
         words.partition_point(|word| ExactMicros::integer(word.end_micros) <= segment.source.start);
-    for (index, word) in words.iter().enumerate().skip(first) {
+    let count = words[first..]
+        .partition_point(|word| ExactMicros::integer(word.start_micros) < segment.source.end);
+    work.charge(count)?;
+    for (offset, word) in words[first..first + count].iter().enumerate() {
         let start = ExactMicros::integer(word.start_micros);
-        if start >= segment.source.end {
-            break;
-        }
         if !word.is_spoken() {
             continue;
         }
@@ -307,7 +357,7 @@ fn append_words(
         bound("kept_words", kept.len() + 1, MAX_REVIEW_WORDS)?;
         kept.push(KeptWord {
             transcript: transcript.identity,
-            word_index: u32::try_from(index).expect("source word count validated"),
+            word_index: u32::try_from(first + offset).expect("source word count validated"),
             segment: segment.id,
             text: word.text.clone(),
             output: to_output(intersection.start)?..to_output(intersection.end)?,
@@ -322,15 +372,32 @@ fn landmarks(
     audio: &[ReviewSegment],
     video: &[ReviewSegment],
     transcripts: &BTreeMap<AssetId, &ReviewTranscript<'_>>,
+    work: &mut DerivationWork,
 ) -> Result<ReviewInventory<AvLandmark>, ReviewExpectationError> {
     let mut mapped = Vec::new();
     let mut complete = true;
     let project_frame = ExactMicros::frames(TimeCode(1), input.document.fps)?;
     let output_frame = ExactMicros::frames(TimeCode(1), input.settings.fps)?;
     let mix_sample = ExactMicros::new(1_000_000, u64::from(MIX_RATE))?;
+    work.charge(sort_work(video.len()))?;
     let mut video_runs: BTreeMap<_, Vec<_>> = BTreeMap::new();
     for picture in video {
         video_runs.entry(picture.id.clip).or_default().push(picture);
+    }
+    let lookup = search_work(transcripts.len()) + search_work(video_runs.len());
+    work.charge(audio.len().saturating_mul(1 + 2 * lookup))?;
+    for sound in audio {
+        if let (Some(transcript), Some(pictures)) = (
+            transcripts.get(&sound.asset),
+            video_runs.get(&sound.id.clip),
+        ) {
+            // Charge the full join before any landmark walk. Out-of-range
+            // landmarks still cost a source comparison.
+            work.charge(input.document.media_pool.len() + transcript.landmarks.len())?;
+            // Each in-range landmark can search every picture run below.
+            let candidates = transcript.landmarks.len().saturating_mul(pictures.len());
+            work.charge(candidates)?;
+        }
     }
     for sound in audio {
         let mut mapped_for_run = false;
@@ -380,6 +447,7 @@ fn landmarks(
         }
         complete &= mapped_for_run;
     }
+    work.charge(sort_work(mapped.len()))?;
     mapped.sort_unstable_by_key(|landmark| {
         (
             landmark.audio_at,

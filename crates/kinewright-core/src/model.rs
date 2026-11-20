@@ -1622,8 +1622,13 @@ impl Document {
     /// AU1 §3.1 gate: whether the track's post-stage signal reaches buses/master.
     #[must_use]
     pub fn track_audible(&self, track: TrackId) -> bool {
-        let mix = self.track_mix(track);
-        !mix.mute && (!self.audio_mix.any_solo() || mix.solo)
+        let mix = self
+            .audio_mix
+            .tracks
+            .iter()
+            .find(|entry| entry.track == track);
+        !mix.is_some_and(|mix| mix.mute)
+            && (!self.audio_mix.any_solo() || mix.is_some_and(|mix| mix.solo))
     }
 
     /// AU5 §5.2: the leading and interior gaps of one track, in project frames.
