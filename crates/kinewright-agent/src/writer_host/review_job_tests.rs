@@ -454,6 +454,9 @@ fn s5_review_reopens_the_root_selected_by_the_artifact_publication() {
             "crash left a stage"
         );
         let (host, client) = s5_review_host(temp.root());
+        if cut == "published-artifact" {
+            s5_review_refuses_changed_reopened_bytes(&host, &client, &temp);
+        }
         let status = s5_review_call(&client, ReviewControl::Status).unwrap();
         assert_eq!(status.token.generation, 1);
         assert_eq!(
@@ -492,6 +495,47 @@ fn s5_review_reopens_the_root_selected_by_the_artifact_publication() {
             );
         }
     }
+}
+
+fn s5_review_refuses_changed_reopened_bytes(
+    host: &WriterHost,
+    client: &HostClient,
+    temp: &kinewright_media::test_support::TempDirectory,
+) {
+    let hash = {
+        let owner = host.owner.upgrade().unwrap();
+        let owner = owner.lock().unwrap();
+        let bundle = owner.owner().unwrap().review_bundle().unwrap();
+        let job = bundle.review_job().unwrap().unwrap();
+        let reference = job
+            .artifact_ref
+            .as_ref()
+            .expect("REVIEW_COMMITTED_ARTIFACT_WINS");
+        bundle
+            .store()
+            .read_record::<ReviewArtifact>(reference)
+            .unwrap()
+            .media_ref
+            .sha256
+            .clone()
+    };
+    let path = temp
+        .path("project.kinewright-assets/studio/objects")
+        .join(hash);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[0] ^= 1;
+    std::fs::write(&path, &bytes).unwrap();
+    let reply = client
+        .request(HostCommand::Review(ReviewControl::Status))
+        .unwrap();
+    bytes[0] ^= 1;
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(
+        reply
+            .error
+            .is_some_and(|error| error.message.contains("owned identity changed")),
+        "REVIEW_FIRST_REQUEST_VERIFIES_REOPENED_ARTIFACT"
+    );
 }
 
 #[test]
@@ -606,6 +650,15 @@ fn s5_review_edits_undo_copy_and_checker_attempt_stay_bound_to_the_frozen_versio
         "REVIEW_SOURCE_WORKER_COMPLETED",
     );
     assert!(s5_review_call(&client, ReviewControl::Status).is_none());
+    let resume = client
+        .request(HostCommand::Review(ReviewControl::Resume(token.clone())))
+        .unwrap();
+    assert!(
+        resume
+            .error
+            .is_some_and(|error| error.message.contains("generation or version changed")),
+        "REVIEW_COPY_REFUSES_SOURCE_RESUME"
+    );
     let artifact = s5_review_artifact(&host, &token);
     assert_eq!(
         artifact.output.video_frames, 6,
@@ -641,7 +694,7 @@ fn s5_review_edits_undo_copy_and_checker_attempt_stay_bound_to_the_frozen_versio
             .contains("generation or version")
     );
     wrong = token.clone();
-    wrong.snapshot = prior;
+    wrong.snapshot = prior.clone();
     assert!(
         source
             .update_review_job(&wrong, update(binding.clone()))
@@ -671,4 +724,28 @@ fn s5_review_edits_undo_copy_and_checker_attempt_stay_bound_to_the_frozen_versio
         core.request(kinewright_core::Command::Redo).is_ok(),
         "REVIEW_EDIT_UNDO_SURVIVES"
     );
+    let pool = core.history_pool().clone();
+    drop(owner);
+    drop(shared);
+    drop(host);
+    let copy = Ja1EditingSession::open(&temp.path("copy.kinewright"), &pool).unwrap();
+    let copy = copy.review_bundle().unwrap();
+    assert!(
+        copy.review_job().unwrap().is_none(),
+        "REVIEW_COLD_COPY_OMITS_AUTHORITY"
+    );
+    let descriptor = copy.read_snapshot(&prior).unwrap().descriptor;
+    let evidence = copy
+        .store()
+        .read_record::<ReviewEvidence>(&descriptor.review_evidence_ref.unwrap())
+        .unwrap();
+    let artifact = copy
+        .store()
+        .read_record::<ReviewArtifact>(evidence.artifacts().next_back().unwrap())
+        .unwrap();
+    assert_eq!(
+        *artifact, first,
+        "REVIEW_COLD_COPY_RETAINS_PUBLISHED_EVIDENCE"
+    );
+    copy.store().verify(&artifact.media_ref).unwrap();
 }

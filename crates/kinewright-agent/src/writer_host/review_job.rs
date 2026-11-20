@@ -327,6 +327,9 @@ impl HostCommandOwner {
             }
             return Err(error);
         }
+        if matches!(control, ReviewControl::Status | ReviewControl::Resume(_)) {
+            self.verify_reopened_review()?;
+        }
         match control {
             ReviewControl::Status => {}
             ReviewControl::Annotate { snapshot, fields } => {
@@ -438,20 +441,6 @@ impl HostCommandOwner {
             prove_retired(stage)?;
             bundle.store().sweep_review_staging(stage)?;
         }
-        if job.artifact_ref.is_some()
-            && job.phase != ReviewPhase::Stopping
-            && self.review_runtime.verified.as_ref() != Some(&token)
-        {
-            drop(bundle.open_review_artifact(&token)?);
-            let needs_fresh_attempt = matches!(&job.phase, ReviewPhase::Checking(checks) if checks.reviewer_attempt.is_some());
-            if needs_fresh_attempt {
-                self.owner_mut()?
-                    .update_review_job(&token, UpdateReviewJob::UnbindChecks)?;
-                self.review_runtime.verified = Some(token);
-                return Ok(());
-            }
-            self.review_runtime.verified = Some(token.clone());
-        }
         let update = match job.phase {
             ReviewPhase::Encoding => UpdateReviewJob::RecoverEncoding,
             ReviewPhase::Stopping => UpdateReviewJob::RetireStopped,
@@ -460,6 +449,28 @@ impl HostCommandOwner {
         };
         drop(job);
         self.owner_mut()?.update_review_job(&token, update)?;
+        Ok(())
+    }
+
+    // The host must publish discovery before a potentially large artifact read.
+    // Review entry points verify the retained bytes before accepting a resume.
+    fn verify_reopened_review(&mut self) -> Result<(), HostError> {
+        let bundle = self.owner()?.review_bundle()?;
+        let Some(job) = bundle.review_job()?.filter(|job| {
+            job.artifact_ref.is_some()
+                && job.phase != ReviewPhase::Stopping
+                && self.review_runtime.verified.as_ref() != Some(&job.token)
+        }) else {
+            return Ok(());
+        };
+        drop(bundle.open_review_artifact(&job.token)?);
+        let token = job.token.clone();
+        if matches!(&job.phase, ReviewPhase::Checking(checks) if checks.reviewer_attempt.is_some())
+        {
+            self.owner_mut()?
+                .update_review_job(&token, UpdateReviewJob::UnbindChecks)?;
+        }
+        self.review_runtime.verified = Some(token);
         Ok(())
     }
 
