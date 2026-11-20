@@ -445,6 +445,7 @@ pub enum HostCommand {
     ReadEditorial {
         version: Option<kinewright_project::studio_records::SnapshotKey>,
     },
+    Review(kinewright_project::review_job::ReviewControl),
     DecideRulebook {
         decision: kinewright_project::editorial::RulebookDecision,
     },
@@ -852,6 +853,10 @@ pub struct FeedbackMapping {
 pub struct HostReply {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_receipt: Option<super::receipt_reconciliation::ReceiptReply>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<kinewright_project::review_job::ReviewStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_annotations: Option<kinewright_project::review_job::ReviewAnnotationFields>,
     pub snapshot_lease: Option<kinewright_project::store::snapshot_reader::SnapshotLease>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_edit_lease: Option<kinewright_project::store::snapshot_reader::CurrentEditLease>,

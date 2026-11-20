@@ -1236,6 +1236,7 @@ impl BundleCommit {
             roots.extend(root.version_index_ref.clone());
             roots.extend(root.approved_rulebook_ref.clone());
             roots.extend(root.pending_rulebook_ref.clone());
+            roots.extend(root.active_review_ref.clone());
             roots.extend(root.feedback_index_ref.clone());
             roots.extend(root.run_index_ref.clone());
             roots.extend(root.claim_index_ref.clone());
@@ -1323,6 +1324,12 @@ impl BundleCommit {
             pending_rulebook_ref: metadata_root
                 .as_ref()
                 .and_then(|r| r.pending_rulebook_ref.clone()),
+            active_review_ref: metadata_root
+                .as_ref()
+                .and_then(|r| r.active_review_ref.clone()),
+            stopped_review: metadata_root
+                .as_ref()
+                .and_then(|r| r.stopped_review.clone()),
             feedback_index_ref: metadata_root
                 .as_ref()
                 .and_then(|r| r.feedback_index_ref.clone()),
@@ -1579,6 +1586,10 @@ impl PreparedBranchPublication {
             bundle.receipts = receipts;
             bundle.issuers = issuers;
             bundle.manual_branch_id = manual_branch_id.clone();
+            bundle.store.set_review_budget(
+                root.as_ref()
+                    .is_some_and(|root| root.active_review_ref.is_some()),
+            );
             bundle.root = root;
             bundle.branches = branches;
             bundle.copy_publication = None;

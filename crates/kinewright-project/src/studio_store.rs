@@ -76,6 +76,8 @@ record!(
                 (&d.audit_ref, RecordKind::EditorialAudit),
                 (&d.rulebook_ref, RecordKind::RulebookRevision),
                 (&d.editorial_rationale_ref, RecordKind::EditorialRationale),
+                (&d.review_annotations_ref, RecordKind::ReviewAnnotations),
+                (&d.review_evidence_ref, RecordKind::ReviewEvidence),
             ] {
                 if let Some(reference) = reference {
                     kind(reference, expected)?;
@@ -491,12 +493,18 @@ pub(crate) enum PendingRulebookUpdate {
     Clear,
 }
 
+pub(crate) enum PendingReviewUpdate {
+    Set(ObjectRef),
+    Retired(crate::review_job::ReviewToken),
+}
+
 #[derive(Default)]
 pub(crate) struct ValidatedMetadataUpdate {
     pub(crate) versions: Option<ObjectRef>,
     pub(crate) feedback: Option<ObjectRef>,
     pub(crate) approved_rulebook: Option<ObjectRef>,
     pub(crate) pending_rulebook: Option<PendingRulebookUpdate>,
+    pub(crate) review: Option<PendingReviewUpdate>,
     pub(crate) runs: Option<ObjectRef>,
     pub(crate) seals: Vec<SealedObject>,
     pub(crate) task_checkpoints: Vec<crate::bundle_records::BranchId>,
@@ -517,6 +525,16 @@ impl ValidatedMetadataUpdate {
                 root.pending_rulebook_ref = Some(reference.clone());
             }
             Some(PendingRulebookUpdate::Clear) => root.pending_rulebook_ref = None,
+            None => {}
+        }
+        match &self.review {
+            Some(PendingReviewUpdate::Set(reference)) => {
+                root.active_review_ref = Some(reference.clone());
+            }
+            Some(PendingReviewUpdate::Retired(token)) => {
+                root.active_review_ref = None;
+                root.stopped_review = Some(token.clone());
+            }
             None => {}
         }
         if let Some(r) = &self.runs {
@@ -1223,6 +1241,8 @@ impl ProjectBundle {
                     audit_ref: None,
                     rulebook_ref: None,
                     editorial_rationale_ref: None,
+                    review_annotations_ref: None,
+                    review_evidence_ref: None,
                     parent_version: p.parent_version.clone(),
                     run_provenance: p.run_provenance.clone(),
                 };

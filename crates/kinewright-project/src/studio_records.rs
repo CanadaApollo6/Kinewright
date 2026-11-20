@@ -57,6 +57,8 @@ pub struct SnapshotDescriptor {
     /// The rulebook that governed the complete audit.
     pub rulebook_ref: Option<ObjectRef>,
     pub editorial_rationale_ref: Option<ObjectRef>,
+    pub review_annotations_ref: Option<ObjectRef>,
+    pub review_evidence_ref: Option<ObjectRef>,
     pub parent_version: Option<VersionId>,
     pub run_provenance: Option<RunId>,
 }
@@ -73,6 +75,8 @@ impl SnapshotDescriptor {
         refs.extend(self.audit_ref.clone());
         refs.extend(self.rulebook_ref.clone());
         refs.extend(self.editorial_rationale_ref.clone());
+        refs.extend(self.review_annotations_ref.clone());
+        refs.extend(self.review_evidence_ref.clone());
         refs
     }
 }

@@ -974,6 +974,24 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
             RecordKind::RulebookProposal => {
                 admit!(crate::editorial::RulebookProposal);
             }
+            RecordKind::ReviewAnnotations => {
+                admit!(crate::review_job::StoredReviewAnnotations);
+            }
+            RecordKind::ReviewExpectations => {
+                admit!(crate::review_job::StoredReviewExpectations);
+            }
+            RecordKind::ReviewRequest => {
+                admit!(crate::review_job::ReviewRequest);
+            }
+            RecordKind::ReviewJob => {
+                admit!(crate::review_job::ReviewJob);
+            }
+            RecordKind::ReviewArtifact => {
+                admit!(crate::review_job::ReviewArtifact);
+            }
+            RecordKind::ReviewEvidence => {
+                admit!(crate::review_job::ReviewEvidence);
+            }
             RecordKind::FeedbackIndex => {
                 admit!(crate::studio_records::FeedbackIndex);
             }
@@ -1479,6 +1497,9 @@ pub(super) fn validate_studio_records(
     usage: &Arc<Mutex<StorageUsage>>,
     limits: &StorageLimits,
 ) -> Result<(), BundleError> {
+    use crate::review_job::{
+        ReviewArtifact, ReviewEvidence, ReviewJob, ReviewRequest, StoredReviewAnnotations,
+    };
     use crate::studio_records::{
         FeedbackBatch, FeedbackIndex, FeedbackRevision, RunDeliveryRecord, RunEffectRecord,
         RunEventSegment, RunIndex, RunRequestRecord, RunResultRecord, RunSnapshotRecord,
@@ -1516,6 +1537,52 @@ pub(super) fn validate_studio_records(
     } else {
         None
     };
+    if let Some(reference) = &root.active_review_ref {
+        let job = load!(ReviewJob, reference);
+        let descriptor = versions
+            .as_ref()
+            .and_then(|index| index.snapshots.get(&job.token.snapshot.version))
+            .ok_or_else(|| BundleError::Corrupt("active review version missing".into()))?;
+        let request = load!(ReviewRequest, &job.request_ref);
+        request.validate_snapshot(descriptor)?;
+        if job.token.project != root.project_id
+            || job.token.snapshot != request.snapshot
+            || job
+                .stage
+                .as_ref()
+                .is_some_and(|stage| stage.byte_limit != request.byte_limit)
+        {
+            return Err(BundleError::Corrupt("active review binding".into()));
+        }
+        if let Some(reference) = &job.artifact_ref {
+            let index = descriptor
+                .review_evidence_ref
+                .as_ref()
+                .ok_or_else(|| BundleError::Corrupt("active review evidence missing".into()))?;
+            let index = load!(ReviewEvidence, index);
+            if index.artifacts().next_back() != Some(reference) {
+                return Err(BundleError::Corrupt(
+                    "active review evidence binding".into(),
+                ));
+            }
+            let artifact = load!(ReviewArtifact, reference);
+            if artifact.job != job.token.job
+                || artifact.generation != job.token.generation
+                || artifact.request_ref != job.request_ref
+            {
+                return Err(BundleError::Corrupt(
+                    "active review artifact generation".into(),
+                ));
+            }
+        }
+    }
+    if root
+        .stopped_review
+        .as_ref()
+        .is_some_and(|token| token.project != root.project_id)
+    {
+        return Err(BundleError::Corrupt("stopped review project".into()));
+    }
     if let Some(index) = &versions {
         for descriptor in index.snapshots.values() {
             let checkpoint = load!(BranchCheckpoint, &descriptor.checkpoint_ref);
@@ -1536,6 +1603,29 @@ pub(super) fn validate_studio_records(
             if let Some(reference) = &descriptor.audit_ref {
                 let audit = load!(crate::editorial::EditorialAudit, reference);
                 crate::editorial_store::validate_editorial_binding(descriptor, &audit)?;
+            }
+            if let Some(reference) = &descriptor.review_annotations_ref {
+                let annotations = load!(StoredReviewAnnotations, reference);
+                if annotations.0.snapshot.0 != descriptor.identity.digest() {
+                    return Err(BundleError::Corrupt(
+                        "review annotation version binding".into(),
+                    ));
+                }
+            }
+            if let Some(reference) = &descriptor.review_evidence_ref {
+                let index = load!(ReviewEvidence, reference);
+                for reference in index.artifacts() {
+                    let artifact = load!(ReviewArtifact, reference);
+                    let request = load!(ReviewRequest, &artifact.request_ref);
+                    request.validate_snapshot(descriptor)?;
+                    if artifact.snapshot != descriptor.key
+                        || artifact.media_ref.byte_length > request.byte_limit
+                    {
+                        return Err(BundleError::Corrupt(
+                            "review evidence version binding".into(),
+                        ));
+                    }
+                }
             }
             if let Some(reference) = &descriptor.editorial_rationale_ref {
                 let rationale = load!(crate::editorial::EditorialRationale, reference);

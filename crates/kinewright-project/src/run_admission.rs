@@ -205,11 +205,20 @@ impl ProjectStore {
         ))
     }
     pub(crate) fn admission_limits(&self) -> StorageLimits {
-        if self.run_budget_active() && !self.is_project_publication() {
+        let mut limits = if self.run_budget_active() && !self.is_project_publication() {
             ordinary(self.limits())
         } else {
             self.limits().clone()
+        };
+        if self.protect_review_budget() {
+            limits.objects = limits
+                .objects
+                .saturating_sub(crate::review_job::OBJECT_HEADROOM);
+            limits.metadata_bytes = limits
+                .metadata_bytes
+                .saturating_sub(crate::review_job::METADATA_HEADROOM);
         }
+        limits
     }
     pub(crate) fn run_error(&self, error: BundleError) -> BundleError {
         if self.run_budget_active()
@@ -224,7 +233,11 @@ impl ProjectStore {
         }
     }
     pub(crate) fn admit_run_write(&self) -> Result<(), BundleError> {
-        if self.run_budget_active() && !self.is_project_publication() && self.has_run_limit() {
+        if self.run_budget_active()
+            && !self.is_project_publication()
+            && self.has_run_limit()
+            && !crate::review_job::using_terminal_budget(self)
+        {
             return Err(BundleError::RunLimit);
         }
         Ok(())

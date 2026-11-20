@@ -88,6 +88,12 @@ pub enum RecordKind {
     EditorialRationale,
     RulebookRevision,
     RulebookProposal,
+    ReviewAnnotations,
+    ReviewExpectations,
+    ReviewRequest,
+    ReviewJob,
+    ReviewArtifact,
+    ReviewEvidence,
     FeedbackIndex,
     FeedbackRevision,
     FeedbackBatch,
@@ -127,6 +133,12 @@ impl RecordKind {
                 | Self::EditorialRationale
                 | Self::RulebookRevision
                 | Self::RulebookProposal
+                | Self::ReviewAnnotations
+                | Self::ReviewExpectations
+                | Self::ReviewRequest
+                | Self::ReviewJob
+                | Self::ReviewArtifact
+                | Self::ReviewEvidence
                 | Self::FeedbackIndex
                 | Self::FeedbackRevision
                 | Self::FeedbackBatch

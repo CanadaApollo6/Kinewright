@@ -164,6 +164,7 @@ pub(crate) struct Studio {
     versions: Vec<SnapshotKey>,
     versions_open: bool,
     editorial: Option<EditorialDetails>,
+    output_review: crate::studio_review::OutputReview,
     pub(crate) tab: Tab,
     draft_snapshot: Option<SnapshotKey>,
     stills: [Option<Still>; 2],
@@ -615,6 +616,7 @@ impl KinewrightApp {
         let context = attachment.studio_ready.take();
         let versions = attachment.studio_versions_ready.take();
         let editorial = attachment.studio_editorial_ready.take();
+        let review = attachment.studio_review_ready.take();
         let editorial_project = attachment.studio_project_id().ok();
         let failure = attachment.studio_error_ready.take();
         let manual_failed = attachment.studio_manual_failed.take();
@@ -642,6 +644,10 @@ impl KinewrightApp {
         {
             *editorial_state = None;
         }
+        self.focused_mut()
+            .studio
+            .output_review
+            .refresh(review, editorial_project.as_ref());
         if let Some(versions) = versions {
             self.focused_mut().studio.versions = versions;
         }
@@ -827,6 +833,12 @@ impl KinewrightApp {
                         }
                         if let Some(details) = current_details
                             && let Some(action) = show_editorial_details(ui, details)
+                        {
+                            editorial_action = Some(action);
+                        }
+                        let studio = &mut self.focused_mut().studio;
+                        if let Some(action) =
+                            studio.output_review.show(ui, studio.editorial.as_ref())
                         {
                             editorial_action = Some(action);
                         }

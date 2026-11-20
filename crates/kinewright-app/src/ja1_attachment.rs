@@ -75,12 +75,14 @@ pub(crate) struct EditorialDetails {
     pub version: Option<SnapshotKey>,
     pub audit: Option<EditorialAudit>,
     pub proposal: Option<(ObjectRef, RulebookProposal)>,
+    pub annotations: Option<kinewright_project::review_job::ReviewAnnotationFields>,
 }
 
 pub(crate) enum Action {
     DismissManualNotice,
     StudioVersions,
     StudioEditorial(Option<SnapshotKey>),
+    StudioReview(Box<kinewright_project::review_job::ReviewControl>),
     StudioRulebook {
         decision: RulebookDecision,
         version: Option<SnapshotKey>,
@@ -133,6 +135,7 @@ impl Action {
             Self::DismissManualNotice
             | Self::StudioVersions
             | Self::StudioEditorial(_)
+            | Self::StudioReview(_)
             | Self::StudioRulebook { .. }
             | Self::StudioSelect(_)
             | Self::Retry
@@ -161,6 +164,7 @@ impl Action {
             Self::DismissManualNotice
                 | Self::StudioVersions
                 | Self::StudioEditorial(_)
+                | Self::StudioReview(_)
                 | Self::StudioRulebook { .. }
                 | Self::StudioManualPlayback(_)
                 | Self::StudioSelect(_)
@@ -216,6 +220,7 @@ pub(crate) struct Ja1Attachment {
     pub(crate) studio_edit_pending: bool,
     pub(crate) studio_editorial_ready: Option<EditorialDetails>,
     pub(crate) studio_error_ready: Option<String>,
+    pub(crate) studio_review_ready: Option<crate::studio_review::ReviewRefresh>,
     /// The scope a failed Current-edit acquisition tried, and whether the
     /// failure is temporary (S3 C11 fu1).
     pub(crate) studio_manual_failed: Option<(
@@ -286,6 +291,7 @@ impl Ja1Attachment {
             studio_edit_pending: false,
             studio_editorial_ready: None,
             studio_error_ready: None,
+            studio_review_ready: None,
             studio_manual_failed: None,
             studio_manual_ready: None,
             owner,
@@ -453,6 +459,13 @@ impl Ja1Attachment {
             return Err(BundleError::Unsettled);
         }
         self.end_manual_gestures();
+        if let Action::StudioReview(control) = action {
+            let result = self.studio_review(*control);
+            if let Err(error) = &result {
+                self.studio_error_ready = Some(error.to_string());
+            }
+            return result;
+        }
         match &action {
             Action::StudioManualPlayback(document) => {
                 // A failure is reported once, with the scope it tried: an
@@ -922,6 +935,26 @@ impl Ja1Attachment {
         }
         self.owner.studio_versions()
     }
+    fn studio_review(
+        &mut self,
+        control: kinewright_project::review_job::ReviewControl,
+    ) -> Result<(), BundleError> {
+        let host = self.host.as_ref().ok_or_else(|| {
+            BundleError::Identity(
+                "Output review requires a saved project attached to the writer host.".into(),
+            )
+        })?;
+        let reply = host
+            .client
+            .request(kinewright_agent::writer_host::HostCommand::Review(control))
+            .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+        if let Some(error) = reply.error {
+            return Err(BundleError::Corrupt(error.message));
+        }
+        self.studio_review_ready = Some(crate::studio_review::ReviewRefresh(reply.review));
+        Ok(())
+    }
+
     fn read_studio_editorial(&mut self, version: Option<&SnapshotKey>) -> Result<(), BundleError> {
         let result = self.studio_editorial(version);
         match result {
@@ -955,6 +988,7 @@ impl Ja1Attachment {
                 version: version.cloned(),
                 audit: reply.editorial_audit,
                 proposal: reply.rulebook_proposal,
+                annotations: reply.review_annotations,
             });
         }
         let audit = version
@@ -971,6 +1005,10 @@ impl Ja1Attachment {
             version: version.cloned(),
             audit,
             proposal,
+            annotations: version
+                .map(|key| self.owner.review_annotations(key))
+                .transpose()?
+                .flatten(),
         })
     }
 
@@ -1514,6 +1552,7 @@ impl Ja1Attachment {
             Action::DismissManualNotice
             | Action::StudioVersions
             | Action::StudioEditorial(_)
+            | Action::StudioReview(_)
             | Action::StudioRulebook { .. }
             | Action::StudioManualPlayback(_)
             | Action::StudioSelect(_)

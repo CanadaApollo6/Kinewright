@@ -104,6 +104,7 @@ struct MediaAdmission {
 struct StoreInner {
     admission_identity: Arc<()>,
     run_budget: std::sync::atomic::AtomicBool,
+    review_budget: std::sync::atomic::AtomicBool,
     run_limit: std::sync::atomic::AtomicBool,
     read_authority: Option<kinewright_media::owned_io::ReadAuthority>,
     read_graph_charge: Option<snapshot_reader::GraphCharge>,
@@ -692,6 +693,7 @@ impl ProjectStore {
             inner: Arc::new(StoreInner {
                 admission_identity: Arc::new(()),
                 run_budget: std::sync::atomic::AtomicBool::new(false),
+                review_budget: std::sync::atomic::AtomicBool::new(false),
                 run_limit: std::sync::atomic::AtomicBool::new(false),
                 read_authority,
                 read_graph_charge: None,
@@ -794,6 +796,19 @@ impl ProjectStore {
             }),
         }
     }
+    pub(crate) fn set_review_budget(&self, active: bool) {
+        self.inner
+            .review_budget
+            .store(active, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn protect_review_budget(&self) -> bool {
+        self.inner
+            .review_budget
+            .load(std::sync::atomic::Ordering::SeqCst)
+            && !crate::review_job::using_terminal_budget(self)
+    }
+
     pub(crate) fn run_budget_active(&self) -> bool {
         self.inner
             .run_budget
@@ -1019,7 +1034,12 @@ impl ProjectStore {
         {
             return Err(BundleError::Identity("originating source is closed".into()));
         }
-        let free = self.with_namespace(|n| n.available_bytes())?;
+        let mut free = self.with_namespace(|n| n.available_bytes())?;
+        if self.protect_review_budget() {
+            free = free
+                .checked_sub(crate::review_job::DISK_HEADROOM)
+                .ok_or(BundleError::Capacity("review revocation disk headroom"))?;
+        }
         StorageReservation::reserve(
             &self.inner.usage,
             &self.admission_limits(),

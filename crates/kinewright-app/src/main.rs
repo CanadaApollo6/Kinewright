@@ -45,6 +45,7 @@ mod slash;
 mod solo_ui;
 mod studio;
 mod studio_feedback;
+mod studio_review;
 mod studio_run_view;
 mod studio_voice;
 mod theme;

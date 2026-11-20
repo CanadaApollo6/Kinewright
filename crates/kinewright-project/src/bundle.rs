@@ -130,6 +130,8 @@ pub struct StudioRoot {
     pub version_index_ref: Option<ObjectRef>,
     pub approved_rulebook_ref: Option<ObjectRef>,
     pub pending_rulebook_ref: Option<ObjectRef>,
+    pub active_review_ref: Option<ObjectRef>,
+    pub stopped_review: Option<crate::review_job::ReviewToken>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback_index_ref: Option<ObjectRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -214,6 +216,7 @@ impl StudioRoot {
             (&self.version_index_ref, RecordKind::VersionIndex),
             (&self.approved_rulebook_ref, RecordKind::RulebookRevision),
             (&self.pending_rulebook_ref, RecordKind::RulebookProposal),
+            (&self.active_review_ref, RecordKind::ReviewJob),
             (&self.feedback_index_ref, RecordKind::FeedbackIndex),
             (&self.run_index_ref, RecordKind::RunIndex),
         ] {
@@ -253,6 +256,7 @@ impl StudioRoot {
         refs.extend(self.version_index_ref.clone());
         refs.extend(self.approved_rulebook_ref.clone());
         refs.extend(self.pending_rulebook_ref.clone());
+        refs.extend(self.active_review_ref.clone());
         refs.extend(self.feedback_index_ref.clone());
         refs.extend(self.run_index_ref.clone());
         refs.extend(self.claim_index_ref.clone());
@@ -799,6 +803,7 @@ impl LoadedBundle {
             limits,
         )?;
         store.replace_verified_memo(self.memo)?;
+        store.set_review_budget(root.active_review_ref.is_some());
         let branches = self
             .branches
             .into_iter()
@@ -1381,6 +1386,8 @@ impl ProjectBundle {
         self.recovery = loaded.manifest.recovery.clone();
         self.store.replace_verified_memo(loaded.memo)?;
         self.inventory = loaded.inventory;
+        self.store
+            .set_review_budget(root.active_review_ref.is_some());
         self.root = Some(root);
         self.admission = loaded.admission;
         self.copy_publication = None;

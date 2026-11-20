@@ -148,6 +148,7 @@ impl Attachment {
             | HostCommand::ReadFeedbackView { .. } => {
                 matches!(self.role, AttachmentRole::Viewer | AttachmentRole::Editor)
             }
+            HostCommand::Review(_) => self.role == AttachmentRole::Editor,
             HostCommand::ReadEditorial { .. } => self.role != AttachmentRole::Producer,
             HostCommand::ListVersions
             | HostCommand::LeaseSnapshot { .. }

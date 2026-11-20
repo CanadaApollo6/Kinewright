@@ -28,6 +28,7 @@ mod release;
 pub use manual::{ManualAuthority, ManualHistoryCommit, ManualRecoveryEndpoint};
 mod recovery;
 mod retained_work;
+mod review;
 pub use retained_work::{
     RetainedTaskDiscovery, RetainedTaskWork, RetainedWorkFailure, RetainedWorkKind,
 };

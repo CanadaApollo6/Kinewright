@@ -1276,6 +1276,8 @@ fn w14_raw_switch_structure_and_ordinary_v3_backward_control() {
         version_index_ref: None,
         approved_rulebook_ref: None,
         pending_rulebook_ref: None,
+        active_review_ref: None,
+        stopped_review: None,
         feedback_index_ref: None,
         run_index_ref: None,
         claim_index_ref: None,
