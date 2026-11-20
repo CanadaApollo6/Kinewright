@@ -37,6 +37,7 @@ pub fn source_profile_assumption(
 }
 mod preview;
 mod render;
+mod review_geometry;
 mod room_tone_store;
 #[cfg(test)]
 mod s4_d13;
@@ -226,6 +227,10 @@ pub use lut_store::{
     LUT_MAX_FILE_BYTES, LUT_STORE_LUTS_DIRECTORY, LUT_STORE_SUFFIX, LutAssetImport, LutLibrary,
     LutStore, LutStoreError, LutStoreErrorCode, metadata_mismatch,
 };
+pub use review_geometry::{
+    OverlayGeometry, review_layer_can_reshape_below, review_layer_reshapes_below_at,
+    review_overlay_geometry,
+};
 pub use room_tone_store::{
     ROOM_TONE_ASSET_FRAMES_PER_SECOND, ROOM_TONE_CHANNELS, ROOM_TONE_MAX_CAPTURE_MILLISECONDS,
     ROOM_TONE_MAX_FILE_BYTES, ROOM_TONE_MINIMUM_CAPTURE_MILLISECONDS,
@@ -237,8 +242,8 @@ pub use sha256::{sha256_bytes, sha256_file, sha256_reader, source_fingerprint};
 pub use timeline::{
     TimelineAdjustmentLayer, TimelineAudioSegment, TimelineSolidLayer, TimelineSource,
     TimelineTitleLayer, TimelineVideoLayer, TimelineVisualLayer, TransitionCoverage,
-    TransitionRenderParams, timeline_audio_segments, timeline_source_at, video_layers_at,
-    visual_layers_at,
+    TransitionRenderParams, enabled_clip_runs, timeline_audio_segments, timeline_source_at,
+    video_layers_at, visual_layers_at,
 };
 mod data_dir;
 pub use data_dir::{data_subdirectory, default_data_dir};

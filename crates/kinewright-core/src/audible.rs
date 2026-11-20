@@ -23,6 +23,23 @@ impl Serialize for ExactMicros {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for ExactMicros {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Numerator {
+            Small(u64),
+            Large(String),
+        }
+        let (numerator, denominator) = <(Numerator, u64)>::deserialize(deserializer)?;
+        let numerator = match numerator {
+            Numerator::Small(value) => u128::from(value),
+            Numerator::Large(value) => value.parse().map_err(serde::de::Error::custom)?,
+        };
+        Self::new(numerator, denominator).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[error("invalid or unrepresentable audible clock")]
 pub struct AudibleClockError;

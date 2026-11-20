@@ -25,6 +25,7 @@ pub(crate) mod provider_readiness;
 pub mod receipt_reconciliation;
 mod recovery;
 mod resolve;
+pub mod review_expectations;
 mod revise;
 pub(crate) mod run_inputs;
 pub(crate) mod spending;

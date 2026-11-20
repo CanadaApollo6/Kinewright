@@ -36,7 +36,8 @@ pub struct Word {
 }
 
 impl Word {
-    fn is_spoken(&self) -> bool {
+    #[must_use]
+    pub fn is_spoken(&self) -> bool {
         let text = self.text.trim();
         !(text.starts_with('[') && text.ends_with(']'))
     }
