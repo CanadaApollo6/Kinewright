@@ -49,8 +49,6 @@ EXTERNAL_LIB_ALIASES = {
     'libz': 'zlib',
     'zlib': 'zlib',
     'zlibstatic': 'zlib',
-    'zs': 'zlib',
-    'libzs': 'zlib',
     'x264': 'libx264',
     'libx264': 'libx264',
     'x265': 'libx265',
@@ -59,6 +57,13 @@ EXTERNAL_LIB_ALIASES = {
     'libx265-static': 'libx265',
     'dav1d': 'libdav1d',
     'libdav1d': 'libdav1d',
+}
+# vcpkg x64-windows-static installs static zlib as libzs.lib (-lzs / -llibzs).
+# Scope these aliases to Windows pkg-config output only; ELF and PE import names
+# and Linux pkg-config entries must never collapse libzs/zs into zlib.
+WINDOWS_PKGCONFIG_EXTERNAL_LIB_ALIASES = {
+    'zs': 'zlib',
+    'libzs': 'zlib',
 }
 HARMLESS_LINKER_FLAGS = {
     '-pthread', '-pthreads', '-fopenmp', '-static', '-shared', '-rdynamic', '-pie', '-no-pie',
@@ -350,8 +355,10 @@ def pe_imports(path):
     return sorted(imported)
 
 
-def _normalize_external_token(raw):
+def _normalize_external_token(raw, extra_aliases=None):
     key = raw.lower()
+    if extra_aliases and key in extra_aliases:
+        return extra_aliases[key]
     if key in EXTERNAL_LIB_ALIASES:
         return EXTERNAL_LIB_ALIASES[key]
     return raw
@@ -434,7 +441,7 @@ def _expand_pkgconfig_tokens(raw_tokens, source):
     return expanded
 
 
-def _classify_pkgconfig_library(raw_lib, from_path):
+def _classify_pkgconfig_library(raw_lib, from_path, system=None):
     lib = raw_lib
     lib_lower = lib.lower()
     if '.so.' in lib_lower:
@@ -456,11 +463,13 @@ def _classify_pkgconfig_library(raw_lib, from_path):
     stem = lib_lower[3:] if lib_lower.startswith('lib') else lib_lower
     if stem in FFMPEG_LIBRARY_STEMS:
         return None
-    return _normalize_external_token(lib)
+    extra = WINDOWS_PKGCONFIG_EXTERNAL_LIB_ALIASES if (system or platform.system()) == 'Windows' else None
+    return _normalize_external_token(lib, extra_aliases=extra)
 
 
-def pkgconfig_external_libraries(root):
+def pkgconfig_external_libraries(root, system=None):
     """Enumerate external libraries declared in installed lib/pkgconfig/*.pc files."""
+    system = system or platform.system()
     pc_dir = Path(root) / 'lib/pkgconfig'
     pc_files = sorted(pc_dir.glob('*.pc'))
     if not pc_files:
@@ -494,13 +503,13 @@ def pkgconfig_external_libraries(root):
                 if token == '--library':
                     if index >= len(tokens) or tokens[index].startswith('-'):
                         raise ValueError(f'{pc_file}: missing library name after --library')
-                    name = _classify_pkgconfig_library(tokens[index], from_path=False)
+                    name = _classify_pkgconfig_library(tokens[index], from_path=False, system=system)
                     index += 1
                     if name is not None:
                         found.add(name)
                     continue
                 if token.startswith('--library=') and len(token) > 10:
-                    name = _classify_pkgconfig_library(token[10:], from_path=False)
+                    name = _classify_pkgconfig_library(token[10:], from_path=False, system=system)
                     if name is not None:
                         found.add(name)
                     continue
@@ -516,12 +525,13 @@ def pkgconfig_external_libraries(root):
                     name = _classify_pkgconfig_library(
                         token[3:].replace('\\', '/').rsplit('/', 1)[-1],
                         from_path=True,
+                        system=system,
                     )
                     if name is not None:
                         found.add(name)
                     continue
                 if token.startswith('-l') and len(token) > 2:
-                    name = _classify_pkgconfig_library(token[2:], from_path=False)
+                    name = _classify_pkgconfig_library(token[2:], from_path=False, system=system)
                     if name is not None:
                         found.add(name)
                     continue
@@ -529,6 +539,7 @@ def pkgconfig_external_libraries(root):
                     name = _classify_pkgconfig_library(
                         token.replace('\\', '/').rsplit('/', 1)[-1],
                         from_path=True,
+                        system=system,
                     )
                     if name is not None:
                         found.add(name)

@@ -825,26 +825,65 @@ class SurfaceInspection(unittest.TestCase):
                         inspector.pkgconfig_external_libraries(root)
                     self.assertIn(token, str(refused.exception))
 
-    def test_pkgconfig_maps_windows_static_zlib_libzs_without_matching_neighbours(self):
+    def test_pkgconfig_maps_windows_static_zlib_libzs_without_aliasing_elf_pe_or_linux(self):
         with tempfile.TemporaryDirectory(dir=builder.ROOT / 'target') as directory:
             root = Path(directory)
             pc_dir = root / 'lib/pkgconfig'
             pc_dir.mkdir(parents=True)
             pc_file = pc_dir / 'libavcodec.pc'
 
-            for libs_private in ['-L/x -llibzs', r'-libpath:C:\x libzs.lib']:
-                with self.subTest(case=libs_private):
+            for libs_private in ['-L/x -lzs', '-L/x -llibzs', r'-libpath:C:\x libzs.lib', r'-libpath:C:\x zs.lib']:
+                with self.subTest(windows_pkgconfig=libs_private):
                     pc_file.write_text(
                         f'Libs: -L${{libdir}} -lavcodec\nLibs.private: {libs_private}\n',
                         encoding='utf-8',
                     )
-                    self.assertEqual(inspector.pkgconfig_external_libraries(root), ['zlib'])
+                    self.assertEqual(
+                        inspector.pkgconfig_external_libraries(root, system='Windows'),
+                        ['zlib'],
+                    )
+
+            for libs_private, expected_name in [('-L/x -lzs', 'zs'), ('-L/x -llibzs', 'libzs')]:
+                with self.subTest(linux_pkgconfig=libs_private):
+                    pc_file.write_text(
+                        f'Libs: -L${{libdir}} -lavcodec\nLibs.private: {libs_private}\n',
+                        encoding='utf-8',
+                    )
+                    self.assertEqual(
+                        inspector.pkgconfig_external_libraries(root, system='Linux'),
+                        [expected_name],
+                    )
+
+            so_path = root / 'libavcodec.so.63.1.102'
+            so_path.write_bytes(_minimal_elf64([
+                'libc.so.6', 'libavutil.so.61', 'libdav1d.so.7', 'libx264.so.165', 'libx265.so.215', 'libzs.so.1',
+            ]))
+            linked = inspector.binary_external_libraries([so_path])
+            self.assertEqual(linked, ['libdav1d', 'libx264', 'libx265', 'libzs'])
+
+            linux_expected = inspector.expected_surface(system='Linux')
+            linux_report = self._matching_report(linux_expected)
+            linux_report['external_library_sources']['linked'] = linked
+            linux_report['external_libraries'] = sorted(set(linked) | linux_expected['external_libraries'])
+            with self.assertRaises(SystemExit) as refused:
+                inspector.check(linux_report, linux_expected)
+            linux_message = str(refused.exception)
+            self.assertIn('external_libraries.linked:', linux_message)
+            self.assertIn('unexpected=libzs', linux_message)
+            self.assertIn('missing=zlib', linux_message)
+
+            dll_path = root / 'avcodec-63.dll'
+            dll_path.write_bytes(_minimal_pe64(['KERNEL32.dll', 'zs.dll', 'libzs.dll']))
+            self.assertEqual(inspector.binary_external_libraries([dll_path]), ['libzs', 'zs'])
 
             pc_file.write_text(
                 'Libs: -L${libdir} -lavcodec\nLibs.private: -L/x -llibzq\n',
                 encoding='utf-8',
             )
-            self.assertEqual(inspector.pkgconfig_external_libraries(root), ['libzq'])
+            self.assertEqual(
+                inspector.pkgconfig_external_libraries(root, system='Windows'),
+                ['libzq'],
+            )
 
             expected = inspector.expected_surface(system='Windows')
             report = self._matching_report(expected)
