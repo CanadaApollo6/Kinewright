@@ -128,7 +128,8 @@ def plan(listing, tier, count):
             cost = sum(estimates.get((suite["label"], p), 60 if p.startswith("pf1_s2c_witness::") else 2) for p in names if p not in suite["ignored"])
             if not split:
                 cost = {"kinewright_app": 342 if tier == "fast" else 28, "mcp_server": 182,
-                        "ja_s1_storage": 188, "kinewright_project": 86}.get(suite["label"], max(1, len(names) * 0.02))
+                        "ja_s1_storage": 188, "kinewright_project": 86,
+                        "lpac_native": 16}.get(suite["label"], max(1, len(names) * 0.02))
                 if len(names) == 1:
                     cost = estimates.get((suite["label"], names[0]), cost)
                 cost = measured_batches.get(suite["label"], cost)
@@ -219,7 +220,14 @@ def execute_unit(data, unit, number, index, directory):
         # One block keeps concurrent failures readable; the complete log remains an artifact.
         names = "\n".join(f"  {suite['label']}::{name}" for name in unit["tests"])
         tail = "\n".join(text.splitlines()[-40:])
-        print(f"Test process {number} {reason}:\n{names}\nLast 40 output lines ({log_name}):\n{tail}", flush=True)
+        failed = set(re.findall(r"(?m)^test (.+?) \.\.\. FAILED$", text))
+        failed.intersection_update(unit["tests"])
+        panics = re.findall(r"(?m)^thread '([^'\n]+)'(?: \(\d+\))? panicked at [^\n]*:\n([^\n]+)", text)
+        summary = "".join(f"\n  {suite['label']}::{name}: {message}" for name, message in panics
+                          if name in failed)
+        if summary:
+            summary = f"\nFirst panic lines:{summary}"
+        print(f"Test process {number} {reason}:\n{names}{summary}\nLast 40 output lines ({log_name}):\n{tail}", flush=True)
 
     if code:
         diagnose(f"failed or timed out (exit {code})")

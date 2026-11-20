@@ -1,3 +1,5 @@
+pub mod media_lpac;
+
 use std::{
     ffi::{OsStr, OsString},
     io,
@@ -17,17 +19,23 @@ use std::{
 /// # Errors
 /// Every token or known-folder error refuses acquisition.
 pub fn execution_namespace() -> io::Result<(PathBuf, String)> {
+    let sid = account_sid()?;
+    Ok((
+        local_app_data()?
+            .join("Kinewright")
+            .join(format!("studio-execution-{sid}")),
+        format!("execution-{sid}.lock"),
+    ))
+}
+
+fn account_sid() -> io::Result<String> {
     use windows_sys::Win32::{
         Foundation::LocalFree,
         Security::{
             Authorization::ConvertSidToStringSidW, GetTokenInformation, TOKEN_QUERY, TOKEN_USER,
             TokenUser,
         },
-        System::{
-            Com::CoTaskMemFree,
-            Threading::{GetCurrentProcess, OpenProcessToken},
-        },
-        UI::Shell::{FOLDERID_LocalAppData, KF_FLAG_DONT_UNEXPAND, SHGetKnownFolderPath},
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
     let mut token = ptr::null_mut();
     // SAFETY: CurrentProcess is a valid pseudo handle and token is writable.
@@ -72,6 +80,14 @@ pub fn execution_namespace() -> io::Result<(PathBuf, String)> {
     {
         return Err(io::Error::other("invalid account SID"));
     }
+    Ok(sid)
+}
+
+fn local_app_data() -> io::Result<PathBuf> {
+    use windows_sys::Win32::{
+        System::Com::CoTaskMemFree,
+        UI::Shell::{FOLDERID_LocalAppData, KF_FLAG_DONT_UNEXPAND, SHGetKnownFolderPath},
+    };
     let mut folder = ptr::null_mut();
     let folder_id = FOLDERID_LocalAppData;
     // SAFETY: The null token selects this account; folder receives an owned shell allocation.
@@ -91,16 +107,11 @@ pub fn execution_namespace() -> io::Result<(PathBuf, String)> {
     };
     // SAFETY: The API requires CoTaskMemFree even on failure; null is accepted.
     unsafe { CoTaskMemFree(folder.cast()) };
-    let root = root.filter(|p| p.is_absolute()).ok_or_else(|| {
+    root.filter(|p| p.is_absolute()).ok_or_else(|| {
         io::Error::other(format!(
             "OS-local machine namespace unavailable: HRESULT {result:#x}"
         ))
-    })?;
-    Ok((
-        root.join("Kinewright")
-            .join(format!("studio-execution-{sid}")),
-        format!("execution-{sid}.lock"),
-    ))
+    })
 }
 
 unsafe fn copy_os_string(value: *const u16) -> OsString {

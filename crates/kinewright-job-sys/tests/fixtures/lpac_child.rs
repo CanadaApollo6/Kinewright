@@ -1,0 +1,731 @@
+#![cfg_attr(windows, allow(unsafe_code))]
+
+#[cfg(not(windows))]
+fn main() {}
+
+#[cfg(windows)]
+fn main() -> std::process::ExitCode {
+    let mut args = std::env::args_os().skip(1);
+    if let Some(mode) = args.next() {
+        let code = match mode.to_str() {
+            Some("--ordinary-package-control") => {
+                child::package_read(&args.next().expect("package control canary")).1
+            }
+            Some("--ordinary-handle-control") => {
+                child::inherited_canary(&args.next().expect("handle control canary")).1
+            }
+            _ => return run(),
+        };
+        return std::process::ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
+    run()
+}
+
+#[cfg(windows)]
+fn run() -> std::process::ExitCode {
+    match child::run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("LPAC fixture before reply: {error}");
+            std::process::ExitCode::from(71)
+        }
+    }
+}
+
+#[cfg(windows)]
+mod child {
+    use std::{
+        env,
+        ffi::{OsStr, OsString},
+        fs::{File, OpenOptions},
+        io::{self, Read, Write},
+        net::SocketAddrV4,
+        os::windows::{
+            ffi::OsStrExt,
+            io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
+        },
+        path::Path,
+        ptr,
+    };
+    use windows_sys::Win32::{
+        Foundation::{
+            CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_INVALID_DATA,
+            ERROR_INVALID_HANDLE, GetLastError, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0,
+        },
+        Networking::WinSock::{
+            AF_INET, IN_ADDR, IN_ADDR_0, INVALID_SOCKET, IPPROTO_TCP, SOCK_STREAM, SOCKADDR_IN,
+            SOCKET, WSACleanup, WSADATA, WSAGetLastError, WSAStartup, closesocket, connect, socket,
+        },
+        Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, FILE_BEGIN, GetFileInformationByHandle, ReadFile,
+            SetFilePointerEx, WriteFile,
+        },
+        System::{
+            Console::{
+                GetConsoleWindow, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
+                STD_OUTPUT_HANDLE,
+            },
+            Memory::{
+                MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+            },
+            Registry::{HKEY_CURRENT_USER, KEY_WRITE, RegCloseKey, RegCreateKeyExW, RegDeleteKeyW},
+            Threading::{
+                CREATE_NO_WINDOW, CREATE_SUSPENDED, CreateProcessW, GetCurrentProcess,
+                GetCurrentProcessId, GetCurrentThreadId, OpenProcess, OpenThread,
+                PROCESS_DUP_HANDLE, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+                PROCESS_VM_WRITE, STARTUPINFOW, THREAD_SET_CONTEXT, TerminateProcess,
+                WaitForSingleObject,
+            },
+        },
+    };
+
+    const SOURCE: &[u8] = b"LPAC source bytes";
+
+    pub fn run() -> io::Result<()> {
+        let mut args = env::args_os().skip(1);
+        let file = next_handle(&mut args)?;
+        let request = next_handle(&mut args)?;
+        let reply = next_handle(&mut args)?;
+        let stdio = request.is_null() && reply.is_null() && file.is_null();
+        let panic_reply = if stdio {
+            // SAFETY: this returns the unconfined control's redirected stdout pipe.
+            unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
+        } else {
+            reply
+        };
+        install_panic_report(panic_reply as usize);
+        let case = next_arg(&mut args)?;
+        let target = next_arg(&mut args)?;
+
+        if stdio {
+            return exercise(
+                &case,
+                &target,
+                None,
+                &mut io::stdin().lock(),
+                &mut io::stdout().lock(),
+            );
+        }
+
+        let source = duplicate_file(file)?;
+        let mut request = duplicate_file(request)?;
+        let mut reply = duplicate_file(reply)?;
+        exercise(&case, &target, Some(source), &mut request, &mut reply)
+    }
+
+    fn install_panic_report(reply: usize) {
+        std::panic::set_hook(Box::new(move |info| {
+            let message = format!("{info}").replace(['\r', '\n', '\t'], " ");
+            let mut report = format!("panic\t101\t{message}");
+            report.truncate(report.floor_char_boundary(4095));
+            report.push('\n');
+            let mut written = 0;
+            // SAFETY: the original reply handle remains open for the life of this process.
+            // Write directly so a panic during a stdio write never reacquires its Rust lock.
+            unsafe {
+                WriteFile(
+                    reply as RawHandle,
+                    report.as_ptr(),
+                    u32::try_from(report.len()).unwrap_or(4096),
+                    &raw mut written,
+                    ptr::null_mut(),
+                );
+            }
+        }));
+    }
+
+    struct Winsock;
+    impl Drop for Winsock {
+        fn drop(&mut self) {
+            // SAFETY: this guard corresponds to a successful WSAStartup.
+            unsafe { WSACleanup() };
+        }
+    }
+
+    struct Socket(SOCKET);
+    impl Drop for Socket {
+        fn drop(&mut self) {
+            // SAFETY: the successful socket call gave this guard an owned socket.
+            unsafe { closesocket(self.0) };
+        }
+    }
+
+    fn connect_loopback(address: SocketAddrV4, output: &mut impl Write) -> io::Result<()> {
+        if !address.ip().is_loopback() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "non-loopback address",
+            ));
+        }
+        let mut data = WSADATA::default();
+        // SAFETY: data is writable and 0x0202 requests Winsock 2.2.
+        let startup = unsafe { WSAStartup(0x0202, &raw mut data) };
+        if startup != 0 {
+            return writeln!(output, "WSAStartup\t{startup}");
+        }
+        let _winsock = Winsock;
+        // SAFETY: Winsock initialized successfully and the socket type is TCP/IPv4.
+        let raw = unsafe { socket(i32::from(AF_INET), SOCK_STREAM, IPPROTO_TCP) };
+        if raw == INVALID_SOCKET {
+            // SAFETY: read the thread's Winsock error immediately after the failed call.
+            let code = unsafe { WSAGetLastError() };
+            return writeln!(output, "socket\t{code}\tWSAStartup=0");
+        }
+        let socket = Socket(raw);
+        let endpoint = SOCKADDR_IN {
+            sin_family: AF_INET,
+            sin_port: address.port().to_be(),
+            sin_addr: IN_ADDR {
+                S_un: IN_ADDR_0 {
+                    S_addr: u32::from_ne_bytes(address.ip().octets()),
+                },
+            },
+            sin_zero: [0; 8],
+        };
+        // SAFETY: socket and the encoded IPv4 endpoint remain live through the call.
+        let result = unsafe {
+            connect(
+                socket.0,
+                (&raw const endpoint).cast(),
+                i32::try_from(size_of::<SOCKADDR_IN>()).expect("IPv4 address size"),
+            )
+        };
+        // SAFETY: Winsock records the error on the current thread.
+        let code = if result == 0 {
+            0
+        } else {
+            unsafe { WSAGetLastError() }
+        };
+        writeln!(output, "connect\t{code}\tWSAStartup=0 socket=0")
+    }
+
+    fn duplicate_file(raw: RawHandle) -> io::Result<File> {
+        let mut copy = ptr::null_mut();
+        // SAFETY: Windows validates the input handle value. Success transfers a distinct handle.
+        let ok = unsafe {
+            let current = GetCurrentProcess();
+            DuplicateHandle(
+                current,
+                raw,
+                current,
+                &raw mut copy,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::other(format!(
+                "DuplicateHandle (fixture inherited handle): {}",
+                io::Error::last_os_error()
+            )));
+        }
+        // SAFETY: success returned an owned handle and no other owner exists.
+        Ok(unsafe { File::from_raw_handle(copy) })
+    }
+
+    fn next_arg(args: &mut impl Iterator<Item = OsString>) -> io::Result<OsString> {
+        args.next()
+            .ok_or_else(|| io::Error::other("missing fixture argument"))
+    }
+
+    fn next_handle(args: &mut impl Iterator<Item = OsString>) -> io::Result<RawHandle> {
+        next_arg(args)?
+            .to_str()
+            .and_then(|value| value.parse::<usize>().ok())
+            .map(|value| value as RawHandle)
+            .ok_or_else(|| io::Error::other("invalid fixture handle"))
+    }
+
+    fn exercise(
+        case: &OsStr,
+        target: &OsStr,
+        source: Option<File>,
+        input: &mut impl Read,
+        output: &mut impl Write,
+    ) -> io::Result<()> {
+        let mut start = [0u8];
+        input
+            .read_exact(&mut start)
+            .map_err(|e| io::Error::other(format!("ReadFile (request): {e}")))?;
+        if start != *b"!" {
+            return Err(io::Error::other("ReadFile (request): wrong handshake byte"));
+        }
+        let (api, code) = match case.to_str() {
+            Some("ready") => ready(target, source.is_some()),
+            Some("package-only-read") => package_read(target),
+            Some("inherited-canary") => inherited_canary(target),
+            Some("sibling") => return sibling_access(target, output),
+            Some("sibling-hold") => return sibling_hold(target, source, input, output),
+            Some("owner-access") => {
+                return super::profile_permissions::owner_access(target, output);
+            }
+            Some("profile-registry-direct") => return direct_registry(target, output),
+            Some("profile-objects") => return super::profile_permissions::objects(target, output),
+            Some("source") => {
+                read_source(source.ok_or_else(|| io::Error::other("missing source handle"))?)
+            }
+            Some("create") => file_write(target, "create"),
+            Some("grow") => file_write(target, "grow"),
+            Some("replace") => file_write(target, "replace"),
+            Some("mutate") => file_write(target, "mutate"),
+            Some("registry") => registry(target),
+            Some("connect") => return connect_loopback(parse(target)?, output),
+            Some("process") => (
+                "OpenProcess(PROCESS_DUP_HANDLE)",
+                open_process(parse(target)?, PROCESS_DUP_HANDLE),
+            ),
+            Some("process-query") => (
+                "OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)",
+                open_process(parse(target)?, PROCESS_QUERY_LIMITED_INFORMATION),
+            ),
+            Some("pipe") => (
+                "CreateFileW(named pipe)",
+                result_code(OpenOptions::new().write(true).open(target)),
+            ),
+            Some("spawn") => spawn(target),
+            Some("memory") => ("VirtualAlloc", allocate(parse(target)?)),
+            Some("hold" | "hold-directory") => ("ReadFile(hold)", 0),
+            _ => {
+                return Err(io::Error::other(format!(
+                    "unknown fixture case {}",
+                    case.display()
+                )));
+            }
+        };
+        let report = if case == "hold" {
+            // SAFETY: these APIs return the identifiers of this process and thread.
+            let (pid, tid) = unsafe { (GetCurrentProcessId(), GetCurrentThreadId()) };
+            format!("{api}\t{code}\t{pid}:{tid}\n")
+        } else if case == "hold-directory" {
+            let directory = env::var_os("LOCALAPPDATA")
+                .ok_or_else(|| io::Error::other("missing LOCALAPPDATA for directory witness"))?;
+            format!("{api}\t{code}\t{}\n", Path::new(&directory).display())
+        } else {
+            format!("{api}\t{code}\n")
+        };
+        output.write_all(report.as_bytes())?;
+        output.flush()?;
+        if case == "hold" || case == "hold-directory" || case == "memory" {
+            // The host must kill a waiting child. EOF is a distinct fixture failure.
+            input.read_exact(&mut start)?;
+        }
+        Ok(())
+    }
+
+    fn parse<T: std::str::FromStr>(value: &OsStr) -> io::Result<T> {
+        value
+            .to_str()
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| io::Error::other("invalid fixture argument"))
+    }
+
+    fn wide(value: &OsStr) -> Vec<u16> {
+        value.encode_wide().chain([0]).collect()
+    }
+
+    fn result_code<T>(result: io::Result<T>) -> u32 {
+        match result {
+            Ok(_) => 0,
+            Err(error) => error.raw_os_error().unwrap_or(-1).cast_unsigned(),
+        }
+    }
+
+    pub(super) fn package_read(target: &OsStr) -> (&'static str, u32) {
+        match File::open(target) {
+            Ok(mut file) => {
+                let mut bytes = Vec::new();
+                match file.read_to_end(&mut bytes) {
+                    Ok(_) if bytes == b"packages-only" => ("ReadFile(package-only canary)", 0),
+                    Ok(_) => ("ReadFile(package-only canary bytes mismatch)", 13),
+                    Err(error) => (
+                        "ReadFile(package-only canary)",
+                        result_code::<()>(Err(error)),
+                    ),
+                }
+            }
+            Err(error) => (
+                "CreateFileW(package-only canary)",
+                result_code::<()>(Err(error)),
+            ),
+        }
+    }
+
+    pub(super) fn inherited_canary(target: &OsStr) -> (&'static str, u32) {
+        let Some((raw, volume, index)) = target.to_str().and_then(|text| {
+            let mut parts = text.split(':');
+            Some((
+                parts.next()?.parse::<usize>().ok()?,
+                parts.next()?.parse::<u32>().ok()?,
+                parts.next()?.parse::<u64>().ok()?,
+            ))
+        }) else {
+            return ("inherited canary arguments", ERROR_INVALID_DATA);
+        };
+        let handle = raw as RawHandle;
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: Windows validates the numeric handle, info is writable.
+        if unsafe { GetFileInformationByHandle(handle, &raw mut info) } == 0 {
+            // SAFETY: capture the error from the immediately preceding call.
+            return ("GetFileInformationByHandle(unlisted canary)", unsafe {
+                GetLastError()
+            });
+        }
+        let observed = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+        if (info.dwVolumeSerialNumber, observed) != (volume, index) {
+            return (
+                "unlisted handle names a different object",
+                ERROR_INVALID_HANDLE,
+            );
+        }
+        // SAFETY: the identity check established a live handle to the seekable test file.
+        if unsafe { SetFilePointerEx(handle, 0, ptr::null_mut(), FILE_BEGIN) } == 0 {
+            // SAFETY: capture the failure on this thread.
+            return ("SetFilePointerEx(unlisted canary)", unsafe {
+                GetLastError()
+            });
+        }
+        let expected = b"unlisted handle";
+        let mut bytes = [0u8; 15];
+        let mut read = 0;
+        // SAFETY: identity confirms the exact regular test file. The buffer and count are writable.
+        if unsafe {
+            ReadFile(
+                handle,
+                bytes.as_mut_ptr(),
+                15,
+                &raw mut read,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            // SAFETY: capture the failure on this thread.
+            return ("ReadFile(unlisted canary)", unsafe { GetLastError() });
+        }
+        (
+            "ReadFile(unlisted canary)",
+            if read == 15 && &bytes == expected {
+                0
+            } else {
+                ERROR_INVALID_DATA
+            },
+        )
+    }
+
+    fn sibling_hold(
+        target: &OsStr,
+        source: Option<File>,
+        input: &mut impl Read,
+        output: &mut impl Write,
+    ) -> io::Result<()> {
+        use std::{io::BufRead, sync::mpsc, thread};
+        let Some(source) = source else {
+            return Err(io::Error::other("missing sibling source"));
+        };
+        let startup = ready(target, true);
+        if startup != ("ready", 0) {
+            return writeln!(output, "{}\t{}", startup.0, startup.1);
+        }
+        let (api, code) = read_source(source);
+        if (api, code) != ("WriteFile(read-only inherited source)", 5) {
+            return writeln!(output, "{api}\t{code}");
+        }
+        let (sender, id) = mpsc::channel();
+        let (stop, parked) = mpsc::channel::<()>();
+        let worker = thread::Builder::new().spawn(move || {
+            // SAFETY: this returns the ID of the calling worker thread.
+            let _ = sender.send(unsafe { GetCurrentThreadId() });
+            let _ = parked.recv();
+        })?;
+        let exchange = (|| {
+            let later = id.recv().map_err(io::Error::other)?;
+            // SAFETY: these APIs return the IDs of the calling process and thread.
+            let (pid, main) = unsafe { (GetCurrentProcessId(), GetCurrentThreadId()) };
+            writeln!(output, "{api}\t{code}\t{pid}:{main}:{later}")?;
+            output.flush()?;
+            let mut input = io::BufReader::new(input);
+            let mut sibling = String::new();
+            input.read_line(&mut sibling)?;
+            sibling_access(OsStr::new(sibling.trim_end()), output)?;
+            output.flush()?;
+            input.read_exact(&mut [0])?;
+            Ok(())
+        })();
+        drop(stop);
+        worker
+            .join()
+            .map_err(|_| io::Error::other("sibling worker panicked"))?;
+        exchange
+    }
+
+    fn sibling_access(target: &OsStr, output: &mut impl Write) -> io::Result<()> {
+        let fields: Vec<_> = target.to_str().unwrap_or_default().split(':').collect();
+        let [pid, main, later] = fields.as_slice() else {
+            return Err(io::Error::other("missing sibling process/thread IDs"));
+        };
+        let pid = parse(OsStr::new(pid))?;
+        let main = parse(OsStr::new(main))?;
+        let later = parse(OsStr::new(later))?;
+        let duplicate = open_process(pid, PROCESS_DUP_HANDLE);
+        let vm_write = open_process(pid, PROCESS_VM_WRITE);
+        let query = open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION);
+        let main = open_thread(main);
+        let later = open_thread(later);
+        writeln!(
+            output,
+            "sibling access\t0\tOpenProcess(PROCESS_DUP_HANDLE)={duplicate} OpenProcess(PROCESS_VM_WRITE)={vm_write} OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)={query} OpenThread(main,THREAD_SET_CONTEXT)={main} OpenThread(later,THREAD_SET_CONTEXT)={later}"
+        )
+    }
+
+    fn open_thread(tid: u32) -> u32 {
+        // SAFETY: this requests a handle to the named test thread and performs no operation on it.
+        let thread = unsafe { OpenThread(THREAD_SET_CONTEXT, 0, tid) };
+        if thread.is_null() {
+            // SAFETY: capture the failure on this thread.
+            unsafe { GetLastError() }
+        } else {
+            // SAFETY: OpenThread transferred this handle.
+            unsafe { CloseHandle(thread) };
+            0
+        }
+    }
+
+    fn direct_registry(target: &OsStr, output: &mut impl Write) -> io::Result<()> {
+        use windows_sys::Win32::System::Registry::{
+            HKEY_USERS, KEY_SET_VALUE, REG_BINARY, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW,
+        };
+        let (path, value) = target
+            .to_str()
+            .and_then(|target| target.split_once('\t'))
+            .ok_or_else(|| io::Error::other("missing registry canary path and name"))?;
+        let path: Vec<u16> = OsStr::new(path).encode_wide().chain([0]).collect();
+        let value: Vec<u16> = OsStr::new(value).encode_wide().chain([0]).collect();
+        let mut key = ptr::null_mut();
+        // SAFETY: the host supplied an exact, terminated per-user key name.
+        let opened =
+            unsafe { RegOpenKeyExW(HKEY_USERS, path.as_ptr(), 0, KEY_SET_VALUE, &raw mut key) };
+        if opened != 0 {
+            return writeln!(output, "RegOpenKeyExW(KEY_SET_VALUE)\t{opened}");
+        }
+        // SAFETY: key is open, the value name is terminated, and the data contains six bytes.
+        let written =
+            unsafe { RegSetValueExW(key, value.as_ptr(), 0, REG_BINARY, b"canary".as_ptr(), 6) };
+        // SAFETY: this process owns the key and the value name is unique to this witness.
+        let cleanup = unsafe {
+            let cleanup = if written == 0 {
+                RegDeleteValueW(key, value.as_ptr())
+            } else {
+                0
+            };
+            RegCloseKey(key);
+            cleanup
+        };
+        if cleanup != 0 {
+            return writeln!(output, "RegDeleteValueW(canary)\t{cleanup}");
+        }
+        writeln!(
+            output,
+            "RegSetValueExW(profile direct)\t{written}\tRegOpenKeyExW(KEY_SET_VALUE)=0"
+        )
+    }
+
+    fn ready(expected_dir: &OsStr, lpac: bool) -> (&'static str, u32) {
+        let actual = match env::current_dir() {
+            Ok(path) => path,
+            Err(error) => return ("GetCurrentDirectoryW", result_code::<()>(Err(error))),
+        };
+        if actual != Path::new(expected_dir) {
+            return ("GetCurrentDirectoryW(cwd mismatch)", 0);
+        }
+        let system_root =
+            env::var_os("SystemRoot").is_some_and(|value| Path::new(&value).is_absolute());
+        let expected_environment = if lpac {
+            ["localappdata", "systemroot", "temp", "tmp"].as_slice()
+        } else {
+            ["systemroot"].as_slice()
+        };
+        let mut names: Vec<_> = env::vars_os()
+            .map(|(name, _)| name.to_string_lossy().to_ascii_lowercase())
+            .collect();
+        names.sort();
+        if !system_root || names != expected_environment {
+            return ("GetEnvironmentStringsW(unexpected startup environment)", 0);
+        }
+        // SAFETY: this query has no arguments. A pseudoconsole also returns a window handle.
+        if !unsafe { GetConsoleWindow() }.is_null() {
+            return ("GetConsoleWindow(unexpected console association)", 0);
+        }
+        if lpac {
+            // The LPAC protocol uses explicit handles. Only the control redirects standard I/O.
+            for (slot, step) in [
+                (STD_INPUT_HANDLE, "GetStdHandle(LPAC stdin must be absent)"),
+                (
+                    STD_OUTPUT_HANDLE,
+                    "GetStdHandle(LPAC stdout must be absent)",
+                ),
+                (STD_ERROR_HANDLE, "GetStdHandle(LPAC stderr must be absent)"),
+            ] {
+                // SAFETY: slot names one of the three standard-handle slots.
+                let handle = unsafe { GetStdHandle(slot) };
+                if handle == INVALID_HANDLE_VALUE {
+                    // SAFETY: read this thread's last error immediately after the failed query.
+                    return (step, unsafe { GetLastError() });
+                }
+                if !handle.is_null() {
+                    return (step, 0);
+                }
+            }
+        }
+        ("ready", 0)
+    }
+
+    fn read_source(mut source: File) -> (&'static str, u32) {
+        let mut bytes = [0; SOURCE.len()];
+        if let Err(error) = source.read_exact(&mut bytes) {
+            return ("ReadFile(source)", result_code::<()>(Err(error)));
+        }
+        if bytes != SOURCE {
+            return ("ReadFile(source bytes mismatch)", 0);
+        }
+        (
+            "WriteFile(read-only inherited source)",
+            result_code(source.write_all(b"unexpected")),
+        )
+    }
+
+    fn file_write(target: &OsStr, mode: &str) -> (&'static str, u32) {
+        let mut options = OpenOptions::new();
+        let result = match mode {
+            "create" => options.write(true).create_new(true).open(target),
+            "grow" => options.append(true).open(target),
+            "replace" => options.write(true).create(true).truncate(true).open(target),
+            _ => options.write(true).open(target),
+        };
+        match result {
+            Ok(mut file) => ("WriteFile(canary)", result_code(file.write_all(b"canary"))),
+            Err(error) => ("CreateFileW(canary)", result_code::<()>(Err(error))),
+        }
+    }
+
+    fn registry(target: &OsStr) -> (&'static str, u32) {
+        let key_name = wide(target);
+        let mut key = ptr::null_mut();
+        // SAFETY: the name is terminated, key is writable and HKCU is predefined.
+        let status = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                key_name.as_ptr(),
+                0,
+                ptr::null(),
+                0,
+                KEY_WRITE,
+                ptr::null(),
+                &raw mut key,
+                ptr::null_mut(),
+            )
+        };
+        if status == 0 {
+            // SAFETY: key was opened successfully. Delete only the unique canary key.
+            let (close, delete) = unsafe {
+                (
+                    RegCloseKey(key),
+                    RegDeleteKeyW(HKEY_CURRENT_USER, key_name.as_ptr()),
+                )
+            };
+            if close != 0 {
+                return ("RegCloseKey", close);
+            }
+            if delete != 0 {
+                return ("RegDeleteKeyW", delete);
+            }
+        }
+        ("RegCreateKeyExW(HKCU)", status)
+    }
+
+    fn open_process(pid: u32, access: u32) -> u32 {
+        // SAFETY: this call requests only a local process handle, which success transfers.
+        let process = unsafe { OpenProcess(access, 0, pid) };
+        if process.is_null() {
+            // SAFETY: read this thread's last error immediately after a failed call.
+            unsafe { GetLastError() }
+        } else {
+            // SAFETY: this is the owned handle returned by OpenProcess.
+            unsafe { CloseHandle(process) };
+            0
+        }
+    }
+
+    fn spawn(program: &OsStr) -> (&'static str, u32) {
+        let program = wide(program);
+        let startup = STARTUPINFOW {
+            cb: size_of::<STARTUPINFOW>()
+                .try_into()
+                .expect("STARTUPINFOW size"),
+            ..Default::default()
+        };
+        let mut info = PROCESS_INFORMATION::default();
+        // SAFETY: the program is terminated, startup is initialized and info is writable.
+        let ok = unsafe {
+            CreateProcessW(
+                program.as_ptr(),
+                ptr::null_mut(),
+                ptr::null(),
+                ptr::null(),
+                0,
+                CREATE_NO_WINDOW | CREATE_SUSPENDED,
+                ptr::null(),
+                ptr::null(),
+                &raw const startup,
+                &raw mut info,
+            )
+        };
+        if ok == 0 {
+            // SAFETY: read this thread's last error immediately after a failed call.
+            return ("CreateProcessW(second process)", unsafe { GetLastError() });
+        }
+        // SAFETY: CreateProcessW has transferred these handles to this process.
+        let (process, _thread) = unsafe {
+            (
+                OwnedHandle::from_raw_handle(info.hProcess),
+                OwnedHandle::from_raw_handle(info.hThread),
+            )
+        };
+        // SAFETY: the child is still suspended and this process owns the process handle.
+        if unsafe { TerminateProcess(process.as_raw_handle(), 1) } == 0 {
+            // SAFETY: read this thread's last error immediately after a failed call.
+            return ("TerminateProcess(second process)", unsafe {
+                GetLastError()
+            });
+        }
+        // SAFETY: the owned process handle remains live until the wait completes.
+        let status = unsafe { WaitForSingleObject(process.as_raw_handle(), 2_000) };
+        if status == WAIT_FAILED {
+            // SAFETY: read this thread's last error immediately after a failed call.
+            return ("WaitForSingleObject(second process) failed", unsafe {
+                GetLastError()
+            });
+        }
+        if status != WAIT_OBJECT_0 {
+            return ("WaitForSingleObject(second process)", status);
+        }
+        ("CreateProcessW(second process)", 0)
+    }
+
+    fn allocate(bytes: usize) -> u32 {
+        // SAFETY: null address lets Windows select a range. No memory is dereferenced.
+        let memory =
+            unsafe { VirtualAlloc(ptr::null(), bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) };
+        if memory.is_null() {
+            // SAFETY: read this thread's last error immediately after a failed call.
+            unsafe { GetLastError() }
+        } else {
+            // SAFETY: memory is the base of the owned reservation. MEM_RELEASE requires zero size.
+            unsafe { VirtualFree(memory, 0, MEM_RELEASE) };
+            0
+        }
+    }
+}
+
+#[cfg(windows)]
+#[path = "profile_permissions.rs"]
+mod profile_permissions;

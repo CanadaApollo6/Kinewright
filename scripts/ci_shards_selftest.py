@@ -453,22 +453,33 @@ class Sharding(unittest.TestCase):
                 self.assertEqual(result["code"], status)
 
     def test_failures_name_tests_and_print_only_the_last_forty_lines(self):
-        for failure in ("crash", "timeout", "summary", "missing-result"):
+        for failure in ("crash", "timeout", "summary", "missing-result", "panic"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory(prefix="kinewright-ci-diagnostics-") as directory:
                 root = Path(directory)
                 binary = root / "witness-0123456789abcdef"
                 binary.touch()
                 data = {"tier": "fast", "suites": [{"path": str(binary), "cwd": str(root), "label": "witness"}]}
-                unit = {"suite": 0, "tests": ["named_test"], "full": False}
+                unit = {"suite": 0, "tests": ["named_test", "other_test"], "full": False}
 
                 def execute(*args, **kwargs):
                     output = kwargs["stdout"]
+                    if failure == "panic":
+                        output.write(
+                            "running 2 tests\n"
+                            "test named_test ... FAILED\n"
+                            "test other_test ... ok\n"
+                            "thread 'named_test' (5724) panicked at tests/foo.rs:4:5:\n"
+                            "CreateProcessW (suspended LPAC): os error 2\n"
+                            "path detail that belongs in the artifact\n"
+                            "thread 'other_test' panicked at tests/foo.rs:8:5:\n"
+                            "unrelated panic\n"
+                        )
                     output.write("discarded-prefix\n" + "".join(f"diagnostic-{n}\n" for n in range(50)))
                     if failure == "summary":
                         output.write("running 1 test\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n")
                     if failure == "timeout":
                         raise subprocess.TimeoutExpired("test", 600)
-                    return subprocess.CompletedProcess(args[0], -11 if failure == "crash" else 0)
+                    return subprocess.CompletedProcess(args[0], {"crash": -11, "panic": 101}.get(failure, 0))
 
                 output = io.StringIO()
                 with mock.patch.object(subprocess, "run", side_effect=execute), contextlib.redirect_stdout(output):
@@ -477,7 +488,7 @@ class Sharding(unittest.TestCase):
                             cs.execute_unit(data, unit, 7, 2, root)
                     else:
                         result = cs.execute_unit(data, unit, 7, 2, root)
-                        self.assertEqual(result["code"], -11 if failure == "crash" else 124)
+                        self.assertEqual(result["code"], {"crash": -11, "panic": 101, "timeout": 124}[failure])
                 diagnostic = output.getvalue()
                 self.assertIn("witness::named_test", diagnostic)
                 self.assertIn("Test process 7", diagnostic)
@@ -485,6 +496,10 @@ class Sharding(unittest.TestCase):
                 tail = diagnostic.split("Last 40 output lines (shard-2-7.log):\n", 1)[1].splitlines()
                 self.assertEqual(len(tail), 40)
                 self.assertIn("diagnostic-49", tail)
+                if failure == "panic":
+                    self.assertIn("witness::named_test: CreateProcessW (suspended LPAC): os error 2", diagnostic)
+                    self.assertNotIn("path detail that belongs in the artifact", diagnostic)
+                    self.assertNotIn("unrelated panic", diagnostic)
                 self.assertNotIn("discarded-prefix", diagnostic)
                 self.assertIn("discarded-prefix", (root / "shard-2-7.log").read_text())
 

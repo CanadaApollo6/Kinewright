@@ -565,28 +565,60 @@ asserts `ENOSYS` and the checked legacy fallback.
 
 ## Windows confinement
 
-Use the documented `CreateProcessW` LPAC launch with an unnamed Job. The native
-Windows spike is the first task of slice 1b. Use a stable name-derived SID from
-`DeriveAppContainerSidFromAppContainerName`, zero capabilities, and no per-launch
-profile or ACL edits. Grant that SID read/execute on the packaged helper/DLL
+Use the documented `CreateProcessW` LPAC launch with an unnamed Job and zero
+capabilities. Register a profile once per user under the stable moniker chosen
+for the media helper. Derive the expected SID with
+`DeriveAppContainerSidFromAppContainerName` and check the SID returned at
+registration. Grant that SID read/execute on the packaged helper and DLL
 directory once at install or first run in a user-owned install. For an
 admin-owned install, the installer grants access. Never grant the source
-directory. At startup, sweep stale profiles/storage/launch artefacts under our
-name prefix after proving they have no live owner; preserve the stable install
-grant and never touch unrelated profiles. Use `SECURITY_CAPABILITIES` with
+directory. Use `SECURITY_CAPABILITIES` with
 `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` and
 `PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY` set to
 `PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT`.
 [Microsoft's LPAC launch contract](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer).
 
+Preparation can run again at app startup. It never deletes directories,
+files, or named streams. Verify the profile root against the pinned
+`Packages` directory and check every descendant's identity. Refuse reparse
+points or changed identities. Open each storage object with `WRITE_DAC`
+during preparation and apply the protected DACL on the same checked handle.
+Verification opens storage read-only. Cover `Packages\<name>` and every
+retained descendant, and the profile registry storage key and every subkey.
+Remove every ACE for the
+container SID, ALL APPLICATION PACKAGES, and ALL RESTRICTED APPLICATION
+PACKAGES. Open the registry key by moniker under the current user's classes
+hive at `Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage`.
+Open the classes hive directly as `HKEY_USERS\<SID>_Classes`. Open each
+component below the hive separately and refuse registry links.
+Production code does not impersonate a thread. Before each launch, recheck
+registration, SID, and the protected, grant-free storage DACLs. The combined
+file and registry walk is capped at 256 nodes. An unreadable or over-cap tree
+refuses launch. Launch performs no profile repair. Uninstall calls
+`DeleteAppContainerProfile`.
+
 Use `STARTUPINFOEXW` with
 `EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT`,
-an explicit executable path, an environment containing only `SystemRoot`, and
-the install directory as cwd. Suppress stderr without an inherited console or
-writable file handle. Do not request elevation. Before `ResumeThread`, inspect
-the actual suspended child's `TokenIsAppContainer`, expected AppContainer SID,
-zero `TokenCapabilities`, and low integrity level. Successful token inspection,
-not successful API return, is the spike's launch pass criterion.
+an explicit executable path, and the install directory as cwd. Pass
+`SystemRoot` and a fresh host-owned empty directory as `LOCALAPPDATA`.
+Create it under the account's LocalAppData known folder and keep the checked
+directory handle open until the child exits. Windows rewrites the child
+environment for the profile. Detach from the
+console and inherit only the listed handles. Do not request elevation.
+Before `ResumeThread`, check `TokenIsAppContainer`, the expected AppContainer
+SID, zero `TokenCapabilities`, and low integrity. The suspended token must
+pass `AccessCheck` for read through its own package SID and fail the same
+check through ALL APPLICATION PACKAGES. Successful creation alone proves
+none of these facts.
+
+Decision 8 requires isolation between helpers that share a package SID.
+Create each process and primary thread with protected security descriptors.
+The host user owns both objects. Only the host user and SYSTEM have ACEs,
+and the returned handles are non-inheritable. With the child suspended,
+use `SetTokenInformation(TokenDefaultDacl)` to apply the same two ACEs to
+objects created later, including additional threads. Read back that default
+DACL and both creation descriptors before resuming. A failed write or
+inspection ends the suspended child.
 
 If an additional restricted-token layer is necessary, compose a lowbox token
 from the restricted base via `NtCreateLowBoxToken`, as in Chromium's reviewed
@@ -596,7 +628,7 @@ Do not substitute `CreateProcessAsUserW(restricted_token)` for verified LPAC.
 [Chromium composition witness](https://chromium.googlesource.com/chromium/src/+/71104fd3/sandbox/win/src/restricted_token_unittest.cc)
 and [restricting-SID access checks](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createrestrictedtoken).
 
-The host uses `CreateFileW` for the source and `GetFileInformationByHandleEx`
+The host uses `CreateFileW` for the source and `GetFileInformationByHandle`
 for identity/type checks. Inherit only narrowed read-only source, pipe, and
 section handles through `DuplicateHandle`, `SetHandleInformation`, and
 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. No source path or parent process, token,
@@ -633,18 +665,37 @@ packaged MS1 DLLs. Use `GetProcessMitigationPolicy` for host inspection and
 Do not require Microsoft-only signatures, which would reject our FFmpeg DLLs.
 [Mitigation policies](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setprocessmitigationpolicy).
 
-Windows reads OS/runtime images, but this launch grants no writable private
-storage. Do not create a profile that supplies an unbounded writable directory
-or registry hive. Native canaries must prove creation, growth, and mutation are
-denied in every reachable private/temp/profile/registry location. If any runtime
-write is unavoidable, enforce a hard quota before accepting any media and prove
-it on native Windows; cleanup or periodic disk polling is not a quota.
-Otherwise refuse Windows media launch. Expose no write broker. Also test named
-pipes, ALPC endpoints, and `OpenProcess` against the host and a sibling helper,
-in addition to user files, registry, and network. Stable SID reuse grants no
-sibling IPC authority; verify denial rather than infer it from capabilities.
-Unsupported LPAC, mitigations, token composition, or nested Job setup fails
-closed. Prove this exact combined launch on native Windows before shipping.
+Windows reads OS and runtime images. The prepared profile must give the
+helper no writable private disk or registry storage. The helper's own
+AppContainer named-object directory is accepted. Its objects are transient
+and the Job admits one process. Native canaries must prove creation, growth,
+and mutation are denied in reachable private, temp, profile, and registry
+locations. If a runtime write is unavoidable, enforce and prove a hard quota
+before admitting media. Expose no write broker. Also test named pipes, ALPC
+endpoints, and process access against the host and a sibling helper. Test
+two helpers from the same profile in separate Jobs. In both directions,
+refuse process opens for handle duplication, VM write, and limited query.
+Refuse opens for setting context on the primary thread and a thread created
+after startup. An unconfined control must succeed at each open.
+Unsupported LPAC, mitigation, or nested Job setup refuses launch.
+
+Hosted runs 44512875269, 44523085254, and 44525476876 establish the launch
+requirements and storage behavior on `windows-2025`. Creation without
+registration returned Win32 2. Passing only `SystemRoot` with a registered
+profile returned 203. Token class 46 returned Win32 87 and native status
+`0xc0000003`. Added deny ACEs left the `AC` tree writable. Removing the
+package grants made its files and directories refuse writes. The storage
+registry key accepted a direct write as created and refused a direct write
+after its package grant was removed. The child started with the `AC` tree
+absent. The ordinary AppContainer could read an ALL APPLICATION PACKAGES
+file. LPAC received access denied. All this evidence comes from an elevated
+administrator account. A standard account and Windows 10 and 11 client
+builds remain unproven (MS-T8).
+
+Hosted run 44582306271 allowed all four same-SID process and primary-thread
+opens with the default descriptors. The decision 8 descriptors and later
+thread test require a new hosted run.
+
 
 ## Hardware decode and software cost
 
@@ -900,7 +951,7 @@ Publish CPU time, copy bandwidth, PSS/commit, and two-source contention as well 
 | Slice | Required deliverable and gate |
 | --- | --- |
 | 1a, Linux confinement + probe | Implement source admission, blocked shim scope join/degraded limits, namespaces/seccomp, app-parented shim/payload PDEATHSIG, the separate zbus scope supervisor and typed lifecycle contract, and isolated/full-stack attack witnesses end to end. Migrate all Linux import/project probes, including `crates/kinewright-project/src/owned_media.rs:415`. Include bounded first-frame decode, admission-required still inspection, and the replacement allocation sub-budget now. Return metadata only, no PCM/pixel rings. Measure 1080p/UHD/still probe PSS and address-space peaks before freezing probe limits. Pass video and still IX admission success fixtures plus malformed refusals, final-filter join/close/cancel, and watchdog-disabled app/supervisor-loss witnesses in both modes. Assert supervisor cgroup separation. Ship the install-time AppArmor profile, install it on Ubuntu CI, and qualify stock Arch plus Ubuntu availability and missing-profile refusal. |
-| 1b, Windows confinement + probe | Start with the native LPAC spike. Pass suspended-token inspection, stable SID/install ACL, no writable storage or proven hard quota, Job/CPU/mitigation, inherited-handle, and named-pipe/ALPC/process canaries before the same end-to-end probe protocol and IX admission. No Windows safety claim before this gate. |
+| 1b, Windows confinement + probe | Prepare a stable per-user LPAC profile with an install read/execute grant and protected, grant-free private storage. Verify the profile before each launch and the actual token, Job, CPU cap, mitigations, and handle inheritance before resuming. Exercise storage, network, named-pipe, ALPC, and process refusals before end-to-end probe protocol and IX admission. Hosted launcher evidence covers elevated `windows-2025`. Qualify standard accounts and Windows 10 and 11 client builds in MS-T8 before making a Windows safety claim. |
 | 2, waveform | First streaming consumer on both platforms. A validated probe precedes a fresh source-bound measurement helper. Stream bounded peak summaries through credited binary `DataChunk` frames. Add cancellation/checkpoint/launch-breaker witnesses and long-audio memory qualification. No loudness yet. |
 | 3, frames | Add agreed-geometry video and PCM rings for preview, playback, timeline rendering, and export source reads. Freeze ±64.0 PCM validation, preserve sample/colour/rotation contracts, and refuse mid-stream geometry changes. Gate snapshot-copy/parser fuzzing, shipping-config absolute fps, copy ceiling, two playheads, multicam, and churn. |
 | 4, loudness/thumbnails/rest | Add charged-cap loudness, source thumbnails, still pixel output beyond admission inspection, recognition extraction, scene/beat/silence analysis, room tone, and cache inspection. Thumbnail pixels use bounded binary chunks, ≤256 KiB total per thumbnail, never encoded images for host decode. Delete all direct input/decode host APIs. Complete all-callers audit, native escape tests, affected/dependent-crate gates, memory soak, and security review. |
