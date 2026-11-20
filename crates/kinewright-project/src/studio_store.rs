@@ -2109,6 +2109,11 @@ impl FrozenContext {
             sources,
             Arc::new(library),
             Arc::clone(self) as kinewright_media::owned_io::LifetimeGuard,
+            bind_playback_fonts(
+                self.resource_context
+                    .iter()
+                    .map(|resource| &resource.identity().entry),
+            ),
         )
         .and_then(|inputs| {
             if let Some(authority) = self.snapshot.pin.read_store().read_authority() {
@@ -2144,6 +2149,18 @@ impl crate::editing_session::Ja1EditingSession {
             .map(|descriptor| descriptor.key.clone())
             .collect())
     }
+}
+
+fn bind_playback_fonts<'a>(
+    entries: impl IntoIterator<Item = &'a crate::owned_inputs::OwnedInputEntry>,
+) -> kinewright_media::owned_io::ManifestFonts {
+    kinewright_media::owned_io::ManifestFonts::bind(entries.into_iter().filter_map(|entry| {
+        (entry.object.record_kind == RecordKind::OwnedFont).then_some((
+            entry.entry_id.as_str(),
+            entry.object.sha256.as_str(),
+            entry.object.byte_length,
+        ))
+    }))
 }
 
 impl crate::store::ProjectStore {
@@ -2203,12 +2220,14 @@ impl crate::store::ProjectStore {
                 "manual playback LUT resources".into(),
             ));
         }
+        let fonts = bind_playback_fonts(manifest.entries.iter());
         let lifetime = Arc::new((pin, document_charge, manifest, leases, resources));
         kinewright_media::owned_io::PlaybackInputs::admit(
             document,
             sources,
             Arc::new(library),
             lifetime,
+            fonts,
         )
         // A host-leased reader binds every later read and retarget to its lease.
         .and_then(|inputs| match self.read_authority() {

@@ -789,6 +789,30 @@ pub struct FfmpegMediaEngine {
 }
 
 impl FfmpegMediaEngine {
+    /// Encode the admitted snapshot to an exclusive, size-limited staging name.
+    ///
+    /// # Errors
+    ///
+    /// Refuses invalid settings, unavailable pinned inputs, exhausted
+    /// reservations, lost read authority, cancellation, or staging failure.
+    pub fn export_owned_document(
+        &self,
+        inputs: &Arc<crate::owned_io::PlaybackInputs>,
+        target: crate::OwnedExportTarget<'_>,
+        settings: &ExportSettings,
+        progress: &ProgressSink,
+    ) -> Result<crate::OwnedExport, crate::OwnedExportError> {
+        self.decoders.scope(|| {
+            crate::export::export_owned_document(
+                inputs,
+                target,
+                settings,
+                progress,
+                self.gpu.clone(),
+            )
+        })
+    }
+
     pub(crate) fn unscoped_events(&self) -> Receiver<MediaEvent> {
         self.events_rx.clone()
     }

@@ -2420,6 +2420,7 @@ dependencies = [
  "rustix 1.1.4",
  "serde",
  "serde_json",
+ "thiserror 2.0.19",
  "wgpu",
  "winapi-util",
 ]

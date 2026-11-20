@@ -84,25 +84,66 @@ pub fn decode_audio_range(
     output_channels: u16,
     cancellation: &ExportCancellation,
 ) -> Result<Vec<f32>, MediaError> {
+    decode_audio_range_with_source(
+        path,
+        source_fps,
+        source_from..source_end,
+        output_rate,
+        output_channels,
+        cancellation,
+        None,
+    )
+}
+
+pub(crate) fn decode_audio_range_with_source(
+    path: &Path,
+    source_fps: Rational,
+    source_range: std::ops::Range<TimeCode>,
+    output_rate: u32,
+    output_channels: u16,
+    cancellation: &ExportCancellation,
+    source: Option<&crate::owned_io::CertifiedSource>,
+) -> Result<Vec<f32>, MediaError> {
     if cancellation.is_cancelled() {
         return Err(MediaError::Cancelled);
     }
-    let start_sample = frame_to_samples(source_from, output_rate, source_fps);
-    let end_sample = frame_to_samples(source_end, output_rate, source_fps);
+    let start_sample = frame_to_samples(source_range.start, output_rate, source_fps);
+    let end_sample = frame_to_samples(source_range.end, output_rate, source_fps);
     let expected = usize::try_from(end_sample.saturating_sub(start_sample))
         .unwrap_or(usize::MAX)
         .saturating_mul(usize::from(output_channels));
-    let mut decoder =
-        AudioDecoder::open(path, output_rate, output_channels, start_sample, end_sample)?;
-    let mut samples = Vec::with_capacity(expected);
-    while let Some(chunk) = decoder.next_chunk()? {
+    let mut decoder = AudioDecoder::open_with_source_and_cancel(
+        path,
+        output_rate,
+        output_channels,
+        start_sample,
+        end_sample,
+        source,
+        source.map(|_| cancellation.shared_signal()),
+    )?;
+    collect_pcm(expected, cancellation, || decoder.next_chunk())
+}
+
+fn collect_pcm(
+    expected: usize,
+    cancellation: &ExportCancellation,
+    mut next_chunk: impl FnMut() -> Result<Option<Vec<f32>>, MediaError>,
+) -> Result<Vec<f32>, MediaError> {
+    let mut samples = Vec::new();
+    samples
+        .try_reserve_exact(expected)
+        .map_err(crate::decode::backend)?;
+    while let Some(chunk) = next_chunk()? {
         if cancellation.is_cancelled() {
             return Err(MediaError::Cancelled);
         }
-        samples.extend_from_slice(&chunk);
+        // Repeated timestamps can keep producing packets below the range end.
+        // Keep the same prefix as the old final truncation and keep checking
+        // the rest of the input for cancellation and read/decoder failures.
+        let take = chunk.len().min(expected - samples.len());
+        samples.extend_from_slice(&chunk[..take]);
     }
     samples.resize(expected, 0.0);
-    samples.truncate(expected);
     Ok(samples)
 }
 
@@ -2239,6 +2280,16 @@ pub(crate) fn process_buffer_static(
     channels: usize,
     input: &[f32],
 ) -> Result<Vec<f32>, MediaError> {
+    process_buffer_static_with_check(effect, sample_rate, channels, input, || Ok(()))
+}
+
+pub(crate) fn process_buffer_static_with_check(
+    effect: &Effect,
+    sample_rate: u32,
+    channels: usize,
+    input: &[f32],
+    mut check: impl FnMut() -> Result<(), MediaError>,
+) -> Result<Vec<f32>, MediaError> {
     if channels == 0 {
         return Err(MediaError::Backend(
             "a static audio node needs at least one channel".to_owned(),
@@ -2249,7 +2300,10 @@ pub(crate) fn process_buffer_static(
     let silence = vec![0.0_f32; channels];
     let mut frame = vec![0.0_f32; channels];
     let mut output = Vec::with_capacity(input.len().saturating_add(latency_frames * channels));
-    for source in input.chunks_exact(channels) {
+    for (index, source) in input.chunks_exact(channels).enumerate() {
+        if index % 1_024 == 0 {
+            check()?;
+        }
         frame.copy_from_slice(source);
         runtime.process_frame(&mut frame, &silence, TimeCode::ZERO, sample_rate);
         output.extend_from_slice(&frame);
@@ -4829,8 +4883,31 @@ impl AudioDecoder {
         end_sample: u64,
         source: Option<&crate::owned_io::CertifiedSource>,
     ) -> Result<Self, MediaError> {
+        Self::open_with_source_and_cancel(
+            path,
+            output_rate,
+            output_channels,
+            target_sample,
+            end_sample,
+            source,
+            None,
+        )
+    }
+
+    fn open_with_source_and_cancel(
+        path: &Path,
+        output_rate: u32,
+        output_channels: u16,
+        target_sample: u64,
+        end_sample: u64,
+        source: Option<&crate::owned_io::CertifiedSource>,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<Self, MediaError> {
         let mut input = if let Some(source) = source {
-            crate::owned_io::DecodeInput::open(source, Arc::new(AtomicBool::new(false)))?
+            crate::owned_io::DecodeInput::open(
+                source,
+                cancel.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+            )?
         } else {
             crate::owned_io::DecodeInput::Legacy(media_input(path)?)
         };
@@ -5107,6 +5184,75 @@ mod tests {
     use crate::test_support::{GeneratedMedia, pseudo_random_amplitude, rms, tone, wav_f32};
 
     use super::*;
+
+    fn repeated_pcm_fixture() -> GeneratedMedia {
+        GeneratedMedia::ffmpeg(
+            "owned-export-repeated-pcm",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=0.25",
+                "-af",
+                "asetpts=0",
+                "-c:a",
+                "pcm_s16le",
+            ],
+            "mkv",
+        )
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
+    fn s5_owned_export_pcm_collection_is_bounded_with_repeated_pts() {
+        let asset = repeated_pcm_fixture();
+        let expected = 4_800;
+        let mut decoder =
+            AudioDecoder::open(asset.path(), 48_000, 2, 0, expected as u64 / 2).unwrap();
+        let mut delivered = 0;
+        let clipped = collect_pcm(expected, &ExportCancellation::default(), || {
+            let chunk = decoder.next_chunk()?;
+            delivered += chunk.as_ref().map_or(0, Vec::len);
+            Ok(chunk)
+        })
+        .unwrap();
+        assert!(
+            delivered > expected,
+            "repeated timestamps must produce excess samples"
+        );
+        assert_eq!(clipped.len(), expected);
+        assert_eq!(
+            clipped.capacity(),
+            expected,
+            "collection exceeded the charged capacity"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
+    fn s5_owned_export_decode_cancellation_stops_at_the_first_decoded_chunk() {
+        let asset = repeated_pcm_fixture();
+        let cancellation = ExportCancellation::default();
+        let mut decoder = AudioDecoder::open(asset.path(), 48_000, 2, 0, 2_400).unwrap();
+        let mut reads = 0;
+        let result = collect_pcm(4_800, &cancellation, || {
+            let chunk = decoder.next_chunk()?;
+            reads += 1;
+            if reads == 1 {
+                assert!(chunk.as_ref().is_some_and(|chunk| !chunk.is_empty()));
+                cancellation.cancel();
+            }
+            Ok(chunk)
+        });
+        assert_eq!(reads, 1, "decoding resumed after cancellation");
+        assert_eq!(result, Err(MediaError::Cancelled));
+    }
 
     #[test]
     fn c2_r4_retained_pcm_mixer_and_output_ring_keep_their_authority() {

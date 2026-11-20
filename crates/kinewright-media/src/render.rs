@@ -44,6 +44,7 @@ static ADJUSTMENT_FRAME: LazyLock<WorkingFrame> = LazyLock::new(|| WorkingFrame 
 pub(crate) const PREVIEW_MAX_WIDTH: u32 = 1280;
 
 const FRAME_CACHE_CAPACITY: usize = 32;
+const OWNED_EXPORT_CACHE_FRAMES: usize = 4;
 pub(crate) const PREFETCH_FRAMES: i64 = 15;
 pub(crate) const FRAME_CACHE_BYTE_BUDGET: usize = 224 * 1024 * 1024;
 
@@ -798,6 +799,7 @@ pub(crate) struct FrameRenderer {
     /// `missing_lut_asset` instead of quietly dropping the look.
     lut_library: Arc<LutLibrary>,
     inputs: Option<Arc<crate::owned_io::PlaybackInputs>>,
+    export_stop: Option<Arc<std::sync::atomic::AtomicBool>>,
     legacy_media: Option<kinewright_core::LegacyMediaGrant>,
     /// The engine gauge current when this renderer was built, if any.
     decoders: Option<DecoderGauge>,
@@ -864,6 +866,7 @@ impl FrameRenderer {
             preview: None,
             lut_library: Arc::new(LutLibrary::default()),
             inputs: None,
+            export_stop: None,
             legacy_media: None,
         }
     }
@@ -900,6 +903,10 @@ impl FrameRenderer {
             self.inputs = inputs;
         }
     }
+    pub(crate) fn set_export_stop(&mut self, cancellation: &kinewright_core::ExportCancellation) {
+        self.export_stop = Some(cancellation.shared_signal());
+    }
+
     pub(crate) fn set_lut_library(&mut self, library: Arc<LutLibrary>) {
         self.lut_library = library;
     }
@@ -1507,6 +1514,13 @@ impl FrameRenderer {
             scale.max_width(),
         )
         .with_authority(self.inputs.as_deref(), self.legacy_media.as_ref());
+        // Delivery walks the timeline once. Bound its decoded-frame residency
+        // while keeping a short forward window for the shared sequential decoder.
+        let capacity = if self.export_stop.is_some() {
+            OWNED_EXPORT_CACHE_FRAMES
+        } else {
+            FRAME_CACHE_CAPACITY
+        };
         if let std::collections::hash_map::Entry::Vacant(entry) =
             self.video_sources.entry(key.clone())
         {
@@ -1520,8 +1534,15 @@ impl FrameRenderer {
                     description,
                     d65_assumption(description),
                     &certified,
-                    None,
-                )?
+                    self.export_stop.as_ref(),
+                )
+                .map_err(|error| {
+                    if self.export_stop.is_some() {
+                        crate::export::name_owned_refusal(error, asset)
+                    } else {
+                        error
+                    }
+                })?
             } else {
                 self.legacy_media
                     .as_ref()
@@ -1536,7 +1557,7 @@ impl FrameRenderer {
                     (threads, None),
                 )?
             };
-            let mut cache = FrameCache::new(FRAME_CACHE_CAPACITY);
+            let mut cache = FrameCache::new(capacity);
             let demand = self
                 .preview
                 .as_ref()
@@ -1571,6 +1592,7 @@ impl FrameRenderer {
                     None => prefetch_frames(frame_bytes),
                 },
             };
+            let prefetch = prefetch.min(i64::try_from(capacity - 1).unwrap_or(i64::MAX));
             let end = TimeCode(
                 source_at
                     .0

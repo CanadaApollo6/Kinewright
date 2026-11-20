@@ -2786,6 +2786,7 @@ impl Compositor {
     }
 
     fn load_cube_lut(&self, path: &Path) -> Result<Arc<CubeLut>, MediaError> {
+        crate::locator::before_file_open()?;
         let canonical = fs::canonicalize(path).map_err(|error| {
             MediaError::Backend(format!(
                 "could not resolve .cube LUT {}: {error}",

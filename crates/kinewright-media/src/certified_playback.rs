@@ -3,7 +3,10 @@
 use super::{CertifiedSource, LifetimeGuard, ReadAuthority};
 use crate::LutLibrary;
 use kinewright_core::{AssetId, Document, MediaError};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, OnceLock},
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct PlaybackAuthority(Arc<()>);
@@ -19,6 +22,56 @@ impl std::hash::Hash for PlaybackAuthority {
     }
 }
 
+/// Font identities of the owner's checked manifest. Titles have one immutable
+/// face, whose identity is derived from the bytes used by the title renderer.
+#[derive(Clone)]
+pub struct ManifestFonts {
+    embedded: bool,
+    unsupported: Option<String>,
+}
+
+impl ManifestFonts {
+    #[must_use]
+    pub fn bind<'a>(fonts: impl IntoIterator<Item = (&'a str, &'a str, u64)>) -> Self {
+        static TITLE_FONT_DIGEST: OnceLock<String> = OnceLock::new();
+        let bytes = kinewright_core::title_font_bytes();
+        let digest = TITLE_FONT_DIGEST.get_or_init(|| crate::sha256_bytes(bytes));
+        let mut binding = Self {
+            embedded: false,
+            unsupported: None,
+        };
+        for (id, hash, length) in fonts {
+            if id == "font:Inter" && hash == digest && length == bytes.len() as u64 {
+                binding.embedded = true;
+            } else {
+                binding.unsupported = Some(format!("{id} (sha256 {hash})"));
+                break;
+            }
+        }
+        binding
+    }
+
+    pub(crate) fn check_export(&self, document: &Document) -> Result<(), MediaError> {
+        if let Some(input) = &self.unsupported {
+            return Err(MediaError::OwnedExportInputUnavailable {
+                input: input.clone(),
+            });
+        }
+        if !self.embedded
+            && document
+                .tracks
+                .iter()
+                .flat_map(|track| &track.clips)
+                .any(|clip| clip.content.title().is_some())
+        {
+            return Err(MediaError::OwnedExportInputUnavailable {
+                input: "font:Inter".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
 pub struct PlaybackInputs {
     pub(crate) read_authority: Option<ReadAuthority>,
     pub(crate) authority: PlaybackAuthority,
@@ -26,6 +79,7 @@ pub struct PlaybackInputs {
     pub(crate) sources: BTreeMap<AssetId, CertifiedSource>,
     pub(crate) lut: Arc<LutLibrary>,
     pub(crate) lifetime: LifetimeGuard,
+    pub(crate) fonts: ManifestFonts,
 }
 impl PlaybackInputs {
     pub fn with_read_authority(mut self, authority: ReadAuthority) -> Result<Self, MediaError> {
@@ -69,6 +123,7 @@ impl PlaybackInputs {
             self.sources.clone(),
             Arc::clone(&self.lut),
             Arc::clone(&self.lifetime),
+            self.fonts.clone(),
         )?;
         inputs.authority = self.authority.clone();
         inputs.read_authority.clone_from(&self.read_authority);
@@ -84,6 +139,7 @@ impl PlaybackInputs {
         sources: BTreeMap<AssetId, CertifiedSource>,
         lut: Arc<LutLibrary>,
         lifetime: LifetimeGuard,
+        fonts: ManifestFonts,
     ) -> Result<Self, MediaError> {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         for asset in &document.media_pool {
@@ -123,6 +179,7 @@ impl PlaybackInputs {
             sources,
             lut,
             lifetime,
+            fonts,
         })
     }
     pub(crate) fn source(&self, id: AssetId) -> Result<CertifiedSource, MediaError> {

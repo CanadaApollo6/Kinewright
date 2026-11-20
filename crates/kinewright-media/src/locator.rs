@@ -1,7 +1,11 @@
 //! Thread-affine locator execution: queued work retains its source authority,
 //! and every native locator open rechecks it inside the operation's lease.
 use kinewright_core::{LegacyMediaGrant, LegacyMediaWork, MediaError};
-use std::{cell::RefCell, marker::PhantomData, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    marker::PhantomData,
+    rc::Rc,
+};
 
 /// The receiver cannot extract the payload without entering its source scope.
 /// Only running jobs acquire leases: held queued jobs never stall activation.
@@ -29,6 +33,34 @@ impl<T> LocatorJob<T> {
 
 thread_local! {
     static AUTHORITY: RefCell<Vec<LegacyMediaGrant>> = const { RefCell::new(Vec::new()) };
+    static PATH_OPENS_DENIED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Locator readers must stay closed for the entire synchronous owned encode.
+pub(crate) struct DenyLocatorOpens(bool, PhantomData<Rc<()>>);
+
+impl DenyLocatorOpens {
+    pub(crate) fn enter() -> Self {
+        Self(
+            PATH_OPENS_DENIED.with(|state| state.replace(true)),
+            PhantomData,
+        )
+    }
+}
+
+impl Drop for DenyLocatorOpens {
+    fn drop(&mut self) {
+        PATH_OPENS_DENIED.set(self.0);
+    }
+}
+
+pub(crate) fn before_file_open() -> Result<(), MediaError> {
+    if PATH_OPENS_DENIED.get() {
+        return Err(MediaError::Backend(
+            "locator opens are forbidden during owned export".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Metadata is partitioned even when a revoked job reports its refusal.
@@ -94,6 +126,7 @@ pub(crate) fn enter_retained(
 }
 
 pub(crate) fn before_decoder_open() -> Result<(), MediaError> {
+    before_file_open()?;
     check()?;
     #[cfg(feature = "test-util")]
     if let Some(grant) = capture() {

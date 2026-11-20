@@ -1584,6 +1584,12 @@ pub struct MixWindowLevelReport {
 pub struct ExportCancellation(Arc<AtomicBool>);
 
 impl ExportCancellation {
+    /// Share the cancellation signal with a native I/O adapter.
+    #[must_use]
+    pub fn shared_signal(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.0)
+    }
+
     pub fn cancel(&self) {
         self.0.store(true, Ordering::Release);
     }
@@ -1976,6 +1982,8 @@ pub enum MediaError {
     MediaReadTemporarilyUnavailable,
     #[error("owned_media_operation_unavailable: this operation has no certified source route")]
     OwnedMediaOperationUnavailable,
+    #[error("owned_export_input_unavailable: {input} has no certified export route")]
+    OwnedExportInputUnavailable { input: String },
     #[error("media operation is not implemented")]
     NotImplemented,
     #[error("media operation was cancelled")]
@@ -2153,6 +2161,7 @@ impl MediaError {
             Self::MatteProof(error) => Some(error.code()),
             Self::MatteCoverage(error) => Some(error.code()),
             Self::Store { code, .. } => Some(code),
+            Self::OwnedExportInputUnavailable { .. } => Some("owned_export_input_unavailable"),
             Self::MediaReadTemporarilyUnavailable => Some("owned_media_temporarily_unavailable"),
             Self::MediaAdmissionRequired
             | Self::OwnedMediaOperationUnavailable
