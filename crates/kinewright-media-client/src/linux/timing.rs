@@ -1,4 +1,4 @@
-use super::Phase;
+use super::{Failure, Phase};
 use std::{
     fmt,
     time::{Duration, Instant},
@@ -74,6 +74,7 @@ impl fmt::Display for ProbeTiming {
 pub(super) struct Progress {
     timing: ProbeTiming,
     entered: Instant,
+    terminal_failure: Option<(Instant, Failure)>,
 }
 
 impl Default for Progress {
@@ -81,11 +82,32 @@ impl Default for Progress {
         Self {
             timing: ProbeTiming::default(),
             entered: Instant::now(),
+            terminal_failure: None,
         }
     }
 }
 
 impl Progress {
+    pub(super) fn begin_cleanup(
+        &mut self,
+        finished: Instant,
+        failure: Option<&Failure>,
+    ) -> ProbeTiming {
+        let timing = self.snapshot();
+        // The worker keeps its result through cleanup. The actor may have to
+        // answer from this copy while that cleanup still owns its slot.
+        self.terminal_failure = failure.map(|failure| (finished, failure.clone()));
+        self.enter(Phase::Cleanup);
+        timing
+    }
+
+    pub(super) fn failure_before(&self, deadline: Instant) -> Option<Failure> {
+        self.terminal_failure
+            .as_ref()
+            .filter(|(known_at, _)| *known_at <= deadline)
+            .map(|(_, failure)| failure.clone())
+    }
+
     pub(super) fn enter(&mut self, phase: Phase) {
         if self.timing.phase == phase {
             return;

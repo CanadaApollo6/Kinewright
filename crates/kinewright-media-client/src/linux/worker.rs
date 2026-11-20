@@ -156,6 +156,10 @@ impl Shared {
         self.progress.lock().unwrap().snapshot()
     }
 
+    pub(super) fn failure_before(&self, deadline: Instant) -> Option<Failure> {
+        self.progress.lock().unwrap().failure_before(deadline)
+    }
+
     fn scope_error(&self, error: Error) -> Failure {
         match error {
             Error::TimedOut => Failure::ProbeTimedOut(self.timing()),
@@ -454,11 +458,21 @@ impl Lease {
         let scope = self.scope.ok_or_else(bad)?;
         shared.enter(Phase::VerifyScope);
         self.trace.set(Phase::VerifyScope);
-        match self
+        let verification = self
             .controller
             .call(Message::VerifyScope { scope })
-            .map_err(|error| shared.scope_error(error))?
+            .map_err(|error| shared.scope_error(error))?;
+        #[cfg(feature = "slow-tests")]
+        let verification = if self.seams.scope == Some(super::ScopeSeam::VerifyTimedOut)
+            && matches!(verification, Message::ScopeVerified { .. })
         {
+            Message::Failed {
+                error: Error::TimedOut,
+            }
+        } else {
+            verification
+        };
+        match verification {
             Message::ScopeVerified {
                 scope: actual,
                 starttime,
@@ -470,12 +484,15 @@ impl Lease {
                     .into());
             }
             Message::Failed {
-                error: Error::SandboxUnavailable,
+                error: error @ (Error::SandboxUnavailable | Error::TimedOut),
             } => {
                 *fallback = true;
-                return Err(Phase::VerifyScope
-                    .unavailable(Reason::ScopeVerifyFailed)
-                    .into());
+                let reason = if error == Error::TimedOut {
+                    Reason::ScopeVerifyTimedOut
+                } else {
+                    Reason::ScopeVerifyFailed
+                };
+                return Err(Phase::VerifyScope.unavailable(reason).into());
             }
             Message::Failed { error } => return Err(shared.scope_error(error)),
             _ => return Err(bad()),
@@ -605,8 +622,12 @@ impl Lease {
         Ok(result)
     }
     fn finish(&mut self, result: Outcome, fallback: bool, shared: &Shared, end: Instant) -> Done {
-        let timing = shared.timing();
-        shared.enter(Phase::Cleanup);
+        let finished = Instant::now();
+        let timing = shared
+            .progress
+            .lock()
+            .unwrap()
+            .begin_cleanup(finished, result.as_ref().err());
         let orderly = result.is_ok();
         let success = self.cleanup(!orderly, end);
         shared.native_clean.store(true, Ordering::Release);

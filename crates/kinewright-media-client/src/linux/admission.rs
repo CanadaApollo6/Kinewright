@@ -368,11 +368,14 @@ impl Queue {
             }
         }
     }
-    /// The oldest request whose source has no active cursor. Returns whether
-    /// it was a fresh caller request (its reservation is released here).
-    pub fn next(&mut self, busy: impl Fn(&[u8; 32]) -> bool, status: &Status) -> Option<Pending> {
-        let eligible = |item: &Pending| !busy(&item.request.source.identity());
-        if let Some(index) = self.continued.iter().position(eligible) {
+    /// The oldest eligible request, with continuations first. Releases a
+    /// pending reservation only when removing a fresh caller request.
+    pub fn next(
+        &mut self,
+        eligible: impl Fn(&Pending) -> bool,
+        status: &Status,
+    ) -> Option<Pending> {
+        if let Some(index) = self.continued.iter().position(&eligible) {
             return self.continued.remove(index);
         }
         let index = self.pending.iter().position(eligible)?;
@@ -545,7 +548,7 @@ mod tests {
         assert!(resumed.try_recv().is_err(), "the next request is admitted");
         assert!(!queue.circuit.paused(), "that request resumed admission");
         assert!(queue.circuit.permits([201; 32], false, after));
-        assert!(queue.next(|_| false, &status).is_some());
+        assert!(queue.next(|_| true, &status).is_some());
         assert_eq!(status.pending.load(Ordering::Acquire), 0);
     }
     #[test]

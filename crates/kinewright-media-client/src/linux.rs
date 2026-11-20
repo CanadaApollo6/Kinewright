@@ -99,6 +99,8 @@ pub enum ScopeSeam {
     /// scope id does when the manager's reply is lost after attach. Every
     /// emptiness proof of that scope then errors as with `PersistentError`.
     AttachedReportedFailed,
+    /// The supervisor attaches the scope and replies that verification timed out.
+    VerifyTimedOut,
 }
 impl Config {
     #[must_use]
@@ -206,6 +208,7 @@ pub enum UnavailableReason {
     ScopeCreateFailed,
     ScopeUnavailable(kinewright_media_ipc::ScopeUnavailableReason),
     ScopeVerifyFailed,
+    ScopeVerifyTimedOut,
     RequiredNamespacesUnavailable,
     NamespacePolicyDenied,
     EarlyEof,
@@ -268,7 +271,7 @@ impl fmt::Display for Unavailable {
 
 impl std::error::Error for Unavailable {}
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Failure {
     Sandbox(MediaSandboxError),
     ProbeTimedOut(ProbeTiming),

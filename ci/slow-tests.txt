@@ -235,6 +235,8 @@ rss_native degraded_rss_polling_records_overshoot_and_quarantines_source crates/
 runtime_native runtime_releases_both_slots_during_bus_disconnect crates/kinewright-media-client/tests/runtime_native.rs linux-only # Native scope cleanup and supervisor reconnect/restart
 runtime_native runtime_scope_proof_holds_when_a_removed_scope_keeps_two_links crates/kinewright-media-client/tests/runtime_native.rs linux-only # Hosted-kernel deletion shape: ENODEV proves a two-link removed scope
 runtime_native runtime_scope_proof_error_keeps_the_reservation crates/kinewright-media-client/tests/runtime_native.rs linux-only # Persistent scope proof error: bounded, typed, reservation kept
+runtime_native ms_t10_scope_verification_timeout_falls_back crates/kinewright-media-client/tests/runtime_native.rs linux-only # VerifyScope timeout preserves degraded fallback
+runtime_native ms_t10_finished_helper_failure_survives_held_cleanup crates/kinewright-media-client/tests/runtime_native.rs linux-only # Finished native refusal survives the cleanup deadline
 runtime_native runtime_unproven_fallback_is_not_relaunched crates/kinewright-media-client/tests/runtime_native.rs linux-only # Attached-then-failed scope with unproven cleanup: no degraded relaunch
 
 # Compact-history session model (portable; native-store companion stays in fast).

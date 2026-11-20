@@ -156,7 +156,10 @@ impl Handle {
             .map_err(|_| Error::Crashed)?;
         receiver
             .recv_timeout(Duration::from_secs(6))
-            .map_err(|_| Error::TimedOut)?
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => Error::TimedOut,
+                mpsc::RecvTimeoutError::Disconnected => Error::Crashed,
+            })?
     }
 
     /// Transfer a scope whose native members the app has already reaped.
@@ -264,5 +267,50 @@ fn rpc(
         | Message::ScopeUnavailable { .. }
         | Message::Failed { .. }) => Ok(message),
         _ => Err(Error::ProtocolViolation),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ms_t10_queued_scope_call_reports_controller_loss() {
+        let (sender, incoming) = mpsc::sync_channel(2);
+        let (first_reply, first) = mpsc::sync_channel(1);
+        let create = || Message::CreateScope {
+            pid: std::process::id(),
+            memory_bytes: 1,
+        };
+        sender
+            .try_send(Call::Request {
+                message: create(),
+                reply: first_reply,
+            })
+            .unwrap();
+        let handle = Handle {
+            sender,
+            pin: Arc::new(ProcessHandle::open(std::process::id()).unwrap()),
+            generation: 1,
+            available: true,
+            pending_stops: Arc::default(),
+        };
+        std::thread::scope(|scope| {
+            let caller = scope.spawn(|| handle.call(create()));
+            let (queued, receiver) = mpsc::sync_channel(2);
+            for _ in 0..2 {
+                queued.try_send(incoming.recv().unwrap()).unwrap();
+            }
+            let (mut controller, supervisor) = UnixStream::pair().unwrap();
+            drop(supervisor);
+            assert_eq!(
+                serve(&mut controller, 1, &receiver, &handle.pending_stops),
+                Err(Error::Crashed)
+            );
+            assert!(matches!(first.recv().unwrap(), Err(Error::Crashed)));
+            drop(receiver);
+            let outcome = caller.join().unwrap();
+            assert!(matches!(outcome, Err(Error::Crashed)), "{outcome:?}");
+        });
     }
 }

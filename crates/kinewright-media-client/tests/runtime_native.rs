@@ -113,13 +113,7 @@ fn runtime_fixture() {
         Limits::PROBE,
     );
     #[cfg(feature = "slow-tests")]
-    let config = if case == "hosted-kernel" {
-        config.scope_seam(kinewright_media_client::ScopeSeam::HostedKernel)
-    } else {
-        config
-    };
-    #[cfg(feature = "slow-tests")]
-    let Some(config) = unproven_case(&case, config, &png) else {
+    let Some(config) = seamed_case(&case, config, &png) else {
         return;
     };
     let runtime = Runtime::start(config).unwrap();
@@ -136,6 +130,13 @@ fn runtime_fixture() {
     assert_eq!(probe.metadata().kind, Kind::Image);
     assert_eq!(probe.metadata().duration_frames, 1);
     let state = runtime.snapshot();
+    #[cfg(feature = "slow-tests")]
+    if case == "verify-timeout" {
+        assert!(state.degraded);
+        assert_eq!(runtime.witness().launches, 2);
+        runtime.shutdown().unwrap();
+        return;
+    }
     // The parent names the mode this environment must give; the other mode
     // never stands in for it.
     let expected = std::env::var("KW_RUNTIME_EXPECT").unwrap();
@@ -155,6 +156,69 @@ fn runtime_fixture() {
         (runtime.snapshot().active, runtime.snapshot().pending),
         (0, 0)
     );
+}
+
+#[cfg(feature = "slow-tests")]
+fn held_helper_failure(config: Config, path: &Path) {
+    use kinewright_media_client::Failure;
+    use kinewright_media_ipc::MediaSandboxError;
+    use std::sync::atomic::Ordering;
+    fs::write(path, b"A regular file without a supported media format.").unwrap();
+    let hold = Arc::new(AtomicBool::new(false));
+    let runtime = Runtime::start(config.hold_cleanup(Arc::clone(&hold))).unwrap();
+    let probe =
+        || runtime.probe_until_deadline(Box::new(Input(File::open(path).unwrap())), None, None);
+    let control = probe();
+    assert!(
+        matches!(
+            control,
+            Err(Failure::Sandbox(MediaSandboxError::UnsupportedMedia))
+        ),
+        "{control:?}"
+    );
+    println!("MS2_HELD_FAILURE_CONTROL {control:?}");
+    hold.store(true, Ordering::Release);
+    let result = probe();
+    let active = runtime.snapshot().active;
+    hold.store(false, Ordering::Release);
+    runtime.shutdown().unwrap();
+    assert_eq!(
+        active, 1,
+        "the answer must leave the held reservation active"
+    );
+    assert!(
+        matches!(
+            result,
+            Err(Failure::Sandbox(MediaSandboxError::UnsupportedMedia))
+        ),
+        "{result:?}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn ms_t10_finished_helper_failure_survives_held_cleanup() {
+    let _deadline = deadline::test();
+    run_case("held-failure");
+}
+
+#[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn ms_t10_scope_verification_timeout_falls_back() {
+    let _deadline = deadline::test();
+    if !ms2_diag::user_manager() {
+        println!(
+            "MS2_NATIVE_NOT_RUN binary=runtime_native test=ms_t10_scope_verification_timeout_falls_back reason=no_user_manager"
+        );
+        return;
+    }
+    run_case("verify-timeout");
 }
 /// Two probes whose scope emptiness proof always errors. Each must be
 /// answered with a typed failure inside the cleanup budget, keep its decode
@@ -192,16 +256,19 @@ fn unproven_cleanup(config: Config, png: &Path) {
     assert_eq!((first.2, second.2, held), (1, 2, 2));
     assert_eq!(shutdown, Err(MediaSandboxError::Crashed));
 }
-/// Runs the unproven-cleanup cases; any other case gets its config back.
+/// Selects the scope seams and runs cases with a specialized outcome check.
 #[cfg(feature = "slow-tests")]
-fn unproven_case(case: &std::ffi::OsStr, config: Config, png: &Path) -> Option<Config> {
+fn seamed_case(case: &std::ffi::OsStr, config: Config, png: &Path) -> Option<Config> {
     use kinewright_media_client::ScopeSeam;
-    if case == "attached-failed" {
-        unproven_fallback(config.scope_seam(ScopeSeam::AttachedReportedFailed), png);
-    } else if case == "persistent-error" {
-        unproven_cleanup(config.scope_seam(ScopeSeam::PersistentError), png);
-    } else {
-        return Some(config);
+    match case.to_str().unwrap() {
+        "hosted-kernel" => return Some(config.scope_seam(ScopeSeam::HostedKernel)),
+        "verify-timeout" => return Some(config.scope_seam(ScopeSeam::VerifyTimedOut)),
+        "held-failure" => held_helper_failure(config, png),
+        "attached-failed" => {
+            unproven_fallback(config.scope_seam(ScopeSeam::AttachedReportedFailed), png)
+        }
+        "persistent-error" => unproven_cleanup(config.scope_seam(ScopeSeam::PersistentError), png),
+        _ => return Some(config),
     }
     None
 }
