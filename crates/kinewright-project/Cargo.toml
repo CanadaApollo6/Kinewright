@@ -12,7 +12,7 @@ repository.workspace = true
 # on core and media.
 test-util = ["kinewright-media/test-util"]
 # Executable override for confined probe fixtures. Keep on dev edges only.
-ms2-test-bin-dir = []
+ms2-test-bin-dir = ["kinewright-media-client/probe-phase-logs"]
 slow-tests = []
 storage-heap-profile = []
 history-metrics = ["kinewright-core/history-metrics"]

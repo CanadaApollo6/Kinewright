@@ -2611,12 +2611,24 @@ impl BundleRecord for crate::owned_inputs::OwnedInputManifest {
         Ok(())
     }
     fn validate_admission(&self, store: &ProjectStore) -> Result<(), BundleError> {
+        self.validate_media_admission(store, None)
+    }
+}
+impl crate::owned_inputs::OwnedInputManifest {
+    fn validate_media_admission(
+        &self,
+        store: &ProjectStore,
+        asset: Option<&kinewright_core::MediaAsset>,
+    ) -> Result<(), BundleError> {
         self.validate_store(store)?;
         for entry in &self.entries {
             if entry.object.record_kind == RecordKind::OwnedMedia
                 && !store.media_admission_verified(entry)?
             {
-                store.certify_media_entry_until_deadline(entry)?;
+                let locator = asset
+                    .filter(|asset| entry.matches_media_asset(asset))
+                    .map(|asset| asset.path.as_path());
+                store.certify_media_entry_until_deadline(entry, locator)?;
             }
         }
         Ok(())
@@ -2706,19 +2718,27 @@ impl ProjectStore {
         &mut self,
         record: &T,
     ) -> Result<SealedObject, BundleError> {
-        self.admit_record_offering(record)
+        self.admit_record_offering(record, T::validate_admission)
+    }
+    pub(crate) fn admit_media_interpretation_manifest(
+        &mut self,
+        manifest: &crate::owned_inputs::OwnedInputManifest,
+        asset: &kinewright_core::MediaAsset,
+    ) -> Result<SealedObject, BundleError> {
+        self.admit_record_offering(manifest, |manifest, store| {
+            manifest.validate_media_admission(store, Some(asset))
+        })
     }
     fn admit_record_offering<T: BundleRecord>(
         &mut self,
         record: &T,
+        validate_admission: impl FnOnce(&T, &Self) -> Result<(), BundleError>,
     ) -> Result<SealedObject, BundleError> {
         self.admit_run_write()?;
         record
             .validate(&self.admission_limits())
             .map_err(|e| self.run_error(e))?;
-        record
-            .validate_admission(self)
-            .map_err(|e| self.run_error(e))?;
+        validate_admission(record, self).map_err(|e| self.run_error(e))?;
         if !T::KIND.supported() {
             return Err(BundleError::Unsupported("inactive record kind".into()));
         }

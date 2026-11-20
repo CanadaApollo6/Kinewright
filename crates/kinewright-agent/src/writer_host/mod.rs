@@ -893,9 +893,7 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
     #[cfg(target_os = "linux")]
-    let permit = if matches!(request.command, HostCommand::ReviseCut { .. })
-        && state.runtime.startup_pending()
-    {
+    let permit = if waits_for_startup(&state, &bearer, &request) {
         // Recovery owns no command slot while this exact request waits. Reads,
         // Stop and Shutdown must remain available, and only one waiter is admitted.
         drop(permit);
@@ -966,6 +964,23 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
         Ok(reply) => json_response(&reply),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+#[cfg(target_os = "linux")]
+fn waits_for_startup(state: &HttpState, bearer: &str, request: &HostRequest) -> bool {
+    use crate::orchestration::orchestration_records::{OrchestrationCommand, RunAction};
+
+    if matches!(request.command, HostCommand::ReviseCut { .. }) {
+        return state.runtime.startup_pending();
+    }
+    matches!(&request.command, HostCommand::DispatchOrchestration { request }
+        if matches!(&request.envelope.command, OrchestrationCommand::ControlRun(intent)
+            if intent.action == RunAction::Continue))
+        && state.runtime.startup_needs_probe_retry()
+        && state.owner.lock().is_ok_and(|owner| {
+            owner
+                .authorize_request(Some(bearer), request)
+                .is_ok_and(|(index, _, _)| owner.attachments[index].role == AttachmentRole::Editor)
+        })
 }
 fn startup_refusal(error: &HostRefusal) -> Response {
     let mut response = json_response(error);

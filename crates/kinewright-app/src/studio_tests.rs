@@ -183,6 +183,175 @@ pub(crate) fn attach(app: &mut KinewrightApp, owner: Ja1EditingSession) {
     app.projects[0].ja1 = Some(crate::ja1_attachment::Ja1Attachment::new(owner).unwrap());
     app.projects[0].install_ja1_view();
 }
+
+#[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn ms_t10_studio_probe_timeout_keeps_the_project_editable() {
+    let test = "studio::tests::ms_t10_studio_probe_timeout_keeps_the_project_editable";
+    if let Some(marker) = ms_t10_silent_helper(test) {
+        let mut fixture = fixtures();
+        let context = &fixture.contexts[0];
+        let path = &context.document.media_pool[0].path;
+        let key = &context.snapshot.descriptor.key;
+        let owner = fixture.owners.remove(0);
+        owner
+            .store()
+            .unwrap()
+            .clear_media_memo_for_fixture()
+            .unwrap();
+        let (mut app, _) = in1_harness(context.document.clone());
+        attach(&mut app, owner);
+        std::fs::write(&marker, []).unwrap();
+        let error = app
+            .focused_mut()
+            .ja1
+            .as_mut()
+            .unwrap()
+            .apply(Action::StudioSelect(key.clone()))
+            .unwrap_err();
+        std::fs::remove_file(marker).unwrap();
+
+        assert!(
+            matches!(
+                &error,
+                kinewright_project::bundle::BundleError::MediaProbeTimedOut { path: name, .. }
+                if name == path
+            ),
+            "{error:?}"
+        );
+        app.sync_studio_selection();
+        let message = app
+            .focused()
+            .studio
+            .failure
+            .as_ref()
+            .unwrap()
+            .message
+            .as_str();
+        assert!(
+            message.starts_with(&format!(
+                "Reading media “{}” did not finish in time. Try again.",
+                path.file_name().unwrap().to_string_lossy()
+            )),
+            "{message}"
+        );
+        assert!(message.contains("phase=helper Forked"), "{message}");
+        assert_eq!(app.plate_label().2, message);
+        assert_eq!(app.projects.len(), 1);
+        assert!(!app.focused().ja1.as_ref().unwrap().read_only());
+        assert!(matches!(
+            app.focused()
+                .core
+                .request(Command::Do(Operation::AddTrack {
+                    track: Track {
+                        id: TrackId(99),
+                        kind: TrackKind::Audio,
+                        name: None,
+                        sync_lock: true,
+                        clips: vec![],
+                    }
+                }))
+                .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        // Only a new selection asks the helper to probe the same file again.
+        app.focused_mut()
+            .ja1
+            .as_mut()
+            .unwrap()
+            .apply(Action::StudioSelect(key.clone()))
+            .unwrap();
+        in1_shutdown(&mut app);
+    }
+}
+
+#[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn ms_t10_colour_timeout_names_the_asset() {
+    let test = "studio::tests::ms_t10_colour_timeout_names_the_asset";
+    if let Some(marker) = ms_t10_silent_helper(test) {
+        let mut fixture = fixtures();
+        let mut asset = fixture.contexts[0].document.media_pool[0].clone();
+        asset.color_description.provenance = kinewright_core::ColorProvenance::UserOverride;
+        let mut owner = fixture.owners.remove(0);
+        std::fs::write(&marker, []).unwrap();
+        let error = owner.apply_owned_media_interpretation(&asset).unwrap_err();
+        std::fs::remove_file(marker).unwrap();
+        assert!(
+            matches!(&error, kinewright_project::bundle::BundleError::MediaProbeTimedOut { path, .. }
+                if *path == asset.path),
+            "{error:?}"
+        );
+        owner.apply_owned_media_interpretation(&asset).unwrap();
+    }
+}
+
+#[test]
+fn ms_t10_unavailable_version_keeps_its_status_prefix() {
+    let (mut app, _) = in1_harness(Document::default());
+    app.focused_mut().studio.failure = Some(String::from("version unavailable").into());
+    assert_eq!(
+        app.plate_label().2,
+        "Damaged or unavailable · version unavailable"
+    );
+    in1_shutdown(&mut app);
+}
+
+fn ms_t10_silent_helper(test: &str) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    const FIXTURE: &str = "KINEWRIGHT_MS_T10_FIXTURE";
+    if let Some(directory) = std::env::var_os(FIXTURE) {
+        return Some(std::path::Path::new(&directory).join("stall"));
+    }
+    let directory = TempDirectory::new_in(&workspace_target_dir(), "ms-t10-silent-helper");
+    let binaries = std::env::var_os("KINEWRIGHT_MS2_TEST_BIN_DIR")
+        .map_or_else(
+            || workspace_target_dir().join("debug"),
+            std::path::PathBuf::from,
+        )
+        .canonicalize()
+        .unwrap();
+    for (name, link) in [
+        ("kinewright-media-helper", "normal"),
+        ("kinewright-media-helper-witness", "witness"),
+        ("kinewright-media-supervisor", "kinewright-media-supervisor"),
+    ] {
+        assert!(binaries.join(name).is_file(), "missing test binary {name}");
+        symlink(binaries.join(name), directory.path(link)).unwrap();
+    }
+    let wrapper = directory.path("kinewright-media-helper");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\ndir=${0%/*}\nif [ -e \"$dir/stall\" ]; then\n    exec \"$dir/witness\" \"$@\" silent\nfi\nexec \"$dir/normal\" \"$@\"\n",
+    ).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--include-ignored", "--nocapture"])
+        .env(FIXTURE, directory.root())
+        .env("KINEWRIGHT_MS2_TEST_BIN_DIR", directory.root())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{stdout}\n{stderr}"
+    );
+    for line in stderr
+        .lines()
+        .filter(|line| line.starts_with("MS_T10_PROBE_PHASES "))
+    {
+        eprintln!("{line}");
+    }
+    None
+}
+
 pub(crate) fn wait_frame(
     app: &mut KinewrightApp,
     context: &egui::Context,

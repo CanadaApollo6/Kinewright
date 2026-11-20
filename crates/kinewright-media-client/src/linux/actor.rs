@@ -1,7 +1,7 @@
 //! Sole process spawner and admission owner. No media parsing or scope RPC here.
 use super::{
-    ACTIVE_PROBES, CANCEL_GRACE, Config, Failure, Outcome, Phase, REAP_BUDGET, Request, Status,
-    TICK, Unavailable, UnavailableReason as Reason,
+    ACTIVE_PROBES, CANCEL_GRACE, Config, Failure, Outcome, Phase, ProbeTiming, REAP_BUDGET,
+    Request, Status, TICK, Unavailable, UnavailableReason as Reason,
     admission::{Health, Pending, Queue, attribute},
     controller::Controller,
     worker,
@@ -58,6 +58,34 @@ impl Job {
             next_rss: now,
             memory_violation: false,
         }
+    }
+    fn check_deadline_and_authority(&mut self, now: Instant) {
+        if self.cause.is_none() && !self.answered {
+            if let Err(error) = self.pending.request.source.check() {
+                self.cause = Some(Failure::Authority(error));
+                let _ = self.running.pin.kill();
+            } else if self.pending.request.cancel.load(Ordering::Acquire) {
+                self.cause = Some(Failure::Sandbox(Error::Cancelled));
+                self.kill_at = Some(now + CANCEL_GRACE);
+                self.running.shared.cancel.store(true, Ordering::Release);
+            } else if now >= self.deadline && !self.running.thread.is_finished() {
+                self.cause = Some(Failure::ProbeTimedOut(self.running.shared.timing()));
+                self.kill_at = Some(now + CANCEL_GRACE);
+                self.running.shared.cancel.store(true, Ordering::Release);
+            }
+        }
+        if self.kill_at.is_some_and(|deadline| now >= deadline) {
+            let _ = self.running.pin.kill();
+        }
+    }
+    fn take_cause(&mut self) -> Option<Failure> {
+        let cause = self.cause.take()?;
+        if matches!(cause, Failure::ProbeTimedOut(_))
+            && let Some(failure) = self.running.shared.failure_before(self.deadline)
+        {
+            return Some(failure);
+        }
+        Some(cause)
     }
     fn resident_total(&mut self, now: Instant) -> io::Result<Option<u64>> {
         let shim = self
@@ -147,6 +175,7 @@ struct Actor {
     spawner: Option<std::os::fd::OwnedFd>,
     generation: u64,
     supervisor_generation: u64,
+    supervisor_handshake: Option<(Instant, Instant)>,
     controller: Result<Controller, Unavailable>,
     scope_failure: Option<Error>,
     /// Decode slots held by leases whose scope emptiness was never proven.
@@ -163,12 +192,13 @@ impl Actor {
         let initialized = kinewright_job_sys::install_subreaper().is_ok();
         let spawner = media_host::spawner_pidfd();
         let available = initialized && spawner.is_ok();
+        let mut supervisor_handshake = None;
         let controller = if !initialized {
             Err(Phase::Runtime.unavailable(Reason::Subreaper))
         } else if spawner.is_err() {
             Err(Phase::Runtime.unavailable(Reason::SpawnerPidfd))
         } else {
-            Controller::start(&config.supervisor, 1)
+            Controller::start(&config.supervisor, 1, &mut supervisor_handshake)
         };
         Self {
             config,
@@ -178,6 +208,7 @@ impl Actor {
             spawner: spawner.ok().flatten(),
             generation: 1,
             supervisor_generation: 1,
+            supervisor_handshake,
             controller,
             scope_failure: None,
             unproven: 0,
@@ -251,23 +282,7 @@ impl Actor {
     fn settle(&mut self, now: Instant) {
         for index in (0..self.active.len()).rev() {
             let job = &mut self.active[index];
-            if job.cause.is_none() && !job.answered {
-                if let Err(error) = job.pending.request.source.check() {
-                    job.cause = Some(Failure::Authority(error));
-                    let _ = job.running.pin.kill();
-                } else if job.pending.request.cancel.load(Ordering::Acquire) {
-                    job.cause = Some(Failure::Sandbox(Error::Cancelled));
-                    job.kill_at = Some(now + CANCEL_GRACE);
-                    job.running.shared.cancel.store(true, Ordering::Release);
-                } else if now >= job.deadline {
-                    job.cause = Some(Failure::Sandbox(Error::TimedOut));
-                    job.kill_at = Some(now + CANCEL_GRACE);
-                    job.running.shared.cancel.store(true, Ordering::Release);
-                }
-            }
-            if job.kill_at.is_some_and(|deadline| now >= deadline) {
-                let _ = job.running.pin.kill();
-            }
+            job.check_deadline_and_authority(now);
             if job.cause.is_some() && job.answer_at.is_none() {
                 // Every cause sends the kill by `kill_at`, or already did when
                 // the cause was set. Terminate, reap and empty within a further
@@ -281,7 +296,7 @@ impl Actor {
                 // The cause moves to the caller; `answered` keeps the job from
                 // being caused, charged or answered again when cleanup ends.
                 job.answered = true;
-                let Some(cause) = job.cause.take() else {
+                let Some(cause) = job.take_cause() else {
                     continue;
                 };
                 eprintln!(
@@ -298,15 +313,16 @@ impl Actor {
                     .circuit
                     .record(identity, Health::of(&result), now)
                     .paused;
-                let _ = job.pending.reply.send(result);
+                Self::answer(&job.pending, result, None);
                 if paused {
                     self.queue.clear_for_pause(&self.status, now);
                 }
                 continue;
             }
             if job.running.thread.is_finished() {
-                let job = self.active.swap_remove(index);
-                let uncaused = job.cause.is_none();
+                let mut job = self.active.swap_remove(index);
+                let cause = job.take_cause();
+                let uncaused = cause.is_none();
                 let done = job.running.thread.join();
                 let unproven = done.as_ref().is_ok_and(|done| done.unproven);
                 if unproven {
@@ -322,22 +338,20 @@ impl Actor {
                     // The caller already has its failure and the breaker its token.
                     continue;
                 }
+                let timing = done.as_ref().ok().map(|done| done.timing);
                 let mut result = match done {
-                    // A fallback run whose scope emptiness is unproven keeps
-                    // its slot and gets its failure, like the retry below.
-                    Ok(done)
-                        if job.cause.is_none()
-                            && done.fallback
-                            && !unproven
-                            && !request.degraded =>
-                    {
+                    Ok(done) if uncaused && done.fallback && !unproven && !request.degraded => {
+                        request.earlier_timing.add(done.timing);
                         request.degraded = true;
                         self.queue.continue_with(request, &self.status, now);
                         continue;
                     }
-                    Ok(done) => attribute(job.cause, done.result),
-                    Err(_) => Err(job.cause.unwrap_or(Failure::Sandbox(Error::Crashed))),
+                    Ok(done) => attribute(cause, done.result),
+                    Err(_) => Err(cause.unwrap_or(Failure::Sandbox(Error::Crashed))),
                 };
+                if unproven && matches!(result, Ok(_) | Err(Failure::ProbeTimedOut(_))) {
+                    result = Err(Failure::Sandbox(Error::Crashed));
+                }
                 // This host-owned worker cannot finish until its cleanup guard
                 // has reaped the shim and verified native scope emptiness. Keep
                 // cleanup waits off the actor so other deadlines still fire.
@@ -354,14 +368,45 @@ impl Actor {
                 // An unproven cleanup is a host fault, not a helper one; a
                 // retry would only spend the remaining slot on it.
                 if uncaused && !unproven && recorded.retry && !recorded.paused {
+                    if let Some(timing) = timing {
+                        request.earlier_timing.add(timing);
+                    }
                     self.queue.continue_with(request, &self.status, now);
                     continue;
                 }
-                let _ = request.reply.send(result);
+                Self::answer(&request, result, timing);
             }
         }
     }
+    fn answer(request: &Pending, mut result: Outcome, completed: Option<ProbeTiming>) {
+        match &mut result {
+            Err(Failure::ProbeTimedOut(timing)) => {
+                timing.add(request.earlier_timing);
+                timing.report(false);
+            }
+            Ok(_) => {
+                if let Some(mut timing) = completed {
+                    timing.add(request.earlier_timing);
+                    timing.report(true);
+                }
+            }
+            Err(_) => {}
+        }
+        let _ = request.reply.send(result);
+    }
     fn restart(&mut self) {
+        if let Some(finished) = self.expired_handshake()
+            && self
+                .queue
+                .pending
+                .iter()
+                .chain(&self.queue.continued)
+                .any(|item| item.queued < finished)
+        {
+            // Let admission report the expired handshake to its waiters.
+            // Only a later request can ask for a fresh handshake.
+            return;
+        }
         // Only restart after every old lease has independently completed native
         // cleanup. An absent manager still has a live lifecycle supervisor.
         if self.controller.is_err()
@@ -372,7 +417,11 @@ impl Actor {
             && let Some(next) = self.supervisor_generation.checked_add(1)
         {
             self.supervisor_generation = next;
-            self.controller = Controller::start(&self.config.supervisor, next);
+            self.controller = Controller::start(
+                &self.config.supervisor,
+                next,
+                &mut self.supervisor_handshake,
+            );
             if let Some(cause) = self.scope_failure.take() {
                 let ready = self.controller.is_ok();
                 eprintln!(
@@ -380,6 +429,13 @@ impl Actor {
                 );
             }
         }
+    }
+    fn expired_handshake(&self) -> Option<Instant> {
+        let (_, finished) = self.supervisor_handshake?;
+        self.controller
+            .as_ref()
+            .is_err_and(|error| error.reason == Reason::SupervisorHandshakeTimedOut)
+            .then_some(finished)
     }
     fn admit(&mut self) {
         self.queue.expire(&self.status, Instant::now());
@@ -398,29 +454,27 @@ impl Actor {
             // One source identity has only one active cursor, even when
             // multiple clips or callers request it concurrently.
             let active = &self.active;
+            let expired_handshake = self.expired_handshake();
             let Some(mut item) = self.queue.next(
-                |identity| {
-                    active
-                        .iter()
-                        .any(|job| job.pending.request.source.identity() == *identity)
+                |item| {
+                    expired_handshake.is_none_or(|finished| item.queued < finished)
+                        && !active.iter().any(|job| {
+                            job.pending.request.source.identity() == item.request.source.identity()
+                        })
                 },
                 &self.status,
             ) else {
                 break;
             };
-            let refuse = if self.closed || item.request.cancel.load(Ordering::Acquire) {
-                Some(Failure::Sandbox(Error::Cancelled))
-            } else {
-                item.request.source.check().err().map(Failure::Authority)
-            };
-            if let Some(error) = refuse {
+            if let Some(error) = item.admission_refusal(self.closed) {
                 let _ = item.reply.send(Err(error));
                 continue;
             }
+            item.record_handshake(self.supervisor_handshake);
             let control = match &self.controller {
                 Ok(control) => control,
                 Err(error) => {
-                    let _ = item.reply.send(Err((*error).into()));
+                    Self::answer(&item, Err(supervisor_failure(*error)), None);
                     continue;
                 }
             };
@@ -563,6 +617,7 @@ impl Actor {
                             reply,
                             queued,
                             degraded: false,
+                            earlier_timing: ProbeTiming::default(),
                         },
                         &self.status,
                         Instant::now(),
@@ -596,6 +651,184 @@ impl Actor {
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
+    }
+}
+
+fn supervisor_failure(error: Unavailable) -> Failure {
+    if error.reason == Reason::SupervisorHandshakeTimedOut {
+        Failure::ProbeTimedOut(ProbeTiming {
+            phase: Phase::Supervisor,
+            ..ProbeTiming::default()
+        })
+    } else {
+        error.into()
+    }
+}
+
+#[cfg(test)]
+mod ms_t10_tests {
+    use super::*;
+
+    struct Input(std::fs::File);
+    impl super::super::Source for Input {
+        fn file(&self) -> &std::fs::File {
+            &self.0
+        }
+        fn identity(&self) -> [u8; 32] {
+            [0; 32]
+        }
+        fn check(&self) -> Result<(), kinewright_core::MediaError> {
+            Ok(())
+        }
+    }
+
+    fn settle_cleanup(armed_timeout: bool, unproven: bool, failure: Option<Error>) -> Outcome {
+        let (_sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let mut actor = Actor::new(
+            Config::new(
+                "/dev/null".into(),
+                "/dev/null".into(),
+                super::super::Limits::PROBE,
+            ),
+            receiver,
+            Arc::default(),
+        );
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        let queued = Instant::now();
+        let (running, finish_cleanup) = worker::cleanup_fixture(unproven, failure);
+        let pending = Pending {
+            request: Request {
+                source: Box::new(Input(std::fs::File::open("/dev/null").unwrap())),
+                video: None,
+                audio: None,
+                cancel: Arc::default(),
+                explicit_retry: false,
+            },
+            reply,
+            queued,
+            degraded: false,
+            earlier_timing: ProbeTiming::default(),
+        };
+        let mut job = Job::launched(pending, running, queued);
+        if armed_timeout {
+            job.deadline = queued;
+            job.check_deadline_and_authority(queued);
+        }
+        finish_cleanup.send(()).unwrap();
+        while !job.running.thread.is_finished() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let completed = Instant::now();
+        if !armed_timeout {
+            // Cleanup finished before the cutoff, but the actor missed that tick.
+            job.deadline = completed + TICK;
+            // The first crash already spent this source's automatic retry.
+            actor
+                .queue
+                .circuit
+                .record([0; 32], Health::Unhealthy(Error::Crashed), queued);
+        }
+        actor.active.push(job);
+        actor.settle(completed + TICK * 2);
+        assert_eq!(actor.unproven, usize::from(unproven));
+        assert_eq!(actor.cleanup_failure, unproven.then_some(Error::Crashed));
+        result.try_recv().unwrap()
+    }
+
+    #[test]
+    fn ms_t10_cleanup_crash_survives_late_settlement() {
+        let result = settle_cleanup(false, false, None);
+        assert!(
+            matches!(result, Err(Failure::Sandbox(Error::Crashed))),
+            "{result:?}"
+        );
+
+        // A nonzero exit first observed after arming the timeout can be due to
+        // the actor's own cancellation, so the timeout remains the answer.
+        assert!(matches!(
+            settle_cleanup(true, false, None),
+            Err(Failure::ProbeTimedOut(_))
+        ));
+    }
+
+    #[test]
+    fn ms_t10_cleanup_crash_unproven_overrides_armed_timeout() {
+        let result = settle_cleanup(true, true, None);
+        assert!(
+            matches!(result, Err(Failure::Sandbox(Error::Crashed))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn ms_t10_cleanup_unproven_preserves_unsupported_media() {
+        let result = settle_cleanup(false, true, Some(Error::UnsupportedMedia));
+        assert!(
+            matches!(result, Err(Failure::Sandbox(Error::UnsupportedMedia))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn ms_t10_handshake_timeout_only_answers_its_waiters() {
+        use std::{path::PathBuf, sync::mpsc, time::Duration};
+        let (_sender, receiver) = mpsc::sync_channel(2);
+        let mut actor = Actor::new(
+            Config::new(
+                PathBuf::from("/dev/null"),
+                PathBuf::from("/dev/null"),
+                super::super::Limits::PROBE,
+            ),
+            receiver,
+            Arc::default(),
+        );
+        let finished = Instant::now();
+        let started = finished.checked_sub(Duration::from_millis(50)).unwrap();
+        actor.supervisor_handshake = Some((started, finished));
+        actor.controller = Err(Phase::Supervisor.unavailable(Reason::SupervisorHandshakeTimedOut));
+        let mut enqueue = |queued| {
+            let (reply, result) = mpsc::sync_channel(1);
+            actor.status.pending.fetch_add(1, Ordering::Relaxed);
+            actor.queue.offer(
+                Pending {
+                    request: Request {
+                        source: Box::new(Input(std::fs::File::open("/dev/null").unwrap())),
+                        video: None,
+                        audio: None,
+                        cancel: Arc::default(),
+                        explicit_retry: false,
+                    },
+                    reply,
+                    queued,
+                    degraded: false,
+                    earlier_timing: ProbeTiming::default(),
+                },
+                &actor.status,
+                finished,
+            );
+            result
+        };
+        let waiter = enqueue(started);
+        let later = enqueue(finished);
+        actor.restart();
+        actor.admit();
+        assert!(matches!(
+            waiter.try_recv().unwrap(),
+            Err(Failure::ProbeTimedOut(timing)) if timing.supervisor_handshake == finished - started
+        ));
+        let waiting = later.try_recv();
+        assert!(
+            matches!(waiting, Err(mpsc::TryRecvError::Empty)),
+            "{waiting:?}"
+        );
+        assert_eq!(actor.status.pending.load(Ordering::Relaxed), 1);
+        actor.restart();
+        actor.admit();
+        assert_eq!(actor.supervisor_generation, 2);
+        assert!(
+            matches!(later.try_recv().unwrap(), Err(Failure::Unavailable(error))
+            if error.reason == Reason::ExecutableUnavailable)
+        );
     }
 }
 

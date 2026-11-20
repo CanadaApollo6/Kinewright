@@ -16,7 +16,7 @@ use std::{
         mpsc::{self, SyncSender},
     },
     thread::JoinHandle,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 enum Call {
@@ -34,6 +34,20 @@ pub(super) struct Handle {
     pub available: bool,
     pending_stops: Arc<AtomicUsize>,
 }
+
+#[cfg(test)]
+impl Handle {
+    pub(super) fn disconnected_fixture(pin: Arc<ProcessHandle>) -> Self {
+        Self {
+            sender: mpsc::sync_channel(0).0,
+            pin,
+            generation: 1,
+            available: false,
+            pending_stops: Arc::default(),
+        }
+    }
+}
+
 pub(super) struct Controller {
     pub handle: Handle,
     worker: JoinHandle<Result<(), Error>>,
@@ -66,7 +80,12 @@ impl Drop for Guard {
 impl Controller {
     /// Called only by the dedicated spawner. Bootstrap is bounded by socket
     /// timeouts; all subsequent blocking RPCs run on the controller worker.
-    pub fn start(path: &Path, generation: u64) -> Result<Self, Unavailable> {
+    pub fn start(
+        path: &Path,
+        generation: u64,
+        handshake: &mut Option<(Instant, Instant)>,
+    ) -> Result<Self, Unavailable> {
+        *handshake = None;
         let error = |reason| move |_| Phase::Supervisor.unavailable(reason);
         let (socket, inherited) =
             media_scope::socketpair().map_err(error(Reason::SupervisorSocket))?;
@@ -84,7 +103,10 @@ impl Controller {
         let mut guard = Guard { child, socket };
         let pin =
             Arc::new(ProcessHandle::open(guard.child.id()).map_err(error(Reason::SupervisorPin))?);
-        let initial = read_frame(&mut guard.socket).map_err(|error| {
+        let started = Instant::now();
+        let initial = read_frame(&mut guard.socket);
+        *handshake = Some((started, Instant::now()));
+        let initial = initial.map_err(|error| {
             let reason = match error.kind() {
                 io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => {
                     Reason::SupervisorHandshakeTimedOut
@@ -114,6 +136,7 @@ impl Controller {
             .name("media-scopes".into())
             .spawn(move || {
                 let result = serve(&mut guard.socket, generation, &receiver, &worker_stops);
+                drop(receiver);
                 guard.finish(&worker_pin);
                 result
             })
@@ -148,7 +171,10 @@ impl Handle {
             .map_err(|_| Error::Crashed)?;
         receiver
             .recv_timeout(Duration::from_secs(6))
-            .map_err(|_| Error::TimedOut)?
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => Error::TimedOut,
+                mpsc::RecvTimeoutError::Disconnected => Error::Crashed,
+            })?
     }
 
     /// Transfer a scope whose native members the app has already reaped.
@@ -256,5 +282,50 @@ fn rpc(
         | Message::ScopeUnavailable { .. }
         | Message::Failed { .. }) => Ok(message),
         _ => Err(Error::ProtocolViolation),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ms_t10_queued_scope_call_reports_controller_loss() {
+        let (sender, incoming) = mpsc::sync_channel(2);
+        let (first_reply, first) = mpsc::sync_channel(1);
+        let create = || Message::CreateScope {
+            pid: std::process::id(),
+            memory_bytes: 1,
+        };
+        sender
+            .try_send(Call::Request {
+                message: create(),
+                reply: first_reply,
+            })
+            .unwrap();
+        let handle = Handle {
+            sender,
+            pin: Arc::new(ProcessHandle::open(std::process::id()).unwrap()),
+            generation: 1,
+            available: true,
+            pending_stops: Arc::default(),
+        };
+        std::thread::scope(|scope| {
+            let caller = scope.spawn(|| handle.call(create()));
+            let (queued, receiver) = mpsc::sync_channel(2);
+            for _ in 0..2 {
+                queued.try_send(incoming.recv().unwrap()).unwrap();
+            }
+            let (mut controller, supervisor) = UnixStream::pair().unwrap();
+            drop(supervisor);
+            assert_eq!(
+                serve(&mut controller, 1, &receiver, &handle.pending_stops),
+                Err(Error::Crashed)
+            );
+            assert!(matches!(first.recv().unwrap(), Err(Error::Crashed)));
+            drop(receiver);
+            let outcome = caller.join().unwrap();
+            assert!(matches!(outcome, Err(Error::Crashed)), "{outcome:?}");
+        });
     }
 }

@@ -2,7 +2,8 @@
 //! no process, pipe, or scope authority. Healthy launches are bounded by the
 //! active slots and this queue; only unhealthy outcomes consume breaker tokens.
 use super::{
-    Busy, Failure, INITIAL_DEADLINE, Outcome, PENDING_PROBES, QUEUE_WAIT, Request, Status,
+    Busy, Failure, INITIAL_DEADLINE, Outcome, PENDING_PROBES, ProbeTiming, QUEUE_WAIT, Request,
+    Status,
 };
 use kinewright_media_ipc::MediaSandboxError as Error;
 use std::{
@@ -23,8 +24,27 @@ pub(super) struct Pending {
     /// Queue wait is bounded separately; the decode deadline starts at launch.
     pub queued: Instant,
     pub degraded: bool,
+    pub earlier_timing: ProbeTiming,
 }
 impl Pending {
+    pub fn admission_refusal(&self, closed: bool) -> Option<Failure> {
+        if closed || self.request.cancel.load(Ordering::Acquire) {
+            Some(Failure::Sandbox(Error::Cancelled))
+        } else {
+            self.request.source.check().err().map(Failure::Authority)
+        }
+    }
+
+    pub fn record_handshake(&mut self, handshake: Option<(Instant, Instant)>) {
+        if let Some((started, finished)) = handshake {
+            // Charge only the part of the handshake this request waited for.
+            self.earlier_timing.supervisor_handshake = self
+                .earlier_timing
+                .supervisor_handshake
+                .max(finished.saturating_duration_since(started.max(self.queued)));
+        }
+    }
+
     /// The decode window opens at launch, never at enqueue: time spent behind
     /// another source's slow decode is the queue's bound, not this one's.
     pub fn decode_deadline(&self, launched: Instant) -> Instant {
@@ -49,6 +69,7 @@ impl Health {
                 Self::Neutral
             }
             Err(Failure::Sandbox(error)) => Self::Unhealthy(*error),
+            Err(Failure::ProbeTimedOut(_)) => Self::Unhealthy(Error::TimedOut),
             // Keep the unavailable outcome's breaker charge and retry policy.
             Err(Failure::Unavailable(_)) => Self::Unhealthy(Error::SandboxUnavailable),
         }
@@ -347,11 +368,14 @@ impl Queue {
             }
         }
     }
-    /// The oldest request whose source has no active cursor. Returns whether
-    /// it was a fresh caller request (its reservation is released here).
-    pub fn next(&mut self, busy: impl Fn(&[u8; 32]) -> bool, status: &Status) -> Option<Pending> {
-        let eligible = |item: &Pending| !busy(&item.request.source.identity());
-        if let Some(index) = self.continued.iter().position(eligible) {
+    /// The oldest eligible request, with continuations first. Releases a
+    /// pending reservation only when removing a fresh caller request.
+    pub fn next(
+        &mut self,
+        eligible: impl Fn(&Pending) -> bool,
+        status: &Status,
+    ) -> Option<Pending> {
+        if let Some(index) = self.continued.iter().position(&eligible) {
             return self.continued.remove(index);
         }
         let index = self.pending.iter().position(eligible)?;
@@ -376,7 +400,7 @@ fn refuse(item: &Pending, failure: Failure, fresh: bool, status: &Status) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::{
         fs::File,
@@ -408,6 +432,7 @@ mod tests {
                 reply,
                 queued,
                 degraded: false,
+                earlier_timing: ProbeTiming::default(),
             },
             receiver,
         )
@@ -523,7 +548,7 @@ mod tests {
         assert!(resumed.try_recv().is_err(), "the next request is admitted");
         assert!(!queue.circuit.paused(), "that request resumed admission");
         assert!(queue.circuit.permits([201; 32], false, after));
-        assert!(queue.next(|_| false, &status).is_some());
+        assert!(queue.next(|_| true, &status).is_some());
         assert_eq!(status.pending.load(Ordering::Acquire), 0);
     }
     #[test]
@@ -676,7 +701,7 @@ mod tests {
         }
         assert!(!circuit.paused());
     }
-    fn fixture_probe() -> kinewright_media_ipc::ValidatedProbe {
+    pub(in crate::linux) fn fixture_probe() -> kinewright_media_ipc::ValidatedProbe {
         use kinewright_core::{
             ColorBitDepth, ColorMatrix, ColorPrimaries, ColorProvenance, ColorRange, ColorTransfer,
             ColorWhitePoint,

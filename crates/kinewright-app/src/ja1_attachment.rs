@@ -215,7 +215,7 @@ pub(crate) struct Ja1Attachment {
     pub(crate) studio_versions_ready: Option<Vec<kinewright_project::studio_records::SnapshotKey>>,
     pub(crate) studio_edit_pending: bool,
     pub(crate) studio_editorial_ready: Option<EditorialDetails>,
-    pub(crate) studio_error_ready: Option<String>,
+    pub(crate) studio_error_ready: Option<crate::studio::StudioFailure>,
     /// The scope a failed Current-edit acquisition tried, and whether the
     /// failure is temporary (S3 C11 fu1).
     pub(crate) studio_manual_failed: Option<(
@@ -480,7 +480,10 @@ impl Ja1Attachment {
                     }
                     Err(error) => {
                         self.message = format!("Playback input unavailable: {error}");
-                        self.studio_error_ready = Some(self.message.clone());
+                        self.studio_error_ready = Some(crate::studio::StudioFailure::from_bundle(
+                            self.message.clone(),
+                            &error,
+                        ));
                         let temporary = matches!(
                             error,
                             BundleError::HistoryChanged
@@ -516,7 +519,10 @@ impl Ja1Attachment {
                 };
                 let refresh = self.read_studio_editorial(version.as_ref());
                 if let Err(error) = status {
-                    self.studio_error_ready = Some(error.to_string());
+                    self.studio_error_ready = Some(crate::studio::StudioFailure::from_bundle(
+                        error.to_string(),
+                        &error,
+                    ));
                     return Err(error);
                 }
                 return refresh;
@@ -528,8 +534,14 @@ impl Ja1Attachment {
                     return Ok(());
                 }
                 Err(error) => {
-                    self.message = format!("Version damaged or unavailable: {error}");
-                    self.studio_error_ready = Some(self.message.clone());
+                    self.message = match &error {
+                        BundleError::MediaProbeTimedOut { .. } => error.to_string(),
+                        _ => format!("Version damaged or unavailable: {error}"),
+                    };
+                    self.studio_error_ready = Some(crate::studio::StudioFailure::from_bundle(
+                        self.message.clone(),
+                        &error,
+                    ));
                     return Err(error);
                 }
             },
@@ -552,7 +564,10 @@ impl Ja1Attachment {
                     self.message = format!(
                         "The copy was not opened. Your selected version remains unchanged. {error}"
                     );
-                    self.studio_error_ready = Some(self.message.clone());
+                    self.studio_error_ready = Some(crate::studio::StudioFailure::from_bundle(
+                        self.message.clone(),
+                        error,
+                    ));
                 }
                 return result;
             }
@@ -930,7 +945,10 @@ impl Ja1Attachment {
                 Ok(())
             }
             Err(error) => {
-                self.studio_error_ready = Some(error.to_string());
+                self.studio_error_ready = Some(crate::studio::StudioFailure::from_bundle(
+                    error.to_string(),
+                    &error,
+                ));
                 Err(error)
             }
         }

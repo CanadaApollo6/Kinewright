@@ -129,6 +129,9 @@ pub(super) fn send(port: &HostFeedback<'_>, request: &ScopedOrchestrationRequest
         Err(super::HostError::Refused(error)) if error.retry_after_recovery() => {
             return ControlReply::RecoveryUnknown(error.message);
         }
+        Err(super::HostError::Refused(error)) if error.is_media_probe_timeout() => {
+            return ControlReply::Refused(error.message);
+        }
         Err(error) => return ControlReply::Unknown(error.to_string()),
     };
     if let Some(error) = reply.error {

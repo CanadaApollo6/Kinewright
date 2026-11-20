@@ -8,6 +8,7 @@ repository.workspace = true
 
 [features]
 slow-tests = ["kinewright-job-sys/slow-tests"]
+probe-phase-logs = []
 
 [target.'cfg(target_os = "linux")'.dependencies]
 kinewright-core = { path = "../kinewright-core" }

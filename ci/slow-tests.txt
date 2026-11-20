@@ -189,6 +189,8 @@ ja_s4_guardian s4_c2_service_identity_refused crates/kinewright-agent/tests/ja_s
 ja_s4_guardian s4_c2_service_events_session crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
 ja_s4_guardian s4_c2_service_events_recovery crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
 kinewright_app studio_voice::e2e_tests::s3_studio_end_to_end crates/kinewright-app/src/studio_e2e_tests.rs linux-only # C10 start-to-finish Studio, host-attached
+kinewright_app studio::tests::ms_t10_studio_probe_timeout_keeps_the_project_editable crates/kinewright-app/src/studio_tests.rs linux-only # Stalled native helper through Studio selection
+kinewright_app studio::tests::ms_t10_colour_timeout_names_the_asset crates/kinewright-app/src/studio_tests.rs linux-only # Stalled native helper during colour re-probe
 
 kinewright_agent writer_host::hooks_tests::tests::te13_finish_cannot_spend_the_terminal_reserve crates/kinewright-agent/src/writer_host/te13_tests.rs linux-only # TE1.3 ordinary intent vs terminal reserve; 67 s locally
 
@@ -234,6 +236,8 @@ rss_native degraded_rss_polling_records_overshoot_and_quarantines_source crates/
 runtime_native runtime_releases_both_slots_during_bus_disconnect crates/kinewright-media-client/tests/runtime_native.rs linux-only # Native scope cleanup and supervisor reconnect/restart
 runtime_native runtime_scope_proof_holds_when_a_removed_scope_keeps_two_links crates/kinewright-media-client/tests/runtime_native.rs linux-only # Hosted-kernel deletion shape: ENODEV proves a two-link removed scope
 runtime_native runtime_scope_proof_error_keeps_the_reservation crates/kinewright-media-client/tests/runtime_native.rs linux-only # Persistent scope proof error: bounded, typed, reservation kept
+runtime_native ms_t10_scope_verification_timeout_falls_back crates/kinewright-media-client/tests/runtime_native.rs linux-only # VerifyScope timeout preserves degraded fallback
+runtime_native ms_t10_finished_helper_failure_survives_held_cleanup crates/kinewright-media-client/tests/runtime_native.rs linux-only # Finished native refusal survives the cleanup deadline
 runtime_native runtime_unproven_fallback_is_not_relaunched crates/kinewright-media-client/tests/runtime_native.rs linux-only # Attached-then-failed scope with unproven cleanup: no degraded relaunch
 
 # Compact-history session model (portable; native-store companion stays in fast).

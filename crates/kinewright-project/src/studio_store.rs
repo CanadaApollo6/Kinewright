@@ -1820,10 +1820,17 @@ impl crate::store::ProjectStore {
             ) {
                 resource_context.push(self.certify_resource_input(&identity)?);
             } else {
-                certified_input_leases.push(self.lease_input_for_owner(
-                    &identity,
-                    &(manifest.project_id.clone(), manifest.session_id.clone()),
-                )?);
+                certified_input_leases.push(
+                    self.lease_input_for_owner(
+                        &identity,
+                        &(manifest.project_id.clone(), manifest.session_id.clone()),
+                        document
+                            .media_pool
+                            .iter()
+                            .find(|asset| entry.matches_media_asset(asset))
+                            .map(|asset| asset.path.as_path()),
+                    )?,
+                );
             }
         }
         Ok(FrozenContext {
@@ -2249,10 +2256,17 @@ impl crate::store::ProjectStore {
                 }
                 resources.push(resource);
             } else {
-                leases.push(self.lease_input_for_owner(
-                    &identity,
-                    &(manifest.project_id.clone(), manifest.session_id.clone()),
-                )?);
+                leases.push(
+                    self.lease_input_for_owner(
+                        &identity,
+                        &(manifest.project_id.clone(), manifest.session_id.clone()),
+                        document
+                            .media_pool
+                            .iter()
+                            .find(|asset| entry.matches_media_asset(asset))
+                            .map(|asset| asset.path.as_path()),
+                    )?,
+                );
             }
         }
         for asset in &document.media_pool {

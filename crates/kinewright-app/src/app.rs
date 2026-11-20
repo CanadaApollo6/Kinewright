@@ -4011,7 +4011,7 @@ impl KinewrightApp {
                     {
                         self.presenter.suspend();
                         self.playback.pause();
-                        self.focused_mut().studio.failure = Some(error.to_string());
+                        self.focused_mut().studio.failure = Some(error.to_string().into());
                     }
                     let revision = self.focused().revision;
                     // `IN1b` §5.1 rule 12: the constructor is total after

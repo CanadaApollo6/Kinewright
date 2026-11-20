@@ -1,7 +1,7 @@
 //! One pipe owner per probe. Its guard retains cleanup across caller/worker loss.
 use super::{
-    CANCEL_GRACE, Failure, INITIAL_DEADLINE, Limits, Outcome, SCOPE_PROOF_ERRORS, Unavailable,
-    UnavailableReason as Reason, controller::Handle,
+    CANCEL_GRACE, Failure, INITIAL_DEADLINE, Limits, Outcome, ProbeTiming, SCOPE_PROOF_ERRORS,
+    Unavailable, UnavailableReason as Reason, controller::Handle, timing::Progress,
 };
 use kinewright_job_sys::{
     Cgroup, ProcessHandle,
@@ -19,7 +19,7 @@ use std::{
     path::{Path, PathBuf},
     process::Child,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     thread::JoinHandle,
@@ -29,7 +29,7 @@ use std::{
 /// Diagnostics only: which step each live probe is in, so a stalled test can
 /// say which reply it waits for. Bounded and lock-free; carries no authority.
 static WAITING: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
-const PHASES: [&str; Phase::ResourceCheck as usize + 1] = [
+const PHASES: [&str; Phase::Cleanup as usize + 1] = [
     "launch",
     "supervisor CreateScope reply",
     "supervisor VerifyScope reply",
@@ -46,6 +46,7 @@ const PHASES: [&str; Phase::ResourceCheck as usize + 1] = [
     "runtime setup",
     "supervisor startup",
     "resource check",
+    "helper cleanup",
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Phase {
@@ -65,6 +66,7 @@ pub enum Phase {
     Runtime,
     Supervisor,
     ResourceCheck,
+    Cleanup,
 }
 impl Phase {
     #[must_use]
@@ -134,6 +136,7 @@ pub fn diagnostics() -> String {
 
 #[derive(Default)]
 pub(super) struct Shared {
+    progress: Mutex<Progress>,
     pub cancel: AtomicBool,
     pub payload: AtomicU32,
     pub payload_start: AtomicU64,
@@ -144,6 +147,26 @@ pub(super) struct Shared {
     #[cfg(feature = "slow-tests")]
     pub contained: AtomicBool,
 }
+impl Shared {
+    fn enter(&self, phase: Phase) {
+        self.progress.lock().unwrap().enter(phase);
+    }
+
+    pub(super) fn timing(&self) -> ProbeTiming {
+        self.progress.lock().unwrap().snapshot()
+    }
+
+    pub(super) fn failure_before(&self, deadline: Instant) -> Option<Failure> {
+        self.progress.lock().unwrap().failure_before(deadline)
+    }
+
+    fn scope_error(&self, error: Error) -> Failure {
+        match error {
+            Error::TimedOut => Failure::ProbeTimedOut(self.timing()),
+            _ => Failure::Sandbox(error),
+        }
+    }
+}
 pub(super) struct Running {
     pub pin: Arc<ProcessHandle>,
     pub shared: Arc<Shared>,
@@ -151,11 +174,72 @@ pub(super) struct Running {
 }
 pub(super) struct Done {
     pub result: Outcome,
+    pub timing: ProbeTiming,
     pub fallback: bool,
     /// Cleanup could not prove the helper scope empty. The scope was not
     /// released, and the actor keeps its decode slot reserved.
     pub unproven: bool,
 }
+
+#[cfg(test)]
+pub(super) fn cleanup_fixture(
+    unproven: bool,
+    failure: Option<Error>,
+) -> (Running, std::sync::mpsc::SyncSender<()>) {
+    static NEXT_GENERATION: AtomicU64 = AtomicU64::new(u64::MAX);
+    // Native cleanup observes a nonzero exit even if the probe produced metadata.
+    let lifetime = File::open("/dev/null").unwrap();
+    let root = Root::create(NEXT_GENERATION.fetch_sub(1, Ordering::Relaxed)).unwrap();
+    let child = std::process::Command::new("/bin/false").spawn().unwrap();
+    let (child, pin) = pin_child(child).unwrap();
+    let mut lease = Lease {
+        child,
+        pin: Arc::clone(&pin),
+        controller: Handle::disconnected_fixture(Arc::clone(&pin)),
+        scope: None,
+        group: None,
+        _lifetime: lifetime,
+        _root: root,
+        complete: false,
+        reaped: false,
+        unproven,
+        trace: Trace::claim(pin.pid()),
+        #[cfg(feature = "slow-tests")]
+        shim_smaps: None,
+        #[cfg(feature = "slow-tests")]
+        seams: Seams::new(None, None),
+    };
+    let shared = Arc::new(Shared::default());
+    let worker_shared = Arc::clone(&shared);
+    let (finish_cleanup, wait) = std::sync::mpsc::sync_channel(1);
+    let thread = std::thread::spawn(move || {
+        wait.recv().unwrap();
+        let result = match failure {
+            Some(error) => Err(Failure::Sandbox(error)),
+            None => Ok(super::admission::tests::fixture_probe()),
+        };
+        let done = lease.finish(
+            result,
+            false,
+            &worker_shared,
+            Instant::now() + INITIAL_DEADLINE,
+        );
+        assert!(matches!(
+            done.result,
+            Err(Failure::Sandbox(error)) if error == failure.unwrap_or(Error::Crashed)
+        ));
+        done
+    });
+    (
+        Running {
+            pin,
+            shared,
+            thread,
+        },
+        finish_cleanup,
+    )
+}
+
 pub(super) struct Launch<'a> {
     pub helper: &'a Path,
     pub limits: Limits,
@@ -386,8 +470,14 @@ impl Lease {
         }
         Ok(())
     }
-    fn join_scope(&mut self, limits: Limits, fallback: &mut bool) -> Result<(), Failure> {
+    fn join_scope(
+        &mut self,
+        limits: Limits,
+        fallback: &mut bool,
+        shared: &Shared,
+    ) -> Result<(), Failure> {
         let bad = || Failure::Sandbox(Error::ProtocolViolation);
+        shared.enter(Phase::CreateScope);
         self.trace.set(Phase::CreateScope);
         match self
             .controller
@@ -395,7 +485,7 @@ impl Lease {
                 pid: self.pin.pid(),
                 memory_bytes: limits.private_memory,
             })
-            .map_err(Failure::Sandbox)?
+            .map_err(|error| shared.scope_error(error))?
         {
             Message::ScopeCreated { scope } => self.scope = Some(scope),
             Message::ScopeCreateFailed { scope, .. } => {
@@ -421,17 +511,28 @@ impl Lease {
                     .unavailable(Reason::ScopeCreateFailed)
                     .into());
             }
-            Message::Failed { error } => return Err(Failure::Sandbox(error)),
+            Message::Failed { error } => return Err(shared.scope_error(error)),
             _ => return Err(bad()),
         }
         self.owned_group().map_err(|_| bad())?;
         let scope = self.scope.ok_or_else(bad)?;
+        shared.enter(Phase::VerifyScope);
         self.trace.set(Phase::VerifyScope);
-        match self
+        let verification = self
             .controller
             .call(Message::VerifyScope { scope })
-            .map_err(Failure::Sandbox)?
+            .map_err(|error| shared.scope_error(error))?;
+        #[cfg(feature = "slow-tests")]
+        let verification = if self.seams.scope == Some(super::ScopeSeam::VerifyTimedOut)
+            && matches!(verification, Message::ScopeVerified { .. })
         {
+            Message::Failed {
+                error: Error::TimedOut,
+            }
+        } else {
+            verification
+        };
+        match verification {
             Message::ScopeVerified {
                 scope: actual,
                 starttime,
@@ -453,7 +554,7 @@ impl Lease {
                 };
                 return Err(Phase::VerifyScope.unavailable(reason).into());
             }
-            Message::Failed { error } => return Err(Failure::Sandbox(error)),
+            Message::Failed { error } => return Err(shared.scope_error(error)),
             _ => return Err(bad()),
         }
         self.owned_group().map_err(|_| bad())?;
@@ -488,8 +589,9 @@ impl Lease {
         let generation = protocol.generation;
         let bad = || Failure::Sandbox(Error::ProtocolViolation);
         if settings.mode == Mode::Scope {
-            self.join_scope(settings.limits, fallback)?;
+            self.join_scope(settings.limits, fallback, protocol.shared)?;
         }
+        protocol.shared.enter(Phase::Forked);
         #[cfg(feature = "slow-tests")]
         protocol.shared.contained.store(true, Ordering::Release);
         release
@@ -529,6 +631,7 @@ impl Lease {
         let ready = protocol.receive(Phase::Ready)?;
         protocol.traffic.accept(ready).map_err(Failure::Sandbox)?;
         protocol.shared.ready.store(true, Ordering::Release);
+        protocol.shared.enter(Phase::ProbeResult);
         protocol.send(Message::Probe {
             video: settings.selected[0],
             audio: settings.selected[1],
@@ -552,6 +655,7 @@ impl Lease {
             .traffic
             .accept(complete)
             .map_err(Failure::Sandbox)?;
+        protocol.shared.enter(Phase::CloseEof);
         #[cfg(feature = "slow-tests")]
         if let Some(observer) = &settings.observer {
             let failure = Phase::Complete.unavailable(Reason::MemoryWitness);
@@ -578,11 +682,18 @@ impl Lease {
         Ok(result)
     }
     fn finish(&mut self, result: Outcome, fallback: bool, shared: &Shared, end: Instant) -> Done {
+        let finished = Instant::now();
+        let timing = shared
+            .progress
+            .lock()
+            .unwrap()
+            .begin_cleanup(finished, result.as_ref().err());
         let orderly = result.is_ok();
         let success = self.cleanup(!orderly, end);
         shared.native_clean.store(true, Ordering::Release);
         self.release_scope();
         Done {
+            timing,
             result: if orderly && !success {
                 Err(Failure::Sandbox(Error::Crashed))
             } else {
@@ -817,6 +928,7 @@ impl Protocol<'_> {
         }
     }
     fn receive(&mut self, phase: Phase) -> Result<Frame, Failure> {
+        self.shared.enter(phase);
         self.tracer.set(phase);
         let mut reader = Interruptible {
             file: self.response,
@@ -832,7 +944,7 @@ impl Protocol<'_> {
         }
         frame.map_err(|error| match error.kind() {
             io::ErrorKind::InvalidData => Failure::Sandbox(Error::ProtocolViolation),
-            io::ErrorKind::TimedOut => Failure::Sandbox(Error::TimedOut),
+            io::ErrorKind::TimedOut => Failure::ProbeTimedOut(self.shared.timing()),
             kind if !self.shared.ready.load(Ordering::Acquire) => {
                 let reason = if kind == io::ErrorKind::UnexpectedEof {
                     Reason::EarlyEof
@@ -858,7 +970,10 @@ impl Protocol<'_> {
         };
         if reader
             .read(&mut extra)
-            .map_err(|_| Failure::Sandbox(Error::Crashed))?
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::TimedOut => Failure::ProbeTimedOut(self.shared.timing()),
+                _ => Failure::Sandbox(Error::Crashed),
+            })?
             != 0
         {
             return Err(Failure::Sandbox(Error::ProtocolViolation));

@@ -611,7 +611,14 @@ pub struct HostRefusal {
     pub message: String,
     pub native_code: Option<i32>,
 }
+const MEDIA_PROBE_TIMED_OUT: &str = "media_probe_timed_out";
+
 impl HostRefusal {
+    #[must_use]
+    pub fn is_media_probe_timeout(&self) -> bool {
+        self.code == MEDIA_PROBE_TIMED_OUT
+    }
+
     /// These refusals are issued before dispatch, so recovery can safely resend the request.
     #[must_use]
     pub fn retry_after_recovery(&self) -> bool {
@@ -691,6 +698,7 @@ impl From<BundleError> for HostRefusal {
             BundleError::Capacity(_) => "storage_backpressure",
             BundleError::RunLimit | BundleError::RunAdmission(_) => "run_limit",
             BundleError::Unsupported(_) => "unsupported_bundle",
+            BundleError::MediaProbeTimedOut { .. } => MEDIA_PROBE_TIMED_OUT,
             BundleError::Corrupt(_) => "damaged_bundle",
             BundleError::Unsettled => "unsettled",
         };

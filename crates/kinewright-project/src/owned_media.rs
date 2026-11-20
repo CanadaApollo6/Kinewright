@@ -378,15 +378,21 @@ pub struct PreparedOwnedMedia {
 #[derive(Clone)]
 pub struct CertifiedMediaInput {
     source: CertifiedSource,
+    probe_path: std::path::PathBuf,
     interpretation: MediaInterpretation,
     cold_certification: bool,
 }
 impl CertifiedMediaInput {
+    pub(crate) fn probe_path(&self) -> &Path {
+        &self.probe_path
+    }
+
     pub(crate) fn playback_source(&self) -> CertifiedSource {
         self.source.clone()
     }
     fn from_admitted_source(
         source: CertifiedSource,
+        locator: &Path,
         interpretation: MediaInterpretation,
     ) -> Result<Self, BundleError> {
         let source = source
@@ -403,16 +409,18 @@ impl CertifiedMediaInput {
             .map_err(io_error)?;
         Ok(Self {
             source,
+            probe_path: locator.to_path_buf(),
             interpretation,
             cold_certification: false,
         })
     }
     pub(crate) fn from_verified_source(
         source: CertifiedSource,
+        locator: &Path,
         interpretation: MediaInterpretation,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<Self, BundleError> {
-        let probe = crate::media_sandbox::probe(&source, cancel)?;
+        let probe = crate::media_sandbox::probe(locator, &source, cancel)?;
         if !interpretation.matches_probe(&probe)? {
             return Err(BundleError::Corrupt("probe/interpretation conflict".into()));
         }
@@ -421,6 +429,7 @@ impl CertifiedMediaInput {
             .map_err(io_error)?;
         Ok(Self {
             source,
+            probe_path: locator.to_path_buf(),
             interpretation,
             cold_certification: true,
         })
@@ -464,7 +473,7 @@ impl CertifiedMediaInput {
         &self,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<kinewright_media::owned_io::CertifiedProbe, BundleError> {
-        let result = crate::media_sandbox::probe(&self.source, cancel)?;
+        let result = crate::media_sandbox::probe(&self.probe_path, &self.source, cancel)?;
         if !self.interpretation.matches_probe(&result)? {
             return Err(BundleError::Corrupt("probe/interpretation conflict".into()));
         }
@@ -558,7 +567,7 @@ impl ProjectStore {
             manifest.entries.push(entry);
         }
         manifest.entries.sort_by(|a, b| a.entry_id.cmp(&b.entry_id));
-        let sealed = self.admit_record(&manifest)?;
+        let sealed = self.admit_media_interpretation_manifest(&manifest, asset)?;
         Ok(PreparedOwnedMedia {
             asset: asset.clone(),
             inputs_ref: sealed.reference.clone(),
@@ -586,7 +595,7 @@ impl ProjectStore {
         let sealed_table = self.admit_record(&table)?;
         let certificate =
             self.certify_media_parts(&source.reference, &sealed_table.reference, None, None, None)?;
-        let probe = crate::media_sandbox::probe(&certificate, None)?;
+        let probe = crate::media_sandbox::probe(locator, &certificate, None)?;
         let probed_color = probe.color_description.clone();
         let asset = MediaAsset {
             remote_locator: None,
@@ -661,38 +670,48 @@ impl ProjectStore {
         &self,
         reference: &OwnedInputRef,
     ) -> Result<CertifiedMediaInput, BundleError> {
-        self.certify_media_input_with_cancellation(reference, None)
+        self.certify_media_input_with_cancellation(reference, None, None)
     }
     pub fn certify_media_input_with_cancel(
         &self,
         reference: &OwnedInputRef,
         cancel: Arc<AtomicBool>,
     ) -> Result<CertifiedMediaInput, BundleError> {
-        self.certify_media_input_with_cancellation(reference, Some(cancel))
+        self.certify_media_input_with_cancellation(reference, None, Some(cancel))
     }
-    fn certify_media_input_with_cancellation(
+    pub(crate) fn certify_media_input_with_cancellation(
         &self,
         reference: &OwnedInputRef,
+        locator: Option<&Path>,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<CertifiedMediaInput, BundleError> {
         let manifest = self.read_input_manifest(&reference.manifest_ref)?;
         if !manifest.entries.contains(&reference.entry) {
             return Err(BundleError::Identity("media manifest binding".into()));
         }
-        self.certify_media_entry_in_context(&reference.entry, Some(&reference.manifest_ref), cancel)
+        self.certify_media_entry_in_context(
+            &reference.entry,
+            locator,
+            Some(&reference.manifest_ref),
+            cancel,
+        )
     }
     pub(crate) fn certify_media_entry_until_deadline(
         &self,
         entry: &OwnedInputEntry,
+        locator: Option<&Path>,
     ) -> Result<CertifiedMediaInput, BundleError> {
-        self.certify_media_entry_in_context(entry, None, None)
+        self.certify_media_entry_in_context(entry, locator, None, None)
     }
     fn certify_media_entry_in_context(
         &self,
         entry: &OwnedInputEntry,
+        locator: Option<&Path>,
         context: Option<&ObjectRef>,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<CertifiedMediaInput, BundleError> {
+        // Bare manifests identify the actual owned file by its object filename.
+        let locator = locator.unwrap_or_else(|| Path::new(&entry.object.sha256));
         let interpretation = entry.media_interpretation()?;
         let mut memo = self.media_admission_memo(entry)?;
         let source = self.certify_media_parts(
@@ -703,10 +722,10 @@ impl ProjectStore {
             cancel.clone(),
         )?;
         if memo.is_some() {
-            return CertifiedMediaInput::from_admitted_source(source, interpretation);
+            return CertifiedMediaInput::from_admitted_source(source, locator, interpretation);
         }
         let certificate =
-            CertifiedMediaInput::from_verified_source(source, interpretation, cancel)?;
+            CertifiedMediaInput::from_verified_source(source, locator, interpretation, cancel)?;
         certificate.verify_unchanged()?;
         self.remember_media_admission(
             entry,
@@ -925,7 +944,7 @@ mod tests {
         for _ in 0..2 {
             let source = owner
                 .store()
-                .certify_media_entry_until_deadline(&entry)
+                .certify_media_entry_until_deadline(&entry, None)
                 .unwrap();
             let mut decoder = source.open_audio(Arc::new(AtomicBool::new(false))).unwrap();
             assert!(decoder.next_frame().unwrap().is_some());
@@ -1354,7 +1373,7 @@ mod tests {
         let (_asset, entry, _pins) = import(&mut owner, 1, 3456);
         let original = owner
             .store()
-            .certify_media_entry_until_deadline(&entry)
+            .certify_media_entry_until_deadline(&entry, None)
             .unwrap();
         assert!(!original.certification_was_cold());
         let root = owner.store().resolved_root().unwrap();
@@ -1368,7 +1387,7 @@ mod tests {
         let expected = owner.store().open_input_descriptor(&entry.object).err();
         let refused = owner
             .store()
-            .certify_media_entry_until_deadline(&entry)
+            .certify_media_entry_until_deadline(&entry, None)
             .err();
         std::fs::set_permissions(objects, permissions).unwrap();
         let expected = expected.expect("fixture must refuse the temporary directory permission");
@@ -1389,7 +1408,7 @@ mod tests {
         original.verify_unchanged().unwrap();
         let warm = owner
             .store()
-            .certify_media_entry_until_deadline(&entry)
+            .certify_media_entry_until_deadline(&entry, None)
             .unwrap();
         assert!(
             !warm.certification_was_cold(),

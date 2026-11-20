@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +62,7 @@ pub struct OwnedInputRef {
 pub struct InputLeaseRequest {
     hold: StorePin,
     identity: OwnedInputRef,
+    locator: Option<PathBuf>,
 }
 impl InputLeaseRequest {
     /// Refresh an already admitted media binding outside the owner's mutex.
@@ -71,10 +72,19 @@ impl InputLeaseRequest {
     ) -> Result<CertifiedMediaInput, BundleError> {
         self.hold
             .read_store()
-            .certify_media_input_with_cancel(&self.identity, cancel)
+            .certify_media_input_with_cancellation(
+                &self.identity,
+                self.locator.as_deref(),
+                Some(cancel),
+            )
     }
     pub fn open(self) -> Result<OwnedInputLease, BundleError> {
-        self.hold.read_store().lease_input(&self.identity)
+        let store = self.hold.read_store();
+        store.lease_input_for_owner(
+            &self.identity,
+            &store.input_owner(),
+            self.locator.as_deref(),
+        )
     }
 }
 /// Retains the actual store authority and physical charge. It grants no decoder certification.
@@ -201,6 +211,10 @@ impl OwnedInputLease {
                 .read_store()
                 .pin(std::slice::from_ref(&self.identity.manifest_ref))?,
             identity: self.identity.clone(),
+            locator: self
+                .source
+                .as_ref()
+                .map(|source| source.probe_path().to_path_buf()),
         })
     }
     fn verified_cursor(
@@ -321,16 +335,18 @@ impl ProjectStore {
         Ok(InputLeaseRequest {
             hold: self.pin(std::slice::from_ref(&reference.manifest_ref))?,
             identity: reference.clone(),
+            locator: None,
         })
     }
     pub fn lease_input(&self, reference: &OwnedInputRef) -> Result<OwnedInputLease, BundleError> {
-        self.lease_input_for_owner(reference, &self.input_owner())
+        self.lease_input_for_owner(reference, &self.input_owner(), None)
     }
     /// Only a verified checkpoint preparation can admit a historical payload owner.
     pub(crate) fn lease_input_for_owner(
         &self,
         reference: &OwnedInputRef,
         owner: &(Option<ProjectId>, Option<SessionId>),
+        locator: Option<&Path>,
     ) -> Result<OwnedInputLease, BundleError> {
         let manifest = self.read_record::<OwnedInputManifest>(&reference.manifest_ref)?;
         if &(manifest.project_id.clone(), manifest.session_id.clone()) != owner
@@ -344,7 +360,7 @@ impl ProjectStore {
         let source = if reference.entry.object.record_kind
             == crate::bundle_records::RecordKind::OwnedMedia
         {
-            Some(self.certify_media_input_until_deadline(reference)?)
+            Some(self.certify_media_input_with_cancellation(reference, locator, None)?)
         } else {
             None
         };
