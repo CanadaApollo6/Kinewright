@@ -33,6 +33,22 @@ pub(super) fn validate_merge_checkpoint(
     Ok(())
 }
 impl HostCommandOwner {
+    pub(super) fn freeze_task_rulebook(
+        &self,
+        state: &mut RunProjection,
+        task: &crate::orchestration::orchestration_records::TaskId,
+    ) -> Result<(), HostError> {
+        let record = state
+            .tasks
+            .iter_mut()
+            .find(|record| &record.id == task)
+            .ok_or_else(refused)?;
+        if record.progress.frozen_rulebook.is_none() {
+            record.progress.frozen_rulebook = Some(self.owner()?.frozen_rulebook()?);
+        }
+        Ok(())
+    }
+
     /// Descent is proved by this run's acknowledged merge receipts, never by a
     /// model-supplied head or a same-project branch name alone.
     pub(super) fn run_candidate_bases(

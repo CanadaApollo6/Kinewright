@@ -469,6 +469,18 @@ pub(super) fn validate(
             RecordKind::VersionIndex => {
                 control!(crate::studio_records::VersionIndex);
             }
+            RecordKind::EditorialAudit => {
+                control!(crate::editorial::EditorialAudit);
+            }
+            RecordKind::EditorialRationale => {
+                control!(crate::editorial::EditorialRationale);
+            }
+            RecordKind::RulebookRevision => {
+                control!(crate::editorial::RulebookRevision);
+            }
+            RecordKind::RulebookProposal => {
+                control!(crate::editorial::RulebookProposal);
+            }
             RecordKind::FeedbackIndex => {
                 control!(crate::studio_records::FeedbackIndex);
             }

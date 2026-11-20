@@ -1274,6 +1274,8 @@ fn w14_raw_switch_structure_and_ordinary_v3_backward_control() {
         candidate_recovery: std::collections::BTreeMap::new(),
         branch_index_ref: reference(RecordKind::BranchIndex),
         version_index_ref: None,
+        approved_rulebook_ref: None,
+        pending_rulebook_ref: None,
         feedback_index_ref: None,
         run_index_ref: None,
         claim_index_ref: None,

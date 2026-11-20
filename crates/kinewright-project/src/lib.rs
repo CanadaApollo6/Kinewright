@@ -45,6 +45,8 @@ pub mod store;
 pub mod usage_measurement;
 pub mod usage_stream;
 // JA-1 S3 C1 shared metadata and S4 receiving contracts.
+pub mod editorial;
+mod editorial_store;
 pub mod studio_records;
 pub mod studio_store;
 // JA-1 S3 C5 fix 2

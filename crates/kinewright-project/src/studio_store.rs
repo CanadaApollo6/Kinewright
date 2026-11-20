@@ -43,6 +43,8 @@ macro_rules! record {
         }
     };
 }
+pub(crate) use record;
+
 record!(
     VersionIndex,
     VersionIndex,
@@ -70,6 +72,18 @@ record!(
             kind(&d.document_ref, RecordKind::Document)?;
             kind(&d.owner_ref, RecordKind::OperationHistory)?;
             kind(&d.input_manifest_ref, RecordKind::InputManifest)?;
+            for (reference, expected) in [
+                (&d.audit_ref, RecordKind::EditorialAudit),
+                (&d.rulebook_ref, RecordKind::RulebookRevision),
+                (&d.editorial_rationale_ref, RecordKind::EditorialRationale),
+            ] {
+                if let Some(reference) = reference {
+                    kind(reference, expected)?;
+                }
+            }
+            if d.audit_ref.is_none() && d.rulebook_ref.is_some() {
+                return Err(BundleError::Corrupt("snapshot editorial references".into()));
+            }
             if d.revision_refs.len() as u64 > l.comments {
                 return Err(BundleError::Capacity("snapshot revision refs"));
             }
@@ -472,9 +486,17 @@ impl PreparedMetadataPublication {
     }
 }
 
+pub(crate) enum PendingRulebookUpdate {
+    Propose(ObjectRef),
+    Clear,
+}
+
+#[derive(Default)]
 pub(crate) struct ValidatedMetadataUpdate {
     pub(crate) versions: Option<ObjectRef>,
     pub(crate) feedback: Option<ObjectRef>,
+    pub(crate) approved_rulebook: Option<ObjectRef>,
+    pub(crate) pending_rulebook: Option<PendingRulebookUpdate>,
     pub(crate) runs: Option<ObjectRef>,
     pub(crate) seals: Vec<SealedObject>,
     pub(crate) task_checkpoints: Vec<crate::bundle_records::BranchId>,
@@ -486,6 +508,16 @@ impl ValidatedMetadataUpdate {
         }
         if let Some(r) = &self.feedback {
             root.feedback_index_ref = Some(r.clone());
+        }
+        if let Some(r) = &self.approved_rulebook {
+            root.approved_rulebook_ref = Some(r.clone());
+        }
+        match &self.pending_rulebook {
+            Some(PendingRulebookUpdate::Propose(reference)) => {
+                root.pending_rulebook_ref = Some(reference.clone());
+            }
+            Some(PendingRulebookUpdate::Clear) => root.pending_rulebook_ref = None,
+            None => {}
         }
         if let Some(r) = &self.runs {
             root.run_index_ref = Some(r.clone());
@@ -753,7 +785,9 @@ impl ProjectBundle {
         scope: MetadataScope,
         update: &MetadataUpdate,
     ) -> Result<ReceiptLookup, BundleError> {
-        if matches!(scope, MetadataScope::Feedback | MetadataScope::Snapshot) {
+        if matches!(scope, MetadataScope::Feedback | MetadataScope::Snapshot)
+            || matches!(update.change, MetadataChange::DecideRulebook(_))
+        {
             return self.with_person_publication(|bundle| {
                 bundle.metadata_publisher(envelope, scope, update)
             });
@@ -895,6 +929,12 @@ impl ProjectBundle {
                     | MetadataChange::SaveVoice(_)
                     | MetadataChange::SubmitBatch { .. }
             ) | (MetadataScope::Snapshot, MetadataChange::PublishSnapshot(_))
+                | (
+                    MetadataScope::Editorial,
+                    MetadataChange::RetainEditorial { .. }
+                        | MetadataChange::ProposeRulebook(_)
+                        | MetadataChange::DecideRulebook(_)
+                )
                 | (
                     MetadataScope::Orchestration,
                     MetadataChange::Orchestration { .. }
@@ -1119,18 +1159,20 @@ impl ProjectBundle {
     ) -> Result<(ValidatedMetadataUpdate, MetadataResult), BundleError> {
         #[cfg(any(test, feature = "test-util"))]
         crate::io_observer::at_test_hook("metadata_admission");
-        let mut pending = ValidatedMetadataUpdate {
-            versions: None,
-            feedback: None,
-            runs: None,
-            seals: vec![],
-            task_checkpoints: vec![],
-        };
+        let mut pending = ValidatedMetadataUpdate::default();
+        if self.stage_editorial(&update.change, &mut pending)? {
+            return Ok((pending, MetadataResult::Editorial));
+        }
         let original_feedback = self.feedback_index()?;
         let _feedback_charge = charge_value(&self.store, &*original_feedback)?;
         let _update_charge = charge_value(&self.store, update)?;
         let mut feedback = (*original_feedback).clone();
         let result = match &update.change {
+            MetadataChange::RetainEditorial { .. }
+            | MetadataChange::ProposeRulebook(_)
+            | MetadataChange::DecideRulebook(_) => {
+                return Err(BundleError::HistoryBarrierInvariant);
+            }
             MetadataChange::OrchestrationUpdate {
                 transition,
                 consume_batch,
@@ -1178,6 +1220,9 @@ impl ProjectBundle {
                     identity: checkpoint.identity,
                     input_manifest_ref: checkpoint.input_manifest_ref.clone(),
                     revision_refs: p.revision_refs.clone(),
+                    audit_ref: None,
+                    rulebook_ref: None,
+                    editorial_rationale_ref: None,
                     parent_version: p.parent_version.clone(),
                     run_provenance: p.run_provenance.clone(),
                 };
@@ -1392,6 +1437,10 @@ pub(crate) fn add_required_apis(
         if matches!(
             kind,
             RecordKind::VersionIndex
+                | RecordKind::EditorialAudit
+                | RecordKind::EditorialRationale
+                | RecordKind::RulebookRevision
+                | RecordKind::RulebookProposal
                 | RecordKind::FeedbackIndex
                 | RecordKind::FeedbackRevision
                 | RecordKind::FeedbackBatch

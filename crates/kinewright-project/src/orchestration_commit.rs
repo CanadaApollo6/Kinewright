@@ -342,6 +342,17 @@ fn projection_refs(state: &RunProjection, refs: &mut Vec<ObjectRef>) -> Result<(
     refs.extend(state.edit_applications.clone());
     for task in &state.tasks {
         brief_refs(&task.brief, refs)?;
+        if let Some(reference) = task
+            .progress
+            .frozen_rulebook
+            .as_ref()
+            .and_then(|r| r.revision.as_ref())
+        {
+            if reference.record_kind != RecordKind::RulebookRevision {
+                return Err(Refusal::InvalidState);
+            }
+            refs.push(reference.clone());
+        }
         refs.extend(task.progress.feedback.clone());
         refs.extend(task.progress.decisions.clone());
         match &task.state {

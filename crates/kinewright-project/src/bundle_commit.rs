@@ -1234,6 +1234,8 @@ impl BundleCommit {
         }
         if let Some(root) = &metadata_root {
             roots.extend(root.version_index_ref.clone());
+            roots.extend(root.approved_rulebook_ref.clone());
+            roots.extend(root.pending_rulebook_ref.clone());
             roots.extend(root.feedback_index_ref.clone());
             roots.extend(root.run_index_ref.clone());
             roots.extend(root.claim_index_ref.clone());
@@ -1315,6 +1317,12 @@ impl BundleCommit {
             version_index_ref: metadata_root
                 .as_ref()
                 .and_then(|r| r.version_index_ref.clone()),
+            approved_rulebook_ref: metadata_root
+                .as_ref()
+                .and_then(|r| r.approved_rulebook_ref.clone()),
+            pending_rulebook_ref: metadata_root
+                .as_ref()
+                .and_then(|r| r.pending_rulebook_ref.clone()),
             feedback_index_ref: metadata_root
                 .as_ref()
                 .and_then(|r| r.feedback_index_ref.clone()),

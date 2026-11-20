@@ -44,6 +44,8 @@ pub(super) fn connector_command(command: &HostCommand) -> bool {
             | HostCommand::ReadVoiceRange { .. }
             | HostCommand::ListFeedback
             | HostCommand::ListVersions
+            | HostCommand::ReadEditorial { .. }
+            | HostCommand::DecideRulebook { .. }
             | HostCommand::ReadSnapshot { .. }
             | HostCommand::LeaseSnapshot { .. }
             | HostCommand::LeaseCurrentEdit { .. }

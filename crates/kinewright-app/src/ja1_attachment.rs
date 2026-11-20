@@ -7,12 +7,14 @@ use kinewright_project::operation_actor::Core;
 use kinewright_project::{
     bundle::{BundleError, PublicationState},
     bundle_copy::CopyStatus,
-    bundle_records::{BranchId, ObjectRef},
+    bundle_records::{BranchId, ObjectRef, ProjectId},
     bundle_recovery::RecoverySelection,
     bundle_rescue::{RescueConsent, RescueEligibility, RescueProbe, RescueSelection},
     bundle_switch::ProjectSelectionResult,
     editing_session::Ja1EditingSession,
+    editorial::{EditorialAudit, RulebookDecision, RulebookProposal},
     storage_budget::StorageLimits,
+    studio_records::SnapshotKey,
 };
 use std::fmt::Write as _;
 #[path = "ja1_host.rs"]
@@ -68,9 +70,21 @@ impl PreparedView {
     }
 }
 
+pub(crate) struct EditorialDetails {
+    pub project: ProjectId,
+    pub version: Option<SnapshotKey>,
+    pub audit: Option<EditorialAudit>,
+    pub proposal: Option<(ObjectRef, RulebookProposal)>,
+}
+
 pub(crate) enum Action {
     DismissManualNotice,
     StudioVersions,
+    StudioEditorial(Option<SnapshotKey>),
+    StudioRulebook {
+        decision: RulebookDecision,
+        version: Option<SnapshotKey>,
+    },
     StudioManualPlayback(Arc<Document>),
     StudioSelect(kinewright_project::studio_records::SnapshotKey),
     StudioEditCopy(kinewright_project::studio_records::SnapshotKey),
@@ -118,6 +132,8 @@ impl Action {
             | Self::PreviewRelease(_) => true,
             Self::DismissManualNotice
             | Self::StudioVersions
+            | Self::StudioEditorial(_)
+            | Self::StudioRulebook { .. }
             | Self::StudioSelect(_)
             | Self::Retry
             | Self::OpenRecovery
@@ -144,6 +160,8 @@ impl Action {
             self,
             Self::DismissManualNotice
                 | Self::StudioVersions
+                | Self::StudioEditorial(_)
+                | Self::StudioRulebook { .. }
                 | Self::StudioManualPlayback(_)
                 | Self::StudioSelect(_)
                 | Self::ImportMedia(_)
@@ -196,6 +214,7 @@ pub(crate) struct Ja1Attachment {
     pub(crate) studio_ready: Option<Arc<kinewright_project::studio_store::FrozenContext>>,
     pub(crate) studio_versions_ready: Option<Vec<kinewright_project::studio_records::SnapshotKey>>,
     pub(crate) studio_edit_pending: bool,
+    pub(crate) studio_editorial_ready: Option<EditorialDetails>,
     pub(crate) studio_error_ready: Option<String>,
     /// The scope a failed Current-edit acquisition tried, and whether the
     /// failure is temporary (S3 C11 fu1).
@@ -265,6 +284,7 @@ impl Ja1Attachment {
             studio_ready: None,
             studio_versions_ready: None,
             studio_edit_pending: false,
+            studio_editorial_ready: None,
             studio_error_ready: None,
             studio_manual_failed: None,
             studio_manual_ready: None,
@@ -474,7 +494,32 @@ impl Ja1Attachment {
             }
             Action::StudioVersions => {
                 self.studio_versions_ready = Some(self.studio_versions()?);
-                return Ok(());
+                return self.read_studio_editorial(None);
+            }
+            Action::StudioEditorial(version) => {
+                return self.read_studio_editorial(version.as_ref());
+            }
+            Action::StudioRulebook { decision, version } => {
+                let status = if let Some(host) = &self.host {
+                    host.client
+                        .request(kinewright_agent::writer_host::HostCommand::DecideRulebook {
+                            decision: decision.clone(),
+                        })
+                        .map_err(|e| BundleError::Corrupt(e.to_string()))
+                        .and_then(|reply| {
+                            reply
+                                .error
+                                .map_or(Ok(()), |e| Err(BundleError::Corrupt(e.message)))
+                        })
+                } else {
+                    self.owner.decide_rulebook(decision.clone())
+                };
+                let refresh = self.read_studio_editorial(version.as_ref());
+                if let Err(error) = status {
+                    self.studio_error_ready = Some(error.to_string());
+                    return Err(error);
+                }
+                return refresh;
             }
             Action::StudioSelect(key) => match self.studio_context(key) {
                 Ok(context) => {
@@ -868,6 +913,58 @@ impl Ja1Attachment {
         }
         self.owner.studio_versions()
     }
+    fn read_studio_editorial(&mut self, version: Option<&SnapshotKey>) -> Result<(), BundleError> {
+        let result = self.studio_editorial(version);
+        match result {
+            Ok(details) => {
+                self.studio_editorial_ready = Some(details);
+                Ok(())
+            }
+            Err(error) => {
+                self.studio_error_ready = Some(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    fn studio_editorial(
+        &self,
+        version: Option<&SnapshotKey>,
+    ) -> Result<EditorialDetails, BundleError> {
+        if let Some(host) = &self.host {
+            let reply = host
+                .client
+                .request(kinewright_agent::writer_host::HostCommand::ReadEditorial {
+                    version: version.cloned(),
+                })
+                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            if let Some(error) = reply.error {
+                return Err(BundleError::Corrupt(error.message));
+            }
+            return Ok(EditorialDetails {
+                project: reply.status.project_id.ok_or(BundleError::HistoryChanged)?,
+                version: version.cloned(),
+                audit: reply.editorial_audit,
+                proposal: reply.rulebook_proposal,
+            });
+        }
+        let audit = version
+            .map(|key| self.owner.editorial_audit(key))
+            .transpose()?
+            .flatten()
+            .map(|audit| (*audit).clone());
+        let proposal = self
+            .owner
+            .rulebook_proposal()?
+            .map(|(reference, proposal)| (reference, (*proposal).clone()));
+        Ok(EditorialDetails {
+            project: self.owner.project_id()?,
+            version: version.cloned(),
+            audit,
+            proposal,
+        })
+    }
+
     pub(crate) fn studio_project_id(
         &self,
     ) -> Result<kinewright_project::bundle_records::ProjectId, BundleError> {
@@ -1400,6 +1497,8 @@ impl Ja1Attachment {
         match action {
             Action::DismissManualNotice
             | Action::StudioVersions
+            | Action::StudioEditorial(_)
+            | Action::StudioRulebook { .. }
             | Action::StudioManualPlayback(_)
             | Action::StudioSelect(_)
             | Action::StudioEditCopy(_) => {

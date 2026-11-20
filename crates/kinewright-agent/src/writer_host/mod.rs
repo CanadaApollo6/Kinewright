@@ -38,6 +38,7 @@ pub use studio_runtime::fixture::{ProtocolFixture, ProtocolFixtureMode, Protocol
 mod completion_fixture;
 #[cfg(all(target_os = "linux", feature = "test-util"))]
 pub use completion_fixture::CompletionFixture;
+mod editorial;
 mod provider_usage;
 mod settled_release;
 mod task_completion;
@@ -1815,6 +1816,7 @@ impl HostCommandOwner {
             let write = !matches!(
                 command,
                 HostCommand::ListVersions
+                    | HostCommand::ReadEditorial { .. }
                     | HostCommand::ListFeedback
                     | HostCommand::ReadSnapshot { .. }
                     | HostCommand::ReadFeedback { .. }
@@ -1990,6 +1992,7 @@ impl HostCommandOwner {
             | HostCommand::DispatchOrchestration { .. }
             | HostCommand::ObserveRun { .. }
             | HostCommand::ResolveAttention { .. }
+            | HostCommand::DecideRulebook { .. }
             | HostCommand::DetachForContinuation
             | HostCommand::ReviseCut { .. } => {
                 return Err(HostRefusal::new(
@@ -2008,7 +2011,10 @@ impl HostCommandOwner {
                     MetadataChange::SaveFeedback(_)
                     | MetadataChange::SaveVoice(_)
                     | MetadataChange::SubmitBatch { .. } => MetadataScope::Feedback,
-                    MetadataChange::Orchestration { .. }
+                    MetadataChange::RetainEditorial { .. }
+                    | MetadataChange::ProposeRulebook(_)
+                    | MetadataChange::DecideRulebook(_)
+                    | MetadataChange::Orchestration { .. }
                     | MetadataChange::OrchestrationUpdate { .. } => {
                         return Err(HostRefusal::new(
                             "unsupported_command",
@@ -2053,6 +2059,18 @@ impl HostCommandOwner {
             }
             HostCommand::ListFeedback => {
                 reply.feedback_index = Some((*self.owner()?.feedback_index()?).clone());
+            }
+            HostCommand::ReadEditorial { version } => {
+                if let Some(key) = version {
+                    reply.editorial_audit = self
+                        .owner()?
+                        .editorial_audit(&key)?
+                        .map(|audit| (*audit).clone());
+                }
+                reply.rulebook_proposal = self
+                    .owner()?
+                    .rulebook_proposal()?
+                    .map(|(reference, proposal)| (reference, (*proposal).clone()));
             }
             HostCommand::ListVersions => {
                 reply.versions = self.owner()?.studio_versions()?;

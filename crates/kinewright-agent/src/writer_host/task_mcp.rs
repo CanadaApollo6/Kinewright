@@ -23,6 +23,14 @@ use std::sync::{Arc, Mutex, Weak};
 
 pub(crate) const CAPABILITIES: &[(&str, &str)] = &[
     (
+        "propose_rulebook_revision",
+        "Propose one project rule for the person to approve.",
+    ),
+    (
+        "record_editorial_audit",
+        "Record cut rationale as Editor or complete retention, hook and story checks as Reviewer, for an exact published version.",
+    ),
+    (
         "finish_task",
         "Freeze and publish the current revision with one durable completion identity. Retry the original id and payload. Frozen-only work is pending; completion also requires any parent delivery to be observed.",
     ),
@@ -383,15 +391,23 @@ impl TaskMcp {
         }
         host.prove_retention()?;
         let (index, state, task) = host.resolve_task_mcp(&self.auth, &self.endpoint)?;
-        let role = state
+        let record = state
             .tasks
             .iter()
             .find(|record| record.id == task)
-            .ok_or_else(|| refused("task missing"))?
-            .brief
-            .role;
+            .ok_or_else(|| refused("task missing"))?;
+        let role = record.brief.role;
         if !manifest::names(role).contains(&name) {
             return Err(refused("tool hidden for durable task role"));
+        }
+        if matches!(name, "record_editorial_audit" | "propose_rulebook_revision") {
+            return host.editorial_task_tool(
+                &state,
+                record,
+                self.endpoint.authority(),
+                name,
+                arguments,
+            );
         }
         if matches!(
             name,

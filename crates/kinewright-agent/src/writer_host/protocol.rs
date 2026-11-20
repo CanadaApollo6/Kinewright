@@ -441,6 +441,12 @@ pub enum HostCommand {
         evidence: ObjectRef,
     },
     ListVersions,
+    ReadEditorial {
+        version: Option<kinewright_project::studio_records::SnapshotKey>,
+    },
+    DecideRulebook {
+        decision: kinewright_project::editorial::RulebookDecision,
+    },
     ReadSnapshot {
         key: kinewright_project::studio_records::SnapshotKey,
     },
@@ -866,6 +872,13 @@ pub struct HostReply {
     #[serde(default)]
     pub versions: Vec<kinewright_project::studio_records::SnapshotKey>,
     pub snapshot: Option<kinewright_project::studio_records::SnapshotDescriptor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub editorial_audit: Option<kinewright_project::editorial::EditorialAudit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rulebook_proposal: Option<(
+        kinewright_project::bundle_records::ObjectRef,
+        kinewright_project::editorial::RulebookProposal,
+    )>,
     pub feedback: Option<kinewright_project::studio_records::FeedbackRevision>,
     /// `ReadFeedback`: the revision's exact text and strokes evidence, so a
     /// GUI whose bundle the host holds can show the saved note (S3 C7).

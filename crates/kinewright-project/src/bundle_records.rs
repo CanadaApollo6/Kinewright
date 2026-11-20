@@ -84,6 +84,10 @@ pub enum RecordKind {
     IssuerState,
     CreationBrief,
     VersionIndex,
+    EditorialAudit,
+    EditorialRationale,
+    RulebookRevision,
+    RulebookProposal,
     FeedbackIndex,
     FeedbackRevision,
     FeedbackBatch,
@@ -119,6 +123,10 @@ impl RecordKind {
                 | Self::ReceiptIndex
                 | Self::IssuerState
                 | Self::VersionIndex
+                | Self::EditorialAudit
+                | Self::EditorialRationale
+                | Self::RulebookRevision
+                | Self::RulebookProposal
                 | Self::FeedbackIndex
                 | Self::FeedbackRevision
                 | Self::FeedbackBatch
