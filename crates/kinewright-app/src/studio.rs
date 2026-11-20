@@ -13,18 +13,20 @@ use kinewright_project::{
 };
 use std::sync::Arc;
 
-fn show_audit_rulebook(ui: &mut egui::Ui, part: Option<&str>, reference: Option<&ObjectRef>) {
-    let label = match reference {
-        Some(reference) => {
-            let revision = reference.sha256.get(..12).unwrap_or(&reference.sha256);
-            format!("Rulebook {revision}")
-        }
-        None => "No approved rules".to_owned(),
-    };
-    if let Some(part) = part {
-        ui.label(format!("{part} · {label}"));
+fn show_audit_rulebook(
+    ui: &mut egui::Ui,
+    prefix: &str,
+    reference: Option<&ObjectRef>,
+    suffix: &str,
+) {
+    let label = if reference.is_some() {
+        "House rules"
     } else {
-        ui.label(label);
+        "No house rules used"
+    };
+    let response = ui.label(format!("{prefix}{label}{suffix}"));
+    if let Some(reference) = reference {
+        response.on_hover_text(reference.sha256.get(..12).unwrap_or(&reference.sha256));
     }
 }
 
@@ -34,20 +36,25 @@ fn show_editorial_details(ui: &mut egui::Ui, details: &EditorialDetails) -> Opti
         ui.separator();
         ui.small(version.version.as_str());
         if let Some(audit) = &details.audit {
-            ui.strong("Editorial audit");
+            ui.strong("Editorial notes");
             let review_rulebook = audit.rulebook_ref();
             if let Some(rationale) = &audit.rationale
                 && rationale.rulebook_ref.as_ref() != review_rulebook
             {
-                show_audit_rulebook(ui, Some("Review"), review_rulebook);
-                show_audit_rulebook(ui, Some("Rationale"), rationale.rulebook_ref.as_ref());
+                show_audit_rulebook(ui, "Review · ", review_rulebook, "");
+                show_audit_rulebook(
+                    ui,
+                    "Edit reasons · ",
+                    rationale.rulebook_ref.as_ref(),
+                    " · different rules",
+                );
             } else {
-                show_audit_rulebook(ui, None, review_rulebook);
+                show_audit_rulebook(ui, "", review_rulebook, "");
             }
             for entry in audit.entries() {
                 let disposition = match entry.disposition {
-                    AuditDisposition::Blocking => "Blocking",
-                    AuditDisposition::Advisory => "Advisory",
+                    AuditDisposition::Blocking => "Must fix",
+                    AuditDisposition::Advisory => "Suggestion",
                     AuditDisposition::Resolved => continue,
                 };
                 let entry = &entry.observation;
@@ -61,12 +68,19 @@ fn show_editorial_details(ui: &mut egui::Ui, details: &EditorialDetails) -> Opti
                 ui.label(&entry.text);
             }
         } else {
-            ui.label("No editorial audit");
+            ui.label("No editorial notes");
         }
     }
     let (reference, proposal) = details.proposal.as_ref()?;
     ui.separator();
-    ui.strong("Proposed rule");
+    ui.strong("Proposed house rule");
+    ui.label(
+        egui::RichText::new(
+            "Applies to this project from now on. Work already under way and existing versions keep their rules.",
+        )
+        .small()
+        .weak(),
+    );
     ui.label(&proposal.rule);
     ui.horizontal(|ui| {
         let approve = ui.button("Approve").clicked();
