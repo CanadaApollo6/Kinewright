@@ -36,14 +36,23 @@ record!(
 record!(
     EditorialAudit,
     EditorialAudit,
-    |v: &EditorialAudit| rulebook_edges(v.rulebook_ref()),
+    |v: &EditorialAudit| {
+        let review = v.rulebook_ref();
+        let rationale = v
+            .rationale
+            .as_ref()
+            .and_then(|part| part.rulebook_ref.as_ref());
+        review
+            .into_iter()
+            .chain(rationale.filter(|reference| Some(*reference) != review))
+            .cloned()
+            .collect()
+    },
     |v: &EditorialAudit, _: &StorageLimits| {
         validate_part(&v.review, Role::Reviewer)?;
         if let Some(rationale) = &v.rationale {
             validate_part(rationale, Role::Editor)?;
-            if &rationale.snapshot != v.snapshot()
-                || rationale.rulebook_ref.as_ref() != v.rulebook_ref()
-            {
+            if &rationale.snapshot != v.snapshot() {
                 return Err(BundleError::Identity(
                     "editorial audit rationale binding".into(),
                 ));
@@ -203,7 +212,6 @@ impl ProjectBundle {
         let previous = descriptor
             .audit_ref
             .as_ref()
-            .filter(|_| descriptor.rulebook_ref == frozen.revision)
             .map(|reference| self.store.read_record::<EditorialAudit>(reference))
             .transpose()?
             .map(StorageReservation::take);
@@ -218,16 +226,11 @@ impl ProjectBundle {
                 self.stage_complete_audit(descriptor, &audit, pending)?;
             }
             (Role::Reviewer, previous) => {
-                let staged = descriptor
+                let rationale = descriptor
                     .editorial_rationale_ref
                     .as_ref()
                     .map(|reference| self.store.read_record::<EditorialRationale>(reference))
                     .transpose()?
-                    .filter(|rationale| rationale.0.rulebook_ref == frozen.revision);
-                if staged.is_some() {
-                    descriptor.editorial_rationale_ref = None;
-                }
-                let rationale = staged
                     .map(|r| r.take().0)
                     .or_else(|| previous.and_then(|audit| audit.rationale));
                 self.stage_complete_audit(
@@ -256,6 +259,7 @@ impl ProjectBundle {
         let sealed = self.store.admit_record(audit)?;
         descriptor.audit_ref = Some(sealed.reference.clone());
         descriptor.rulebook_ref = audit.rulebook_ref().cloned();
+        descriptor.editorial_rationale_ref = None;
         pending.seals.push(sealed);
         Ok(())
     }
@@ -360,10 +364,11 @@ impl Ja1EditingSession {
 
 pub(crate) fn validate_editorial_binding(
     descriptor: &SnapshotDescriptor,
-    snapshot: &SnapshotKey,
-    rulebook: Option<&ObjectRef>,
+    audit: &EditorialAudit,
 ) -> Result<(), BundleError> {
-    if snapshot != &descriptor.key || rulebook != descriptor.rulebook_ref.as_ref() {
+    if audit.snapshot() != &descriptor.key
+        || audit.rulebook_ref() != descriptor.rulebook_ref.as_ref()
+    {
         return Err(BundleError::Corrupt(
             "editorial audit version binding".into(),
         ));
@@ -440,7 +445,7 @@ mod tests {
         }
     }
 
-    fn s5_version_with_audit(bundle: &mut ProjectBundle) -> (SnapshotKey, ObjectRef) {
+    fn s5_version(bundle: &mut ProjectBundle) -> SnapshotKey {
         let checkpoint_ref = bundle
             .checkpoint_reference(bundle.manual_branch_id())
             .unwrap();
@@ -456,16 +461,25 @@ mod tests {
         else {
             panic!("S5_SNAPSHOT_RECEIPT");
         };
+        key
+    }
+
+    fn s5_submit_part(bundle: &mut ProjectBundle, key: &SnapshotKey, role: Role) -> AuditPart {
         let frozen = FrozenRulebook {
             revision: bundle.approved_rulebook().cloned(),
+        };
+        let kinds: &[_] = match role {
+            Role::Editor => &[AuditKind::CutRationale],
+            Role::Reviewer => &[AuditKind::Retention, AuditKind::Hook, AuditKind::Story],
+            _ => panic!("Expected an editorial role"),
         };
         let submission = AuditSubmission {
             version: key.version.clone(),
             snapshot: key.clone(),
             rulebook_ref: frozen.revision.clone(),
-            entries: [AuditKind::Retention, AuditKind::Hook, AuditKind::Story]
-                .into_iter()
-                .map(|kind| AuditObservation {
+            entries: kinds
+                .iter()
+                .map(|&kind| AuditObservation {
                     kind,
                     line_or_beat: "Opening".into(),
                     output: AudioRange {
@@ -483,11 +497,17 @@ mod tests {
             MetadataScope::Editorial,
             MetadataChange::RetainEditorial {
                 target,
-                role: Role::Reviewer,
+                role,
                 frozen,
-                part,
+                part: part.clone(),
             },
         );
+        part
+    }
+
+    fn s5_version_with_audit(bundle: &mut ProjectBundle) -> (SnapshotKey, ObjectRef) {
+        let key = s5_version(bundle);
+        s5_submit_part(bundle, &key, Role::Reviewer);
         let reference = bundle
             .read_snapshot(&key)
             .unwrap()
@@ -495,6 +515,186 @@ mod tests {
             .audit_ref
             .unwrap();
         (key, reference)
+    }
+
+    fn s5_approve_rule(bundle: &mut ProjectBundle, rule: &str) -> ObjectRef {
+        let proposal = RulebookProposal {
+            proposed_by: s5_attempt(bundle),
+            parent: bundle.approved_rulebook().cloned(),
+            rule: rule.into(),
+        };
+        s5_publish(
+            bundle,
+            MetadataScope::Editorial,
+            MetadataChange::ProposeRulebook(proposal),
+        );
+        let proposal = bundle.pending_rulebook().unwrap().clone();
+        s5_publish(
+            bundle,
+            MetadataScope::Editorial,
+            MetadataChange::DecideRulebook(RulebookDecision {
+                proposal,
+                approve: true,
+            }),
+        );
+        bundle.approved_rulebook().unwrap().clone()
+    }
+
+    fn s5_rereview(bundle: &mut ProjectBundle) -> (SnapshotKey, EditorialAudit, ObjectRef) {
+        s5_approve_rule(bundle, "Keep the promise.");
+        let key = s5_version(bundle);
+        let rationale = s5_submit_part(bundle, &key, Role::Editor);
+        s5_submit_part(bundle, &key, Role::Reviewer);
+        let superseded = bundle
+            .read_snapshot(&key)
+            .unwrap()
+            .descriptor
+            .audit_ref
+            .unwrap();
+        s5_approve_rule(bundle, "Review the first cut.");
+        let review = s5_submit_part(bundle, &key, Role::Reviewer);
+        (
+            key,
+            EditorialAudit {
+                review,
+                rationale: Some(rationale),
+            },
+            superseded,
+        )
+    }
+
+    #[test]
+    fn s5_rereview_retains_original_rationale_after_collection() {
+        let temp = TempDirectory::new_in(&workspace_target_dir(), "s5-editorial-rereview");
+        let mut bundle = s5_bundle(&temp);
+        let (key, expected, superseded) = s5_rereview(&mut bundle);
+        for _ in 0..2 {
+            BundleCommit::publish_maintenance(&mut bundle).unwrap();
+        }
+        bundle.collect_after_ack().unwrap();
+        assert!(
+            bundle.store.verify(&superseded).is_err(),
+            "S5_REREVIEW_OLD_AUDIT_COLLECTED"
+        );
+        let audit = bundle.editorial_audit(&key).unwrap().unwrap();
+        assert_eq!(*audit, expected, "S5_REREVIEW_PRESERVES_RATIONALE");
+        assert_eq!(audit.rulebook_ref(), expected.review.rulebook_ref.as_ref());
+        let original = expected.rationale.unwrap().rulebook_ref.unwrap();
+        assert_eq!(
+            bundle
+                .store
+                .read_record::<RulebookRevision>(&original)
+                .expect("S5_REREVIEW_RETAINS_ORIGINAL_RULEBOOK")
+                .rules,
+            ["Keep the promise."]
+        );
+    }
+
+    #[test]
+    fn s5_completion_carries_staged_rationale_across_approval() {
+        let temp = TempDirectory::new_in(&workspace_target_dir(), "s5-editorial-staged");
+        let mut bundle = s5_bundle(&temp);
+        s5_approve_rule(&mut bundle, "Keep the promise.");
+        let key = s5_version(&mut bundle);
+        let rationale = s5_submit_part(&mut bundle, &key, Role::Editor);
+        assert!(
+            bundle
+                .read_snapshot(&key)
+                .unwrap()
+                .descriptor
+                .editorial_rationale_ref
+                .is_some()
+        );
+        s5_approve_rule(&mut bundle, "Review the first cut.");
+        let review = s5_submit_part(&mut bundle, &key, Role::Reviewer);
+        let audit = bundle.editorial_audit(&key).unwrap().unwrap();
+        assert_eq!(
+            audit.rationale.as_ref(),
+            Some(&rationale),
+            "S5_COMPLETION_CARRIES_RATIONALE"
+        );
+        assert_eq!(audit.review, review);
+        let descriptor = bundle.read_snapshot(&key).unwrap().descriptor;
+        assert!(
+            descriptor.editorial_rationale_ref.is_none(),
+            "S5_COMPLETION_CLEARS_STAGE"
+        );
+        assert_eq!(descriptor.rulebook_ref, review.rulebook_ref);
+    }
+
+    #[test]
+    fn s5_editor_resubmission_keeps_review_under_its_original_revision() {
+        let temp = TempDirectory::new_in(&workspace_target_dir(), "s5-editorial-editor-resubmits");
+        let mut bundle = s5_bundle(&temp);
+        let original = s5_approve_rule(&mut bundle, "Keep the promise.");
+        let key = s5_version(&mut bundle);
+        s5_submit_part(&mut bundle, &key, Role::Editor);
+        let review = s5_submit_part(&mut bundle, &key, Role::Reviewer);
+        let review_bytes = serde_json::to_vec(&review).unwrap();
+        s5_approve_rule(&mut bundle, "Review the first cut.");
+        let rationale = s5_submit_part(&mut bundle, &key, Role::Editor);
+        let audit = bundle.editorial_audit(&key).unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_vec(&audit.review).unwrap(),
+            review_bytes,
+            "S5_EDITOR_PRESERVES_REVIEW"
+        );
+        assert_eq!(
+            audit.rationale.as_ref(),
+            Some(&rationale),
+            "S5_EDITOR_REPLACES_ONLY_RATIONALE"
+        );
+        assert_eq!(audit.rulebook_ref(), Some(&original));
+        let descriptor = bundle.read_snapshot(&key).unwrap().descriptor;
+        assert!(descriptor.editorial_rationale_ref.is_none());
+        assert_eq!(descriptor.rulebook_ref, Some(original));
+    }
+
+    #[test]
+    fn s5_save_as_and_reopen_keep_both_audit_revisions() {
+        let temp = TempDirectory::new_in(&workspace_target_dir(), "s5-editorial-mixed-copy");
+        let mut bundle = s5_bundle(&temp);
+        let (key, expected, _) = s5_rereview(&mut bundle);
+        for _ in 0..2 {
+            BundleCommit::publish_maintenance(&mut bundle).unwrap();
+        }
+        let path = temp.path("copy.kinewright");
+        let SaveAsOutcome::Copied(copy) = bundle.save_as(&path).unwrap() else {
+            panic!("S5_MIXED_COPY");
+        };
+        let copied = copy
+            .into_destination()
+            .unwrap_or_else(|_| panic!("S5_MIXED_COPY_COMMITTED"));
+        let verify = |bundle: &ProjectBundle| {
+            assert_eq!(
+                *bundle.editorial_audit(&key).unwrap().unwrap(),
+                expected,
+                "S5_MIXED_AUDIT_COPY"
+            );
+            let review = expected.review.rulebook_ref.as_ref().unwrap();
+            let rationale = expected
+                .rationale
+                .as_ref()
+                .unwrap()
+                .rulebook_ref
+                .as_ref()
+                .unwrap();
+            for reference in [review, rationale] {
+                bundle
+                    .store
+                    .read_record::<RulebookRevision>(reference)
+                    .expect("S5_MIXED_RULEBOOK_COPY");
+            }
+        };
+        verify(&copied);
+        drop(copied);
+        let reopened = ProjectBundle::activate(
+            &path,
+            BundleWriteAdmission::read(&path).unwrap(),
+            bundle.history_pool(),
+        )
+        .expect("S5_MIXED_COPY_REOPEN");
+        verify(&reopened);
     }
 
     #[test]
@@ -539,26 +739,7 @@ mod tests {
     fn s5_save_as_keeps_approved_rules_and_exact_audits() {
         let temp = TempDirectory::new_in(&workspace_target_dir(), "s5-editorial-copy");
         let mut bundle = s5_bundle(&temp);
-        let proposal = RulebookProposal {
-            proposed_by: s5_attempt(&bundle),
-            parent: None,
-            rule: "Keep the promise.".into(),
-        };
-        s5_publish(
-            &mut bundle,
-            MetadataScope::Editorial,
-            MetadataChange::ProposeRulebook(proposal),
-        );
-        let proposal = bundle.pending_rulebook().unwrap().clone();
-        s5_publish(
-            &mut bundle,
-            MetadataScope::Editorial,
-            MetadataChange::DecideRulebook(RulebookDecision {
-                proposal,
-                approve: true,
-            }),
-        );
-        let approved = bundle.approved_rulebook().unwrap().clone();
+        let approved = s5_approve_rule(&mut bundle, "Keep the promise.");
         let (key, audit) = s5_version_with_audit(&mut bundle);
         let prior = bundle.editorial_audit(&key).unwrap().unwrap().take();
         let proposal = RulebookProposal {

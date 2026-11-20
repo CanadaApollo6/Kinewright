@@ -8,8 +8,25 @@ use crate::{
 };
 use eframe::egui::{self, Color32, Rect, Vec2};
 use kinewright_core::{Document, TimeCode};
-use kinewright_project::{studio_records::SnapshotKey, studio_store::FrozenContext};
+use kinewright_project::{
+    bundle_records::ObjectRef, studio_records::SnapshotKey, studio_store::FrozenContext,
+};
 use std::sync::Arc;
+
+fn show_audit_rulebook(ui: &mut egui::Ui, part: Option<&str>, reference: Option<&ObjectRef>) {
+    let label = match reference {
+        Some(reference) => {
+            let revision = reference.sha256.get(..12).unwrap_or(&reference.sha256);
+            format!("Rulebook {revision}")
+        }
+        None => "No approved rules".to_owned(),
+    };
+    if let Some(part) = part {
+        ui.label(format!("{part} · {label}"));
+    } else {
+        ui.label(label);
+    }
+}
 
 fn show_editorial_details(ui: &mut egui::Ui, details: &EditorialDetails) -> Option<Action> {
     use kinewright_project::editorial::{AuditDisposition, RulebookDecision};
@@ -18,14 +35,14 @@ fn show_editorial_details(ui: &mut egui::Ui, details: &EditorialDetails) -> Opti
         ui.small(version.version.as_str());
         if let Some(audit) = &details.audit {
             ui.strong("Editorial audit");
-            match audit.rulebook_ref() {
-                Some(reference) => {
-                    let revision = reference.sha256.get(..12).unwrap_or(&reference.sha256);
-                    ui.label(format!("Rulebook {revision}"));
-                }
-                None => {
-                    ui.label("No approved rules");
-                }
+            let review_rulebook = audit.rulebook_ref();
+            if let Some(rationale) = &audit.rationale
+                && rationale.rulebook_ref.as_ref() != review_rulebook
+            {
+                show_audit_rulebook(ui, Some("Review"), review_rulebook);
+                show_audit_rulebook(ui, Some("Rationale"), rationale.rulebook_ref.as_ref());
+            } else {
+                show_audit_rulebook(ui, None, review_rulebook);
             }
             for entry in audit.entries() {
                 let disposition = match entry.disposition {

@@ -167,6 +167,7 @@ impl EditorialAudit {
         &self.review.snapshot
     }
 
+    /// The review determines which revision this complete audit satisfies.
     #[must_use]
     pub fn rulebook_ref(&self) -> Option<&ObjectRef> {
         self.review.rulebook_ref.as_ref()

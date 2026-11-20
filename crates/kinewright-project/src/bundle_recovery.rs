@@ -1535,11 +1535,7 @@ pub(super) fn validate_studio_records(
             }
             if let Some(reference) = &descriptor.audit_ref {
                 let audit = load!(crate::editorial::EditorialAudit, reference);
-                crate::editorial_store::validate_editorial_binding(
-                    descriptor,
-                    audit.snapshot(),
-                    audit.rulebook_ref(),
-                )?;
+                crate::editorial_store::validate_editorial_binding(descriptor, &audit)?;
             }
             if let Some(reference) = &descriptor.editorial_rationale_ref {
                 let rationale = load!(crate::editorial::EditorialRationale, reference);
