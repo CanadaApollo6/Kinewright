@@ -45,15 +45,12 @@ pub fn review_overlay_geometry(
 /// Whether a layer can reshape the already-composited picture during its range.
 #[must_use]
 pub fn review_layer_can_reshape_below(clip: &Clip) -> bool {
-    clip.transition_in.as_ref().is_some_and(|transition| {
-        transition.duration.0 > 1
-            && transition_descriptor(&transition.name)
-                .is_some_and(|desc| matches!(desc.shading, TransitionShading::Push { .. }))
-    }) || (matches!(clip.content, ClipContent::Adjustment)
-        && clip.effects.iter().any(|effect| {
-            (effect.enabled || effect.enabled_curve.is_some())
-                && effect_parameters_reshape(effect, None, true)
-        }))
+    reshaping_transition_frames(clip).is_some()
+        || (matches!(clip.content, ClipContent::Adjustment)
+            && clip.effects.iter().any(|effect| {
+                (effect.enabled || effect.enabled_curve.is_some())
+                    && effect_parameters_reshape(effect, None, true)
+            }))
 }
 
 /// Whether this layer can reshape the backdrop at one project frame.
@@ -61,12 +58,27 @@ pub fn review_layer_can_reshape_below(clip: &Clip) -> bool {
 pub fn review_layer_reshapes_below_at(clip: &Clip, at: TimeCode) -> bool {
     let local = TimeCode(at.0 - clip.timeline_start.0);
     clip.is_enabled_at(local)
-        && (transition_render_params(clip, at).backdrop.is_some()
+        && (reshaping_transition_frames(clip).is_some_and(|end| (0..end).contains(&local.0))
             || (matches!(clip.content, ClipContent::Adjustment)
                 && clip.effects.iter().any(|effect| {
                     effect.is_enabled_at(local)
                         && effect_parameters_reshape(effect, Some(local), true)
                 })))
+}
+
+fn reshaping_transition_frames(clip: &Clip) -> Option<i64> {
+    let transition = clip.transition_in.as_ref().filter(|t| t.duration.0 > 1)?;
+    let reshapes = transition_descriptor(&transition.name).is_none_or(|desc| {
+        match desc.shading {
+            TransitionShading::Push { .. } => true,
+            TransitionShading::CrossfadeAlpha | TransitionShading::FadeFromColor { .. } => false,
+            // Adjustment layers sample the stack below them. A spatial
+            // transition can move or mask those pixels as well.
+            _ => matches!(clip.content, ClipContent::Adjustment),
+        }
+    });
+    // The renderer reaches the authored, undisplaced state at d - 1.
+    reshapes.then_some(transition.duration.0 - 1)
 }
 
 fn effect_parameters_reshape(
@@ -236,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn output_review_fix1_geometry_matches_compositor_cpu_twin() {
+    fn output_review_fix2_geometry_matches_compositor_cpu_twin() {
         for raster in [(33_u16, 21_u16), (19, 35)] {
             let full = TitlePixelBounds {
                 left: 0,
@@ -244,12 +256,14 @@ mod tests {
                 right: i32::from(raster.0),
                 bottom: i32::from(raster.1),
             };
-            for [anchor_x, anchor_y] in [[0.5, 0.5], [0.15, 0.73]] {
-                for [scale_x, scale_y] in [[1.0, 1.0], [-0.8, 1.32]] {
-                    for rotation in [0.0, 0.41] {
-                        for [offset_x, offset_y] in [[0.0, 0.0], [0.29, -0.33]] {
+            // Keep lightly clipped quads so the same tight bound holds
+            // whether the rasterizer covers a rotated or axis-aligned edge.
+            for [anchor_x, anchor_y] in [[0.5, 0.5], [0.38, 0.60]] {
+                for [scale_x, scale_y] in [[0.75, 0.75], [-0.58, 0.77]] {
+                    for rotation in [0.0, 0.41, -0.41] {
+                        for [offset_x, offset_y] in [[0.0, 0.0], [0.10, -0.11]] {
                             for [on, axis, edge] in
-                                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.52], [2.0, 1.0, 0.39]]
+                                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.68], [2.0, 1.0, 0.27]]
                             {
                                 let mut params = params_for_at(
                                     &[],
@@ -285,7 +299,7 @@ mod tests {
                                     expected.bottom - actual.bottom,
                                 ];
                                 assert!(
-                                    rotation != 0.0 || excess.into_iter().all(|edge| edge <= 2),
+                                    excess.into_iter().all(|edge| edge <= 2),
                                     "{params:?} {actual:?} vs {expected:?}"
                                 );
                             }
@@ -307,5 +321,34 @@ mod tests {
             enabled_curve: None,
         };
         assert!(effect_parameters_reshape(&effect, None, true));
+    }
+
+    #[test]
+    fn output_review_fix2_unknown_upper_transition_is_unresolved_while_active() {
+        let clip = Clip {
+            id: kinewright_core::ClipId(1),
+            asset: kinewright_core::AssetId(0),
+            content: ClipContent::Adjustment,
+            timeline_start: TimeCode(10),
+            source_range: TimeCode(0)..TimeCode(30),
+            transition_in: Some(kinewright_core::Transition {
+                name: "future_spatial_transition".into(),
+                duration: TimeCode(21),
+            }),
+            effects: Vec::new(),
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            audio_gain_curve: None,
+            speed_percent: 100,
+            enabled: true,
+            enabled_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
+        };
+        assert!(review_layer_can_reshape_below(&clip));
+        assert!(review_layer_reshapes_below_at(&clip, TimeCode(10)));
+        assert!(review_layer_reshapes_below_at(&clip, TimeCode(29)));
+        assert!(!review_layer_reshapes_below_at(&clip, TimeCode(30)));
     }
 }

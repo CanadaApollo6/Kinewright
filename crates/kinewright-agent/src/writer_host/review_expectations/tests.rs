@@ -958,6 +958,60 @@ fn output_review_fix1_upper_adjustment_splits_bounds_and_color_preserves_them() 
 }
 
 #[test]
+fn output_review_fix2_adjustment_slide_marks_only_its_spatial_frames() {
+    let mut adjustment = adjustment(2, 5, 25, test_effect("brightness", "percent", 10));
+    adjustment.transition_in = Some(kinewright_core::Transition {
+        name: "slide_left".into(),
+        duration: TimeCode(21),
+    });
+    let document = doc(
+        Vec::new(),
+        vec![
+            track(1, vec![title(1, 0, "Lower title", false)]),
+            track(2, vec![adjustment]),
+        ],
+    );
+    let slide = derive(&document, &manifest(&document), &[], &annotations()).unwrap();
+    let runs = &slide.overlays.titles.known().next().unwrap().visible;
+    assert_eq!(runs.len(), 3);
+    let span = |start, end| times(TimeCode(start)..TimeCode(end), document.fps).unwrap();
+    assert_eq!(runs[0].output, span(0, 5));
+    assert_eq!(runs[1].output, span(5, 25));
+    assert_eq!(runs[1].bounds, Err(OverlayUnknown::UpperLayerGeometry));
+    assert_eq!(runs[2].output, span(25, 30));
+    assert!(runs[0].bounds.is_ok());
+    assert_eq!(runs[2].bounds, runs[0].bounds);
+    assert!(!slide.overlays.is_resolved());
+}
+
+#[test]
+fn output_review_fix2_adjustment_crossfade_preserves_bounds() {
+    let mut document = doc(
+        Vec::new(),
+        vec![
+            track(1, vec![title(1, 0, "Lower title", false)]),
+            track(
+                2,
+                vec![adjustment(
+                    2,
+                    5,
+                    25,
+                    test_effect("brightness", "percent", 10),
+                )],
+            ),
+        ],
+    );
+    let baseline = derive(&document, &manifest(&document), &[], &annotations()).unwrap();
+    document.tracks[1].clips[0].transition_in = Some(kinewright_core::Transition {
+        name: "crossfade".into(),
+        duration: TimeCode(21),
+    });
+    let crossfade = derive(&document, &manifest(&document), &[], &annotations()).unwrap();
+    assert_eq!(crossfade.overlays.titles, baseline.overlays.titles);
+    assert!(crossfade.overlays.is_resolved());
+}
+
+#[test]
 fn output_review_fix1_word_elsewhere_does_not_cover_the_kept_gap() {
     let asset = asset(1, MediaKind::AudioVideo);
     let mut document = doc(vec![asset], vec![track(1, vec![clip(1, 1, 0, 30, 60)])]);
