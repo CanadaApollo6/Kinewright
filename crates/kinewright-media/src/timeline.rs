@@ -311,7 +311,7 @@ pub fn visual_layers_at(
     Ok(layers)
 }
 
-fn evaluated_effects(clip: &Clip, project_at: TimeCode) -> Vec<Effect> {
+pub(crate) fn evaluated_effects(clip: &Clip, project_at: TimeCode) -> Vec<Effect> {
     let local_at = project_at
         .checked_sub(clip.timeline_start)
         .unwrap_or(TimeCode::ZERO);
@@ -441,9 +441,20 @@ pub fn timeline_audio_segments(
 /// [`Clip::is_enabled_at`] holds (MO1 R5).
 ///
 /// Per-frame evaluation is the exact semantics: the ≥ 1 test resolves every
-/// frame, including mid-ramp frames of non-`Hold` enable curves. Only called
-/// when the clip carries an `enabled_curve`; the static case never walks.
-fn enabled_clip_runs(clip: &Clip, start: TimeCode, end: TimeCode) -> Vec<(TimeCode, TimeCode)> {
+/// frame of an enable curve, including mid-ramp frames. Static clips need
+/// no frame walk.
+#[must_use]
+pub fn enabled_clip_runs(clip: &Clip, start: TimeCode, end: TimeCode) -> Vec<(TimeCode, TimeCode)> {
+    if start >= end {
+        return Vec::new();
+    }
+    if clip.enabled_curve.is_none() {
+        return if clip.enabled {
+            vec![(start, end)]
+        } else {
+            Vec::new()
+        };
+    }
     let mut runs = Vec::new();
     let mut cursor = start.0;
     while cursor < end.0 {
@@ -556,7 +567,10 @@ fn media_source_for_clip(
 
 // GPU shading is f32; projecting integer frame offsets is the intended final conversion.
 #[allow(clippy::cast_precision_loss)]
-fn transition_render_params(clip: &Clip, project_at: TimeCode) -> TransitionRenderParams {
+pub(crate) fn transition_render_params(
+    clip: &Clip,
+    project_at: TimeCode,
+) -> TransitionRenderParams {
     let Some(transition) = &clip.transition_in else {
         return TransitionRenderParams::default();
     };
@@ -614,7 +628,7 @@ fn transition_render_params(clip: &Clip, project_at: TimeCode) -> TransitionRend
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn title_alpha(
+pub(crate) fn title_alpha(
     document: &Document,
     clip: &Clip,
     title: &Title,
