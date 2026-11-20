@@ -249,6 +249,61 @@ fn s5_running_director_can_propose_again_after_approval() {
 }
 
 #[test]
+fn s5_decline_clears_proposal_and_preserves_approved_rules() {
+    let mut f = Fixture::new();
+    let (_, parent, director) = c4_director(&f);
+    let decision = s5_propose(&f, &director);
+    holder(&mut f);
+    ok(
+        f.editor
+            .request(HostCommand::DecideRulebook { decision })
+            .unwrap(),
+        "S5_FIRST_RULE_APPROVED",
+    );
+    let (before, _, _) = s5_child(&f, &director, &parent, Role::Reviewer);
+    let approved = s5_brief_rules(&f, &before);
+    assert!(approved["revision"].is_object());
+
+    let mut decline = s5_propose(&f, &director);
+    decline.approve = false;
+    ok(
+        f.editor
+            .request(HostCommand::DecideRulebook { decision: decline })
+            .unwrap(),
+        "S5_RULE_DECLINED",
+    );
+    assert!(
+        s5_editorial(&f, None).rulebook_proposal.is_none(),
+        "S5_DECLINE_CLEARS_PENDING"
+    );
+    let (after, _, _) = s5_child(&f, &director, &parent, Role::Reviewer);
+    assert_eq!(
+        s5_brief_rules(&f, &after),
+        approved,
+        "S5_DECLINE_PRESERVES_APPROVED"
+    );
+}
+
+#[test]
+fn s5_second_proposal_is_refused_while_one_is_pending() {
+    let f = Fixture::new();
+    let (_, _, director) = c4_director(&f);
+    let first = s5_propose(&f, &director);
+    assert_eq!(
+        s5_refusal(
+            &director,
+            "propose_rulebook_revision",
+            serde_json::json!({"rule":"Keep the closing beat."}),
+            "rulebook proposal already pending",
+        ),
+        None,
+        "S5_SECOND_PROPOSAL_REFUSED"
+    );
+    let (retained, _) = s5_editorial(&f, None).rulebook_proposal.unwrap();
+    assert_eq!(retained, first.proposal, "S5_PENDING_PROPOSAL_PRESERVED");
+}
+
+#[test]
 fn s5_agent_cannot_approve_its_proposal() {
     let f = Fixture::new();
     let (_run, parent, director) = c4_director(&f);
@@ -418,6 +473,10 @@ fn s5_reviewer_refuses_invalid_audit_submissions() {
             .collect::<Vec<_>>()
     );
     check(too_many, "editorial audit entries");
+    let mut overlong_text = args;
+    overlong_text["entries"][0]["text"] =
+        serde_json::json!("x".repeat(kinewright_project::editorial::MAX_AUDIT_TEXT + 1));
+    check(overlong_text, "editorial audit text exceed the limit");
     assert!(changes.is_empty(), "S5_AUDIT_REFUSALS_CHANGED {changes:#?}");
     assert!(s5_editorial(&f, Some(key)).editorial_audit.is_none());
 }
