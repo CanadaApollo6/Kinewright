@@ -17,8 +17,8 @@ pub const MAX_REVIEW_ELEMENT_TEXT_BYTES: usize = 2_048;
 pub const MAX_REVIEW_BOUNDS_RUNS: usize = 65_536;
 pub const MAX_REVIEW_PAUSES: usize = 1_024;
 pub const MAX_REVIEW_LANDMARKS: usize = 4_096;
-/// Caps work for keyframed clips and per-frame overlay geometry.
-pub const MAX_REVIEW_FRAME_EVALUATIONS: usize = 2_000_000;
+/// Aggregate units for timeline and overlay derivation.
+pub const MAX_REVIEW_DERIVATION_WORK: usize = 2_000_000;
 
 pub type ReviewSpan = Range<ExactMicros>;
 
@@ -131,6 +131,7 @@ pub struct AvLandmark {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AbsenceProof {
     NoAudibleSourceSegments,
+    NoRecognizedSpeechInKeptRanges,
     NoDocumentElementsOnOutput,
     NoAuthorPauseDeclarations,
     NoPairedAudioVideo,
@@ -175,6 +176,7 @@ pub enum OverlayUnknown {
     ImageNotPinned,
     TextLayoutUnavailable,
     GeometryUnavailable,
+    UpperLayerGeometry,
     NotVisible,
 }
 
@@ -209,11 +211,22 @@ pub struct ReviewOverlay {
     pub visible: Vec<OverlayBoundsRun>,
     pub text: OverlayText,
     pub pixels: OverlayPixels,
+    /// False means the author has not declared the element sourced, with the
+    /// editorial audit row providing the other control.
     pub sourced: bool,
+}
+
+/// Author declarations about a clip with no visible output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OffOutputAnnotation {
+    pub element: ClipId,
+    pub sourced: bool,
+    pub text_card: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverlayExpectations {
+    pub annotated_off_output: Vec<OffOutputAnnotation>,
     pub captions: ReviewInventory<ReviewOverlay>,
     pub titles: ReviewInventory<ReviewOverlay>,
     pub cards: ReviewInventory<ReviewOverlay>,
@@ -248,6 +261,7 @@ pub struct ReviewExpectations {
     pub kept_words: ReviewInventory<KeptWord>,
     /// Union of known kept-word intervals, with the same completeness as the words.
     pub speech_windows: ReviewInventory<ReviewSpan>,
+    pub uncovered_speech_segments: Vec<ReviewSegmentId>,
     pub intended_pauses: ReviewInventory<ReviewSpan>,
     pub av_landmarks: ReviewInventory<AvLandmark>,
     pub overlays: OverlayExpectations,

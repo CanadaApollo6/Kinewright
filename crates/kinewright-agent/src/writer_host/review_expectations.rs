@@ -1,10 +1,11 @@
 //! Derive expectations from a frozen document and its admitted source evidence.
+//! Run derivation outside the writer lock.
 mod overlays;
 mod timing;
 
 use kinewright_core::dialogue::Word;
 use kinewright_core::output_review::{
-    AbsenceProof, MAX_REVIEW_CLIPS, MAX_REVIEW_FRAME_EVALUATIONS, MAX_REVIEW_PAUSES,
+    AbsenceProof, MAX_REVIEW_CLIPS, MAX_REVIEW_DERIVATION_WORK, MAX_REVIEW_PAUSES,
     MAX_REVIEW_TRACKS, ReviewAnnotations, ReviewCutIdentity, ReviewExpectations, ReviewInventory,
     ReviewSnapshotId, TranscriptIdentity,
 };
@@ -16,7 +17,7 @@ use kinewright_core::{
 use kinewright_project::operation_history::SnapshotIdentity;
 use kinewright_project::owned_inputs::{OwnedInputEntry, OwnedInputManifest};
 use serde::Serialize;
-use std::ops::Range;
+use std::{collections::BTreeMap, ops::Range};
 use thiserror::Error;
 
 const MAX_MANIFEST_ENTRIES: usize = 8_192;
@@ -37,6 +38,9 @@ pub struct ReviewTranscript<'a> {
     /// Revision of the source-clock evidence selected by the host.
     pub identity: TranscriptIdentity,
     pub words: &'a [Word],
+    /// Independently established processed range on this revision's source clock.
+    /// Word timestamps alone do not establish recognition coverage.
+    pub recognized_source: Option<kinewright_core::output_review::ReviewSpan>,
     /// Independently measured source events, on the recording's video and
     /// audio clocks relative to their pinned stream origins.
     pub landmarks: &'a [SourceAvLandmark],
@@ -67,7 +71,7 @@ pub enum ReviewExpectationError {
     Raster,
     #[error("transcript for asset {0} does not match one admitted source and selected stream")]
     TranscriptBinding(kinewright_core::AssetId),
-    #[error("source evidence for asset {0} has an invalid word or landmark")]
+    #[error("source evidence for asset {0} has an invalid range, word or landmark")]
     TranscriptTiming(kinewright_core::AssetId),
     #[error(transparent)]
     Document(#[from] OpError),
@@ -94,15 +98,15 @@ pub fn derive_review_expectations(
     if annotations.snapshot != snapshot {
         return Err(ReviewExpectationError::AnnotationSnapshot);
     }
-    validate_limits(input, annotations)?;
+    let mut work = validate_limits(input, annotations)?;
     let document = input.document;
     document.validate()?;
     let settings = input.settings;
     let duration = document.duration;
     let output_frames =
         map_frames_with_rounding(duration, document.fps, settings.fps, FrameRounding::Ceil)?;
+    let overlays = overlays::derive(input, annotations, &mut work)?;
     let evidence = timing::derive(input)?;
-    let overlays = overlays::derive(input, annotations)?;
     let intended_pauses = intended_pauses(document, annotations)?;
     Ok(ReviewExpectations {
         identity: ReviewCutIdentity {
@@ -118,6 +122,7 @@ pub fn derive_review_expectations(
         segments: evidence.segments,
         kept_words: evidence.kept_words,
         speech_windows: evidence.speech_windows,
+        uncovered_speech_segments: evidence.uncovered_speech_segments,
         intended_pauses,
         av_landmarks: evidence.av_landmarks,
         overlays,
@@ -127,7 +132,7 @@ pub fn derive_review_expectations(
 fn validate_limits(
     input: &ReviewExpectationInput<'_>,
     annotations: &ReviewAnnotations,
-) -> Result<(), ReviewExpectationError> {
+) -> Result<DerivationWork, ReviewExpectationError> {
     use kinewright_core::output_review::{
         MAX_REVIEW_ELEMENT_TEXT_BYTES, MAX_REVIEW_ELEMENTS, MAX_REVIEW_TRANSCRIPTS,
     };
@@ -175,7 +180,7 @@ fn validate_limits(
 
     let mut clips = 0;
     let mut elements = 0;
-    let mut curve_frames = 0;
+    let mut work = DerivationWork::default();
     for track in &input.document.tracks {
         clips += track.clips.len();
         bound("clips", clips, MAX_REVIEW_CLIPS)?;
@@ -192,13 +197,10 @@ fn validate_limits(
                     MAX_REVIEW_ELEMENT_TEXT_BYTES,
                 )?;
             }
-            if clip.enabled_curve.is_some() {
-                let duration = input.document.clip_duration(clip)?.0;
-                curve_frames = add_frame_work(curve_frames, duration)?;
-            }
+            work.register(input.document, clip)?;
         }
     }
-    Ok(())
+    Ok(work)
 }
 
 fn bound(field: &'static str, actual: usize, maximum: usize) -> Result<(), ReviewExpectationError> {
@@ -208,10 +210,50 @@ fn bound(field: &'static str, actual: usize, maximum: usize) -> Result<(), Revie
     Ok(())
 }
 
-fn add_frame_work(total: usize, frames: i64) -> Result<usize, ReviewExpectationError> {
-    let next = total.saturating_add(usize::try_from(frames).unwrap_or(usize::MAX));
-    bound("frame_evaluations", next, MAX_REVIEW_FRAME_EVALUATIONS)?;
-    Ok(next)
+#[derive(Default)]
+struct DerivationWork {
+    used: usize,
+    frame_costs: BTreeMap<ClipId, usize>,
+}
+
+impl DerivationWork {
+    fn charge(&mut self, units: usize) -> Result<(), ReviewExpectationError> {
+        self.used = self.used.saturating_add(units);
+        bound("derivation_work", self.used, MAX_REVIEW_DERIVATION_WORK)
+    }
+
+    fn frame_cost(&self, clip: &Clip) -> usize {
+        self.frame_costs[&clip.id]
+    }
+
+    fn register(&mut self, document: &Document, clip: &Clip) -> Result<(), ReviewExpectationError> {
+        let enable_cost = 1 + clip
+            .enabled_curve
+            .as_ref()
+            .map_or(0, |curve| curve.keyframes.len());
+        let mut units = enable_cost;
+        for effect in &clip.effects {
+            let descriptor = kinewright_core::effect_descriptor(&effect.name);
+            let keys = effect.keyframes.values().map(|curve| curve.keyframes.len());
+            let enable_keys = effect
+                .enabled_curve
+                .as_ref()
+                .map_or(0, |curve| curve.keyframes.len());
+            let fixed = 1 + effect.parameters.len() + descriptor.map_or(0, |d| d.parameters.len());
+            units = keys
+                .chain([units, fixed, enable_keys])
+                .fold(0, usize::saturating_add);
+            bound("derivation_work", units, MAX_REVIEW_DERIVATION_WORK)?;
+        }
+        self.charge(units)?;
+        if clip.enabled_curve.is_some() {
+            // Audio and video may each scan the clip's project clock.
+            let frames = usize::try_from(document.clip_duration(clip)?.0).unwrap_or(usize::MAX);
+            self.charge(frames.saturating_mul(enable_cost).saturating_mul(2))?;
+        }
+        self.frame_costs.insert(clip.id, units);
+        Ok(())
+    }
 }
 
 fn inventory<T>(values: Vec<T>, complete: bool, empty: AbsenceProof) -> ReviewInventory<T> {

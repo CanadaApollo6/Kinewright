@@ -119,7 +119,9 @@ pub enum EligibilityReason {
     CaptionWordsDisagree,
     CaptionWordClipped,
     SourcedText,
-    DecimalDigit,
+    NumericCharacter,
+    NumericTextUncomparable,
+    CaptionTextUncomparable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,8 +181,8 @@ fn ineligible_overlay(
                 return Some(EligibilityReason::SourcedText);
             }
             text.chars()
-                .any(decimal_digit)
-                .then_some(EligibilityReason::DecimalDigit)
+                .any(char::is_numeric)
+                .then_some(EligibilityReason::NumericCharacter)
         }
         OverlayKind::Caption => {
             if !expectations.kept_words.is_determined() {
@@ -194,60 +196,72 @@ fn ineligible_overlay(
             if words().any(|word| word.clipped) {
                 return Some(EligibilityReason::CaptionWordClipped);
             }
-            let expected = normalized_tokens(text);
+            let numeric = text.chars().any(char::is_numeric)
+                || words().any(|word| word.text.chars().any(char::is_numeric));
+            if uncomparable_text(text) || words().any(|word| uncomparable_text(&word.text)) {
+                return Some(if numeric {
+                    EligibilityReason::NumericTextUncomparable
+                } else {
+                    EligibilityReason::CaptionTextUncomparable
+                });
+            }
+            let expected = normalized_tokens(text, numeric);
             let matches = !expected.is_empty()
                 && words()
-                    .flat_map(|word| normalized_tokens(&word.text))
+                    .flat_map(|word| normalized_tokens(&word.text, numeric))
                     .eq(expected);
             (!matches).then_some(EligibilityReason::CaptionWordsDisagree)
         }
     }
 }
 
-fn decimal_digit(c: char) -> bool {
-    get_general_category(c) == GeneralCategory::DecimalNumber
+fn uncomparable_text(text: &str) -> bool {
+    text.chars().any(|ch| {
+        matches!(
+            get_general_category(ch),
+            GeneralCategory::Format
+                | GeneralCategory::NonspacingMark
+                | GeneralCategory::SpacingMark
+                | GeneralCategory::EnclosingMark
+        ) || (ch.is_control() && !matches!(ch, '\t' | '\r' | '\n'))
+    })
 }
 
-fn normalized_tokens(text: &str) -> Vec<String> {
+fn normalized_tokens(text: &str, numeric: bool) -> Vec<String> {
+    if numeric {
+        // Every punctuation mark, symbol and non-ASCII separator survives
+        // numeric comparison. Parentheses may denote a negative amount, and
+        // even a trailing period or exclamation mark may change the value.
+        return text
+            .split_ascii_whitespace()
+            .map(|token| {
+                if let Some(magnitude) = token.strip_prefix('−').filter(|tail| {
+                    tail.strip_prefix('.')
+                        .unwrap_or(tail)
+                        .starts_with(char::is_numeric)
+                }) {
+                    // A leading unary minus has the same meaning as ASCII
+                    // minus. Preserve dashes and operators inside the token.
+                    format!("-{magnitude}")
+                } else if token.chars().any(char::is_numeric) {
+                    token.to_owned()
+                } else {
+                    token.to_lowercase()
+                }
+            })
+            .collect();
+    }
     let mut tokens = Vec::new();
     let mut token = String::new();
     let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        let next = chars.peek().copied();
-        let next_is_digit = next.is_some_and(decimal_digit);
-        let number_after_sign = || {
-            let mut remaining = chars.clone().skip_while(|c| c.is_whitespace());
-            match remaining.next() {
-                Some('.') => remaining.next().is_some_and(decimal_digit),
-                Some(digit) => decimal_digit(digit),
-                None => false,
-            }
-        };
-        if matches!(c, '+' | '-' | '−') && number_after_sign() {
-            if !token.is_empty() {
-                tokens.push(std::mem::take(&mut token));
-            }
-            token.push(if c == '−' { '-' } else { c });
-            while chars.peek().is_some_and(|c| c.is_whitespace()) {
-                chars.next();
-            }
-        } else if c.is_alphanumeric()
-            || matches!(
-                get_general_category(c),
-                GeneralCategory::NonspacingMark | GeneralCategory::SpacingMark
-            )
-            || c == '.'
-                && next_is_digit
-                && (token.is_empty()
-                    || token.ends_with(decimal_digit)
-                    || token.ends_with(['+', '-']))
-        {
-            token.extend(c.to_lowercase());
-        } else if matches!(c, '\'' | '’')
+    while let Some(ch) = chars.next() {
+        if ch.is_alphanumeric() {
+            token.extend(ch.to_lowercase());
+        } else if matches!(ch, '\'' | '’')
             && token.ends_with(char::is_alphabetic)
-            && next.is_some_and(char::is_alphabetic)
+            && chars.peek().is_some_and(|next| next.is_alphabetic())
         {
-            // Apostrophes inside a word are punctuation, including curly forms.
+            // Apostrophes inside ordinary prose are punctuation.
         } else if !token.is_empty() {
             tokens.push(std::mem::take(&mut token));
         }
@@ -325,9 +339,11 @@ mod tests {
             segments: Vec::new(),
             kept_words: ReviewInventory::NoneProven(AbsenceProof::NoAudibleSourceSegments),
             speech_windows: ReviewInventory::NoneProven(AbsenceProof::NoAudibleSourceSegments),
+            uncovered_speech_segments: Vec::new(),
             intended_pauses: ReviewInventory::NoneProven(AbsenceProof::NoAuthorPauseDeclarations),
             av_landmarks: ReviewInventory::NoneProven(AbsenceProof::NoPairedAudioVideo),
             overlays: OverlayExpectations {
+                annotated_off_output: Vec::new(),
                 captions: ReviewInventory::NoneProven(AbsenceProof::NoDocumentElementsOnOutput),
                 titles: ReviewInventory::NoneProven(AbsenceProof::NoDocumentElementsOnOutput),
                 cards: ReviewInventory::Present {

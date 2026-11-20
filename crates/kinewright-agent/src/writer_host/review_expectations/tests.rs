@@ -204,6 +204,7 @@ fn transcript(words: &[Word]) -> ReviewTranscript<'_> {
             revision_sha256: digest(&words).unwrap(),
         },
         words,
+        recognized_source: (!words.is_empty()).then_some(us(0)..us(8_000_000)),
         landmarks: &[],
     }
 }
@@ -468,7 +469,7 @@ fn output_review_matching_caption_with_digits_is_eligible() {
         word("Version", 100_000, 300_000),
         word("3.5", 400_000, 800_000),
     ];
-    let record = caption_record("VERSION: 3.5!", &kept);
+    let record = caption_record("VERSION 3.5", &kept);
     assert!(delivery_eligibility(&record).is_empty());
     assert!(record.overlays.is_resolved());
 }
@@ -513,7 +514,7 @@ fn output_review_eligibility_reports_all_caption_title_and_card_exceptions() {
             },
             DeliveryException::Element {
                 element: ClipId(4),
-                reason: EligibilityReason::DecimalDigit
+                reason: EligibilityReason::NumericCharacter
             },
             DeliveryException::Element {
                 element: ClipId(5),
@@ -534,8 +535,8 @@ fn output_review_numeric_normalization_preserves_decimals_and_signs() {
         ("2", "-2", false),
         ("2", "+2", false),
         ("2", "− 2", false),
-        ("−2!", "-2", true),
-        ("(.5).", ".5", true),
+        ("−2", "-2", true),
+        ("(.5).", ".5", false),
         ("5", ".5", false),
     ] {
         let record = caption_record(written, &[word(spoken, 200_000, 300_000)]);
@@ -810,4 +811,390 @@ fn output_review_transcript_stream_must_match_the_manifest() {
         ),
         Err(ReviewExpectationError::TranscriptBinding(AssetId(1)))
     ));
+}
+
+fn caption_exception(reason: EligibilityReason) -> [DeliveryException; 1] {
+    [DeliveryException::Element {
+        element: ClipId(2),
+        reason,
+    }]
+}
+
+#[test]
+fn output_review_fix1_titles_refuse_all_unicode_number_categories() {
+    for text in [
+        "E = mc²",
+        "½ price",
+        "Room Ⅻ",
+        "Step ③",
+        "Edition ٢",
+        "Room 2\u{202e}",
+    ] {
+        let document = doc(Vec::new(), vec![track(2, vec![title(2, 0, text, false)])]);
+        let record = derive(&document, &manifest(&document), &[], &annotations()).unwrap();
+        assert_eq!(
+            delivery_eligibility(&record),
+            caption_exception(EligibilityReason::NumericCharacter),
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
+fn output_review_fix1_numeric_forms_preserve_every_value_character() {
+    for (written, kept) in [
+        ("－2", "2"),
+        ("−½", "½"),
+        ("1/2", "1 2"),
+        ("1⁄2", "1 2"),
+        ("50%", "50"),
+        ("50‰", "50"),
+        ("1e−3", "1e3"),
+        ("1–2", "1 2"),
+        ("1−2", "1-2"),
+        ("1,234", "1234"),
+        ("1\u{202f}234", "1 234"),
+        ("(2)", "2"),
+        ("3!", "3"),
+    ] {
+        let record = caption_record(written, &[word(kept, 200_000, 300_000)]);
+        assert_eq!(
+            delivery_eligibility(&record),
+            caption_exception(EligibilityReason::CaptionWordsDisagree),
+            "{written:?} vs {kept:?}"
+        );
+        let matching = caption_record(written, &[word(written, 200_000, 300_000)]);
+        assert!(
+            delivery_eligibility(&matching).is_empty(),
+            "same form {written:?}"
+        );
+    }
+}
+
+#[test]
+fn output_review_fix1_controls_and_marks_refuse_numeric_comparison() {
+    for written in ["-\u{200b}2", "1\u{20dd}2", "1\u{202e}2"] {
+        let record = caption_record(written, &[word(written, 200_000, 300_000)]);
+        assert_eq!(
+            delivery_eligibility(&record),
+            caption_exception(EligibilityReason::NumericTextUncomparable),
+            "{written:?}"
+        );
+    }
+}
+
+fn test_effect(name: &str, parameter: &str, value: i64) -> Effect {
+    Effect {
+        id: EffectId(1),
+        name: name.into(),
+        enabled: true,
+        enabled_curve: None,
+        parameters: BTreeMap::from([(parameter.into(), ParamValue::Integer(value))]),
+        keyframes: BTreeMap::new(),
+    }
+}
+
+fn adjustment(id: u64, at: i64, duration: i64, effect: Effect) -> Clip {
+    let mut clip = clip(id, 0, at, 0, duration);
+    clip.content = ClipContent::Adjustment;
+    clip.effects.push(effect);
+    clip
+}
+
+#[test]
+fn output_review_fix1_upper_adjustment_splits_bounds_and_color_preserves_them() {
+    let lower = title(1, 0, "Lower title", false);
+    let mut document = doc(
+        Vec::new(),
+        vec![
+            track(1, vec![lower]),
+            track(
+                2,
+                vec![adjustment(
+                    2,
+                    10,
+                    10,
+                    test_effect("transform", "x_percent", 25),
+                )],
+            ),
+        ],
+    );
+    let geometry = derive(&document, &manifest(&document), &[], &annotations()).unwrap();
+    let geometry_runs = &geometry.overlays.titles.known().next().unwrap().visible;
+    assert_eq!(geometry_runs.len(), 3);
+    let rate = document.fps;
+    assert_eq!(
+        geometry_runs[1].output,
+        times(TimeCode(10)..TimeCode(20), rate).unwrap()
+    );
+    assert_eq!(
+        geometry_runs[1].bounds,
+        Err(OverlayUnknown::UpperLayerGeometry)
+    );
+    assert!(!geometry.overlays.is_resolved());
+    document.tracks[1].clips[0].effects[0] = test_effect("brightness", "percent", 10);
+    let graded = derive(&document, &manifest(&document), &[], &annotations()).unwrap();
+    let graded_runs = &graded.overlays.titles.known().next().unwrap().visible;
+    assert_eq!(graded_runs.len(), 1);
+    assert_eq!(graded_runs[0].output, us(0)..us(1_000_000));
+    assert_eq!(graded_runs[0].bounds, geometry_runs[0].bounds);
+    assert!(graded.overlays.is_resolved());
+}
+
+#[test]
+fn output_review_fix1_word_elsewhere_does_not_cover_the_kept_gap() {
+    let asset = asset(1, MediaKind::AudioVideo);
+    let mut document = doc(vec![asset], vec![track(1, vec![clip(1, 1, 0, 30, 60)])]);
+    let words = [word("spoken", 100_000, 200_000)];
+    let mut transcript = transcript(&words);
+    transcript.recognized_source = Some(us(0)..us(1_000_000));
+    let transcript = [transcript];
+    let original = derive(&document, &manifest(&document), &transcript, &annotations()).unwrap();
+    assert!(!original.kept_words.is_determined());
+    document.tracks[0].clips.push(clip(2, 1, 30, 0, 30));
+    document.duration = TimeCode(60);
+    let extended = derive(&document, &manifest(&document), &transcript, &annotations()).unwrap();
+    assert!(!extended.kept_words.is_determined());
+    assert!(!extended.speech_windows.is_determined());
+    assert_eq!(extended.kept_words.known().count(), 1);
+    assert_eq!(
+        extended.uncovered_speech_segments,
+        original.uncovered_speech_segments
+    );
+    assert_eq!(extended.uncovered_speech_segments[0].clip, ClipId(1));
+}
+
+#[test]
+fn output_review_fix1_covered_wordless_range_cannot_match_a_caption() {
+    let asset = asset(1, MediaKind::AudioVideo);
+    let document = doc(
+        vec![asset],
+        vec![
+            track(1, vec![clip(1, 1, 0, 30, 60)]),
+            track(2, vec![title(2, 0, "Someone spoke", true)]),
+        ],
+    );
+    let mut silent = transcript(&[]);
+    silent.recognized_source = Some(us(1_000_000)..us(2_000_000));
+    let record = derive(&document, &manifest(&document), &[silent], &annotations()).unwrap();
+    assert_eq!(
+        record.kept_words,
+        ReviewInventory::NoneProven(AbsenceProof::NoRecognizedSpeechInKeptRanges)
+    );
+    assert!(record.uncovered_speech_segments.is_empty());
+    assert_eq!(
+        delivery_eligibility(&record),
+        caption_exception(EligibilityReason::CaptionWordsDisagree)
+    );
+}
+
+#[test]
+fn output_review_fix1_constant_keys_are_charged_for_every_evaluation() {
+    let mut clip = title(1, 0, "Long title", false);
+    clip.source_range.end = TimeCode(108_000);
+    let mut effect = test_effect("transform", "x_percent", 0);
+    effect.keyframes.insert(
+        "x_percent".into(),
+        AutomationCurve {
+            keyframes: (0..10_000).map(|at| hold(at, 0)).collect(),
+        },
+    );
+    clip.effects.push(effect);
+    let document = doc(Vec::new(), vec![track(1, vec![clip])]);
+    assert_bound(
+        &derive(&document, &manifest(&document), &[], &annotations()),
+        "derivation_work",
+        MAX_REVIEW_DERIVATION_WORK,
+    );
+}
+
+fn hold(at: i64, value: i64) -> Keyframe {
+    Keyframe {
+        at: TimeCode(at),
+        value,
+        interpolation: KeyframeInterpolation::Hold,
+        tangent_in: 0,
+        tangent_out: 0,
+    }
+}
+
+fn fading_title(frames: i64) -> Clip {
+    let mut clip = title(2, 0, "Title at work limit", false);
+    clip.source_range.end = TimeCode(frames);
+    let ClipContent::Title(title) = &mut clip.content else {
+        unreachable!()
+    };
+    title.fade_in_frames = TimeCode(2);
+    clip
+}
+
+#[test]
+fn output_review_fix1_enable_scans_and_overlay_evaluation_share_one_limit() {
+    let mut asset = asset(1, MediaKind::Video);
+    asset.duration = TimeCode(400_000);
+    let mut video = clip(1, 1, 0, 0, 300_000);
+    video.enabled_curve = Some(AutomationCurve {
+        keyframes: vec![hold(0, 1)],
+    });
+    let document = doc(
+        vec![asset],
+        vec![
+            track(1, vec![video]),
+            track(2, vec![fading_title(1_000_000)]),
+        ],
+    );
+    assert_bound(
+        &derive(&document, &manifest(&document), &[], &annotations()),
+        "derivation_work",
+        MAX_REVIEW_DERIVATION_WORK,
+    );
+}
+
+#[test]
+fn output_review_fix1_derivation_admits_the_full_work_budget() {
+    let frames = i64::try_from(MAX_REVIEW_DERIVATION_WORK - 1).unwrap();
+    let document = doc(Vec::new(), vec![track(1, vec![fading_title(frames)])]);
+    let manifest = manifest(&document);
+    let started = std::time::Instant::now();
+    let output = derive(&document, &manifest, &[], &annotations()).unwrap();
+    eprintln!(
+        "derivation at {} work units ({frames} output frames): {:?}",
+        MAX_REVIEW_DERIVATION_WORK,
+        started.elapsed()
+    );
+    let run = &output.overlays.titles.known().next().unwrap().visible[0];
+    assert_eq!(
+        run.output,
+        times(TimeCode(1)..TimeCode(frames), document.fps).unwrap()
+    );
+    assert!(run.bounds.is_ok());
+}
+
+#[test]
+fn output_review_fix1_disabled_element_retains_annotations() {
+    use kinewright_core::output_review::OffOutputAnnotation;
+    let mut disabled = title(1, 0, "Disabled", false);
+    disabled.enabled = false;
+    let document = doc(Vec::new(), vec![track(1, vec![disabled])]);
+    let mut annotations = annotations();
+    annotations.sourced_elements.push(ClipId(1));
+    annotations.text_cards.push(ClipId(1));
+    let record = derive(&document, &manifest(&document), &[], &annotations).unwrap();
+    assert_eq!(
+        record.overlays.cards,
+        ReviewInventory::NoneProven(AbsenceProof::NoDocumentElementsOnOutput)
+    );
+    assert_eq!(
+        record.overlays.annotated_off_output,
+        [OffOutputAnnotation {
+            element: ClipId(1),
+            sourced: true,
+            text_card: true
+        },]
+    );
+    assert!(record.overlays.is_resolved());
+}
+
+#[test]
+fn output_review_fix1_offscreen_title_blocks_overlay_verification() {
+    use kinewright_core::output_review::OffOutputAnnotation;
+    let mut hidden = title(2, 0, "Offscreen", false);
+    hidden
+        .effects
+        .push(test_effect("transform", "x_percent", 100));
+    let document = doc(Vec::new(), vec![track(1, vec![hidden])]);
+    let mut annotations = annotations();
+    annotations.sourced_elements.push(ClipId(2));
+    let record = derive(&document, &manifest(&document), &[], &annotations).unwrap();
+    let title = record.overlays.titles.known().next().unwrap();
+    assert_eq!(title.visible[0].bounds, Err(OverlayUnknown::NotVisible));
+    assert!(!record.overlays.is_resolved());
+    assert_eq!(
+        record.overlays.annotated_off_output,
+        [OffOutputAnnotation {
+            element: ClipId(2),
+            sourced: true,
+            text_card: false
+        },]
+    );
+}
+
+#[test]
+fn output_review_fix1_unsampled_element_retains_annotations() {
+    use kinewright_core::output_review::OffOutputAnnotation;
+    let mut between_samples = title(1, 1, "Between frames", false);
+    between_samples.source_range.end = TimeCode(1);
+    let document = doc(Vec::new(), vec![track(1, vec![between_samples])]);
+    let manifest = manifest(&document);
+    let mut settings = settings(&document);
+    settings.fps = Rational::new(1, 1).unwrap();
+    let mut annotations = annotations();
+    annotations.text_cards.push(ClipId(1));
+    let record = derive_review_expectations(
+        &ReviewExpectationInput {
+            document: &document,
+            snapshot: SNAPSHOT,
+            input_manifest: &manifest,
+            settings: &settings,
+            transcripts: &[],
+        },
+        &annotations,
+    )
+    .unwrap();
+    assert_eq!(
+        record.overlays.cards,
+        ReviewInventory::NoneProven(AbsenceProof::NoDocumentElementsOnOutput)
+    );
+    assert_eq!(
+        record.overlays.annotated_off_output,
+        [OffOutputAnnotation {
+            element: ClipId(1),
+            sourced: false,
+            text_card: true
+        },]
+    );
+}
+
+#[test]
+fn output_review_fix1_video_hold_keeps_one_source_frame_at_mixed_rates() {
+    use kinewright_core::output_review::SegmentSampling;
+    let mut asset = asset(1, MediaKind::AudioVideo);
+    asset.fps = Rational::new(24, 1).unwrap();
+    let mut hold = clip(1, 1, 3, 0, 30);
+    hold.content = ClipContent::Freeze(kinewright_core::FreezeFrame {
+        source_frame: TimeCode(12),
+    });
+    let document = doc(vec![asset], vec![track(1, vec![hold])]);
+    let manifest = manifest(&document);
+    let mut settings = settings(&document);
+    settings.fps = Rational::new(24, 1).unwrap();
+    let record = derive_review_expectations(
+        &ReviewExpectationInput {
+            document: &document,
+            snapshot: SNAPSHOT,
+            input_manifest: &manifest,
+            settings: &settings,
+            transcripts: &[],
+        },
+        &annotations(),
+    )
+    .unwrap();
+    assert_eq!(record.segments.len(), 1);
+    let video = &record.segments[0];
+    assert_eq!(
+        video.sampling,
+        SegmentSampling::VideoHold {
+            frame: TimeCode(12),
+            source_fps: settings.fps
+        }
+    );
+    assert_eq!(video.project, TimeCode(3)..TimeCode(33));
+    assert_eq!(
+        video.source,
+        times(TimeCode(12)..TimeCode(13), settings.fps).unwrap()
+    );
+    assert_eq!(
+        video.output,
+        times(TimeCode(3)..TimeCode(27), settings.fps).unwrap()
+    );
 }

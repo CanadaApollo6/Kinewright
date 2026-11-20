@@ -21,6 +21,7 @@ pub(super) struct TimingEvidence {
     pub(super) segments: Vec<ReviewSegment>,
     pub(super) kept_words: ReviewInventory<KeptWord>,
     pub(super) speech_windows: ReviewInventory<ReviewSpan>,
+    pub(super) uncovered_speech_segments: Vec<ReviewSegmentId>,
     pub(super) av_landmarks: ReviewInventory<AvLandmark>,
 }
 
@@ -32,24 +33,32 @@ pub(super) fn derive(
     let video = video_segments(input, audio.len())?;
     let landmarks = landmarks(input, &audio, &video, &transcripts)?;
     let mut words = Vec::new();
-    let mut complete = true;
+    let mut uncovered_speech_segments = Vec::new();
     let mut used = BTreeMap::new();
     for segment in &audio {
-        if let Some(&transcript) = transcripts.get(&segment.asset) {
+        let transcript = transcripts.get(&segment.asset).copied();
+        if let Some(transcript) = transcript {
             used.insert(segment.asset, transcript.identity);
-            complete &= transcript
-                .words
-                .iter()
-                .any(kinewright_core::dialogue::Word::is_spoken);
             append_words(segment, transcript, &mut words)?;
-        } else {
-            complete = false;
+        }
+        if !transcript
+            .and_then(|t| t.recognized_source.as_ref())
+            .is_some_and(|range| {
+                range.start <= segment.source.start && segment.source.end <= range.end
+            })
+        {
+            uncovered_speech_segments.push(segment.id);
         }
     }
+    uncovered_speech_segments.sort_unstable();
     words.sort_unstable_by_key(|word| (word.output.start, word.segment, word.word_index));
     let windows = union_windows(words.iter().map(|word| word.output.clone()).collect());
-    let complete = complete && (audio.is_empty() || !words.is_empty());
-    let proof = AbsenceProof::NoAudibleSourceSegments;
+    let complete = uncovered_speech_segments.is_empty();
+    let proof = if audio.is_empty() {
+        AbsenceProof::NoAudibleSourceSegments
+    } else {
+        AbsenceProof::NoRecognizedSpeechInKeptRanges
+    };
     let kept_words = inventory(words, complete, proof);
     let speech_windows = inventory(windows, complete, proof);
     let mut segments = audio;
@@ -60,6 +69,7 @@ pub(super) fn derive(
         segments,
         kept_words,
         speech_windows,
+        uncovered_speech_segments,
         av_landmarks: landmarks,
     })
 }
@@ -89,6 +99,13 @@ fn admitted_transcripts<'a>(
         }
         let duration = ExactMicros::frames(asset.duration, asset.fps)?;
         let invalid_timing = || ReviewExpectationError::TranscriptTiming(identity.asset);
+        if transcript
+            .recognized_source
+            .as_ref()
+            .is_some_and(|range| range.start >= range.end || range.end > duration)
+        {
+            return Err(invalid_timing());
+        }
         for word in transcript.words {
             bound("word_text_bytes", word.text.len(), MAX_REVIEW_WORD_BYTES)?;
             if word.text.trim().is_empty()
