@@ -214,13 +214,23 @@ fn s5_running_director_can_propose_again_after_approval() {
         "S5_SECOND_RULE_APPROVED",
     );
     assert!(s5_editorial(&f, None).rulebook_proposal.is_none());
-    let (after_second, _, _) = s5_child(&f, &director, &parent, Role::Reviewer);
-    let approved = s5_brief_rules(&f, &after_second);
-    assert_ne!(approved["revision"], first);
-    assert_eq!(
-        approved["rules"],
-        serde_json::json!(["Keep the spoken promise.", "Keep the closing beat."])
-    );
+    let approved = {
+        let host = f.host.owner.upgrade().unwrap();
+        let host = host.lock().unwrap();
+        let owner = host.owner().unwrap();
+        let reference = owner.approved_rulebook_ref().unwrap().unwrap();
+        let revision = owner
+            .store()
+            .unwrap()
+            .read_record::<kinewright_project::editorial::RulebookRevision>(reference)
+            .unwrap();
+        assert_eq!(
+            revision.rules,
+            ["Keep the spoken promise.", "Keep the closing beat."]
+        );
+        serde_json::to_value(reference).unwrap()
+    };
+    assert_ne!(approved, first);
     assert_eq!(s5_brief_rules(&f, &parent), frozen);
     assert_eq!(s5_brief_rules(&f, &review_attempt), frozen);
     assert_eq!(
@@ -231,7 +241,7 @@ fn s5_running_director_can_propose_again_after_approval() {
 
     let args = s5_audit_args(&key);
     let mut wrong_revision = args.clone();
-    wrong_revision["rulebook_ref"] = approved["revision"].clone();
+    wrong_revision["rulebook_ref"] = approved;
     assert_eq!(
         s5_refusal(
             &reviewer,
