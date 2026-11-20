@@ -1081,22 +1081,47 @@ fn te_t1_confirm_switch_refuses_changed_generation_branch_inputs_or_live_digest(
     wrong_project.project = serde_json::from_value(serde_json::json!("f".repeat(32))).unwrap();
     let mut wrong_switch_generation = installed.clone();
     wrong_switch_generation.switch_generation = installed.switch_generation + 1;
+    let mut wrong_branch = installed.clone();
+    wrong_branch.current.branch =
+        serde_json::from_value(serde_json::json!("b".repeat(32))).unwrap();
+    assert_ne!(wrong_branch.current.branch, installed.current.branch);
     let mut wrong_head = installed.clone();
     wrong_head.current.head = serde_json::from_value(serde_json::json!("e".repeat(32))).unwrap();
     let mut wrong_checkpoint = installed.clone();
     wrong_checkpoint.current.checkpoint.sha256 = "d".repeat(64);
+    let mut wrong_history = installed.clone();
+    wrong_history.current.history.sha256 = "a".repeat(64);
+    assert_ne!(wrong_history.current.history, installed.current.history);
+    let mut wrong_history_role = installed.clone();
+    wrong_history_role.current.history_role = match installed.current.history_role {
+        kinewright_project::operation_history::Role::Ordinary => {
+            kinewright_project::operation_history::Role::Candidate
+        }
+        _ => kinewright_project::operation_history::Role::Ordinary,
+    };
+    assert_ne!(
+        wrong_history_role.current.history_role,
+        installed.current.history_role
+    );
     let mut wrong_inputs = installed.clone();
     wrong_inputs.current.inputs.sha256 = "c".repeat(64);
     let mut wrong_history_digest = installed.clone();
     wrong_history_digest.current.history_digest.core[0] ^= 0xff;
+    let mut wrong_revision = installed.clone();
+    wrong_revision.current.revision =
+        kinewright_core::TimelineRevision(installed.current.revision.0 + 1);
 
     for (label, candidate) in [
         ("different project", wrong_project),
         ("different switch_generation", wrong_switch_generation),
+        ("changed branch", wrong_branch),
         ("changed head", wrong_head),
         ("changed checkpoint", wrong_checkpoint),
+        ("changed history", wrong_history),
+        ("changed history_role", wrong_history_role),
         ("changed input manifest", wrong_inputs),
         ("changed history_digest", wrong_history_digest),
+        ("changed revision", wrong_revision),
     ] {
         let reply = editor
             .request(HostCommand::ConfirmSwitch {
