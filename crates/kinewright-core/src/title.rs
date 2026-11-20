@@ -13,7 +13,7 @@ const CAPTION_MOTION_Y_PERCENT: i32 = 15;
 const MINIMUM_FONT_PIXELS: u32 = 8;
 
 /// One half-open pixel rectangle in a rendered title frame.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TitlePixelBounds {
     pub left: i32,
     pub top: i32,

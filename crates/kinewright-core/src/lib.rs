@@ -39,6 +39,7 @@ mod media;
 mod model;
 mod multicam;
 mod operation;
+pub mod output_review;
 mod qa;
 mod replay_budget;
 mod scopes;
