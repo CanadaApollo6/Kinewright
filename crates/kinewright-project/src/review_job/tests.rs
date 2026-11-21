@@ -519,6 +519,51 @@ fn s5_review_stage_credit_is_sampled_before_free_space() {
     drop(charge);
 }
 
+/// A Save As copy whose first publication is uncertain is settled only by its
+/// `BundleCopy` owner: a review read on the copy, such as a Stop naming the
+/// copy's project, never reconciles it first.
+#[test]
+fn s5_review_settle_leaves_an_uncertain_copy_to_its_owner() {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "review-copy-owner");
+    let (_core, mut bundle, _) = saved_bundle(&temp);
+    let outcome = crate::io_observer::fail_once("root_parent_sync", || {
+        bundle.save_as_with_limits(&temp.path("copy.kinewright"), StorageLimits::default())
+    })
+    .unwrap();
+    let crate::bundle_copy::SaveAsOutcome::Copied(mut copy) = outcome else {
+        panic!("expected a copy");
+    };
+    assert!(
+        matches!(
+            copy.status(),
+            crate::bundle_copy::CopyStatus::DurabilityUnknown
+                | crate::bundle_copy::CopyStatus::CommittedWithError { .. }
+        ),
+        "U2_COPY_UNCERTAIN_STATUS {:?}",
+        copy.status()
+    );
+    let target = copy.destination_owner_mut().unwrap();
+    assert!(
+        target.copy_publication.is_some() && target.unsettled,
+        "U2_COPY_UNCERTAIN"
+    );
+    assert!(
+        matches!(target.review_status_for_stop(), Err(BundleError::Unsettled)),
+        "U2_REVIEW_SETTLE_WAITS_FOR_THE_COPY_OWNER"
+    );
+    assert!(
+        target.copy_publication.is_some() && target.unsettled,
+        "U2_COPY_LEFT_TO_ITS_OWNER"
+    );
+    // Its own owner reconciles it, after which review reads settle again.
+    copy.reconcile().expect("U2_COPY_OWNER_RECONCILES");
+    let target = copy.destination_owner_mut().unwrap();
+    target
+        .review_status_for_stop()
+        .expect("U2_REVIEW_READ_AFTER_THE_COPY");
+}
+
 /// Limits at the reduced ceiling for the run's ordinary writes. Returns the
 /// disk room left past the stage charge.
 fn fill_to_ceiling(bundle: &mut ProjectBundle, ending: StagedEnding, stage: u64) -> u64 {

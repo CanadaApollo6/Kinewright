@@ -337,6 +337,14 @@ impl HostCommandOwner {
         if self.settlement_owned_elsewhere() {
             return Ok(());
         }
+        // A retained source records its own worker's retirement; the active
+        // job is reconciled as below.
+        let active = self.owner()?.project_id().ok();
+        if self.review_runtime.worker.as_ref().is_some_and(|worker| {
+            worker.thread.is_none() && active.as_ref() != Some(&worker.token.project)
+        }) {
+            self.retire_finished_worker()?;
+        }
         if let Some(worker) = &mut self.review_runtime.worker {
             if worker.thread.is_some() {
                 return Ok(());
@@ -368,7 +376,7 @@ impl HostCommandOwner {
         self.check_named_access(&roots, true)?;
         self.prove_retention()?;
         if self.recovery_only
-            || (self.hooks.pending.is_some()
+            || (self.settlement_owned_elsewhere()
                 && !matches!(
                     request.command,
                     HostCommand::Review(ReviewControl::Stop(_) | ReviewControl::Status)
@@ -856,7 +864,7 @@ impl HostCommandOwner {
     fn review_authority(&self, token: &ReviewToken) -> Result<(), HostError> {
         if self.lifecycle.stopping()
             || self.recovery_only
-            || self.hooks.pending.is_some()
+            || self.settlement_owned_elsewhere()
             || !self.retention_proven
             || self.review_runtime.fenced(token)
         {

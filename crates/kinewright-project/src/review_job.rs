@@ -921,12 +921,13 @@ impl ProjectBundle {
             || self.pending_metadata.is_some()
             || self.store.has_unsettled_objects()?
         {
-            // A save or command whose outcome is unknown is settled only by its
-            // own owner, which still holds what it attempted.
+            // A save, command or copy whose outcome is unknown is settled only
+            // by its own owner, which still holds what it attempted.
             if self.pending_publication.is_some()
                 || self.pending_command.is_some()
                 || self.pending_result.is_some()
                 || self.pending_terminal_publication.is_some()
+                || self.copy_publication.is_some()
             {
                 return Err(BundleError::Unsettled);
             }

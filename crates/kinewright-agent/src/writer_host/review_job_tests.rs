@@ -2097,3 +2097,159 @@ fn s5_review_release_waits_for_the_review_worker() {
         "REVIEW_RELEASE_STAGE_SWEPT"
     );
 }
+
+/// A switch whose outcome is unknown is settled only by its own retry: review
+/// results and review writes wait behind it, as they wait behind a hook.
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn s5_review_results_wait_for_an_unresolved_switch() {
+    use kinewright_project::bundle_switch::ProjectSelectionResult;
+    use kinewright_project::io_observer::fail_once;
+    let temp = kinewright_media::test_support::TempDirectory::new("review-switch-results");
+    s5_review_seed(temp.root());
+    let (host, client) = s5_review_host(temp.root());
+    let key = s5_review_version(&host);
+    // Checkpoints a recovery switch can select.
+    ok(
+        s5_review_save(&host, &client, 71),
+        "REVIEW_SWITCH_CASE_SAVE",
+    );
+    ok(
+        s5_review_save(&host, &client, 72),
+        "REVIEW_SWITCH_CASE_SAVE",
+    );
+    let shared = host.owner.upgrade().unwrap();
+    let token = s5_review_start(&client, &key);
+    s5_review_wait(&client, |phase| matches!(phase, ReviewPhase::Checking(_)));
+    s5_review_until(
+        || {
+            shared
+                .lock()
+                .unwrap()
+                .review_fixture_worker()
+                .is_none_or(|(_, done)| done)
+        },
+        "REVIEW_SWITCH_CASE_WORKER_FINISHED",
+    );
+    s5_review_call(&client, ReviewControl::Status).unwrap();
+    let binding = ReviewCheckBinding {
+        configuration_sha256: [7; 32],
+        reviewer_attempt: kinewright_project::bundle_records::SessionId::fresh().unwrap(),
+    };
+    let record = UpdateReviewJob::RecordCheck {
+        binding: binding.clone(),
+        row: kinewright_core::output_review::RequiredReviewRow::StructureAndAvIntegrity,
+        result: kinewright_core::output_review::ReviewRowResult::Pass,
+    };
+    let mut owner = shared.lock().unwrap();
+    owner
+        .record_review_check(&token, UpdateReviewJob::BindChecks(binding))
+        .expect("REVIEW_SWITCH_CASE_BOUND");
+    let session = owner.owner_mut().unwrap();
+    let target = session.list_recovery_points().unwrap().pop().unwrap();
+    session.prepare_recovery(target).unwrap();
+    let selected = fail_once("root_parent_sync", || session.select_local());
+    assert!(
+        matches!(selected, ProjectSelectionResult::Unknown),
+        "REVIEW_SWITCH_CASE_UNKNOWN {selected:?}"
+    );
+    let fenced = owner
+        .record_review_check(&token, record)
+        .expect_err("REVIEW_RESULTS_WAIT_FOR_SWITCH");
+    assert!(
+        fenced.to_string().contains("authority was revoked"),
+        "REVIEW_RESULTS_WAIT_FOR_SWITCH: {fenced}"
+    );
+    assert!(
+        owner.owner().unwrap().switch_publication_unresolved(),
+        "REVIEW_RESULT_LEAVES_THE_SWITCH_TO_ITS_OWNER"
+    );
+    drop(owner);
+    let annotate = client
+        .request(HostCommand::Review(ReviewControl::Annotate {
+            snapshot: key.clone(),
+            fields: kinewright_project::review_job::ReviewAnnotationFields::default(),
+        }))
+        .unwrap();
+    assert!(
+        annotate.error.as_ref().is_some_and(|error| error
+            .message
+            .contains("publication requires reconciliation")),
+        "REVIEW_WRITES_WAIT_FOR_SWITCH {annotate:?}"
+    );
+    let mut owner = shared.lock().unwrap();
+    let session = owner.owner_mut().unwrap();
+    assert!(
+        session.switch_publication_unresolved(),
+        "REVIEW_WRITE_LEAVES_THE_SWITCH_TO_ITS_OWNER"
+    );
+    // The switch's own retry proves its landed root.
+    let selected = session.select_local();
+    assert!(
+        matches!(selected, ProjectSelectionResult::Activated(_)),
+        "REVIEW_SWITCH_CASE_SETTLES {selected:?}"
+    );
+}
+
+/// A clean shutdown records a retained source's worker retirement on that
+/// source, so no other process waits on a stage this process already swept.
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn s5_review_clean_shutdown_retires_a_retained_source_stage() {
+    let temp = kinewright_media::test_support::TempDirectory::new("review-shutdown-source");
+    s5_review_seed(temp.root());
+    let (host, client) = s5_review_host(temp.root());
+    let key = s5_review_version(&host);
+    let source = s5_review_start(&client, &key);
+    let shared = host.owner.upgrade().unwrap();
+    // No Status: the finished source worker is still unretired at Save As.
+    s5_review_until(
+        || {
+            shared
+                .lock()
+                .unwrap()
+                .review_fixture_worker()
+                .is_some_and(|(_, done)| done)
+        },
+        "REVIEW_SHUTDOWN_SOURCE_WORKER_FINISHED",
+    );
+    shared
+        .lock()
+        .unwrap()
+        .owner_mut()
+        .unwrap()
+        .save_as(&temp.path("copy.kinewright"), StorageLimits::default())
+        .unwrap();
+    drop(shared);
+    drop(client);
+    drop(host);
+    assert_eq!(
+        s5_review_stage_count(&temp),
+        0,
+        "REVIEW_SHUTDOWN_SWEEPS_THE_SOURCE_STAGE"
+    );
+    let pool = kinewright_project::operation_history::HistoryPool::new(
+        kinewright_project::operation_history::PoolLimits::default(),
+    );
+    let session = Ja1EditingSession::open(&temp.path("project.kinewright"), &pool).unwrap();
+    let job = session
+        .review_bundle()
+        .unwrap()
+        .review_job()
+        .unwrap()
+        .unwrap();
+    assert!(
+        job.token.job == source.job && job.stage.is_none(),
+        "REVIEW_SHUTDOWN_RETIRES_THE_SOURCE_STAGE {:?} {:?}",
+        job.phase,
+        job.stage
+    );
+}
