@@ -108,7 +108,7 @@ pub struct PreparedOverlayVerification {
     data_dir: Option<std::path::PathBuf>,
     cancellation: ExportCancellation,
     #[cfg(test)]
-    verify_hook: Option<Arc<dyn Fn(&ExportCancellation) + Send + Sync>>,
+    verify_hook: Option<super::review_job::ReviewCancelHook>,
 }
 
 impl HostCommandOwner {
@@ -216,7 +216,7 @@ impl HostCommandOwner {
     #[cfg(test)]
     pub(super) fn set_overlay_verify_hook(
         &mut self,
-        hook: Option<Arc<dyn Fn(&ExportCancellation) + Send + Sync>>,
+        hook: Option<super::review_job::ReviewCancelHook>,
     ) {
         self.review_runtime.overlay_verify_hook = hook;
     }

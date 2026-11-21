@@ -1245,7 +1245,7 @@ fn s5_c6_fix1_translucent_partial_opacity_and_tiny_unmeasurable_overlays() {
 
     let (asset_a, cert_a_enc, sha_a, len_a) = certify_image_asset(&wm_a, AssetId(1));
     let (_, cert_a_ver, _, _) = certify_image_asset(&wm_a, AssetId(1));
-    let (asset_b, cert_b_enc, _, _) = certify_image_asset(&wm_b, AssetId(1));
+    let (asset_b, swapped_card_cert, _, _) = certify_image_asset(&wm_b, AssetId(1));
 
     let wm_clip = Clip {
         id: ClipId(2),
@@ -1351,7 +1351,7 @@ fn s5_c6_fix1_translucent_partial_opacity_and_tiny_unmeasurable_overlays() {
     doc_wm_swapped.media_pool = vec![asset_b];
     let (file_wm_swap, timing_wm_swap) = encode_doc(
         &doc_wm_swapped,
-        BTreeMap::from([(AssetId(1), cert_b_enc)]),
+        BTreeMap::from([(AssetId(1), swapped_card_cert)]),
         &dir.path("wm-swapped.mp4"),
     );
     let report_wm_swap = verify_review_overlays(
@@ -1822,15 +1822,18 @@ fn current_rss_kib() -> Option<u64> {
 /// Opus B1 & L14 witness: caption-heavy 1080p fixture measures wall-clock cost and proves O(1)
 /// memory (no per-element full-frame buffers kept across 60 distinct 1080p captions).
 #[test]
+#[allow(clippy::cast_precision_loss)]
 fn s5_c6_fix1_caption_heavy_1080p_cost_and_bounded_memory() {
     let dir = TempDirectory::new("s5-c6-fix1-1080p-cost");
-    let caption_count = 60_i64;
-    let total_frames = caption_count + 2;
-    let mut caption_clips = Vec::with_capacity(caption_count as usize);
+    let caption_count = 60_usize;
+    let total_frames = i64::try_from(caption_count).unwrap() + 2;
+    let mut caption_clips = Vec::with_capacity(caption_count);
     for i in 0..caption_count {
+        let i64_idx = i64::try_from(i).unwrap();
+        let u64_idx = u64::try_from(i).unwrap();
         caption_clips.push(title_clip(
-            100 + i as u64,
-            1 + i,
+            100 + u64_idx,
+            1 + i64_idx,
             1,
             CaptionPreset::Clean.title(format!("1080p caption line {}", i + 1)),
         ));
@@ -1904,8 +1907,8 @@ fn s5_c6_fix1_caption_heavy_1080p_cost_and_bounded_memory() {
         "S5_C6_FIX1_1080P_PASSES: {:?}",
         report.findings
     );
-    assert_eq!(report.checked_overlays, caption_count as usize);
-    assert_eq!(report.checked_frames, caption_count as u64);
+    assert_eq!(report.checked_overlays, caption_count);
+    assert_eq!(report.checked_frames, u64::try_from(caption_count).unwrap());
     // 60 full 1080p RGBA+mask buffers under the old design would require ~622 MiB up front;
     // O(1) frame-by-frame rendering stays far below that ceiling.
     #[cfg(target_os = "linux")]

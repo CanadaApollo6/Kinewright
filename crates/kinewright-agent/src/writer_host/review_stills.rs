@@ -2,8 +2,6 @@
 //! validation recording `RequiredReviewRow::IndependentVisualReview` through `record_review_check`.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-#[cfg(all(test, target_os = "linux"))]
-use std::sync::Arc;
 
 use image::{
     ImageBuffer, ImageEncoder, Rgba,
@@ -299,8 +297,8 @@ impl ServedReviewStills {
         Ok(())
     }
 
-    fn record_served(&mut self, binding: ActiveStillBinding, stills: &[ServedReviewStill]) {
-        self.rotate_binding_if_needed(&binding);
+    fn record_served(&mut self, binding: &ActiveStillBinding, stills: &[ServedReviewStill]) {
+        self.rotate_binding_if_needed(binding);
         for still in stills {
             self.served.insert(still.still_id.clone(), still.clone());
         }
@@ -1096,7 +1094,7 @@ pub(super) struct PreparedReviewStillsRead {
     config: ReviewStillsConfig,
     cancellation: ExportCancellation,
     #[cfg(all(test, target_os = "linux"))]
-    render_hook: Option<Arc<dyn Fn(&ExportCancellation) + Send + Sync>>,
+    render_hook: Option<super::review_job::ReviewCancelHook>,
 }
 
 /// Rendered off-lock PNGs and metadata awaiting re-verified host recording.
@@ -1316,7 +1314,7 @@ impl HostCommandOwner {
     #[cfg(all(test, target_os = "linux"))]
     pub(super) fn set_review_stills_render_hook(
         &mut self,
-        hook: Option<Arc<dyn Fn(&ExportCancellation) + Send + Sync>>,
+        hook: Option<super::review_job::ReviewCancelHook>,
     ) {
         self.review_runtime.stills_render_hook = hook;
     }
@@ -1498,7 +1496,7 @@ impl HostCommandOwner {
             ));
         }
         self.review_stills
-            .record_served(rendered.binding, &rendered.page.stills);
+            .record_served(&rendered.binding, &rendered.page.stills);
         let summary = format!(
             "Review stills samples {}..{} of {} ({} image blocks; next_cursor={})",
             rendered.page.page_start_sample,

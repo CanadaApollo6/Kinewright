@@ -248,6 +248,7 @@ pub struct DecodedReviewStillsPage {
 /// # Errors
 /// Returns a media error when `config` is invalid, the timing map lacks a positive frame step,
 /// or expectation duration cannot produce sample points.
+#[allow(clippy::too_many_lines)]
 pub fn plan_review_stills(
     expectations: &ReviewExpectations,
     timing: &ReviewOutputTiming,
@@ -267,7 +268,7 @@ pub fn plan_review_stills(
             timing.video_frames
         )));
     }
-    if !timing.video_pts_step.is_some_and(|step| step > 0) {
+    if timing.video_pts_step.is_none_or(|step| step <= 0) {
         return Err(MediaError::Backend(
             "review still plan requires a positive recorded video PTS step".into(),
         ));

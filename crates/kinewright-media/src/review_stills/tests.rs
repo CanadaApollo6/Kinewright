@@ -497,7 +497,7 @@ fn s5_c6_fix1_stills_page_seeks_instead_of_decoding_from_frame_zero() {
         &expectations,
         &doc,
         &mut no_cards,
-        &[last_sample.clone()],
+        std::slice::from_ref(&last_sample),
         &cfg,
         &ExportCancellation::default(),
     )

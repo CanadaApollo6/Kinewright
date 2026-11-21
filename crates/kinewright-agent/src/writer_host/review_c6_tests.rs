@@ -1686,7 +1686,7 @@ fn s5_c6_fix1_cross_version_clock_mapping_and_uncovered_downgrades_to_unknown() 
                 },
             ))
             .unwrap();
-        let clip_id = (0..16)
+        (0..16)
             .rev()
             .find_map(|depth| {
                 host.core()
@@ -1694,8 +1694,7 @@ fn s5_c6_fix1_cross_version_clock_mapping_and_uncovered_downgrades_to_unknown() 
                     .ok()
                     .and_then(|b| b.document().tracks[0].clips.first().map(|c| c.id))
             })
-            .expect("S5_C6_FIX1_CLIP_ADDED");
-        clip_id
+            .expect("S5_C6_FIX1_CLIP_ADDED")
     };
     ok(
         f.editor
@@ -2118,7 +2117,7 @@ fn s5_c6_extract_json_object(raw: &[u8]) -> &[u8] {
     if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}'))
         && start < end
     {
-        return text[start..=end].as_bytes();
+        return &text.as_bytes()[start..=end];
     }
     raw
 }

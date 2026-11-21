@@ -384,7 +384,7 @@ pub fn verify_review_overlays(
     }
 
     // Opus m6 / L12: unknown or non-positive frame step prevents verifying dropped/duplicated frames.
-    if !artifact_timing.video_pts_step.is_some_and(|step| step > 0) {
+    if artifact_timing.video_pts_step.is_none_or(|step| step <= 0) {
         report.push_finding(
             finding_cap,
             OverlayFinding {
@@ -564,7 +564,7 @@ pub fn verify_review_overlays(
         let next_idx = decoder.next_frame_index();
         let needs_pixels =
             active_by_frame.contains_key(&next_idx) || boundary_by_frame.contains_key(&next_idx);
-        let decoded = match decoder.next_frame_rgba64(needs_pixels, cancellation) {
+        let frame_out = match decoder.next_frame_rgba64(needs_pixels, cancellation) {
             Ok(Some(frame)) => frame,
             Ok(None) => break,
             Err(MediaError::Cancelled) => return Err(MediaError::Cancelled),
@@ -586,10 +586,10 @@ pub fn verify_review_overlays(
             }
         };
         observed_frames = observed_frames.saturating_add(1);
-        let frame_idx = decoded.frame_index;
-        let pts = decoded.pts;
+        let frame_idx = frame_out.frame_index;
+        let pts = frame_out.pts;
 
-        if decoded.dimensions != expectations.raster {
+        if frame_out.dimensions != expectations.raster {
             hard_failed = true;
             report.push_finding(
                 finding_cap,
@@ -600,7 +600,7 @@ pub fn verify_review_overlays(
                     pts: Some(pts),
                     detail: OverlayFindingKind::RasterMismatch {
                         expected: expectations.raster,
-                        observed: decoded.dimensions,
+                        observed: frame_out.dimensions,
                     },
                 },
             );
@@ -723,8 +723,8 @@ pub fn verify_review_overlays(
         };
 
         let decoded_slice = DecodedRgba64 {
-            bytes: decoded.rgba64le,
-            full_u16_range: decoded.full_u16_range,
+            bytes: frame_out.rgba64le,
+            full_u16_range: frame_out.full_u16_range,
         };
 
         // 1. Check every overlay expected visible on this frame against with/without references.
@@ -840,13 +840,12 @@ pub fn verify_review_overlays(
                     Some(true) => {}
                 }
                 let schedule = &schedules[probe.schedule_index];
-                let rep_project_at = match output_frame_to_project_at(
+                let Ok(rep_project_at) = output_frame_to_project_at(
                     probe.representative_in_cue_frame,
                     expectations,
                     frozen_document,
-                ) {
-                    Ok(at) => at,
-                    Err(_) => continue,
+                ) else {
+                    continue;
                 };
                 let injected = match renderer.stage_single_clip_for_boundary(
                     frozen_document,
@@ -987,34 +986,35 @@ pub fn verify_review_overlays(
             && measurable_ratio >= config.min_measurable_frame_ratio
             && measured_extremes >= expected_extremes;
 
-        let status = if state.failed_frames > 0 || hard_failed && state.measurable_frames == 0 {
-            OverlayElementStatus::Failed
-        } else if stream_unknown
-            || state.measurable_frames + state.unmeasurable_frames < schedule.expected_frames
-        {
-            any_unknown_element = true;
-            OverlayElementStatus::Unknown
-        } else if !sufficient_measurability {
-            any_unknown_element = true;
-            report.push_finding(
-                finding_cap,
-                OverlayFinding {
-                    element: Some(schedule.element),
-                    overlay_kind: Some(schedule.kind),
-                    frame_index: None,
-                    pts: None,
-                    detail: OverlayFindingKind::UnmeasurableOverlay {
-                        expected_frames: schedule.expected_frames,
-                        measurable_frames: state.measurable_frames,
-                        expected_extremes,
-                        measured_extremes,
+        let element_status =
+            if state.failed_frames > 0 || hard_failed && state.measurable_frames == 0 {
+                OverlayElementStatus::Failed
+            } else if stream_unknown
+                || state.measurable_frames + state.unmeasurable_frames < schedule.expected_frames
+            {
+                any_unknown_element = true;
+                OverlayElementStatus::Unknown
+            } else if !sufficient_measurability {
+                any_unknown_element = true;
+                report.push_finding(
+                    finding_cap,
+                    OverlayFinding {
+                        element: Some(schedule.element),
+                        overlay_kind: Some(schedule.kind),
+                        frame_index: None,
+                        pts: None,
+                        detail: OverlayFindingKind::UnmeasurableOverlay {
+                            expected_frames: schedule.expected_frames,
+                            measurable_frames: state.measurable_frames,
+                            expected_extremes,
+                            measured_extremes,
+                        },
                     },
-                },
-            );
-            OverlayElementStatus::Unknown
-        } else {
-            OverlayElementStatus::Passed
-        };
+                );
+                OverlayElementStatus::Unknown
+            } else {
+                OverlayElementStatus::Passed
+            };
 
         report.animated_extreme_frames = report
             .animated_extreme_frames
@@ -1022,7 +1022,7 @@ pub fn verify_review_overlays(
         report.overlays.push(OverlayElementSummary {
             element: schedule.element,
             kind: schedule.kind,
-            status,
+            status: element_status,
             expected_frames: schedule.expected_frames,
             measurable_frames: state.measurable_frames,
             unmeasurable_frames: state.unmeasurable_frames,
@@ -1389,6 +1389,7 @@ struct DecodedRgba64<'a> {
 }
 
 #[derive(Clone, Copy)]
+#[allow(clippy::struct_field_names)]
 struct FrameMetrics {
     with_rms: f32,
     without_rms: f32,
@@ -1440,14 +1441,18 @@ fn ycbcr_dist_sq(a: [f32; 3], b: [f32; 3]) -> f32 {
 fn padded_box(bounds: TitlePixelBounds, raster: (u32, u32)) -> (usize, usize, usize, usize) {
     let rw = i32::try_from(raster.0).unwrap_or(i32::MAX);
     let rh = i32::try_from(raster.1).unwrap_or(i32::MAX);
-    let x0 = (bounds.left - BOX_PAD_PX).clamp(0, rw) as usize;
-    let y0 = (bounds.top - BOX_PAD_PX).clamp(0, rh) as usize;
-    let x1 = (bounds.right + BOX_PAD_PX).clamp(0, rw) as usize;
-    let y1 = (bounds.bottom + BOX_PAD_PX).clamp(0, rh) as usize;
+    let x0 = usize::try_from((bounds.left - BOX_PAD_PX).clamp(0, rw)).unwrap_or(0);
+    let y0 = usize::try_from((bounds.top - BOX_PAD_PX).clamp(0, rh)).unwrap_or(0);
+    let x1 = usize::try_from((bounds.right + BOX_PAD_PX).clamp(0, rw)).unwrap_or(0);
+    let y1 = usize::try_from((bounds.bottom + BOX_PAD_PX).clamp(0, rh)).unwrap_or(0);
     (x0, y0, x1, y1)
 }
 
-#[allow(clippy::cast_precision_loss)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::too_many_lines
+)]
 fn compare_in_range_frame(
     decoded: DecodedRgba64<'_>,
     with_ref: &[u8],
@@ -1609,7 +1614,7 @@ fn compare_in_range_frame(
     }
 }
 
-#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 fn boundary_probe_can_leak(
     decoded: DecodedRgba64<'_>,
     without_ref: &[u8],
@@ -1654,7 +1659,7 @@ fn boundary_probe_can_leak(
     Some(max_possible_without_rms > config.timing_max_without_rms * 0.65)
 }
 
-#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 fn compare_outside_cue_frame(
     decoded: DecodedRgba64<'_>,
     without_ref: &[u8],
@@ -1694,10 +1699,10 @@ fn compare_outside_cue_frame(
             sum_with_sq += f64::from(ycbcr_dist_sq(d, w));
 
             // Weighted inner product <(D - B), (W - B)> detects even partial-opacity early/lingering cues.
-            let p_y = f64::from(d[0] - b[0]) * f64::from(w[0] - b[0]);
-            let p_cb = 0.25 * f64::from(d[1] - b[1]) * f64::from(w[1] - b[1]);
-            let p_cr = 0.25 * f64::from(d[2] - b[2]) * f64::from(w[2] - b[2]);
-            dot_proj += p_y + p_cb + p_cr;
+            let proj_luma = f64::from(d[0] - b[0]) * f64::from(w[0] - b[0]);
+            let proj_blue = 0.25 * f64::from(d[1] - b[1]) * f64::from(w[1] - b[1]);
+            let proj_red = 0.25 * f64::from(d[2] - b[2]) * f64::from(w[2] - b[2]);
+            dot_proj += proj_luma + proj_blue + proj_red;
         }
     }
 
@@ -2096,6 +2101,7 @@ impl ReviewArtifactVideoDecoder {
     }
 
     /// Decode the next raw video frame, returning `(pts, dimensions, frame)` without running swscale.
+    #[allow(clippy::type_complexity)]
     fn receive_next_raw(
         &mut self,
         cancellation: &ExportCancellation,

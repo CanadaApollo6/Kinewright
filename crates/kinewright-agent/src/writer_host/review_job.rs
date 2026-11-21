@@ -48,6 +48,9 @@ impl Drop for LiveStage {
     }
 }
 
+#[cfg(test)]
+pub(super) type ReviewCancelHook = Arc<dyn Fn(&ExportCancellation) + Send + Sync>;
+
 #[derive(Default)]
 pub(super) struct ReviewRuntime {
     worker: Option<Worker>,
@@ -62,9 +65,9 @@ pub(super) struct ReviewRuntime {
     #[cfg(test)]
     exhaust_artifact: bool,
     #[cfg(test)]
-    pub(super) overlay_verify_hook: Option<Arc<dyn Fn(&ExportCancellation) + Send + Sync>>,
+    pub(super) overlay_verify_hook: Option<ReviewCancelHook>,
     #[cfg(test)]
-    pub(super) stills_render_hook: Option<Arc<dyn Fn(&ExportCancellation) + Send + Sync>>,
+    pub(super) stills_render_hook: Option<ReviewCancelHook>,
 }
 
 #[cfg(test)]
