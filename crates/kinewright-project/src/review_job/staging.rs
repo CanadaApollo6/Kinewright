@@ -54,6 +54,10 @@ struct LiveStage {
     bytes: u64,
     finished: bool,
     directory: Option<File>,
+    /// The stage's allocated blocks are what it took from free space: no
+    /// compression, no copy on write. Otherwise a stage still being written
+    /// earns no credit.
+    exact: bool,
 }
 
 /// The one review stage whose charge is live in this store.
@@ -73,6 +77,9 @@ impl LiveStageSlot {
         };
         if live.finished {
             return live.bytes;
+        }
+        if !live.exact {
+            return 0;
         }
         live.directory
             .as_ref()
@@ -106,7 +113,12 @@ fn staged_bytes(directory: &File) -> rustix::io::Result<u64> {
         if matches!(name.to_bytes(), b"." | b"..") {
             continue;
         }
-        let stat = fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
+        // An entry removed between the listing and its stat holds nothing.
+        let stat = match fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => stat,
+            Err(rustix::io::Errno::NOENT) => continue,
+            Err(error) => return Err(error),
+        };
         if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
             && inodes.insert(stat.st_ino)
         {
@@ -115,6 +127,35 @@ fn staged_bytes(directory: &File) -> rustix::io::Result<u64> {
         }
     }
     Ok(total)
+}
+
+/// Whether a file's `st_blocks` in this empty directory will equal what it
+/// takes from free space. On btrfs the directory is made no-copy-on-write,
+/// which also turns off compression for the files created in it; other file
+/// systems that compress or copy on write, and unknown ones, are not trusted.
+fn blocks_are_free_space(directory: &File) -> bool {
+    const EXT4: u32 = 0xef53;
+    const XFS: u32 = 0x5846_5342;
+    const TMPFS: u32 = 0x0102_1994;
+    const BTRFS: u32 = 0x9123_683e;
+    let Ok(statfs) = fs::fstatfs(directory) else {
+        return false;
+    };
+    // `f_type` is a signed word on some targets; magic numbers are 32 bits.
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let kind = statfs.f_type as u32;
+    match kind {
+        EXT4 | XFS | TMPFS => true,
+        BTRFS => {
+            let no_cow = || -> rustix::io::Result<bool> {
+                let flags = fs::ioctl_getflags(directory)?;
+                fs::ioctl_setflags(directory, flags | fs::IFlags::NOCOW)?;
+                Ok(fs::ioctl_getflags(directory)?.contains(fs::IFlags::NOCOW))
+            };
+            no_cow().unwrap_or(false)
+        }
+        _ => false,
+    }
 }
 
 /// The staging charge of one review stage. Dropping it withdraws the disk
@@ -166,6 +207,7 @@ impl ProjectStore {
             bytes: stage.byte_limit,
             finished: false,
             directory: None,
+            exact: false,
         });
         Ok(ReviewStageCharge {
             slot: Arc::clone(slot),
@@ -197,6 +239,7 @@ impl ProjectStore {
             ));
         }
         parent.sync_all()?;
+        let exact = blocks_are_free_space(&directory);
         // The credit reads the stage through its own descriptor.
         let observed = directory.try_clone()?;
         if let Ok(mut slot) = charge.slot.lock()
@@ -204,6 +247,7 @@ impl ProjectStore {
             && live.id == stage.id
         {
             live.directory = Some(observed);
+            live.exact = exact;
         }
         Ok(ReviewStaging { directory })
     }

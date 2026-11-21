@@ -128,6 +128,45 @@ pub struct StorageUsage {
     pub unsettled: bool,
 }
 
+/// Free disk bytes, and the part of them that is a live review stage's credit.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FreeSpace {
+    bytes: u64,
+    stage_credit: u64,
+}
+
+impl From<u64> for FreeSpace {
+    fn from(bytes: u64) -> Self {
+        Self {
+            bytes,
+            stage_credit: 0,
+        }
+    }
+}
+
+impl FreeSpace {
+    pub(crate) const fn crediting_stage(free: u64, stage_credit: u64) -> Self {
+        Self {
+            bytes: free.saturating_add(stage_credit),
+            stage_credit,
+        }
+    }
+
+    pub(crate) fn less(self, bytes: u64) -> Option<Self> {
+        Some(Self {
+            bytes: self.bytes.checked_sub(bytes)?,
+            ..self
+        })
+    }
+
+    /// Read under the ledger lock: a stage credit counts only while the stage
+    /// charge it offsets is still reserved, so it never outlives that charge.
+    fn under(self, state: &StorageUsage) -> u64 {
+        self.bytes
+            .saturating_sub(self.stage_credit.saturating_sub(state.reserved_stage_bytes))
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ReservationKind {
     Record,
@@ -153,7 +192,7 @@ impl StorageReservation {
         &self,
         target_bytes: u64,
         limits: &StorageLimits,
-        free: u64,
+        free: impl Into<FreeSpace>,
     ) -> Result<Self, BundleError> {
         if !self.active || !self.copy || self.decoded != 0 {
             return Err(BundleError::Capacity(
@@ -222,7 +261,7 @@ impl StorageReservation {
         decoded: u64,
 
         copy: bool,
-        free: u64,
+        free: impl Into<FreeSpace>,
     ) -> Result<Self, BundleError> {
         Self::reserve_for_retained_read(usage, limits, bytes, decoded, copy, free, false)
     }
@@ -237,7 +276,7 @@ impl StorageReservation {
         decoded: u64,
 
         copy: bool,
-        free: u64,
+        free: impl Into<FreeSpace>,
         cleanup_only: bool,
     ) -> Result<Self, BundleError> {
         Self::reserve_kind(
@@ -255,7 +294,7 @@ impl StorageReservation {
         usage: &Arc<Mutex<StorageUsage>>,
         limits: &StorageLimits,
         decoded: u64,
-        free: u64,
+        free: impl Into<FreeSpace>,
     ) -> Result<Self, BundleError> {
         Self::reserve_kind(
             usage,
@@ -280,7 +319,7 @@ impl StorageReservation {
         decoded: u64,
 
         copy: bool,
-        free: u64,
+        free: impl Into<FreeSpace>,
         cleanup_only: bool,
         kind: ReservationKind,
     ) -> Result<Self, BundleError> {
@@ -327,7 +366,7 @@ impl StorageReservation {
                 .ok_or(BundleError::Capacity(
                     "decoder subset exceeds decoded bytes",
                 ))?;
-        if matches!(kind, ReservationKind::Record) && reserved > free {
+        if matches!(kind, ReservationKind::Record) && reserved > free.into().under(&state) {
             return Err(BundleError::Capacity("disk reserve"));
         }
         if physical > allowance {
@@ -736,5 +775,31 @@ mod tests {
         assert_eq!((state.physical_bytes, state.metadata_bytes), (70, 70));
         assert_eq!((state.reserved_bytes, state.decoded_bytes), (0, 0));
         assert!(!state.unsettled && !state.damaged_accounting);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn s5_review_stage_credit_never_outlives_its_charge() {
+        let limits = StorageLimits::default();
+        let usage = Arc::new(Mutex::new(StorageUsage::default()));
+        let mut stage = StorageReservation::reserve(&usage, &limits, 100, 0, true, 100).unwrap();
+        stage.charge_review_stage().unwrap();
+        // Read off-lock while the stage charge is live: 10 raw free, 100 credit.
+        let free = FreeSpace::crediting_stage(10, 100);
+        let live = StorageReservation::reserve(&usage, &limits, 10, 0, false, free)
+            .expect("R1_CREDIT_HONOURED_WHILE_CHARGED");
+        drop(live);
+        drop(stage);
+        assert!(
+            matches!(
+                StorageReservation::reserve(&usage, &limits, 50, 0, false, free),
+                Err(BundleError::Capacity("disk reserve"))
+            ),
+            "R1_STALE_CREDIT_REFUSED"
+        );
+        let exact = StorageReservation::reserve(&usage, &limits, 10, 0, false, free)
+            .expect("R1_RAW_FREE_STILL_ADMITS");
+        drop(exact);
+        assert_eq!(usage.lock().unwrap().reserved_bytes, 0);
     }
 }

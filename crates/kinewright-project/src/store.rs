@@ -862,13 +862,18 @@ impl ProjectStore {
     }
     /// Free disk bytes, crediting bytes a live review stage already wrote under
     /// its own charge so they are not counted on both sides of the check.
-    fn free_bytes(&self) -> Result<u64, BundleError> {
+    fn free_bytes(&self) -> Result<crate::storage_budget::FreeSpace, BundleError> {
         let free = self.with_namespace(|n| n.available_bytes())?;
         #[cfg(any(test, feature = "test-util"))]
         let free = self.simulated_free(free)?;
         #[cfg(target_os = "linux")]
-        let free = free.saturating_add(self.inner.review_stage.credit());
-        Ok(free)
+        let stage_credit = self.inner.review_stage.credit();
+        #[cfg(not(target_os = "linux"))]
+        let stage_credit = 0;
+        Ok(crate::storage_budget::FreeSpace::crediting_stage(
+            free,
+            stage_credit,
+        ))
     }
     /// Replace free disk space with `capacity`, less the physical bytes sealed
     /// since and the bytes a live review stage holds on disk.
@@ -1088,7 +1093,7 @@ impl ProjectStore {
         let mut free = self.free_bytes()?;
         if self.protect_review_budget() {
             free = free
-                .checked_sub(crate::review_job::DISK_HEADROOM)
+                .less(crate::review_job::DISK_HEADROOM)
                 .ok_or(BundleError::Capacity("review revocation disk headroom"))?;
         }
         StorageReservation::reserve(
