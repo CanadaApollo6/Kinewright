@@ -50,6 +50,9 @@ impl Drop for LiveStage {
     }
 }
 
+#[cfg(test)]
+pub(super) type ReviewCancelHook = Arc<dyn Fn(&ExportCancellation) + Send + Sync>;
+
 #[derive(Default)]
 pub(super) struct ReviewRuntime {
     worker: Option<Worker>,
@@ -57,10 +60,16 @@ pub(super) struct ReviewRuntime {
     pending_stop: Vec<ReviewStatus>,
     // The artifact this host published or verified; check results bind only to it.
     verified: Option<ReviewToken>,
+    // Active off-lock check / stills reads cancelled immediately on Stop or host shutdown.
+    active_cancellations: Vec<(ReviewToken, ExportCancellation)>,
     #[cfg(test)]
     probe: Option<Arc<dyn Fn(ReviewPoint) + Send + Sync>>,
     #[cfg(test)]
     exhaust_artifact: bool,
+    #[cfg(test)]
+    pub(super) overlay_verify_hook: Option<ReviewCancelHook>,
+    #[cfg(test)]
+    pub(super) stills_render_hook: Option<ReviewCancelHook>,
 }
 
 #[cfg(test)]
@@ -123,6 +132,40 @@ impl ReviewRuntime {
         if let Some(worker) = &self.worker {
             worker.cancellation.cancel();
         }
+        for (_, cancel) in &self.active_cancellations {
+            cancel.cancel();
+        }
+    }
+
+    pub(super) fn register_review_cancellation(
+        &mut self,
+        token: &ReviewToken,
+        external: Option<&ExportCancellation>,
+    ) -> ExportCancellation {
+        self.active_cancellations
+            .retain(|(_, cancel)| !cancel.is_cancelled());
+        if self.active_cancellations.len() >= 64 {
+            let drain = self.active_cancellations.len().saturating_sub(63);
+            self.active_cancellations.drain(..drain);
+        }
+        let cancel = external.cloned().unwrap_or_default();
+        if self.fenced(token) {
+            cancel.cancel();
+        } else {
+            self.active_cancellations
+                .push((token.clone(), cancel.clone()));
+        }
+        cancel
+    }
+
+    pub(super) fn cancel_review_work(&mut self, token: &ReviewToken) {
+        for (active_token, cancel) in &self.active_cancellations {
+            if active_token == token {
+                cancel.cancel();
+            }
+        }
+        self.active_cancellations
+            .retain(|(active_token, cancel)| active_token != token && !cancel.is_cancelled());
     }
 
     fn pending_for(
@@ -291,6 +334,11 @@ impl HostCommandOwner {
     #[cfg(test)]
     pub(super) fn review_fixture_exhaust_artifact(&mut self, exhaust: bool) {
         self.review_runtime.exhaust_artifact = exhaust;
+    }
+
+    #[cfg(test)]
+    pub(super) fn review_fixture_mark_verified(&mut self, token: ReviewToken) {
+        self.review_runtime.verified = Some(token);
     }
 
     #[cfg(test)]
@@ -492,6 +540,9 @@ impl HostCommandOwner {
             .iter()
             .position(|status| &status.token == token)
             .ok_or_else(unavailable)?;
+        // Cancel any in-flight off-lock overlay verification or review-stills read for this token
+        // immediately, even if durable Stop persistence is deferred by storage backpressure.
+        self.review_runtime.cancel_review_work(token);
         let pending = self.review_runtime.pending_stop.remove(index);
         match self.persist_review_stop(&pending.token) {
             Ok(true) => {}
@@ -553,6 +604,7 @@ impl HostCommandOwner {
         {
             worker.cancellation.cancel();
         }
+        self.review_runtime.cancel_review_work(token);
         Ok(true)
     }
 
@@ -889,7 +941,7 @@ impl HostCommandOwner {
 
     /// The checking variant of the fence: the artifact this host published or
     /// verified, in a durable checking phase, with no Stop pending.
-    fn review_can_record(&self, token: &ReviewToken) -> Result<(), HostError> {
+    pub(super) fn review_can_record(&self, token: &ReviewToken) -> Result<(), HostError> {
         self.review_authority(token)?;
         if self.review_runtime.verified.as_ref() != Some(token) {
             return Err(refused(
@@ -907,10 +959,6 @@ impl HostCommandOwner {
     }
 
     /// The one path by which commits 5 to 7 bind a checker and record results.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the checks of commits 5 and 6 call this seam")
-    )]
     pub(super) fn record_review_check(
         &mut self,
         token: &ReviewToken,
@@ -1068,6 +1116,23 @@ fn encode_review(
         Ok(())
     })();
     (result, pending)
+}
+
+pub(super) fn review_media_engine_for_data_dir(
+    data_dir: Option<std::path::PathBuf>,
+) -> Result<kinewright_media::FfmpegMediaEngine, HostError> {
+    #[cfg(not(test))]
+    {
+        let root = data_dir
+            .map_or_else(kinewright_media::default_data_dir, Ok)
+            .map_err(|error| refused(&error.to_string()))?;
+        kinewright_media::FfmpegMediaEngine::new_with_data_dir(root)
+            .map_err(|error| refused(&error.to_string()))
+    }
+    #[cfg(test)]
+    {
+        review_fixture_engine(data_dir)
+    }
 }
 
 #[cfg(test)]

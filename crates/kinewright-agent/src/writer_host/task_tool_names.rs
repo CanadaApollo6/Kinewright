@@ -7,6 +7,7 @@ pub(crate) const TASK_TOOL_NAMES: &[&str] = &[
     "get_timeline_state",
     "read_task_evidence",
     "read_task_result",
+    "read_review_stills",
     "prepare_edit_plan",
     "commit_edit_plan",
     "discard_edit_plan",

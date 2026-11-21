@@ -1281,6 +1281,7 @@ impl ProjectStore {
                 inner: reader,
                 bytes: 0,
                 limit: reference.byte_length,
+                cancellation: None,
                 #[cfg(test)]
                 fault_reference: None,
             };
@@ -1314,6 +1315,7 @@ impl ProjectStore {
                 inner: reader,
                 bytes: 0,
                 limit: reference.byte_length,
+                cancellation: None,
                 #[cfg(test)]
                 fault_reference: None,
             };
@@ -1960,13 +1962,34 @@ impl ProjectStore {
         self.open_verified(reference).map(drop)
     }
     pub(crate) fn open_verified(&self, reference: &ObjectRef) -> Result<File, BundleError> {
-        self.open_copy_source(reference, false)
+        self.open_copy_source_inner(reference, false, None)
+    }
+    pub(crate) fn open_verified_cancellable(
+        &self,
+        reference: &ObjectRef,
+        cancellation: &kinewright_core::ExportCancellation,
+    ) -> Result<File, BundleError> {
+        self.open_copy_source_inner(reference, false, Some(cancellation))
     }
     fn open_copy_source(
         &self,
         reference: &ObjectRef,
         cleanup_only: bool,
     ) -> Result<File, BundleError> {
+        self.open_copy_source_inner(reference, cleanup_only, None)
+    }
+    fn open_copy_source_inner(
+        &self,
+        reference: &ObjectRef,
+        cleanup_only: bool,
+        cancellation: Option<&kinewright_core::ExportCancellation>,
+    ) -> Result<File, BundleError> {
+        if cancellation.is_some_and(kinewright_core::ExportCancellation::is_cancelled) {
+            return Err(BundleError::Io(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "owned object verification cancelled",
+            )));
+        }
         // A successful byte-for-byte verification preserves immutable owner
         // facts. Only a failed open/identity check invalidates them; discarding
         // them before every read needlessly replays archived histories later.
@@ -1978,7 +2001,20 @@ impl ProjectStore {
             let mut file = self
                 .with_namespace(|namespace| namespace.open_owned(&path))?
                 .ok_or_else(|| BundleError::Corrupt("missing owned object".into()))?;
-            let verified = verify_owned_bytes(&mut file, reference, &self.inner.usage);
+            let verified = verify_owned_bytes_cancellable(
+                &mut file,
+                reference,
+                &self.inner.usage,
+                cancellation,
+            );
+            let cancelled = matches!(
+                &verified,
+                Err(BundleError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted
+            ) && cancellation
+                .is_some_and(kinewright_core::ExportCancellation::is_cancelled);
+            if cancelled {
+                return Err(verified.unwrap_err());
+            }
             if verified.is_err() || file.metadata()?.len() != reference.byte_length {
                 self.inner
                     .ledger
@@ -1998,7 +2034,12 @@ impl ProjectStore {
                 .insert(reference.sha256.clone());
             Ok(file)
         })();
-        if result.is_err() {
+        let cancelled = matches!(
+            &result,
+            Err(BundleError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted
+        ) && cancellation
+            .is_some_and(kinewright_core::ExportCancellation::is_cancelled);
+        if result.is_err() && !cancelled {
             self.inner
                 .verified_memo
                 .lock()
@@ -2175,11 +2216,21 @@ struct CountingReader<'a, R> {
     inner: &'a mut R,
     bytes: u64,
     limit: u64,
+    cancellation: Option<&'a kinewright_core::ExportCancellation>,
     #[cfg(test)]
     fault_reference: Option<&'a ObjectRef>,
 }
 impl<R: Read> Read for CountingReader<'_, R> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self
+            .cancellation
+            .is_some_and(kinewright_core::ExportCancellation::is_cancelled)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "owned object verification cancelled",
+            ));
+        }
         #[cfg(test)]
         if self.bytes > 0
             && let Some(reference) = self.fault_reference
@@ -2221,10 +2272,20 @@ fn verify_owned_bytes(
     reference: &ObjectRef,
     usage: &Mutex<StorageUsage>,
 ) -> Result<(), BundleError> {
+    verify_owned_bytes_cancellable(reader, reference, usage, None)
+}
+
+fn verify_owned_bytes_cancellable(
+    reader: &mut impl Read,
+    reference: &ObjectRef,
+    usage: &Mutex<StorageUsage>,
+    cancellation: Option<&kinewright_core::ExportCancellation>,
+) -> Result<(), BundleError> {
     let mut counted = CountingReader {
         inner: reader,
         bytes: 0,
         limit: reference.byte_length,
+        cancellation,
         #[cfg(test)]
         fault_reference: Some(reference),
     };

@@ -96,6 +96,7 @@ mod tests {
     include!("editorial_tests.rs");
     include!("review_job_tests.rs");
     include!("review_checks_tests.rs");
+    include!("review_c6_tests.rs");
     include!("te12_tests.rs");
     include!("te13_tests.rs");
     include!("te13_fix1_tests.rs");

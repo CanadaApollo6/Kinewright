@@ -10,8 +10,9 @@ use std::{
 use kinewright_core::{
     AssetId, ClipId, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
     ColorRange, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, Document, Effect,
-    EffectId, FrameTexture, LinearRgbaImage, MatteProofError, MediaError, MediaSourceFingerprint,
-    Rational, SourceColorRefusal, TimeCode, Title, classify_source_with_assumption,
+    EffectId, EffectUniform, FrameTexture, LinearRgbaImage, MatteProofError, MediaError,
+    MediaSourceFingerprint, Rational, SourceColorRefusal, TimeCode, Title,
+    classify_source_with_assumption, effect_descriptor,
 };
 
 use crate::{
@@ -1181,10 +1182,147 @@ impl FrameRenderer {
         result
     }
 
-    /// MO2 R28 (ME13): hold decoded sources resident for compositor frames.
-    #[cfg(test)]
+    /// MO2 R28 (ME13) & JA-1 S5a L14: cap frame/title cache residency for bounded renders.
     pub(crate) fn set_cache_budget(&mut self, bytes: usize) {
         self.cache_budget = bytes;
+    }
+
+    /// Stage one project frame's visual layers once for L14 with/without-overlay delivery
+    /// reference comparisons, evicting titles not used on this frame so residency stays O(1)
+    /// across caption-heavy timelines.
+    pub(crate) fn stage_delivery_layers(
+        &mut self,
+        document: &Document,
+        project_at: TimeCode,
+        resolution: (u32, u32),
+        scale: RenderScale,
+        strategy: DecodeStrategy,
+    ) -> Result<StagedDeliveryLayers, MediaError> {
+        self.used_titles = Some(HashSet::new());
+        let decoded = self.decoded_layers(
+            document,
+            project_at,
+            resolution,
+            scale,
+            Video::Decode(strategy),
+        );
+        let used = self.used_titles.take().unwrap_or_default();
+        self.title_cache.retain(|key, _| used.contains(key));
+        self.title_order.retain(|key| used.contains(key));
+        let layers = decoded?
+            .into_iter()
+            .map(|layer| (clip_track_order(document, layer.clip), layer))
+            .collect();
+        Ok(StagedDeliveryLayers { layers })
+    }
+
+    /// Render a previously staged frame through the exact export delivery compositor,
+    /// optionally excluding one overlay clip for the L14 without-overlay reference.
+    pub(crate) fn render_staged_delivery(
+        &mut self,
+        document: &Document,
+        project_at: TimeCode,
+        resolution: (u32, u32),
+        staged: &StagedDeliveryLayers,
+        excluded_clip: Option<ClipId>,
+    ) -> Result<DeliveryFrame, MediaError> {
+        let filtered: Vec<&DecodedLayer> = staged
+            .layers
+            .iter()
+            .filter(|(_, layer)| excluded_clip.is_none_or(|id| layer.clip != id))
+            .map(|(_, layer)| layer)
+            .collect();
+        let layers = compositor_layers_from_refs(&filtered);
+        self.compositor
+            .render_delivery_with_luts(
+                resolution,
+                &layers,
+                &document.color_context.delivery,
+                Some(&self.lut_library),
+            )
+            .map_err(|error| attribute_layer_refs(&filtered, project_at, error))
+    }
+
+    /// Stage a single overlay clip from its most visible in-cue frame (`visibility_at`),
+    /// placed where the document places it at `placement_at`, so an outside-cue timing probe
+    /// can inject a full-opacity reference even for fading or sliding entrances.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn stage_single_clip_for_boundary(
+        &mut self,
+        document: &Document,
+        clip_id: ClipId,
+        visibility_at: TimeCode,
+        placement_at: TimeCode,
+        resolution: (u32, u32),
+        scale: RenderScale,
+        strategy: DecodeStrategy,
+    ) -> Result<Option<StagedClipLayer>, MediaError> {
+        if let Some(inputs) = &self.inputs {
+            inputs.check_read_authority()?;
+        }
+        let _access = crate::locator::enter_retained(self.legacy_media.as_ref())?;
+        validate_managed_context(document)?;
+        document
+            .validate()
+            .map_err(|error| MediaError::InvalidDocument(Box::new(error)))?;
+        let layer_specs = visual_layers_at(document, visibility_at)?;
+        let Some(mut spec) = layer_specs
+            .into_iter()
+            .find(|layer| layer.clip() == clip_id)
+        else {
+            return Ok(None);
+        };
+        if placement_at != visibility_at {
+            let placement_specs = visual_layers_at(document, placement_at)?;
+            let Some(placement_spec) = placement_specs
+                .into_iter()
+                .find(|layer| layer.clip() == clip_id)
+            else {
+                return Ok(None);
+            };
+            merge_boundary_placement(&mut spec, &placement_spec);
+        }
+        let layer =
+            self.stage_one_layer(document, spec, resolution, scale, Video::Decode(strategy))?;
+        Ok(Some(StagedClipLayer {
+            track_order: clip_track_order(document, clip_id),
+            layer,
+        }))
+    }
+
+    /// Render a staged frame with one additional clip injected at its exact document track
+    /// z-order (used for L14 outside-cue early/lingering overlay checks).
+    pub(crate) fn render_staged_delivery_with_injected(
+        &mut self,
+        document: &Document,
+        project_at: TimeCode,
+        resolution: (u32, u32),
+        staged: &StagedDeliveryLayers,
+        injected: &StagedClipLayer,
+    ) -> Result<DeliveryFrame, MediaError> {
+        let mut combined: Vec<&DecodedLayer> = Vec::with_capacity(staged.layers.len() + 1);
+        let mut inserted = false;
+        for (order, layer) in &staged.layers {
+            if !inserted && *order > injected.track_order {
+                combined.push(&injected.layer);
+                inserted = true;
+            }
+            if layer.clip != injected.layer.clip {
+                combined.push(layer);
+            }
+        }
+        if !inserted {
+            combined.push(&injected.layer);
+        }
+        let layers = compositor_layers_from_refs(&combined);
+        self.compositor
+            .render_delivery_with_luts(
+                resolution,
+                &layers,
+                &document.color_context.delivery,
+                Some(&self.lut_library),
+            )
+            .map_err(|error| attribute_layer_refs(&combined, project_at, error))
     }
 
     /// Composite one project frame for the document's delivery target.
@@ -1350,97 +1488,108 @@ impl FrameRenderer {
         }
         let mut decoded_layers = Vec::with_capacity(layer_specs.len());
         for layer in layer_specs {
-            match layer {
-                TimelineVisualLayer::Video(layer) => {
-                    let asset = document.asset(layer.source.asset).ok_or_else(|| {
-                        MediaError::Backend(format!(
-                            "timeline asset {} disappeared",
-                            layer.source.asset
-                        ))
-                    })?;
-                    let key = source_key(
-                        asset,
-                        scale,
-                        self.inputs.as_deref(),
-                        self.legacy_media.as_ref(),
-                    );
-                    let frame = match video {
-                        Video::Decode(strategy) => self.decode_video_frame(
-                            asset.id,
-                            &asset.path,
-                            asset.fps,
-                            asset.resolution,
-                            layer.source.source_at,
-                            layer.source.source_end,
-                            scale,
-                            strategy,
-                            &asset.source_fingerprint,
-                            &asset.color_description,
-                        )?,
-                        Video::Supplied(frames) => {
-                            let at = layer.source.source_at;
-                            frames
-                                .get(&(key.clone(), at.0))
-                                .cloned()
-                                .unwrap_or_else(|| Err(no_frame(asset.id, at)))?
-                        }
-                    };
-                    decoded_layers.push(DecodedLayer {
-                        identity: Some((
-                            ResidentContent::Video(Arc::new(key)),
-                            layer.source.source_at,
-                        )),
-                        clip: layer.source.clip,
-                        frame,
-                        effects: layer.effects,
-                        transition: layer.transition,
-                        mode: pixels(layer.blend_mode),
-                    });
-                }
-                TimelineVisualLayer::Title(layer) => {
-                    let content = Generated::Title(layer.title);
-                    decoded_layers.push(DecodedLayer {
-                        identity: Some((
-                            ResidentContent::Generated((layer.clip, resolution, content.clone())),
-                            TimeCode::ZERO,
-                        )),
-                        clip: layer.clip,
-                        frame: self.generated_frame(layer.clip, resolution, content)?,
-                        effects: layer.effects,
-                        transition: layer.transition,
-                        mode: pixels(layer.blend_mode),
-                    });
-                }
-                TimelineVisualLayer::Solid(layer) => {
-                    let content = Generated::Solid([layer.color.r, layer.color.g, layer.color.b]);
-                    decoded_layers.push(DecodedLayer {
-                        identity: Some((
-                            ResidentContent::Generated((layer.clip, resolution, content.clone())),
-                            TimeCode::ZERO,
-                        )),
-                        clip: layer.clip,
-                        frame: self.generated_frame(layer.clip, resolution, content)?,
-                        effects: layer.effects,
-                        transition: layer.transition,
-                        mode: pixels(layer.blend_mode),
-                    });
-                }
-                // MO2 R18: the compositor ignores an adjustment's frame and
-                // samples the composite below it instead.
-                TimelineVisualLayer::Adjustment(layer) => decoded_layers.push(DecodedLayer {
-                    identity: None,
-                    clip: layer.clip,
-                    frame: ADJUSTMENT_FRAME.clone(),
-                    effects: layer.effects,
-                    transition: layer.transition,
-                    mode: LayerMode {
-                        blend: layer.blend_mode,
-                        role: LayerRole::Adjustment,
-                    },
-                }),
-            }
+            decoded_layers.push(self.stage_one_layer(document, layer, resolution, scale, video)?);
         }
         Ok(decoded_layers)
+    }
+
+    fn stage_one_layer(
+        &mut self,
+        document: &Document,
+        layer: TimelineVisualLayer,
+        resolution: (u32, u32),
+        scale: RenderScale,
+        video: Video<'_>,
+    ) -> Result<DecodedLayer, MediaError> {
+        match layer {
+            TimelineVisualLayer::Video(layer) => {
+                let asset = document.asset(layer.source.asset).ok_or_else(|| {
+                    MediaError::Backend(format!(
+                        "timeline asset {} disappeared",
+                        layer.source.asset
+                    ))
+                })?;
+                let key = source_key(
+                    asset,
+                    scale,
+                    self.inputs.as_deref(),
+                    self.legacy_media.as_ref(),
+                );
+                let frame = match video {
+                    Video::Decode(strategy) => self.decode_video_frame(
+                        asset.id,
+                        &asset.path,
+                        asset.fps,
+                        asset.resolution,
+                        layer.source.source_at,
+                        layer.source.source_end,
+                        scale,
+                        strategy,
+                        &asset.source_fingerprint,
+                        &asset.color_description,
+                    )?,
+                    Video::Supplied(frames) => {
+                        let at = layer.source.source_at;
+                        frames
+                            .get(&(key.clone(), at.0))
+                            .cloned()
+                            .unwrap_or_else(|| Err(no_frame(asset.id, at)))?
+                    }
+                };
+                Ok(DecodedLayer {
+                    identity: Some((
+                        ResidentContent::Video(Arc::new(key)),
+                        layer.source.source_at,
+                    )),
+                    clip: layer.source.clip,
+                    frame,
+                    effects: layer.effects,
+                    transition: layer.transition,
+                    mode: pixels(layer.blend_mode),
+                })
+            }
+            TimelineVisualLayer::Title(layer) => {
+                let content = Generated::Title(layer.title);
+                Ok(DecodedLayer {
+                    identity: Some((
+                        ResidentContent::Generated((layer.clip, resolution, content.clone())),
+                        TimeCode::ZERO,
+                    )),
+                    clip: layer.clip,
+                    frame: self.generated_frame(layer.clip, resolution, content)?,
+                    effects: layer.effects,
+                    transition: layer.transition,
+                    mode: pixels(layer.blend_mode),
+                })
+            }
+            TimelineVisualLayer::Solid(layer) => {
+                let content = Generated::Solid([layer.color.r, layer.color.g, layer.color.b]);
+                Ok(DecodedLayer {
+                    identity: Some((
+                        ResidentContent::Generated((layer.clip, resolution, content.clone())),
+                        TimeCode::ZERO,
+                    )),
+                    clip: layer.clip,
+                    frame: self.generated_frame(layer.clip, resolution, content)?,
+                    effects: layer.effects,
+                    transition: layer.transition,
+                    mode: pixels(layer.blend_mode),
+                })
+            }
+            // MO2 R18: the compositor ignores an adjustment's frame and
+            // samples the composite below it instead.
+            TimelineVisualLayer::Adjustment(layer) => Ok(DecodedLayer {
+                identity: None,
+                clip: layer.clip,
+                frame: ADJUSTMENT_FRAME.clone(),
+                effects: layer.effects,
+                transition: layer.transition,
+                mode: LayerMode {
+                    blend: layer.blend_mode,
+                    role: LayerRole::Adjustment,
+                },
+            }),
+        }
     }
 
     /// A title raster or (MO2 R3) an opaque solid fill, converted to working
@@ -1888,6 +2037,138 @@ fn validate_managed_context(document: &Document) -> Result<(), MediaError> {
     )))
 }
 
+/// Staged visual layers for a single frame, tagged with document track order for L14
+/// with/without-overlay delivery renders.
+pub(crate) struct StagedDeliveryLayers {
+    layers: Vec<(usize, DecodedLayer)>,
+}
+
+/// One staged overlay clip layer with its document track order for outside-cue timing probes.
+pub(crate) struct StagedClipLayer {
+    track_order: usize,
+    layer: DecodedLayer,
+}
+
+fn clip_track_order(document: &Document, clip_id: ClipId) -> usize {
+    document
+        .tracks
+        .iter()
+        .enumerate()
+        .find_map(|(track_index, track)| {
+            track
+                .clips
+                .iter()
+                .any(|clip| clip.id == clip_id)
+                .then_some(track_index)
+        })
+        .unwrap_or(usize::MAX)
+}
+
+const fn is_spatial_uniform(uniform: EffectUniform) -> bool {
+    matches!(
+        uniform,
+        EffectUniform::Scale
+            | EffectUniform::ScaleX
+            | EffectUniform::ScaleY
+            | EffectUniform::ScaleFine
+            | EffectUniform::OffsetX
+            | EffectUniform::OffsetY
+            | EffectUniform::OffsetXBasisPoints
+            | EffectUniform::OffsetYBasisPoints
+            | EffectUniform::Rotation
+            | EffectUniform::AnchorX
+            | EffectUniform::AnchorY
+    )
+}
+
+fn effect_is_spatial_only(effect: &Effect) -> bool {
+    effect_descriptor(&effect.name).is_some_and(|desc| {
+        !desc.parameters.is_empty()
+            && desc
+                .parameters
+                .iter()
+                .all(|param| is_spatial_uniform(param.uniform))
+    })
+}
+
+fn effect_has_spatial_param(effect: &Effect) -> bool {
+    effect_descriptor(&effect.name).is_some_and(|desc| {
+        desc.parameters
+            .iter()
+            .any(|param| is_spatial_uniform(param.uniform))
+    })
+}
+
+fn layer_effects_and_transition_mut(
+    layer: &mut TimelineVisualLayer,
+) -> (&mut Vec<Effect>, &mut TransitionRenderParams) {
+    match layer {
+        TimelineVisualLayer::Video(v) => (&mut v.effects, &mut v.transition),
+        TimelineVisualLayer::Title(t) => (&mut t.effects, &mut t.transition),
+        TimelineVisualLayer::Solid(s) => (&mut s.effects, &mut s.transition),
+        TimelineVisualLayer::Adjustment(a) => (&mut a.effects, &mut a.transition),
+    }
+}
+
+fn layer_effects_and_transition(
+    layer: &TimelineVisualLayer,
+) -> (&[Effect], &TransitionRenderParams) {
+    match layer {
+        TimelineVisualLayer::Video(v) => (&v.effects, &v.transition),
+        TimelineVisualLayer::Title(t) => (&t.effects, &t.transition),
+        TimelineVisualLayer::Solid(s) => (&s.effects, &s.transition),
+        TimelineVisualLayer::Adjustment(a) => (&a.effects, &a.transition),
+    }
+}
+
+/// Apply spatial placement (transform effects and transition slide offset) from `placement`
+/// onto `visibility`, preserving the maximally visible opacity, coverage, and colour state.
+fn merge_boundary_placement(visibility: &mut TimelineVisualLayer, placement: &TimelineVisualLayer) {
+    let (vis_effects, vis_transition) = layer_effects_and_transition_mut(visibility);
+    let (place_effects, place_transition) = layer_effects_and_transition(placement);
+    vis_transition.offset = place_transition.offset;
+
+    // Remove spatial-only effects from the visibility frame; they will be replaced by the
+    // placement frame's evaluated spatial transforms.
+    vis_effects.retain(|effect| !effect_is_spatial_only(effect));
+
+    for place_effect in place_effects {
+        if !effect_has_spatial_param(place_effect) {
+            continue;
+        }
+        if effect_is_spatial_only(place_effect) {
+            vis_effects.push(place_effect.clone());
+            continue;
+        }
+        if let Some(desc) = effect_descriptor(&place_effect.name) {
+            if let Some(existing) = vis_effects.iter_mut().find(|e| e.id == place_effect.id) {
+                for param in desc
+                    .parameters
+                    .iter()
+                    .filter(|p| is_spatial_uniform(p.uniform))
+                {
+                    if let Some(val) = place_effect.parameters.get(param.name) {
+                        existing
+                            .parameters
+                            .insert(param.name.to_owned(), val.clone());
+                    } else {
+                        existing.parameters.remove(param.name);
+                    }
+                    if let Some(curve) = place_effect.keyframes.get(param.name) {
+                        existing
+                            .keyframes
+                            .insert(param.name.to_owned(), curve.clone());
+                    } else {
+                        existing.keyframes.remove(param.name);
+                    }
+                }
+            } else {
+                vis_effects.push(place_effect.clone());
+            }
+        }
+    }
+}
+
 /// Borrow the staged layers as compositor layers, preserving z-order.
 fn compositor_layers(layers: &[DecodedLayer]) -> Vec<CompositorLayer<'_, DecodedLayer>> {
     layers
@@ -1899,6 +2180,31 @@ fn compositor_layers(layers: &[DecodedLayer]) -> Vec<CompositorLayer<'_, Decoded
             mode: layer.mode,
         })
         .collect()
+}
+
+fn compositor_layers_from_refs<'a>(
+    layers: &[&'a DecodedLayer],
+) -> Vec<CompositorLayer<'a, DecodedLayer>> {
+    layers
+        .iter()
+        .map(|layer| CompositorLayer {
+            frame: *layer,
+            effects: &layer.effects,
+            transition: layer.transition,
+            mode: layer.mode,
+        })
+        .collect()
+}
+
+fn attribute_layer_refs(layers: &[&DecodedLayer], at: TimeCode, error: MediaError) -> MediaError {
+    match error {
+        MediaError::NonFiniteRender { layer, .. } => MediaError::NonFiniteRender {
+            layer,
+            clip: layers.get(layer).map(|decoded| decoded.clip),
+            at: Some(at),
+        },
+        other => other,
+    }
 }
 
 const fn pixels(blend: kinewright_core::BlendMode) -> LayerMode {

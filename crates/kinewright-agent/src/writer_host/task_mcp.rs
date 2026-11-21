@@ -87,6 +87,22 @@ pub(crate) fn is_capability(name: &str) -> bool {
     CAPABILITIES.iter().any(|(candidate, _)| *candidate == name)
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct TaskImageBlock {
+    pub(crate) mime_type: &'static str,
+    pub(crate) bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum TaskMcpReply {
+    Json(Value),
+    WithImages {
+        summary: String,
+        structured: Value,
+        images: Vec<TaskImageBlock>,
+    },
+}
+
 #[derive(Clone)]
 pub(crate) struct TaskMcp {
     host: Weak<Mutex<HostCommandOwner>>,
@@ -144,6 +160,7 @@ pub(crate) fn product_tool_name(name: &str, capability: Option<&str>) -> &'stati
         "read_task_evidence" => return "read_task_evidence",
         "read_task_result" => return "read_task_result",
         "read_child_result" => return "read_child_result",
+        "read_review_stills" => return "read_review_stills",
         "get_timeline_transcript" => return "get_timeline_transcript",
         "cut_dialogue" => return "cut_dialogue",
         "check_dialogue_cut" => return "check_dialogue_cut",
@@ -366,7 +383,7 @@ impl TaskMcp {
             stop_gate,
         }
     }
-    pub(crate) fn call(&self, name: &str, arguments: Value) -> Result<Value, HostError> {
+    pub(crate) fn call(&self, name: &str, arguments: Value) -> Result<TaskMcpReply, HostError> {
         #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
         if let Some(gate) = &self.stop_gate {
             gate.before_request(&self.endpoint.authority().task)
@@ -381,13 +398,15 @@ impl TaskMcp {
         }
         Ok(reply)
     }
-    fn call_inner(&self, name: &str, arguments: Value) -> Result<Value, HostError> {
+    fn call_inner(&self, name: &str, arguments: Value) -> Result<TaskMcpReply, HostError> {
         let owner = self.host.upgrade().ok_or_else(|| refused("host closed"))?;
         let mut host = self.lock_owner(&owner)?;
         // Uncertain storage cannot serve resolve_task_mcp's projection. Only
         // the retained original finish may reach exact-envelope reconciliation.
         if name == "finish_task" && host.hooks.pending.is_some() {
-            return self.retry_pending_finish(&mut host, arguments);
+            return self
+                .retry_pending_finish(&mut host, arguments)
+                .map(TaskMcpReply::Json);
         }
         host.prove_retention()?;
         let (index, state, task) = host.resolve_task_mcp(&self.auth, &self.endpoint)?;
@@ -400,9 +419,44 @@ impl TaskMcp {
         if !manifest::names(role).contains(&name) {
             return Err(refused("tool hidden for durable task role"));
         }
+        if name == "read_review_stills" {
+            let request: super::review_stills::ReviewStillPageRequest =
+                serde_json::from_value(arguments)?;
+            let prepared =
+                host.prepare_review_stills_read(record, self.endpoint.authority(), &request)?;
+            drop(host);
+            let rendered = prepared.render(&self.endpoint)?;
+            let mut host = self.lock_owner(&owner)?;
+            let (_, state, task) = host.resolve_task_mcp(&self.auth, &self.endpoint)?;
+            let record = state
+                .tasks
+                .iter()
+                .find(|record| record.id == task)
+                .ok_or_else(|| refused("task missing"))?;
+            return host.finish_review_stills_read(record, self.endpoint.authority(), rendered);
+        }
+        self.call_json_inner(&owner, host, index, &state, &task, name, arguments)
+            .map(TaskMcpReply::Json)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn call_json_inner<'a>(
+        &self,
+        owner: &'a Arc<Mutex<HostCommandOwner>>,
+        mut host: std::sync::MutexGuard<'a, HostCommandOwner>,
+        index: usize,
+        state: &RunProjection,
+        task: &TaskId,
+        name: &str,
+        arguments: Value,
+    ) -> Result<Value, HostError> {
+        let record = state
+            .tasks
+            .iter()
+            .find(|record| record.id == *task)
+            .ok_or_else(|| refused("task missing"))?;
         if matches!(name, "record_editorial_audit" | "propose_rulebook_revision") {
             return host.editorial_task_tool(
-                &state,
+                state,
                 record,
                 self.endpoint.authority(),
                 name,
@@ -416,14 +470,14 @@ impl TaskMcp {
             let record = state
                 .tasks
                 .iter()
-                .find(|record| record.id == task)
+                .find(|record| record.id == *task)
                 .ok_or_else(|| refused("task missing"))?;
             return match name {
                 "get_timeline_state" => {
                     if arguments != json!({}) {
                         return Err(refused("overview takes no caller scope"));
                     }
-                    let (revision, document) = host.context_snapshot(&state.run, &task)?;
+                    let (revision, document) = host.context_snapshot(&state.run, task)?;
                     host.context_overview(&state.run, record, revision, &document)
                 }
                 "read_task_evidence" => {
@@ -434,22 +488,22 @@ impl TaskMcp {
                         super::task_context::EvidenceKind::Audio { .. }
                             | super::task_context::EvidenceKind::Frame { .. }
                     ) {
-                        let prepared = host.prepare_media_context(index, &state, record, &read)?;
+                        let prepared = host.prepare_media_context(index, state, record, &read)?;
                         let rendered = {
                             drop(host);
-                            match prepared.render(&self.endpoint, &owner) {
+                            match prepared.render(&self.endpoint, owner) {
                                 Ok(rendered) => rendered,
                                 Err(error) => {
                                     if prepared.failed()?
-                                        && let Ok(mut host) = self.lock_owner(&owner)
+                                        && let Ok(mut host) = self.lock_owner(owner)
                                     {
-                                        prepared.discard_failed(&mut host, &state.run, &task)?;
+                                        prepared.discard_failed(&mut host, &state.run, task)?;
                                     }
                                     return Err(error);
                                 }
                             }
                         };
-                        let mut host = self.lock_owner(&owner)?;
+                        let mut host = self.lock_owner(owner)?;
                         let (index, state, task) =
                             host.resolve_task_mcp(&self.auth, &self.endpoint)?;
                         let record = state
@@ -459,7 +513,7 @@ impl TaskMcp {
                             .ok_or_else(|| refused("task missing"))?;
                         host.finish_media_context(index, &state, record, &read, &rendered)
                     } else {
-                        let result = host.read_context(index, &state, record, &read);
+                        let result = host.read_context(index, state, record, &read);
                         #[cfg(test)]
                         if let Some(gate) = host.hooks.context_reply_gate.take() {
                             *gate.outcome.lock().unwrap() = result.as_ref().ok().cloned();
@@ -472,7 +526,7 @@ impl TaskMcp {
                 }
                 _ => host.read_child_context(
                     index,
-                    &state,
+                    state,
                     record,
                     &serde_json::from_value(arguments)?,
                 ),
@@ -488,18 +542,18 @@ impl TaskMcp {
             let record = state
                 .tasks
                 .iter()
-                .find(|record| record.id == task)
+                .find(|record| record.id == *task)
                 .ok_or_else(|| refused("task missing"))?;
             let allowed = state.deliveries.iter().any(|delivery| {
                 delivery.result == read.reference
                     && state.tasks.iter().any(|child| {
-                        child.id == delivery.task && child.parent.as_ref() == Some(&task)
+                        child.id == delivery.task && child.parent.as_ref() == Some(task)
                     })
             }) || matches!(&record.state,crate::orchestration::orchestration_records::TaskState::Terminal(result) if *result==read.reference);
             if !allowed {
                 return Err(refused("read reference outside task scope"));
             }
-            return host.read_legacy_context(index, &state, record, &read.reference);
+            return host.read_legacy_context(index, state, record, &read.reference);
         } else if matches!(name, "task_status" | "wait_task") {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
@@ -520,7 +574,7 @@ impl TaskMcp {
                 expected_revision: kinewright_core::TimelineRevision,
             }
             let step: Step = serde_json::from_value(arguments)?;
-            let core = host.hooks.runs[&state.run].tasks[&task].core().clone();
+            let core = host.hooks.runs[&state.run].tasks[task].core().clone();
             drop(host);
             let history = self.history_with_edit_consent(
                 &core,
@@ -596,7 +650,7 @@ impl TaskMcp {
         let replay = host.owner()?.orchestration_replay(&bound.envelope, None)?;
         let merge_replay = if let OrchestrationCommand::MergeTask(merge) = &request.envelope.command
         {
-            host.saved_task_history(&state, &merge.task)?
+            host.saved_task_history(state, &merge.task)?
                 .and_then(|history| history.merge_envelope)
                 .is_some_and(|original| original.id == request.envelope.id)
         } else {
@@ -617,7 +671,7 @@ impl TaskMcp {
             // A broken new choice can end this turn without replacing its stored outcome.
             let outcome = json!({"receipt":receipt});
             drop(host);
-            let _ = super::provider_readiness::check_run(&owner, &state.run);
+            let _ = super::provider_readiness::check_run(owner, &state.run);
             return Ok(outcome);
         }
         #[cfg(target_os = "linux")]
@@ -627,7 +681,7 @@ impl TaskMcp {
         ) && replay.is_none()
         {
             drop(host);
-            super::provider_readiness::check_run(&owner, &state.run).map_err(|why| {
+            super::provider_readiness::check_run(owner, &state.run).map_err(|why| {
                 let reason = if super::provider_readiness::setup_failure(&why) {
                     super::provider_readiness::model_wait()
                 } else {
@@ -635,7 +689,7 @@ impl TaskMcp {
                 };
                 HostRefusal::new("provider_wait", reason)
             })?;
-            host = self.lock_owner(&owner)?;
+            host = self.lock_owner(owner)?;
             host.resolve_task_mcp(&self.auth, &self.endpoint)?;
             if host.bind_publication(&request)? != bound {
                 let why = "Your provider choices changed while they were checked. Review Director and Specialists in Settings, then try again.";
@@ -648,7 +702,7 @@ impl TaskMcp {
             }
         }
         if let OrchestrationCommand::FreezeTask(target) = &request.envelope.command
-            && let Some(history) = host.saved_task_history(&state, target)?
+            && let Some(history) = host.saved_task_history(state, target)?
             && history.frozen
         {
             let receipt = host
@@ -685,7 +739,7 @@ impl TaskMcp {
         if let OrchestrationCommand::MergeTask(merge) = &request.envelope.command {
             host.require_metadata_issuer(index, &request.envelope.id.issuer)?;
             let history = host
-                .saved_task_history(&state, &merge.task)?
+                .saved_task_history(state, &merge.task)?
                 .ok_or_else(|| refused("task history missing"))?;
             let result = host
                 .owner()?
@@ -707,12 +761,12 @@ impl TaskMcp {
             {
                 return Err(refused("merge target/result changed"));
             }
-            host.restore_frozen_task(&state, &merge.task)?;
+            host.restore_frozen_task(state, &merge.task)?;
             // Refuse candidate capacity before binding a caller or retaining
             // any pending merge. A different caller cannot poison that state.
             host.admit_task_merge(&state.run, &merge.task, request.envelope.id.clone())?;
             let reconciliation = host.bind_merge_receipt(
-                &state,
+                state,
                 &merge.task,
                 &request.envelope,
                 self.endpoint.authority(),

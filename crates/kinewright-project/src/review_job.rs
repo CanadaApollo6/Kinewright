@@ -917,6 +917,32 @@ pub struct ReviewPreparationInputs {
     pub annotations: Option<StorageReservation<StoredReviewAnnotations>>,
 }
 
+/// Pinned review artifact metadata prepared under the writer lock so full-file SHA-256
+/// verification of the artifact media bytes runs strictly off-lock (L13).
+pub struct PreparedReviewArtifact {
+    pub artifact: StorageReservation<ReviewArtifact>,
+    pin: crate::store::StorePin,
+}
+
+impl PreparedReviewArtifact {
+    /// Verify the pinned artifact media bytes off the writer lock and return the rewound file.
+    pub fn open_verified(&self) -> Result<std::fs::File, BundleError> {
+        self.pin
+            .read_store()
+            .open_verified(&self.artifact.media_ref)
+    }
+
+    /// Cancellation-aware verification of the pinned artifact media bytes off the writer lock.
+    pub fn open_verified_cancellable(
+        &self,
+        cancellation: &kinewright_core::ExportCancellation,
+    ) -> Result<std::fs::File, BundleError> {
+        self.pin
+            .read_store()
+            .open_verified_cancellable(&self.artifact.media_ref, cancellation)
+    }
+}
+
 impl ProjectBundle {
     pub fn settle_review_root(&mut self) -> Result<(), BundleError> {
         if self.unsettled
@@ -939,10 +965,12 @@ impl ProjectBundle {
         Ok(())
     }
 
-    pub fn open_review_artifact(
+    /// Read the small review-artifact record and pin its media bytes under the writer lock
+    /// without hashing the media file on the lock (L13).
+    pub fn prepare_review_artifact(
         &self,
         token: &ReviewToken,
-    ) -> Result<(StorageReservation<ReviewArtifact>, std::fs::File), BundleError> {
+    ) -> Result<PreparedReviewArtifact, BundleError> {
         let job = self
             .review_job()?
             .filter(|job| &job.token == token && job.phase != ReviewPhase::Stopping)
@@ -951,8 +979,19 @@ impl ProjectBundle {
             BundleError::Identity("review artifact has not been published".into())
         })?;
         let artifact = self.store.read_record::<ReviewArtifact>(reference)?;
-        let verified = self.store.open_verified(&artifact.media_ref)?;
-        Ok((artifact, verified))
+        let pin = self
+            .store
+            .pin(&[reference.clone(), artifact.media_ref.clone()])?;
+        Ok(PreparedReviewArtifact { artifact, pin })
+    }
+
+    pub fn open_review_artifact(
+        &self,
+        token: &ReviewToken,
+    ) -> Result<(StorageReservation<ReviewArtifact>, std::fs::File), BundleError> {
+        let prepared = self.prepare_review_artifact(token)?;
+        let verified = prepared.open_verified()?;
+        Ok((prepared.artifact, verified))
     }
 }
 

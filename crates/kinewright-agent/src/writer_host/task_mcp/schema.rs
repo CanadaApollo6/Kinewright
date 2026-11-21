@@ -145,6 +145,18 @@ pub(crate) fn context_read(name: &str) -> Value {
     let cursor = json!({"type":"string","maxLength":96});
     let mut schema = if name == "read_task_result" {
         object(json!({"reference":reference("object_ref")}), &["reference"])
+    } else if name == "read_review_stills" {
+        object(
+            json!({
+                "cursor": cursor,
+                "page_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": kinewright_media::MAX_STILLS_PER_PAGE
+                }
+            }),
+            &[],
+        )
     } else if name == "read_task_evidence" {
         let frame = json!({"type":"integer","minimum":0});
         let mut variants = Vec::new();
