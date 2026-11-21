@@ -69,6 +69,17 @@ fn queue_limited(
     raster: (u32, u32),
     byte_limit: u64,
 ) -> ReviewToken {
+    let rulebook = bundle.approved_rulebook().cloned();
+    queue_ruled(bundle, descriptor, raster, byte_limit, rulebook)
+}
+
+fn queue_ruled(
+    bundle: &mut ProjectBundle,
+    descriptor: &SnapshotDescriptor,
+    raster: (u32, u32),
+    byte_limit: u64,
+    rulebook: Option<ObjectRef>,
+) -> ReviewToken {
     let snapshot = bundle.read_snapshot(&descriptor.key).unwrap();
     let inputs = snapshot.open_review_inputs().unwrap();
     let mut settings = DeliveryProfile::SourceMaster.export_settings(
@@ -102,7 +113,7 @@ fn queue_limited(
         },
     };
     bundle
-        .queue_review(descriptor, None, settings, byte_limit, expectations)
+        .queue_review(descriptor, rulebook, settings, byte_limit, expectations)
         .unwrap()
 }
 
@@ -936,6 +947,60 @@ fn c7_audit(bundle: &mut ProjectBundle, key: &SnapshotKey, blocking: bool) {
     );
 }
 
+/// Approve a house rule, so the project's rulebook moves on.
+fn c7_approve_rule(bundle: &mut ProjectBundle, rule: &str) -> ObjectRef {
+    let publish = |bundle: &mut ProjectBundle, change| {
+        let issuer = bundle.issue_metadata_issuer().unwrap();
+        let envelope = bundle.metadata_envelope(CommandId {
+            issuer,
+            sequence: 1,
+        });
+        let update = MetadataUpdate {
+            expected_root_generation: bundle.generation,
+            change,
+        };
+        let lookup = bundle
+            .metadata_command(&envelope, MetadataScope::Editorial, &update)
+            .unwrap();
+        assert!(matches!(lookup, ReceiptLookup::Committed(_)), "C7_RULE");
+    };
+    let proposal = crate::editorial::RulebookProposal {
+        proposed_by: c7_attempt(bundle),
+        parent: bundle.approved_rulebook().cloned(),
+        rule: rule.into(),
+    };
+    publish(bundle, MetadataChange::ProposeRulebook(proposal));
+    let proposal = bundle
+        .rulebook_proposal()
+        .unwrap()
+        .map(|(reference, _)| reference)
+        .unwrap();
+    publish(
+        bundle,
+        MetadataChange::DecideRulebook(crate::editorial::RulebookDecision {
+            proposal,
+            approve: true,
+        }),
+    );
+    bundle.approved_rulebook().unwrap().clone()
+}
+
+#[derive(Clone, Copy, Default)]
+struct C7Setup {
+    blocking: bool,
+    skip: Option<RequiredReviewRow>,
+    keep_stage: bool,
+    fault: Option<C7Fault>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum C7Fault {
+    /// A house rule approved after the audit, before the queue.
+    NewRulebook,
+    /// The bound attempt is not a Reviewer task attempt on the cut.
+    NotAReviewer,
+}
+
 /// A checked job: published artifact, staging retired unless kept, one
 /// binding and every row but `skip` recorded Pass by its attempt.
 fn c7_checked_staged(
@@ -945,8 +1010,35 @@ fn c7_checked_staged(
     skip: Option<RequiredReviewRow>,
     retire_stage: bool,
 ) -> C7Ready {
+    c7_checked_with(
+        bundle,
+        temp,
+        C7Setup {
+            blocking,
+            skip,
+            keep_stage: !retire_stage,
+            ..C7Setup::default()
+        },
+    )
+}
+
+fn c7_checked_with(
+    bundle: &mut ProjectBundle,
+    temp: &kinewright_media::test_support::TempDirectory,
+    setup: C7Setup,
+) -> C7Ready {
+    let C7Setup {
+        blocking,
+        skip,
+        keep_stage,
+        fault,
+    } = setup;
+    let retire_stage = !keep_stage;
     let descriptor = version(bundle);
     c7_audit(bundle, &descriptor.key, blocking);
+    if fault == Some(C7Fault::NewRulebook) {
+        c7_approve_rule(bundle, "Keep the promise.");
+    }
     let queued = queue(bundle, &descriptor, (64, 64));
     let encoding = bundle
         .update_review_job(
@@ -986,6 +1078,9 @@ fn c7_checked_staged(
         configuration_sha256: C7_DIGEST,
         reviewer_attempt: SessionId::fresh().unwrap(),
     };
+    if fault != Some(C7Fault::NotAReviewer) {
+        super::seal::test_reviewers::admit(&descriptor.checkpoint_ref, &binding.reviewer_attempt);
+    }
     bundle
         .update_review_job(&token, UpdateReviewJob::BindChecks(binding.clone()))
         .unwrap();
@@ -1309,7 +1404,8 @@ fn ja1_s5a_c7_seal_refuses_changed_inputs() {
     );
     c7_retire(&mut bundle, &ready.token);
 
-    // A stale reviewer attempt: rows of an earlier attempt after a rebind.
+    // A stale reviewer attempt: after a rebind, the earlier attempt's Pass
+    // rows never count, so one new row cannot reach ReadyToSeal.
     let ready = c7_checked(
         &mut bundle,
         &temp,
@@ -1323,6 +1419,12 @@ fn ja1_s5a_c7_seal_refuses_changed_inputs() {
         configuration_sha256: C7_DIGEST,
         reviewer_attempt: SessionId::fresh().unwrap(),
     };
+    let checkpoint = bundle
+        .read_snapshot(&ready.token.snapshot)
+        .unwrap()
+        .descriptor
+        .checkpoint_ref;
+    super::seal::test_reviewers::admit(&checkpoint, &rebound.reviewer_attempt);
     bundle
         .update_review_job(&ready.token, UpdateReviewJob::BindChecks(rebound.clone()))
         .unwrap();
@@ -1332,13 +1434,20 @@ fn ja1_s5a_c7_seal_refuses_changed_inputs() {
         &rebound,
         RequiredReviewRow::IndependentVisualReview,
     );
+    assert!(
+        matches!(
+            bundle.review_job().unwrap().unwrap().phase,
+            ReviewPhase::Checking(_)
+        ),
+        "C7_STALE_ROWS_NEVER_READY"
+    );
     let result = c7_seal(&mut bundle, &ready).unwrap();
     let findings = c7_refused(&mut bundle, result);
     assert!(
         c7_has(
             &findings,
             Some(RequiredReviewRow::StructureAndAvIntegrity),
-            "This check was recorded by an earlier reviewer attempt."
+            "This check has no recorded result."
         ),
         "C7_STALE_ATTEMPT: {findings:?}"
     );
@@ -1510,6 +1619,25 @@ fn ja1_s5a_c7_seal_leaves_the_working_edit_and_save_as_copy_alone() {
     assert_eq!(c7_receipts(&copied, &prior.token.snapshot).len(), 1);
     assert!(c7_receipts(&copied, &ready.token.snapshot).is_empty());
     drop(copied);
+    // The copy reopened from disk: its receipts pass recovery, and no job.
+    let copy_path = temp.path("copy.kinewright");
+    let reopened = ProjectBundle::activate(
+        &copy_path,
+        BundleWriteAdmission::read(&copy_path).unwrap(),
+        core.history_pool(),
+    )
+    .unwrap();
+    assert!(
+        reopened.review_job().unwrap().is_none(),
+        "C7_FIX1_REOPENED_COPY_HAS_NO_JOB"
+    );
+    assert_eq!(
+        c7_receipts(&reopened, &prior.token.snapshot).len(),
+        1,
+        "C7_FIX1_REOPENED_COPY_KEEPS_PRIOR_RECEIPT"
+    );
+    assert!(c7_receipts(&reopened, &ready.token.snapshot).is_empty());
+    drop(reopened);
 
     assert!(matches!(
         c7_seal(&mut bundle, &ready).unwrap(),
@@ -1529,6 +1657,21 @@ fn ja1_s5a_c7_seal_leaves_the_working_edit_and_save_as_copy_alone() {
         .filter(|descriptor| !c7_receipts(&bundle, &descriptor.key).is_empty())
         .count();
     assert_eq!(with_receipts, 2, "C7_ONLY_FROZEN_VERSIONS_SEALED");
+    drop(versions);
+    // Undo across the seal: the edit is undone and saved; the receipts stay
+    // on the frozen versions only.
+    core.request(kinewright_core::Command::Undo).unwrap();
+    bundle.save(&core, &inputs).unwrap();
+    assert_ne!(bundle.manual_head().unwrap(), &head, "C7_FIX1_UNDO_SAVED");
+    assert_eq!(c7_receipts(&bundle, &ready.token.snapshot).len(), 1);
+    assert_eq!(c7_receipts(&bundle, &prior.token.snapshot).len(), 1);
+    let versions = bundle.version_index().unwrap();
+    let with_receipts = versions
+        .snapshots
+        .values()
+        .filter(|descriptor| !c7_receipts(&bundle, &descriptor.key).is_empty())
+        .count();
+    assert_eq!(with_receipts, 2, "C7_FIX1_UNDO_SEALS_NO_OTHER_VERSION");
 }
 
 #[test]
@@ -1546,5 +1689,249 @@ fn ja1_s5a_c7_seal_refuses_while_staging_is_held() {
             "Review staging is still held by the encode."
         ),
         "C7_STAGING: {findings:?}"
+    );
+}
+
+#[test]
+fn ja1_s5a_c7_fix1_seal_refuses_another_rulebook_and_a_non_reviewer() {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "c7-fix1-rulebook");
+    let (_core, mut bundle, _) = saved_bundle(&temp);
+    // The audit was made under no rulebook; the review froze a new one.
+    let ready = c7_checked_with(
+        &mut bundle,
+        &temp,
+        C7Setup {
+            fault: Some(C7Fault::NewRulebook),
+            ..C7Setup::default()
+        },
+    );
+    let result = c7_seal(&mut bundle, &ready).unwrap();
+    let findings = c7_refused(&mut bundle, result);
+    assert!(
+        c7_has(
+            &findings,
+            Some(RequiredReviewRow::EditorialAuditPresent),
+            "The editorial audit was made under another rulebook."
+        ),
+        "C7_FIX1_OTHER_RULEBOOK: {findings:?}"
+    );
+    c7_retire(&mut bundle, &ready.token);
+    // The audit row agrees: the driver records it Unknown.
+    let audited = bundle.review_audit_complete(&ready.token);
+    assert!(audited.is_err(), "C7_FIX1_RETIRED_JOB_HAS_NO_AUDIT_ROW");
+
+    // No editor rationale, and the bound attempt is no Reviewer of the cut.
+    let ready = c7_checked_with(
+        &mut bundle,
+        &temp,
+        C7Setup {
+            fault: Some(C7Fault::NotAReviewer),
+            ..C7Setup::default()
+        },
+    );
+    let result = c7_seal(&mut bundle, &ready).unwrap();
+    let findings = c7_refused(&mut bundle, result);
+    assert!(
+        c7_has(
+            &findings,
+            Some(RequiredReviewRow::IndependentVisualReview),
+            "The visual reviewer is not a Reviewer task attempt on this cut."
+        ),
+        "C7_FIX1_NOT_A_REVIEWER: {findings:?}"
+    );
+}
+
+#[test]
+fn ja1_s5a_c7_fix1_audit_row_follows_the_frozen_rulebook() {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "c7-fix1-audit-row");
+    let (_core, mut bundle, _) = saved_bundle(&temp);
+    let ready = c7_checked_with(
+        &mut bundle,
+        &temp,
+        C7Setup {
+            fault: Some(C7Fault::NewRulebook),
+            skip: Some(RequiredReviewRow::EditorialAuditPresent),
+            ..C7Setup::default()
+        },
+    );
+    assert_eq!(
+        bundle.review_audit_complete(&ready.token).unwrap(),
+        Err("The editorial audit was made under another rulebook."),
+        "C7_FIX1_AUDIT_ROW_RULEBOOK"
+    );
+}
+
+#[test]
+fn ja1_s5a_c7_fix1_retry_after_a_pause_binds_a_fresh_attempt() {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "c7-fix1-retry");
+    let (_core, mut bundle, _) = saved_bundle(&temp);
+    let ready = c7_checked(
+        &mut bundle,
+        &temp,
+        false,
+        Some(RequiredReviewRow::IndependentVisualReview),
+    );
+    // The visual row is missing: the seal pauses.
+    let result = c7_seal(&mut bundle, &ready).unwrap();
+    c7_refused(&mut bundle, result);
+    let retried = bundle
+        .update_review_job(&ready.token, UpdateReviewJob::Retry)
+        .unwrap();
+    assert_eq!(
+        retried.phase,
+        ReviewPhase::Checking(ReviewChecks::default()),
+        "C7_FIX1_RETRY_CLEARS_THE_BINDING"
+    );
+    // A fresh attempt with its own digest binds and records every row.
+    let fresh = ReviewCheckBinding {
+        configuration_sha256: [8; 32],
+        reviewer_attempt: SessionId::fresh().unwrap(),
+    };
+    let checkpoint = bundle
+        .read_snapshot(&ready.token.snapshot)
+        .unwrap()
+        .descriptor
+        .checkpoint_ref;
+    super::seal::test_reviewers::admit(&checkpoint, &fresh.reviewer_attempt);
+    bundle
+        .update_review_job(&ready.token, UpdateReviewJob::BindChecks(fresh.clone()))
+        .unwrap();
+    let rows = CoverageProfileId::OutputReviewV1.required_rows();
+    for (index, &row) in rows.iter().enumerate() {
+        c7_record(&mut bundle, &ready.token, &fresh, row);
+        let ready_to_seal = matches!(
+            bundle.review_job().unwrap().unwrap().phase,
+            ReviewPhase::ReadyToSeal { .. }
+        );
+        assert_eq!(
+            ready_to_seal,
+            index + 1 == rows.len(),
+            "C7_FIX1_READY_ONLY_FROM_THE_FRESH_ATTEMPT"
+        );
+    }
+    let verified = c7_verified(&bundle, &ready.token);
+    let sealed = bundle
+        .seal_review(
+            &ready.token,
+            &SessionId::fresh().unwrap(),
+            [8; 32],
+            &verified,
+        )
+        .unwrap();
+    let SealResult::Sealed(sealed) = sealed else {
+        panic!("C7_FIX1_RETRY_SEALS: {sealed:?}");
+    };
+    assert_eq!(sealed.receipt.key.reviewer_attempt, fresh.reviewer_attempt);
+}
+
+#[test]
+fn ja1_s5a_c7_fix1_disk_full_admitting_the_receipt_keeps_work_and_retries() {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "c7-fix1-enospc");
+    let (_core, mut bundle, _) = saved_bundle(&temp);
+    let prior = c7_checked(&mut bundle, &temp, false, None);
+    assert!(matches!(
+        c7_seal(&mut bundle, &prior).unwrap(),
+        SealResult::Sealed(_)
+    ));
+    let prior_receipts = c7_receipts(&bundle, &prior.token.snapshot);
+    let ready = c7_checked(&mut bundle, &temp, false, None);
+    let before = bundle.review_job().unwrap().unwrap().take();
+    let head = bundle.manual_head().unwrap().clone();
+    let generation = bundle.generation;
+    let verified = c7_verified(&bundle, &ready.token);
+    let command = SessionId::fresh().unwrap();
+    // The receipt's own object write runs out of space.
+    let exhausted = crate::io_observer::fail_native_once("object_file_sync", 28, || {
+        bundle.seal_review(&ready.token, &command, C7_DIGEST, &verified)
+    });
+    assert!(exhausted.is_err(), "C7_FIX1_ENOSPC_REPORTED: {exhausted:?}");
+    assert_eq!(bundle.generation, generation, "C7_FIX1_ROOT_UNCHANGED");
+    assert_eq!(
+        bundle.review_job().unwrap().unwrap().take(),
+        before,
+        "C7_FIX1_JOB_KEPT"
+    );
+    assert_eq!(bundle.manual_head().unwrap(), &head, "C7_FIX1_EDITS_KEPT");
+    assert!(c7_receipts(&bundle, &ready.token.snapshot).is_empty());
+    let kept = c7_receipts(&bundle, &prior.token.snapshot);
+    assert!(
+        kept.len() == 1 && c7_same(&kept[0], &prior_receipts[0]),
+        "C7_FIX1_PRIOR_RECEIPT_KEPT"
+    );
+    let SealResult::Sealed(sealed) = bundle
+        .seal_review(&ready.token, &command, C7_DIGEST, &verified)
+        .unwrap()
+    else {
+        panic!("C7_FIX1_RETRY_SEALS");
+    };
+    assert!(!sealed.replayed);
+}
+
+#[test]
+fn ja1_s5a_c7_fix1_reopen_checks_the_sealed_audit_and_expectations() {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "c7-fix1-receipt-audit");
+    let (_core, mut bundle, _) = saved_bundle(&temp);
+    let ready = c7_checked(&mut bundle, &temp, false, None);
+    let SealResult::Sealed(sealed) = c7_seal(&mut bundle, &ready).unwrap() else {
+        panic!("C7_FIX1_SEALED");
+    };
+    let receipt = sealed.receipt;
+    let descriptor = bundle
+        .read_snapshot(&receipt.key.snapshot)
+        .unwrap()
+        .descriptor;
+    let store = &bundle.store;
+    let evidence = store
+        .read_record::<ReviewEvidence>(descriptor.review_evidence_ref.as_ref().unwrap())
+        .unwrap();
+    let artifact = store
+        .read_record::<ReviewArtifact>(&receipt.key.artifact_ref)
+        .unwrap();
+    let request = store
+        .read_record::<ReviewRequest>(&receipt.key.request_ref)
+        .unwrap();
+    let expectations = store
+        .read_record::<StoredReviewExpectations>(&request.expectations_ref)
+        .unwrap();
+    let audit = store
+        .read_record::<crate::editorial::EditorialAudit>(receipt.key.audit_ref.as_ref().unwrap())
+        .unwrap();
+    let validate =
+        |audit: &crate::editorial::EditorialAudit,
+         expectations: &kinewright_core::output_review::ReviewExpectations| {
+            validate_version_receipt(
+                &descriptor,
+                &evidence,
+                &receipt,
+                &artifact,
+                &request,
+                expectations,
+                audit,
+                &mut Vec::new(),
+            )
+        };
+    validate(&audit, &expectations.0).unwrap();
+    let mut ruled = (*audit).clone();
+    ruled.review.rulebook_ref = Some(receipt.key.request_ref.clone());
+    assert!(
+        validate(&ruled, &expectations.0).is_err(),
+        "C7_FIX1_RECEIPT_AUDIT_RULEBOOK"
+    );
+    let mut blocking = (*audit).clone();
+    blocking.review.entries[0].disposition = crate::editorial::AuditDisposition::Blocking;
+    assert!(
+        validate(&blocking, &expectations.0).is_err(),
+        "C7_FIX1_RECEIPT_AUDIT_BLOCKING"
+    );
+    let mut other = expectations.0.clone();
+    other.identity.export_settings_sha256 = [9; 32];
+    assert!(
+        validate(&audit, &other).is_err(),
+        "C7_FIX1_RECEIPT_EXPECTATIONS_IDENTITY"
     );
 }

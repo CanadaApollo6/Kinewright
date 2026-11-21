@@ -25,6 +25,7 @@ use crate::{
     bundle::{BundleError, ProjectBundle},
     bundle_records::{ObjectRef, RecordKind, SessionId},
     editorial::{AuditDisposition, EditorialAudit},
+    orchestration_records::{AttemptState, Role, TaskId},
     storage_budget::{StorageLimits, StorageReservation},
     store::{BundleRecord, StorePin, record_sealed},
     studio_records::{AudioRange, SnapshotDescriptor, SnapshotKey, VersionId, bounded, kind},
@@ -204,6 +205,22 @@ fn finding(version: &VersionId, row: Option<RequiredReviewRow>, note: &str) -> R
     }
 }
 
+const NO_AUDIT: &str = "The version has no complete editorial audit.";
+const NOT_A_REVIEWER: &str = "The visual reviewer is not a Reviewer task attempt on this cut.";
+const OTHER_RULEBOOK: &str = "The editorial audit was made under another rulebook.";
+
+/// Why `audit` does not bind to the version and the job's frozen rulebook.
+fn audit_binding(
+    descriptor: &SnapshotDescriptor,
+    audit: &EditorialAudit,
+    rulebook: Option<&ObjectRef>,
+) -> Option<&'static str> {
+    if crate::editorial_store::validate_editorial_binding(descriptor, audit).is_err() {
+        return Some("The editorial audit is not bound to this version.");
+    }
+    (audit.rulebook_ref() != rulebook).then_some(OTHER_RULEBOOK)
+}
+
 /// 2. Every required row of the profile, from the bound attempt.
 fn row_findings(
     profile: CoverageProfileId,
@@ -281,23 +298,114 @@ impl ProjectBundle {
     }
 
     /// Whether the reviewed version carries a complete editorial audit bound
-    /// to it; `Err` gives the reason it does not.
+    /// to it and to the rulebook the job froze; `Err` gives the reason it
+    /// does not.
     ///
     /// # Errors
-    /// The version or its audit cannot be read.
+    /// The job, the version or its audit cannot be read.
     pub fn review_audit_complete(
         &self,
-        snapshot: &SnapshotKey,
+        token: &ReviewToken,
     ) -> Result<Result<(), &'static str>, BundleError> {
-        let descriptor = self.review_descriptor(snapshot)?;
+        let descriptor = self.review_descriptor(&token.snapshot)?;
+        let job = self.require_review_job(token)?;
+        let request = self.store.read_record::<ReviewRequest>(&job.request_ref)?;
         let Some(reference) = &descriptor.audit_ref else {
-            return Ok(Err("The version has no complete editorial audit."));
+            return Ok(Err(NO_AUDIT));
         };
         let audit = self.store.read_record::<EditorialAudit>(reference)?;
-        Ok(
-            crate::editorial_store::validate_editorial_binding(&descriptor, &audit)
-                .map_err(|_| "The editorial audit is not bound to this version."),
-        )
+        Ok(audit_binding(&descriptor, &audit, request.rulebook_ref.as_ref()).map_or(Ok(()), Err))
+    }
+
+    /// The Reviewer task attempt `attempt` on the cut `checkpoint`, with its
+    /// state; `None` when it is not one.
+    ///
+    /// # Errors
+    /// The run index or a run projection cannot be read.
+    pub fn reviewer_attempt_on_cut(
+        &self,
+        checkpoint: &ObjectRef,
+        attempt: &SessionId,
+    ) -> Result<Option<AttemptState>, BundleError> {
+        if let Some((task, state)) = self.reserved_task(attempt)? {
+            return Ok(self.reviewer_task(&task, checkpoint)?.then_some(state));
+        }
+        #[cfg(all(test, target_os = "linux"))]
+        if test_reviewers::contains(checkpoint, attempt) {
+            return Ok(Some(AttemptState::Executing));
+        }
+        Ok(None)
+    }
+
+    /// The Reviewer task on `checkpoint` that `attempt` is reserved for.
+    pub fn reviewer_task_on_cut(
+        &self,
+        checkpoint: &ObjectRef,
+        attempt: &SessionId,
+    ) -> Result<Option<TaskId>, BundleError> {
+        Ok(match self.reserved_task(attempt)? {
+            Some((task, _)) if self.reviewer_task(&task, checkpoint)? => Some(task),
+            _ => None,
+        })
+    }
+
+    /// The seal's check: a live reservation decides; once it is pruned, the
+    /// task recorded at binding must be a Reviewer task on the cut.
+    fn reviewer_on_cut(
+        &self,
+        checkpoint: &ObjectRef,
+        attempt: &SessionId,
+        recorded: Option<&TaskId>,
+    ) -> Result<bool, BundleError> {
+        if let Some((task, _)) = self.reserved_task(attempt)? {
+            return Ok(recorded.is_none_or(|recorded| recorded == &task)
+                && self.reviewer_task(&task, checkpoint)?);
+        }
+        if let Some(task) = recorded {
+            return self.reviewer_task(task, checkpoint);
+        }
+        #[cfg(all(test, target_os = "linux"))]
+        if test_reviewers::contains(checkpoint, attempt) {
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn reserved_task(
+        &self,
+        attempt: &SessionId,
+    ) -> Result<Option<(TaskId, AttemptState)>, BundleError> {
+        let runs: Vec<_> = self.run_index()?.orchestration.keys().cloned().collect();
+        for run in runs {
+            let Some(projection) = self.orchestration_projection(&run)? else {
+                continue;
+            };
+            if let Some(reservation) = projection
+                .attempts
+                .iter()
+                .find(|reservation| &reservation.identity.attempt.0 == attempt)
+            {
+                return Ok(Some((
+                    reservation.identity.task.clone(),
+                    reservation.state.clone(),
+                )));
+            }
+        }
+        Ok(None)
+    }
+
+    fn reviewer_task(&self, task: &TaskId, checkpoint: &ObjectRef) -> Result<bool, BundleError> {
+        let runs: Vec<_> = self.run_index()?.orchestration.keys().cloned().collect();
+        for run in runs {
+            let Some(projection) = self.orchestration_projection(&run)? else {
+                continue;
+            };
+            if let Some(record) = projection.tasks.iter().find(|record| &record.id == task) {
+                return Ok(record.brief.role == Role::Reviewer
+                    && &record.brief.scope.base.checkpoint == checkpoint);
+            }
+        }
+        Ok(false)
     }
 
     /// 1. The key: inputs, frozen annotations, bytes, configuration, attempt.
@@ -353,32 +461,40 @@ impl ProjectBundle {
     fn audit_findings(
         &self,
         descriptor: &SnapshotDescriptor,
+        request: &ReviewRequest,
         checks: &ReviewChecks,
         version: &VersionId,
         findings: &mut Vec<ReviewFinding>,
     ) -> Result<(), BundleError> {
         let audit_row = Some(RequiredReviewRow::EditorialAuditPresent);
+        let visual_row = Some(RequiredReviewRow::IndependentVisualReview);
+        // The visual row must come from a Reviewer task attempt on this cut,
+        // whether or not the editor filed a rationale.
+        let reviewer = match &checks.reviewer_attempt {
+            Some(attempt) => self.reviewer_on_cut(
+                &descriptor.checkpoint_ref,
+                attempt,
+                checks.reviewer_task.as_ref(),
+            )?,
+            None => false,
+        };
+        if !reviewer {
+            findings.push(finding(version, visual_row, NOT_A_REVIEWER));
+        }
         match &descriptor.audit_ref {
-            None => findings.push(finding(
-                version,
-                audit_row,
-                "The version has no complete editorial audit.",
-            )),
+            None => findings.push(finding(version, audit_row, NO_AUDIT)),
             Some(reference) => {
                 let audit = self.store.read_record::<EditorialAudit>(reference)?;
-                if crate::editorial_store::validate_editorial_binding(descriptor, &audit).is_err() {
-                    findings.push(finding(
-                        version,
-                        audit_row,
-                        "The editorial audit is not bound to this version.",
-                    ));
+                if let Some(note) = audit_binding(descriptor, &audit, request.rulebook_ref.as_ref())
+                {
+                    findings.push(finding(version, audit_row, note));
                 }
                 if audit.rationale.as_ref().is_some_and(|rationale| {
                     checks.reviewer_attempt.as_ref() == Some(&rationale.attempt.attempt.0)
                 }) {
                     findings.push(finding(
                         version,
-                        Some(RequiredReviewRow::IndependentVisualReview),
+                        visual_row,
                         "The visual reviewer is the editor who made this cut.",
                     ));
                 }
@@ -550,7 +666,7 @@ impl ProjectBundle {
             ));
         }
         let exceptions: Vec<DeliveryException> = delivery_eligibility(&expectations.0);
-        self.audit_findings(&descriptor, &checks, version, &mut findings)?;
+        self.audit_findings(&descriptor, &request, &checks, version, &mut findings)?;
         // 6. Cleanup: staging is reclaimed before the version is sealed.
         if job.stage.is_some() {
             findings.push(finding(
@@ -649,6 +765,7 @@ fn same_settings(left: &ExportSettings, right: &ExportSettings) -> bool {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_version_receipt(
     descriptor: &SnapshotDescriptor,
     evidence: &ReviewEvidence,
@@ -656,9 +773,24 @@ pub(crate) fn validate_version_receipt(
     artifact: &ReviewArtifact,
     request: &ReviewRequest,
     expectations: &kinewright_core::output_review::ReviewExpectations,
+    audit: &EditorialAudit,
     profiles: &mut Vec<CoverageProfileId>,
 ) -> Result<(), BundleError> {
     let key = &receipt.key;
+    // The sealed audit: this version's, under the frozen rulebook, with no
+    // blocking entry, and not filed by the visual reviewer as its editor.
+    if audit.snapshot() != &key.snapshot
+        || audit.rulebook_ref() != key.rulebook_ref.as_ref()
+        || audit
+            .entries()
+            .any(|entry| entry.disposition == AuditDisposition::Blocking)
+        || audit
+            .rationale
+            .as_ref()
+            .is_some_and(|rationale| rationale.attempt.attempt.0 == key.reviewer_attempt)
+    {
+        return Err(BundleError::Corrupt("review receipt audit binding".into()));
+    }
     let exceptions = delivery_eligibility(expectations);
     let outcome = if exceptions.is_empty() {
         SealedReviewOutcome::Delivered
@@ -678,6 +810,7 @@ pub(crate) fn validate_version_receipt(
         || artifact.generation != receipt.token.generation
         || request.snapshot != key.snapshot
         || request.identity != key.identity
+        || expectations.identity != request.identity
         || request.document_ref != key.document_ref
         || request.input_manifest_ref != key.input_manifest_ref
         || request.expectations_ref != key.expectations_ref
@@ -693,4 +826,35 @@ pub(crate) fn validate_version_receipt(
     }
     profiles.push(key.profile);
     Ok(())
+}
+
+/// Project unit tests stand in for the orchestration records that make an
+/// attempt a Reviewer of a cut; the host's tests use the real records.
+/// Gated like the review job tests that admit to it.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) mod test_reviewers {
+    use std::cell::RefCell;
+
+    use crate::bundle_records::{ObjectRef, SessionId};
+
+    thread_local! {
+        static REVIEWERS: RefCell<Vec<(ObjectRef, SessionId)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(crate) fn admit(checkpoint: &ObjectRef, attempt: &SessionId) {
+        REVIEWERS.with(|reviewers| {
+            reviewers
+                .borrow_mut()
+                .push((checkpoint.clone(), attempt.clone()));
+        });
+    }
+
+    pub(super) fn contains(checkpoint: &ObjectRef, attempt: &SessionId) -> bool {
+        REVIEWERS.with(|reviewers| {
+            reviewers
+                .borrow()
+                .iter()
+                .any(|(cut, reviewer)| cut == checkpoint && reviewer == attempt)
+        })
+    }
 }

@@ -242,7 +242,7 @@ pub(in crate::writer_host) fn drive_review(
         let audit = owner
             .owner()?
             .review_source_bundle(&token.project)?
-            .review_audit_complete(&token.snapshot)?;
+            .review_audit_complete(token)?;
         let update = match audit {
             Ok(()) => UpdateReviewJob::RecordCheck {
                 binding: binding.clone(),

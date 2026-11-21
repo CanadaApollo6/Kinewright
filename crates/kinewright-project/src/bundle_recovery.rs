@@ -1626,6 +1626,12 @@ pub(super) fn validate_studio_records(
                         crate::review_job::StoredReviewExpectations,
                         &request.expectations_ref
                     );
+                    let audit_ref = receipt
+                        .key
+                        .audit_ref
+                        .as_ref()
+                        .ok_or_else(|| BundleError::Corrupt("review receipt audit".into()))?;
+                    let audit = load!(crate::editorial::EditorialAudit, audit_ref);
                     crate::review_job::validate_version_receipt(
                         descriptor,
                         &index,
@@ -1633,6 +1639,7 @@ pub(super) fn validate_studio_records(
                         &artifact,
                         &request,
                         &expectations.0,
+                        &audit,
                         &mut profiles,
                     )?;
                 }
