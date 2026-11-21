@@ -813,6 +813,34 @@ impl FfmpegMediaEngine {
         })
     }
 
+    /// Run L14 with/without-overlay verification against a verified review artifact using this
+    /// engine's compositor context and decoder gauge.
+    ///
+    /// # Errors
+    /// Returns [`MediaError::Cancelled`] on cancellation or [`MediaError::Backend`] on invalid
+    /// verification configuration.
+    pub fn verify_review_overlays(
+        &self,
+        artifact_file: std::fs::File,
+        artifact_timing: &crate::ReviewOutputTiming,
+        expectations: &kinewright_core::output_review::ReviewExpectations,
+        inputs: &Arc<crate::owned_io::PlaybackInputs>,
+        config: &crate::OverlayVerificationConfig,
+        cancellation: &kinewright_core::ExportCancellation,
+    ) -> Result<crate::OverlayVerificationReport, MediaError> {
+        self.decoders.scope(|| {
+            crate::review_overlays::verify_review_overlays(
+                artifact_file,
+                artifact_timing,
+                expectations,
+                inputs,
+                self.gpu.clone(),
+                config,
+                cancellation,
+            )
+        })
+    }
+
     pub(crate) fn unscoped_events(&self) -> Receiver<MediaEvent> {
         self.events_rx.clone()
     }

@@ -62,10 +62,12 @@ pub use review_overlays::{
     OverlayVerificationConfig, OverlayVerificationReport, ReviewReadSeek, verify_review_overlays,
 };
 pub use review_stills::{
-    DecodedReviewStill, MAX_REVIEW_STILLS, MAX_STILL_LONG_EDGE, MAX_STILL_PNG_BYTES,
-    MAX_STILLS_PER_PAGE, PlannedReviewStill, ReviewStillKind, ReviewStillPlan,
-    ReviewStillPlanInput, ReviewStillReason, ReviewStillsConfig, bounded_still_dimensions,
-    decode_review_stills_page, plan_review_stills,
+    DecodedReviewStill, DecodedReviewStillsPage, DroppedReviewStill, MAX_DROPPED_SAMPLES_RECORDED,
+    MAX_REVIEW_STILLS, MAX_STILL_LONG_EDGE, MAX_STILL_PAGES_PER_ATTEMPT, MAX_STILL_PNG_BYTES,
+    MAX_STILLS_PER_PAGE, MAX_UNCOVERED_REGIONS_RECORDED, OmittedReferenceOverlay,
+    PlannedReviewStill, ReviewStillKind, ReviewStillPlan, ReviewStillPlanInput, ReviewStillReason,
+    ReviewStillsConfig, UncoveredStillRegion, bounded_still_dimensions, decode_review_stills_page,
+    plan_review_stills,
 };
 pub mod voice_note;
 mod worker;

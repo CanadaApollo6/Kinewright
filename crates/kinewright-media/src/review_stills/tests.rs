@@ -118,6 +118,47 @@ fn sample_expectations(
     }
 }
 
+fn export_simple_doc(doc: &Document, out: &std::path::Path) -> ReviewOutputTiming {
+    let settings = DeliveryProfile::SourceMaster.export_settings(
+        doc,
+        DeliveryEncodeDepth::Eight,
+        ExportCancellation::default(),
+    );
+    let noop = |_: u64| -> Result<LifetimeGuard, String> { Ok(Arc::new(())) };
+    let commit = |install: &mut dyn FnMut() -> Result<(), MediaError>| install();
+    let (progress, _) = crossbeam_channel::bounded(0);
+    let font_bytes = kinewright_core::title_font_bytes();
+    let font_digest = crate::sha256_bytes(font_bytes);
+    let fonts =
+        ManifestFonts::bind([("font:Inter", font_digest.as_str(), font_bytes.len() as u64)]);
+    let OwnedExport::Clean(_) = export_owned_document(
+        &Arc::new(
+            PlaybackInputs::admit(
+                Arc::new(doc.clone()),
+                BTreeMap::new(),
+                Arc::new(LutLibrary::default()),
+                Arc::new(()),
+                fonts,
+            )
+            .unwrap(),
+        ),
+        OwnedExportTarget {
+            destination: out,
+            staging_bytes: 16 << 20,
+            reserve_staging: &noop,
+            reserve_working: &noop,
+            commit: &commit,
+        },
+        &settings,
+        &progress,
+        fallback_gpu().context(),
+    )
+    .unwrap() else {
+        panic!("clean export");
+    };
+    inspect_review_output(File::open(out).unwrap(), &ExportCancellation::default()).unwrap()
+}
+
 #[test]
 fn s5_c6_plan_covers_opening_middle_end_cuts_overlays_and_regions() {
     let fps = Rational::new(24, 1).unwrap();
@@ -130,7 +171,9 @@ fn s5_c6_plan_covers_opening_middle_end_cuts_overlays_and_regions() {
         &ReviewStillPlanInput {
             repaired_regions: vec![t(20)..t(22)],
             commented_regions: vec![t(40)..t(41)],
+            uncovered_regions: Vec::new(),
         },
+        &ReviewStillsConfig::default(),
     )
     .unwrap();
 
@@ -149,8 +192,9 @@ fn s5_c6_plan_covers_opening_middle_end_cuts_overlays_and_regions() {
     assert!(has(12, ReviewStillReason::OverlayTransition));
     assert!(has(21, ReviewStillReason::RepairedRegion));
     assert!(has(40, ReviewStillReason::CommentedRegion));
+    assert_eq!(plan.dropped_count, 0);
+    assert!(plan.dropped_samples.is_empty());
 
-    // Overlay frames must advertise the active overlay so reference stills are attached.
     let s6 = plan.samples.iter().find(|s| s.frame_index == 6).unwrap();
     assert_eq!(s6.overlays, vec![ClipId(2)]);
     assert!(s6.expects_reference());
@@ -163,10 +207,18 @@ fn s5_c6_plan_caps_candidates_at_max_review_stills() {
     let cuts: Vec<i64> = (1..80).map(|i| i * 2).collect();
     let expectations = sample_expectations(200, &cuts, None);
     let timing = fake_timing(200);
-    let plan =
-        plan_review_stills(&expectations, &timing, &ReviewStillPlanInput::default()).unwrap();
+    let cfg = ReviewStillsConfig::default();
+    let plan = plan_review_stills(
+        &expectations,
+        &timing,
+        &ReviewStillPlanInput::default(),
+        &cfg,
+    )
+    .unwrap();
     assert!(plan.candidate_count > MAX_REVIEW_STILLS);
     assert_eq!(plan.samples.len(), MAX_REVIEW_STILLS);
+    assert_eq!(plan.dropped_count, plan.candidate_count - MAX_REVIEW_STILLS);
+    assert!(!plan.dropped_samples.is_empty());
     assert!(
         plan.samples
             .iter()
@@ -181,6 +233,45 @@ fn s5_c6_plan_caps_candidates_at_max_review_stills() {
         plan.samples
             .iter()
             .any(|s| s.reasons.contains(&ReviewStillReason::End))
+    );
+
+    // Opus M3 & m4: custom config cap is actually honored and dropped repaired/commented points are tracked.
+    let fps = Rational::new(24, 1).unwrap();
+    let t = |f: i64| ExactMicros::frames(TimeCode(f), fps).unwrap();
+    let repaired: Vec<_> = (1..15).map(|i| t(i * 10)..t(i * 10 + 1)).collect();
+    let tight_cfg = ReviewStillsConfig {
+        max_stills: 8,
+        ..ReviewStillsConfig::default()
+    };
+    let tight_plan = plan_review_stills(
+        &expectations,
+        &timing,
+        &ReviewStillPlanInput {
+            repaired_regions: repaired,
+            commented_regions: Vec::new(),
+            uncovered_regions: Vec::new(),
+        },
+        &tight_cfg,
+    )
+    .unwrap();
+    assert_eq!(tight_plan.samples.len(), 8);
+    assert!(
+        tight_plan.dropped_repaired_or_commented > 0,
+        "S5_C6_FIX1_DROPPED_REPAIRED_RECORDED"
+    );
+
+    // Invalid config refused.
+    assert!(
+        plan_review_stills(
+            &expectations,
+            &timing,
+            &ReviewStillPlanInput::default(),
+            &ReviewStillsConfig {
+                max_stills: 0,
+                ..ReviewStillsConfig::default()
+            }
+        )
+        .is_err()
     );
 }
 
@@ -250,46 +341,8 @@ fn s5_c6_decode_stills_page_emits_decoded_and_reference_stills_with_bound_pts() 
         ..Document::default()
     };
 
-    let settings = DeliveryProfile::SourceMaster.export_settings(
-        &doc,
-        DeliveryEncodeDepth::Eight,
-        ExportCancellation::default(),
-    );
-    let noop = |_: u64| -> Result<LifetimeGuard, String> { Ok(Arc::new(())) };
-    let commit = |install: &mut dyn FnMut() -> Result<(), MediaError>| install();
     let out = dir.path("stills.mp4");
-    let (progress, _) = crossbeam_channel::bounded(0);
-    let font_bytes = kinewright_core::title_font_bytes();
-    let font_digest = crate::sha256_bytes(font_bytes);
-    let fonts =
-        ManifestFonts::bind([("font:Inter", font_digest.as_str(), font_bytes.len() as u64)]);
-    let OwnedExport::Clean(_) = export_owned_document(
-        &Arc::new(
-            PlaybackInputs::admit(
-                Arc::new(doc.clone()),
-                BTreeMap::new(),
-                Arc::new(LutLibrary::default()),
-                Arc::new(()),
-                fonts,
-            )
-            .unwrap(),
-        ),
-        OwnedExportTarget {
-            destination: &out,
-            staging_bytes: 4 << 20,
-            reserve_staging: &noop,
-            reserve_working: &noop,
-            commit: &commit,
-        },
-        &settings,
-        &progress,
-        fallback_gpu().context(),
-    )
-    .unwrap() else {
-        panic!("clean export");
-    };
-    let timing =
-        inspect_review_output(File::open(&out).unwrap(), &ExportCancellation::default()).unwrap();
+    let timing = export_simple_doc(&doc, &out);
     let fps = doc.fps;
     let t = |f: i64| ExactMicros::frames(TimeCode(f), fps).unwrap();
     let mut expectations = sample_expectations(10, &[], None);
@@ -309,21 +362,28 @@ fn s5_c6_decode_stills_page_emits_decoded_and_reference_stills_with_bound_pts() 
         rest: Vec::new(),
     };
 
-    let plan =
-        plan_review_stills(&expectations, &timing, &ReviewStillPlanInput::default()).unwrap();
+    let cfg = ReviewStillsConfig::default();
+    let plan = plan_review_stills(
+        &expectations,
+        &timing,
+        &ReviewStillPlanInput::default(),
+        &cfg,
+    )
+    .unwrap();
     let page = &plan.samples[..plan.samples.len().min(MAX_STILLS_PER_PAGE)];
     let mut no_cards = |_: [u8; 32], _: u64| Err(MediaError::Backend("none".into()));
-    let stills = decode_review_stills_page(
+    let decoded_page = decode_review_stills_page(
         File::open(&out).unwrap(),
         &timing,
         &expectations,
         &doc,
         &mut no_cards,
         page,
-        MAX_STILL_LONG_EDGE,
+        &cfg,
         &ExportCancellation::default(),
     )
     .unwrap();
+    let stills = decoded_page.stills;
 
     assert!(
         stills
@@ -333,7 +393,7 @@ fn s5_c6_decode_stills_page_emits_decoded_and_reference_stills_with_bound_pts() 
     assert!(
         stills
             .iter()
-            .any(|s| s.kind == ReviewStillKind::OverlayReference)
+            .any(|s| s.kind == ReviewStillKind::OverlayReference && s.omitted_overlays.is_empty())
     );
     for still in &stills {
         assert_eq!(still.width, 320);
@@ -347,4 +407,115 @@ fn s5_c6_decode_stills_page_emits_decoded_and_reference_stills_with_bound_pts() 
         assert_eq!(still.pts, planned.expected_pts);
         assert_eq!(still.frame_index, planned.frame_index);
     }
+
+    // Opus m3: a reference still with an unsupported blend mode explicitly records omitted_overlays.
+    let mut multiply_doc = doc.clone();
+    multiply_doc.tracks[1].clips[0].blend_mode = BlendMode::Multiply;
+    let omitted_page = decode_review_stills_page(
+        File::open(&out).unwrap(),
+        &timing,
+        &expectations,
+        &multiply_doc,
+        &mut no_cards,
+        page,
+        &cfg,
+        &ExportCancellation::default(),
+    )
+    .unwrap();
+    let ref_still = omitted_page
+        .stills
+        .iter()
+        .find(|s| s.kind == ReviewStillKind::OverlayReference)
+        .expect("reference still emitted");
+    assert!(
+        ref_still
+            .omitted_overlays
+            .iter()
+            .any(|o| o.element == ClipId(2)),
+        "S5_C6_FIX1_OMITTED_REFERENCE_OVERLAY_REPORTED: {ref_still:?}"
+    );
+}
+
+/// Opus M5 & GLM 6 witness: decoding a late page seeks to the preceding keyframe instead of
+/// decoding from frame 0.
+#[test]
+fn s5_c6_fix1_stills_page_seeks_instead_of_decoding_from_frame_zero() {
+    let dir = TempDirectory::new("s5-c6-fix1-stills-seek");
+    let total_frames = 160_i64;
+    let doc = Document {
+        resolution: (320, 180),
+        fps: Rational::new(24, 1).unwrap(),
+        duration: TimeCode(total_frames),
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            name: None,
+            sync_lock: false,
+            clips: vec![Clip {
+                id: ClipId(1),
+                asset: AssetId(0),
+                timeline_start: TimeCode::ZERO,
+                source_range: TimeCode::ZERO..TimeCode(total_frames),
+                content: ClipContent::Solid(SolidColor {
+                    r: 30,
+                    g: 50,
+                    b: 80,
+                }),
+                effects: Vec::new(),
+                transition_in: None,
+                link: None,
+                audio_gain_tenth_db: 0,
+                audio_fade_in_frames: TimeCode::ZERO,
+                audio_fade_out_frames: TimeCode::ZERO,
+                audio_gain_curve: None,
+                speed_percent: 100,
+                enabled: true,
+                enabled_curve: None,
+                blend_mode: BlendMode::Normal,
+            }],
+        }],
+        ..Document::default()
+    };
+    let out = dir.path("long-seek.mp4");
+    let timing = export_simple_doc(&doc, &out);
+    let expectations = sample_expectations(total_frames, &[], None);
+    let cfg = ReviewStillsConfig::default();
+    let plan = plan_review_stills(
+        &expectations,
+        &timing,
+        &ReviewStillPlanInput::default(),
+        &cfg,
+    )
+    .unwrap();
+    let last_sample = plan.samples.last().unwrap().clone();
+    assert_eq!(last_sample.frame_index, 159);
+
+    let mut no_cards = |_: [u8; 32], _: u64| Err(MediaError::Backend("none".into()));
+    let page = decode_review_stills_page(
+        File::open(&out).unwrap(),
+        &timing,
+        &expectations,
+        &doc,
+        &mut no_cards,
+        &[last_sample.clone()],
+        &cfg,
+        &ExportCancellation::default(),
+    )
+    .unwrap();
+
+    assert_eq!(page.stills.len(), 1);
+    assert_eq!(page.stills[0].frame_index, 159);
+    assert_eq!(page.stills[0].pts, last_sample.expected_pts);
+    assert!(
+        page.seeks_performed >= 1,
+        "S5_C6_FIX1_STILLS_SEEK_PERFORMED: {page:?}"
+    );
+    // Export uses GOP = 48 frames (2s @ 24fps): seeking to frame 159 lands on keyframe 144 and
+    // decodes ~16 frames rather than all 160 frames from 0.
+    assert!(
+        page.frames_decoded < 64,
+        "S5_C6_FIX1_STILLS_SEEK_AVOIDS_FRAME_ZERO_SCAN: decoded={} seeks={}",
+        page.frames_decoded,
+        page.seeks_performed
+    );
 }

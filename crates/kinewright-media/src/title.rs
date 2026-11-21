@@ -2,24 +2,11 @@ use std::sync::Arc;
 
 use ab_glyph::{Font, FontArc, OutlinedGlyph, PxScale, PxScaleFont, ScaleFont, point};
 use kinewright_core::{
-    FrameTexture, MediaError, Title, TitlePixelBounds, title_color, title_font_bytes, title_layout,
+    FrameTexture, MediaError, Title, title_color, title_font_bytes, title_layout,
 };
 
 const SCRIM_COLOR: [u8; 4] = [0x05, 0x07, 0x0A, 184];
 const CAPTION_OUTLINE_COLOR: [u8; 4] = [0x05, 0x07, 0x0A, 224];
-
-pub(crate) struct RasterizedTitleOverlay {
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) rgba: Vec<u8>,
-    pub(crate) glyph_alpha: Vec<u8>,
-    pub(crate) fg_rgba: [u8; 4],
-    pub(crate) scrim_active: bool,
-    pub(crate) outline_active: bool,
-    pub(crate) text_bounds: TitlePixelBounds,
-    pub(crate) visual_bounds: TitlePixelBounds,
-    pub(crate) glyph_boxes: Vec<TitlePixelBounds>,
-}
 
 pub(crate) struct TitleRasterizer {
     font: FontArc,
@@ -33,41 +20,17 @@ impl TitleRasterizer {
     }
 
     /// Rasterize a declarative title to a transparent full-frame RGBA layer.
-    pub(crate) fn rasterize(
-        &self,
-        title: &Title,
-        resolution: (u32, u32),
-    ) -> Result<FrameTexture, MediaError> {
-        let output = self.rasterize_internal(title, resolution, false)?;
-        Ok(FrameTexture {
-            width: output.width,
-            height: output.height,
-            rgba: Arc::new(output.rgba),
-        })
-    }
-
-    /// Rasterize a declarative title together with its pure glyph coverage mask
-    /// and per-glyph pixel boxes, before any occluding layers.
-    pub(crate) fn rasterize_with_glyph_mask(
-        &self,
-        title: &Title,
-        resolution: (u32, u32),
-    ) -> Result<RasterizedTitleOverlay, MediaError> {
-        self.rasterize_internal(title, resolution, true)
-    }
-
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
         clippy::cast_sign_loss
     )]
-    fn rasterize_internal(
+    pub(crate) fn rasterize(
         &self,
         title: &Title,
         resolution: (u32, u32),
-        capture_mask: bool,
-    ) -> Result<RasterizedTitleOverlay, MediaError> {
+    ) -> Result<FrameTexture, MediaError> {
         let (width, height) = resolution;
         if width == 0 || height == 0 {
             return Err(MediaError::Backend(
@@ -92,16 +55,8 @@ impl TitleRasterizer {
             .unwrap_or(usize::MAX)
             .saturating_mul(usize::try_from(height).unwrap_or(usize::MAX));
         let mut rgba = vec![0_u8; pixel_count.saturating_mul(4)];
-        let mut glyph_alpha = if capture_mask {
-            vec![0_u8; pixel_count]
-        } else {
-            Vec::new()
-        };
-        let mut glyph_boxes = Vec::new();
-        let scrim_active = title.background_scrim && !title.text.is_empty();
-        let outline_active = title.caption_preset.is_some() && !title.background_scrim;
 
-        if scrim_active {
+        if title.background_scrim && !title.text.is_empty() {
             fill_rect(
                 &mut rgba,
                 resolution,
@@ -126,7 +81,7 @@ impl TitleRasterizer {
                 }
                 let glyph = id.with_scale_and_position(scale, point(cursor_x, baseline));
                 if let Some(outlined) = self.font.outline_glyph(glyph) {
-                    if outline_active {
+                    if title.caption_preset.is_some() && !title.background_scrim {
                         let radius =
                             i32::try_from((layout.font_pixels / 32).clamp(2, 4)).unwrap_or(2);
                         draw_glyph(
@@ -147,77 +102,18 @@ impl TitleRasterizer {
                         );
                     }
                     draw_glyph(&mut rgba, resolution, &outlined, color.rgba, &[(0, 0)]);
-                    if capture_mask
-                        && let Some(box_bounds) =
-                            draw_glyph_mask(&mut glyph_alpha, resolution, &outlined)
-                    {
-                        glyph_boxes.push(box_bounds);
-                    }
                 }
                 cursor_x += scaled.h_advance(id);
                 previous = Some(id);
             }
         }
 
-        Ok(RasterizedTitleOverlay {
+        Ok(FrameTexture {
             width,
             height,
-            rgba,
-            glyph_alpha,
-            fg_rgba: color.rgba,
-            scrim_active,
-            outline_active,
-            text_bounds: layout.text_bounds,
-            visual_bounds: layout.visual_bounds,
-            glyph_boxes,
+            rgba: Arc::new(rgba),
         })
     }
-}
-
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss
-)]
-fn draw_glyph_mask(
-    mask: &mut [u8],
-    resolution: (u32, u32),
-    glyph: &OutlinedGlyph,
-) -> Option<TitlePixelBounds> {
-    let bounds = glyph.px_bounds();
-    let mut rendered: Option<TitlePixelBounds> = None;
-    glyph.draw(|x, y, coverage| {
-        let alpha = (coverage * 255.0).round() as u8;
-        if alpha == 0 {
-            return;
-        }
-        let pixel_x = bounds.min.x.floor() as i32 + x as i32;
-        let pixel_y = bounds.min.y.floor() as i32 + y as i32;
-        if pixel_x >= 0
-            && pixel_y >= 0
-            && pixel_x < resolution.0 as i32
-            && pixel_y < resolution.1 as i32
-        {
-            let index = usize::try_from(pixel_y).unwrap() * usize::try_from(resolution.0).unwrap()
-                + usize::try_from(pixel_x).unwrap();
-            let existing = u32::from(mask[index]);
-            let incoming = u32::from(alpha);
-            let combined = incoming + (existing * (255 - incoming) + 127) / 255;
-            mask[index] = u8::try_from(combined).unwrap_or(u8::MAX);
-            let box_bounds = rendered.get_or_insert(TitlePixelBounds {
-                left: pixel_x,
-                top: pixel_y,
-                right: pixel_x + 1,
-                bottom: pixel_y + 1,
-            });
-            box_bounds.left = box_bounds.left.min(pixel_x);
-            box_bounds.top = box_bounds.top.min(pixel_y);
-            box_bounds.right = box_bounds.right.max(pixel_x + 1);
-            box_bounds.bottom = box_bounds.bottom.max(pixel_y + 1);
-        }
-    });
-    rendered
 }
 
 #[allow(

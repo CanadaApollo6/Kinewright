@@ -425,7 +425,7 @@ impl TaskMcp {
             let prepared =
                 host.prepare_review_stills_read(record, self.endpoint.authority(), &request)?;
             drop(host);
-            let rendered = prepared.render(&kinewright_core::ExportCancellation::default())?;
+            let rendered = prepared.render(&self.endpoint)?;
             let mut host = self.lock_owner(&owner)?;
             let (_, state, task) = host.resolve_task_mcp(&self.auth, &self.endpoint)?;
             let record = state

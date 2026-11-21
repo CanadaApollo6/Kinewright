@@ -1,8 +1,10 @@
-//! Deterministic review still sampling plan and bounded page decoding for the read-only Reviewer.
+//! Deterministic review still sampling plan and bounded seekable page decoding for the
+//! read-only Reviewer.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
+    sync::Arc,
 };
 
 use kinewright_core::{
@@ -32,8 +34,16 @@ pub const MAX_STILLS_PER_PAGE: usize = 4;
 pub const MAX_STILL_LONG_EDGE: u32 = 960;
 /// Maximum byte length of one encoded PNG served to the reviewer.
 pub const MAX_STILL_PNG_BYTES: usize = 512 * 1024;
+/// Maximum `read_review_stills` page calls allowed per reviewer attempt.
+pub const MAX_STILL_PAGES_PER_ATTEMPT: usize = 16;
+/// Cap on dropped sample point entries stored in [`ReviewStillPlan::dropped_samples`].
+pub const MAX_DROPPED_SAMPLES_RECORDED: usize = 128;
+/// Cap on uncovered region entries stored in [`ReviewStillPlan::uncovered_regions`].
+pub const MAX_UNCOVERED_REGIONS_RECORDED: usize = 64;
+/// Seek directly to the next sample on a page when the frame gap exceeds this threshold.
+const SEEK_GAP_THRESHOLD_FRAMES: u64 = 48;
 
-/// Fixed configuration governing reviewer still planning, paging, and PNG caps.
+/// Fixed, validated configuration governing reviewer still planning, paging, and PNG caps.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewStillsConfig {
@@ -41,6 +51,7 @@ pub struct ReviewStillsConfig {
     pub max_stills_per_page: usize,
     pub max_long_edge: u32,
     pub max_png_bytes: usize,
+    pub max_pages_per_attempt: usize,
 }
 
 impl Default for ReviewStillsConfig {
@@ -50,21 +61,64 @@ impl Default for ReviewStillsConfig {
             max_stills_per_page: MAX_STILLS_PER_PAGE,
             max_long_edge: MAX_STILL_LONG_EDGE,
             max_png_bytes: MAX_STILL_PNG_BYTES,
+            max_pages_per_attempt: MAX_STILL_PAGES_PER_ATTEMPT,
         }
     }
 }
 
 impl ReviewStillsConfig {
+    /// Validate that every still cap is strictly positive and within hard ceilings.
+    ///
+    /// # Errors
+    /// Returns [`MediaError::Backend`] when any limit is zero or exceeds its hard cap.
+    pub fn validate(&self) -> Result<(), MediaError> {
+        if self.max_stills == 0 || self.max_stills > MAX_REVIEW_STILLS {
+            return Err(MediaError::Backend(format!(
+                "invalid review stills config: max_stills={} must be in 1..={MAX_REVIEW_STILLS}",
+                self.max_stills
+            )));
+        }
+        if self.max_stills_per_page == 0 || self.max_stills_per_page > MAX_STILLS_PER_PAGE {
+            return Err(MediaError::Backend(format!(
+                "invalid review stills config: max_stills_per_page={} must be in 1..={MAX_STILLS_PER_PAGE}",
+                self.max_stills_per_page
+            )));
+        }
+        if self.max_long_edge < 64 || self.max_long_edge > MAX_STILL_LONG_EDGE {
+            return Err(MediaError::Backend(format!(
+                "invalid review stills config: max_long_edge={} must be in 64..={MAX_STILL_LONG_EDGE}",
+                self.max_long_edge
+            )));
+        }
+        if self.max_png_bytes < 4096 || self.max_png_bytes > MAX_STILL_PNG_BYTES {
+            return Err(MediaError::Backend(format!(
+                "invalid review stills config: max_png_bytes={} must be in 4096..={MAX_STILL_PNG_BYTES}",
+                self.max_png_bytes
+            )));
+        }
+        if self.max_pages_per_attempt == 0
+            || self.max_pages_per_attempt > MAX_STILL_PAGES_PER_ATTEMPT
+        {
+            return Err(MediaError::Backend(format!(
+                "invalid review stills config: max_pages_per_attempt={} must be in 1..={MAX_STILL_PAGES_PER_ATTEMPT}",
+                self.max_pages_per_attempt
+            )));
+        }
+        Ok(())
+    }
+
     /// Stable canonical SHA-256 digest of this reviewer-stills configuration, ready to be
     /// combined with other review-check digests into one `ReviewCheckBinding`.
     #[must_use]
     pub fn sha256(&self) -> [u8; 32] {
         let mut hasher = kinewright_hash::Sha256::new();
-        hasher.update(b"kinewright-review-stills-config-v1\0");
+        hasher.update(b"kinewright-review-stills-config-v2\0");
         hasher.update(&(u64::try_from(self.max_stills).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(&(u64::try_from(self.max_stills_per_page).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.update(&self.max_long_edge.to_le_bytes());
         hasher.update(&(u64::try_from(self.max_png_bytes).unwrap_or(u64::MAX)).to_le_bytes());
+        hasher
+            .update(&(u64::try_from(self.max_pages_per_attempt).unwrap_or(u64::MAX)).to_le_bytes());
         hasher.finalize()
     }
 }
@@ -88,12 +142,41 @@ pub enum ReviewStillKind {
     OverlayReference,
 }
 
+/// A commented or repaired region that could not be read or mapped onto the frozen candidate's
+/// output clock. Any uncovered region keeps the visual review row from passing (L12).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UncoveredStillRegion {
+    pub reason: ReviewStillReason,
+    pub detail: String,
+}
+
+/// A candidate sample point omitted by the plan's still cap (Opus m4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DroppedReviewStill {
+    pub frame_index: u64,
+    pub output_micros: u64,
+    pub reasons: Vec<ReviewStillReason>,
+}
+
+/// An overlay that could not be composited into an [`ReviewStillKind::OverlayReference`] still
+/// (Opus m3). Never dropped silently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OmittedReferenceOverlay {
+    pub element: ClipId,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReviewStillPlanInput {
     /// Output-clock intervals repaired in this candidate.
     pub repaired_regions: Vec<ReviewSpan>,
     /// Output-clock intervals or anchor times commented on in Studio feedback.
     pub commented_regions: Vec<ReviewSpan>,
+    /// Commented or repaired regions that could not be read or mapped onto this candidate's clock.
+    pub uncovered_regions: Vec<UncoveredStillRegion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +204,15 @@ pub struct ReviewStillPlan {
     pub total_frames: u64,
     pub candidate_count: usize,
     pub samples: Vec<PlannedReviewStill>,
+    /// Total candidate points dropped by `config.max_stills`.
+    pub dropped_count: usize,
+    /// Number of dropped candidates that carried `RepairedRegion` or `CommentedRegion`.
+    pub dropped_repaired_or_commented: usize,
+    /// Bounded list of candidate points dropped by `config.max_stills`.
+    pub dropped_samples: Vec<DroppedReviewStill>,
+    /// Bounded list of commented/repaired regions that could not be read or mapped onto this cut.
+    pub uncovered_regions: Vec<UncoveredStillRegion>,
+    pub uncovered_regions_total: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,20 +226,35 @@ pub struct DecodedReviewStill {
     pub width: u32,
     pub height: u32,
     pub rgba8: Vec<u8>,
+    /// Non-empty when an `OverlayReference` still could not render one or more planned overlays.
+    pub omitted_overlays: Vec<OmittedReferenceOverlay>,
+}
+
+/// Decoded stills plus bounded decode telemetry for one `decode_review_stills_page` call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedReviewStillsPage {
+    pub stills: Vec<DecodedReviewStill>,
+    pub frames_decoded: u64,
+    pub seeks_performed: u64,
 }
 
 /// Build the deterministic, bounded sample plan for independent visual review from frozen inputs.
 ///
 /// Always includes opening, middle, end, video cuts, overlay transitions, and repaired/commented
-/// regions, merged per frame and deterministically capped at [`MAX_REVIEW_STILLS`].
+/// regions, merged per frame and deterministically capped at `config.max_stills`. Any candidate
+/// dropped by the cap is recorded in `dropped_samples`; any unmappable/unreadable region is
+/// recorded in `uncovered_regions`.
 ///
 /// # Errors
-/// Returns a media error when the timing map or expectation duration cannot produce sample points.
+/// Returns a media error when `config` is invalid, the timing map lacks a positive frame step,
+/// or expectation duration cannot produce sample points.
 pub fn plan_review_stills(
     expectations: &ReviewExpectations,
     timing: &ReviewOutputTiming,
     extra: &ReviewStillPlanInput,
+    config: &ReviewStillsConfig,
 ) -> Result<ReviewStillPlan, MediaError> {
+    config.validate()?;
     let total_frames = u64::try_from(expectations.output_frames.0).unwrap_or(0);
     if total_frames == 0 || !expectations.output_fps.is_valid() {
         return Err(MediaError::Backend(
@@ -159,6 +266,11 @@ pub fn plan_review_stills(
             "artifact video frame count {} is shorter than expected {total_frames}",
             timing.video_frames
         )));
+    }
+    if !timing.video_pts_step.is_some_and(|step| step > 0) {
+        return Err(MediaError::Backend(
+            "review still plan requires a positive recorded video PTS step".into(),
+        ));
     }
 
     let mut by_frame: BTreeMap<u64, BTreeSet<ReviewStillReason>> = BTreeMap::new();
@@ -196,20 +308,63 @@ pub fn plan_review_stills(
             add(frame, reason);
         });
 
-    // 4. Repaired and commented regions.
+    // 4. Repaired and commented regions (out-of-range/invalid spans become uncovered, never dropped).
+    let mut uncovered_regions = extra.uncovered_regions.clone();
     for span in &extra.repaired_regions {
         if let Some(frame) = span_midpoint_frame(span, expectations.output_fps, total_frames) {
             add(frame, ReviewStillReason::RepairedRegion);
+        } else {
+            uncovered_regions.push(UncoveredStillRegion {
+                reason: ReviewStillReason::RepairedRegion,
+                detail: "repaired output span could not be mapped to an output frame".into(),
+            });
         }
     }
     for span in &extra.commented_regions {
         if let Some(frame) = span_midpoint_frame(span, expectations.output_fps, total_frames) {
             add(frame, ReviewStillReason::CommentedRegion);
+        } else {
+            uncovered_regions.push(UncoveredStillRegion {
+                reason: ReviewStillReason::CommentedRegion,
+                detail: "commented output span could not be mapped to an output frame".into(),
+            });
         }
     }
 
     let candidate_count = by_frame.len();
-    let selected_frames = cap_candidate_frames(&by_frame, MAX_REVIEW_STILLS);
+    let selected_frames = cap_candidate_frames(&by_frame, config.max_stills);
+    let selected_set: BTreeSet<u64> = selected_frames.iter().copied().collect();
+
+    let mut dropped_count = 0_usize;
+    let mut dropped_repaired_or_commented = 0_usize;
+    let mut dropped_samples = Vec::new();
+    for (&frame_index, reasons_set) in &by_frame {
+        if selected_set.contains(&frame_index) {
+            continue;
+        }
+        dropped_count = dropped_count.saturating_add(1);
+        let reasons: Vec<ReviewStillReason> = reasons_set.iter().copied().collect();
+        if reasons.iter().any(|r| {
+            matches!(
+                r,
+                ReviewStillReason::RepairedRegion | ReviewStillReason::CommentedRegion
+            )
+        }) {
+            dropped_repaired_or_commented = dropped_repaired_or_commented.saturating_add(1);
+        }
+        if dropped_samples.len() < MAX_DROPPED_SAMPLES_RECORDED {
+            let output_micros = ExactMicros::frames(
+                TimeCode(i64::try_from(frame_index).unwrap_or(i64::MAX)),
+                expectations.output_fps,
+            )
+            .map_or(0, ExactMicros::floor);
+            dropped_samples.push(DroppedReviewStill {
+                frame_index,
+                output_micros,
+                reasons,
+            });
+        }
+    }
 
     let mut samples = Vec::with_capacity(selected_frames.len());
     for (idx, frame_index) in selected_frames.into_iter().enumerate() {
@@ -246,10 +401,18 @@ pub fn plan_review_stills(
         });
     }
 
+    let uncovered_regions_total = uncovered_regions.len();
+    uncovered_regions.truncate(MAX_UNCOVERED_REGIONS_RECORDED);
+
     Ok(ReviewStillPlan {
         total_frames,
         candidate_count,
         samples,
+        dropped_count,
+        dropped_repaired_or_commented,
+        dropped_samples,
+        uncovered_regions,
+        uncovered_regions_total,
     })
 }
 
@@ -317,11 +480,14 @@ fn span_midpoint_frame(
                 return None;
             }
             let frame = u64::try_from(num / den).ok()?;
-            return Some(frame.min(total_frames - 1));
+            if frame >= total_frames {
+                return None;
+            }
+            return Some(frame);
         }
         let range = output_span_to_frames(span, output_fps, total_frames)?;
         if range.is_empty() {
-            return Some(range.start.min(total_frames - 1));
+            return None;
         }
         return Some(range.start + (range.end - range.start) / 2);
     }
@@ -378,7 +544,7 @@ fn cap_candidate_frames(
     chosen.into_iter().collect()
 }
 
-/// Compute bounded still output dimensions preserving aspect ratio within [`MAX_STILL_LONG_EDGE`].
+/// Compute bounded still output dimensions preserving aspect ratio within `max_long_edge`.
 #[must_use]
 pub fn bounded_still_dimensions(raster: (u32, u32), max_long_edge: u32) -> (u32, u32) {
     let (w, h) = raster;
@@ -400,12 +566,13 @@ pub fn bounded_still_dimensions(raster: (u32, u32), max_long_edge: u32) -> (u32,
 }
 
 /// Decode one bounded page of planned review stills (decoded artifact frames and, where overlays
-/// are expected visible, frozen overlay reference stills). Holds at most one decoded frame at a
-/// time while streaming to the target frames.
+/// are expected visible, frozen overlay reference stills). Seeks directly to the keyframe before
+/// each page's first sample (and across large gaps) rather than decoding from frame 0, holding at
+/// most one decoded frame at a time.
 ///
 /// # Errors
-/// Returns a media error when the artifact cannot be decoded, PTS disagrees with the recorded
-/// grid, a requested frame is missing, or cancellation fires.
+/// Returns a media error when `config` is invalid, the artifact cannot be decoded or sought, PTS
+/// disagrees with the recorded grid, a requested frame is missing, or cancellation fires.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn decode_review_stills_page(
     artifact_file: File,
@@ -417,52 +584,80 @@ pub fn decode_review_stills_page(
         u64,
     ) -> Result<Box<dyn ReviewReadSeek>, MediaError>,
     page_samples: &[PlannedReviewStill],
-    max_long_edge: u32,
+    config: &ReviewStillsConfig,
     cancellation: &ExportCancellation,
-) -> Result<Vec<DecodedReviewStill>, MediaError> {
+) -> Result<DecodedReviewStillsPage, MediaError> {
     if cancellation.is_cancelled() {
         return Err(MediaError::Cancelled);
     }
+    config.validate()?;
     if page_samples.is_empty() {
-        return Ok(Vec::new());
+        return Ok(DecodedReviewStillsPage {
+            stills: Vec::new(),
+            frames_decoded: 0,
+            seeks_performed: 0,
+        });
     }
-    if page_samples.len() > MAX_STILLS_PER_PAGE {
+    if page_samples.len() > config.max_stills_per_page {
         return Err(MediaError::Backend(format!(
-            "requested {} review stills exceeds page limit {MAX_STILLS_PER_PAGE}",
-            page_samples.len()
+            "requested {} review stills exceeds configured page limit {}",
+            page_samples.len(),
+            config.max_stills_per_page
         )));
     }
-    let target_size = bounded_still_dimensions(
-        expectations.raster,
-        max_long_edge.clamp(1, MAX_STILL_LONG_EDGE),
-    );
-    let max_frame = page_samples
-        .iter()
-        .map(|s| s.frame_index)
-        .max()
-        .unwrap_or(0);
-    let sample_by_frame: BTreeMap<u64, &PlannedReviewStill> = page_samples
-        .iter()
-        .map(|sample| (sample.frame_index, sample))
-        .collect();
+    let target_size = bounded_still_dimensions(expectations.raster, config.max_long_edge);
+
+    let mut ordered_samples: Vec<&PlannedReviewStill> = page_samples.iter().collect();
+    ordered_samples.sort_unstable_by_key(|s| s.frame_index);
 
     let mut decoder =
         ReviewArtifactVideoDecoder::open(artifact_file, timing, target_size, cancellation)?;
     let mut decoded_by_sample: BTreeMap<u32, DecodedReviewStill> = BTreeMap::new();
+    let mut cursor_frame: Option<u64> = None;
 
-    loop {
+    for sample in &ordered_samples {
         if cancellation.is_cancelled() {
             return Err(MediaError::Cancelled);
         }
-        let next_idx = decoder.next_frame_index();
-        if next_idx > max_frame {
-            break;
-        }
-        let want = sample_by_frame.get(&next_idx).copied();
-        let Some(frame) = decoder.next_frame(want.is_some(), cancellation)? else {
-            break;
+        let target = sample.frame_index;
+        let should_seek = match cursor_frame {
+            None => target > 0,
+            Some(current) => {
+                target < current || target.saturating_sub(current) > SEEK_GAP_THRESHOLD_FRAMES
+            }
         };
-        if let Some(sample) = want {
+        let mut retried_from_start = false;
+        if should_seek {
+            decoder.seek_to_frame(target, timing, cancellation)?;
+        }
+
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(MediaError::Cancelled);
+            }
+            let Some(frame) =
+                decoder.next_frame_by_pts(timing, |idx| idx == target, cancellation)?
+            else {
+                return Err(MediaError::Backend(format!(
+                    "review artifact ended before planned sample frame {target}"
+                )));
+            };
+            cursor_frame = Some(frame.frame_index.saturating_add(1));
+
+            if frame.frame_index > target {
+                if !retried_from_start {
+                    retried_from_start = true;
+                    decoder.seek_to_start(cancellation)?;
+                    continue;
+                }
+                return Err(MediaError::Backend(format!(
+                    "review artifact skipped planned sample frame {target} (decoded frame {})",
+                    frame.frame_index
+                )));
+            }
+            if frame.frame_index < target {
+                continue;
+            }
             if frame.dimensions != expectations.raster {
                 return Err(MediaError::Backend(format!(
                     "decoded review still raster {:?} disagrees with expected {:?}",
@@ -487,10 +682,16 @@ pub fn decode_review_stills_page(
                     width: target_size.0,
                     height: target_size.1,
                     rgba8: frame.rgba8.to_vec(),
+                    omitted_overlays: Vec::new(),
                 },
             );
+            break;
         }
     }
+
+    let frames_decoded = decoder.frames_decoded();
+    let seeks_performed = decoder.seeks_performed();
+    drop(decoder);
 
     let mut results = Vec::with_capacity(page_samples.len() * 2);
     let rasterizer = TitleRasterizer::new();
@@ -524,7 +725,11 @@ pub fn decode_review_stills_page(
         }
     }
 
-    Ok(results)
+    Ok(DecodedReviewStillsPage {
+        stills: results,
+        frames_decoded,
+        seeks_performed,
+    })
 }
 
 #[allow(
@@ -571,7 +776,11 @@ fn render_overlay_reference_still(
     )
     .map_err(|error| MediaError::Backend(error.to_string()))?;
 
-    // Composite expected overlays in document track order, before any occluding non-overlay layers.
+    let mut omitted_overlays = Vec::new();
+    let mut seen_clips = BTreeSet::new();
+
+    // Composite expected overlays in document track order, recording any overlay that cannot be
+    // drawn rather than silently omitting it (Opus m3).
     for track in frozen_document
         .tracks
         .iter()
@@ -581,6 +790,7 @@ fn render_overlay_reference_still(
             if !sample.overlays.contains(&clip.id) {
                 continue;
             }
+            seen_clips.insert(clip.id);
             if cancellation.is_cancelled() {
                 return Err(MediaError::Cancelled);
             }
@@ -592,9 +802,13 @@ fn render_overlay_reference_still(
                 .chain(expectations.overlays.cards.known())
                 .find(|entry| entry.element == clip.id)
             else {
+                omitted_overlays.push(OmittedReferenceOverlay {
+                    element: clip.id,
+                    reason: "overlay missing from frozen expectation record".into(),
+                });
                 continue;
             };
-            composite_expected_overlay(
+            if let Some(reason) = composite_expected_overlay(
                 &mut canvas,
                 (w, h),
                 clip,
@@ -605,7 +819,21 @@ fn render_overlay_reference_still(
                 pinned_image_loader,
                 card_cache,
                 cancellation,
-            )?;
+            )? {
+                omitted_overlays.push(OmittedReferenceOverlay {
+                    element: clip.id,
+                    reason,
+                });
+            }
+        }
+    }
+
+    for &planned_clip in &sample.overlays {
+        if !seen_clips.contains(&planned_clip) {
+            omitted_overlays.push(OmittedReferenceOverlay {
+                element: planned_clip,
+                reason: "planned overlay clip missing from frozen document".into(),
+            });
         }
     }
 
@@ -625,6 +853,7 @@ fn render_overlay_reference_still(
         width: target_size.0,
         height: target_size.1,
         rgba8,
+        omitted_overlays,
     })
 }
 
@@ -648,42 +877,52 @@ fn composite_expected_overlay(
     ) -> Result<Box<dyn ReviewReadSeek>, MediaError>,
     card_cache: &mut DecodedCardCache,
     cancellation: &ExportCancellation,
-) -> Result<(), MediaError> {
+) -> Result<Option<String>, MediaError> {
     if clip.blend_mode != BlendMode::Normal {
-        return Ok(());
+        return Ok(Some(format!(
+            "unsupported blend mode {:?} for standalone overlay reference",
+            clip.blend_mode
+        )));
     }
     let local = TimeCode(project_at.0.saturating_sub(clip.timeline_start.0));
     let mut transition = transition_render_params(clip, project_at);
-    let (src_w, src_h, src_rgba) = match overlay.pixels {
+    let (src_w, src_h, src_rgba): (u32, u32, Arc<Vec<u8>>) = match overlay.pixels {
         OverlayPixels::RenderedText => {
             let OverlayText::Expected(text) = &overlay.text else {
-                return Ok(());
+                return Ok(Some("overlay expected text is unresolved".into()));
             };
             let ClipContent::Title(clip_title) = &clip.content else {
-                return Ok(());
+                return Ok(Some(
+                    "rendered text overlay does not reference a Title clip".into(),
+                ));
             };
             let expected_title = Title {
                 text: text.clone(),
                 ..clip_title.clone()
             };
             transition.alpha *= title_alpha(frozen_document, clip, &expected_title, project_at)?;
-            let rendered = rasterizer.rasterize_with_glyph_mask(&expected_title, resolution)?;
+            let rendered = rasterizer.rasterize(&expected_title, resolution)?;
             (rendered.width, rendered.height, rendered.rgba)
         }
         OverlayPixels::PinnedImage {
             sha256,
             byte_length,
         } => {
-            if let Some(cached) = card_cache.get(&(sha256, byte_length)) {
-                cached.clone()
+            if let Some((cw, ch, cached)) = card_cache.get(&(sha256, byte_length)) {
+                (*cw, *ch, Arc::clone(cached))
             } else {
                 let reader = pinned_image_loader(sha256, byte_length)?;
                 let decoded = decode_still_image_rgba8(reader, cancellation)?;
-                card_cache.insert((sha256, byte_length), decoded.clone());
+                card_cache.insert(
+                    (sha256, byte_length),
+                    (decoded.0, decoded.1, Arc::clone(&decoded.2)),
+                );
                 decoded
             }
         }
-        OverlayPixels::Unknown(_) => return Ok(()),
+        OverlayPixels::Unknown(reason) => {
+            return Ok(Some(format!("overlay pixels unresolved: {reason:?}")));
+        }
     };
 
     let (w, h) = resolution;
@@ -693,7 +932,9 @@ fn composite_expected_overlay(
         pixel_coverage_edge(&mut params, w, h);
     }
     if params.opacity <= 0.0 || params.scale_x == 0.0 || params.scale_y == 0.0 {
-        return Ok(());
+        return Ok(Some(
+            "overlay has zero effective opacity or scale on sample frame".into(),
+        ));
     }
     let extent = [w as f32, h as f32];
     let transformed = is_transformed(&params) || (src_w, src_h) != resolution;
@@ -737,7 +978,7 @@ fn composite_expected_overlay(
             canvas[dst_off + 3] = 255;
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 #[allow(clippy::cast_precision_loss)]

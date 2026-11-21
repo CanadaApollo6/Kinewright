@@ -1,10 +1,9 @@
 //! Reviewer-only paged decoded stills, frozen overlay reference stills, and visual-judgment
 //! validation recording `RequiredReviewRow::IndependentVisualReview` through `record_review_check`.
 
-use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
-    fs::File,
-};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(all(test, target_os = "linux"))]
+use std::sync::Arc;
 
 use image::{
     ImageBuffer, ImageEncoder, Rgba,
@@ -12,31 +11,34 @@ use image::{
     imageops::{FilterType as ResizeFilter, resize},
 };
 use kinewright_core::{
-    Document, ExactMicros, ExportCancellation, MediaError, Rational, TimeCode,
-    output_review::{OverlayPixels, ReviewExpectations, ReviewRowResult},
+    Document, ExactMicros, ExportCancellation, MediaError, Rational, TimeCode, TrackKind,
+    output_review::{OverlayPixels, ReviewExpectations, ReviewLane, ReviewRowResult, ReviewSpan},
 };
 use kinewright_media::{
-    DecodedReviewStill, MAX_REVIEW_STILLS, MAX_STILL_LONG_EDGE, MAX_STILL_PNG_BYTES,
-    MAX_STILLS_PER_PAGE, PlannedReviewStill, ReviewOutputTiming, ReviewReadSeek, ReviewStillKind,
-    ReviewStillPlan, ReviewStillPlanInput, ReviewStillReason, decode_review_stills_page,
+    DecodedReviewStill, MAX_REVIEW_STILLS, OmittedReferenceOverlay, PlannedReviewStill,
+    ReviewOutputTiming, ReviewReadSeek, ReviewStillKind, ReviewStillPlan, ReviewStillPlanInput,
+    ReviewStillReason, ReviewStillsConfig, UncoveredStillRegion, decode_review_stills_page,
     plan_review_stills, sha256_bytes,
 };
 use kinewright_project::{
     bundle::{BundleError, ProjectBundle},
     bundle_records::{ObjectRef, SessionId},
-    editorial::{AuditDisposition, EditorialAudit},
+    editorial::{AuditDisposition, AuditKind, EditorialAudit},
     owned_inputs::{InputLeaseRequest, OwnedInputManifest, OwnedInputRef},
-    review_job::{ReviewJob, ReviewPhase, ReviewRequest, ReviewToken, StoredReviewExpectations},
+    review_job::{
+        PreparedReviewArtifact, ReviewJob, ReviewPhase, ReviewRequest, ReviewToken,
+        StoredReviewExpectations,
+    },
     storage_budget::StorageReservation,
     store::ProjectStore,
-    studio_records::FeedbackRevision,
+    studio_records::{FeedbackRevision, ResolveFeedback, TemporalStatus},
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::orchestration::{
     orchestration_records::{Role, TaskRecord},
-    tasks::RuntimeTaskAuthority,
+    tasks::{RuntimeTaskAuthority, TaskEndpoint},
 };
 
 use super::{
@@ -52,7 +54,7 @@ pub const MAX_VISUAL_NOTE_BYTES: usize = 512;
 pub const MAX_VISUAL_JUDGMENT_BYTES: usize = 64 * 1024;
 /// Maximum retired still IDs retained for cross-attempt refusal diagnostics.
 const MAX_RETIRED_STILL_IDS: usize = 256;
-/// Maximum PNG downscale retries when a still exceeds [`MAX_STILL_PNG_BYTES`].
+/// Maximum PNG downscale retries when a still exceeds the configured PNG byte cap.
 const MAX_PNG_DOWNSCALE_ROUNDS: usize = 4;
 
 fn refused(message: &str) -> HostError {
@@ -63,8 +65,8 @@ fn scope_refused(message: &str) -> HostError {
     HostRefusal::new("task_scope", message).into()
 }
 
-/// Cryptographic identity binding one served still to its PTS, PNG bytes, artifact, review token,
-/// and reviewer attempt.
+/// Cryptographic identity binding one served still to its plan digest, PTS, PNG bytes, artifact,
+/// review token, and reviewer attempt.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ReviewStillId(pub String);
@@ -81,6 +83,7 @@ impl ReviewStillId {
         artifact_ref: &ObjectRef,
         artifact_media_ref: &ObjectRef,
         reviewer_attempt: &SessionId,
+        plan_sha256: &str,
         sample_index: u32,
         frame_index: u64,
         pts: i64,
@@ -89,11 +92,12 @@ impl ReviewStillId {
         png_byte_length: u64,
     ) -> Result<Self, HostError> {
         let bytes = serde_json::to_vec(&(
-            "review_still_v1",
+            "review_still_v2",
             review_token,
             artifact_ref,
             artifact_media_ref,
             reviewer_attempt,
+            plan_sha256,
             sample_index,
             frame_index,
             pts,
@@ -120,10 +124,13 @@ pub struct ServedReviewStill {
     pub height: u32,
     pub png_sha256: String,
     pub png_byte_length: u64,
+    pub plan_sha256: String,
     pub artifact_ref: ObjectRef,
     pub artifact_media_ref: ObjectRef,
     pub review_token: ReviewToken,
     pub reviewer_attempt: SessionId,
+    #[serde(default)]
+    pub omitted_overlays: Vec<OmittedReferenceOverlay>,
 }
 
 /// Arguments accepted by the Reviewer-only `read_review_stills` MCP tool.
@@ -149,6 +156,9 @@ pub struct ReviewStillPage {
     pub page_start_sample: u32,
     pub page_end_sample: u32,
     pub next_cursor: Option<String>,
+    pub dropped_count: usize,
+    pub dropped_repaired_or_commented: usize,
+    pub uncovered_regions_total: usize,
     pub stills: Vec<ServedReviewStill>,
 }
 
@@ -236,6 +246,9 @@ pub struct ValidatedVisualReview {
     pub reviewed_count: usize,
     pub blocking_findings: usize,
     pub advisory_findings: usize,
+    pub dropped_repaired_or_commented: usize,
+    pub uncovered_regions_total: usize,
+    pub omitted_reference_overlays: usize,
     pub findings: Vec<VisualFinding>,
 }
 
@@ -248,26 +261,46 @@ struct ActiveStillBinding {
     plan_sha256: String,
 }
 
-/// Bounded per-host ledger of served reviewer stills for the active checking attempt and recently
+/// Bounded per-host ledger of served reviewer stills, per-attempt page budget, and recently
 /// retired attempts (so stale still IDs from prior attempts are explicitly rejected).
 #[derive(Default)]
 pub(super) struct ServedReviewStills {
+    config: ReviewStillsConfig,
     active: Option<ActiveStillBinding>,
+    pages_admitted: usize,
     served: BTreeMap<ReviewStillId, ServedReviewStill>,
     retired: VecDeque<(ReviewStillId, SessionId)>,
 }
 
 impl ServedReviewStills {
-    fn record_served(&mut self, binding: ActiveStillBinding, stills: &[ServedReviewStill]) {
-        if self.active.as_ref() != Some(&binding) {
+    fn rotate_binding_if_needed(&mut self, binding: &ActiveStillBinding) {
+        if self.active.as_ref() != Some(binding) {
             for (id, entry) in std::mem::take(&mut self.served) {
                 if self.retired.len() >= MAX_RETIRED_STILL_IDS {
                     self.retired.pop_front();
                 }
                 self.retired.push_back((id, entry.reviewer_attempt));
             }
-            self.active = Some(binding);
+            self.active = Some(binding.clone());
+            self.pages_admitted = 0;
         }
+    }
+
+    fn admit_page(
+        &mut self,
+        binding: &ActiveStillBinding,
+        max_pages_per_attempt: usize,
+    ) -> Result<(), HostError> {
+        self.rotate_binding_if_needed(binding);
+        if self.pages_admitted >= max_pages_per_attempt {
+            return Err(refused("Review stills per-attempt page budget exhausted."));
+        }
+        self.pages_admitted += 1;
+        Ok(())
+    }
+
+    fn record_served(&mut self, binding: ActiveStillBinding, stills: &[ServedReviewStill]) {
+        self.rotate_binding_if_needed(&binding);
         for still in stills {
             self.served.insert(still.still_id.clone(), still.clone());
         }
@@ -291,6 +324,7 @@ pub fn parse_visual_judgment(bytes: &[u8]) -> Result<VisualJudgment, VisualJudgm
 /// Frozen review context used to validate a reviewer's [`VisualJudgment`].
 pub struct VisualReviewContext<'a> {
     pub plan: &'a ReviewStillPlan,
+    pub plan_sha256: &'a str,
     pub token: &'a ReviewToken,
     pub artifact_ref: &'a ObjectRef,
     pub artifact_media_ref: &'a ObjectRef,
@@ -300,11 +334,15 @@ pub struct VisualReviewContext<'a> {
 }
 
 /// Validate a parsed [`VisualJudgment`] against the exact planned sample set, active review token,
-/// artifact identity, reviewer attempt, and served still ledger.
+/// artifact identity, plan digest, reviewer attempt, and served still ledger.
+///
+/// Under Ruling L12, any confirmed blocking finding records [`ReviewRowResult::Failed`]; when no
+/// blocking finding is present, any dropped repaired/commented point, unmappable/unreadable region,
+/// or omitted overlay reference downgrades [`ReviewRowResult::Pass`] to [`ReviewRowResult::Unknown`].
 ///
 /// # Errors
 /// Refuses missing planned sample points, unknown still IDs, still IDs from another reviewer
-/// attempt, artifact/token/PTS mismatches, contradictory verdicts, or exceeded bounds.
+/// attempt, artifact/token/plan/PTS mismatches, contradictory verdicts, or exceeded bounds.
 pub fn validate_visual_judgment(
     judgment: &VisualJudgment,
     context: &VisualReviewContext<'_>,
@@ -313,6 +351,7 @@ pub fn validate_visual_judgment(
 
     let mut seen_ids = BTreeSet::new();
     let mut covered: BTreeSet<(u32, ReviewStillKind)> = BTreeSet::new();
+    let mut omitted_reference_overlays = 0_usize;
 
     for id in &judgment.reviewed_still_ids {
         if !seen_ids.insert(id.clone()) {
@@ -321,6 +360,10 @@ pub fn validate_visual_judgment(
             ));
         }
         let still = lookup_and_verify_still(id, context)?;
+        if still.kind == ReviewStillKind::OverlayReference {
+            omitted_reference_overlays =
+                omitted_reference_overlays.saturating_add(still.omitted_overlays.len());
+        }
         covered.insert((still.sample_index, still.kind));
     }
 
@@ -376,6 +419,11 @@ pub fn validate_visual_judgment(
 
     let row_result = if blocking_findings > 0 {
         ReviewRowResult::Failed
+    } else if context.plan.dropped_repaired_or_commented > 0
+        || context.plan.uncovered_regions_total > 0
+        || omitted_reference_overlays > 0
+    {
+        ReviewRowResult::Unknown
     } else {
         ReviewRowResult::Pass
     };
@@ -386,6 +434,9 @@ pub fn validate_visual_judgment(
         reviewed_count: judgment.reviewed_still_ids.len(),
         blocking_findings,
         advisory_findings,
+        dropped_repaired_or_commented: context.plan.dropped_repaired_or_commented,
+        uncovered_regions_total: context.plan.uncovered_regions_total,
+        omitted_reference_overlays,
         findings: judgment.findings.clone(),
     })
 }
@@ -443,9 +494,10 @@ fn lookup_and_verify_still<'a>(
     if &still.review_token != context.token
         || &still.artifact_ref != context.artifact_ref
         || &still.artifact_media_ref != context.artifact_media_ref
+        || still.plan_sha256 != context.plan_sha256
     {
         return Err(VisualJudgmentError::ArtifactOrTokenMismatch(format!(
-            "still {} is bound to a different review token or artifact",
+            "still {} is bound to a different review token, artifact, or still plan",
             id.as_str()
         )));
     }
@@ -473,7 +525,7 @@ fn lookup_and_verify_still<'a>(
 
 /// Collect lease requests for every `OverlayPixels::PinnedImage` referenced by frozen expectations.
 /// Runs under the host lock without reading or hashing any media bytes.
-pub(super) fn collect_pinned_image_leases(
+fn collect_pinned_image_leases(
     store: &ProjectStore,
     manifest_ref: &ObjectRef,
     manifest: &OwnedInputManifest,
@@ -523,54 +575,449 @@ fn hex_digest(bytes: &[u8; 32]) -> String {
     out
 }
 
-/// Extract commented and repaired output regions solely from frozen snapshot and editorial records.
+fn output_duration_micros(expectations: &ReviewExpectations) -> Option<ExactMicros> {
+    ExactMicros::frames(expectations.output_frames, expectations.output_fps).ok()
+}
+
+fn project_frame_to_output_micros(
+    frame: i64,
+    fps: Rational,
+    expectations: &ReviewExpectations,
+    document: &Document,
+) -> Option<ExactMicros> {
+    if frame < 0
+        || frame >= document.duration.0
+        || !fps.is_valid()
+        || fps != expectations.project_fps
+    {
+        return None;
+    }
+    let at = ExactMicros::frames(TimeCode(frame), fps).ok()?;
+    let limit = output_duration_micros(expectations)?;
+    (at <= limit).then_some(at)
+}
+
+fn map_parent_output_span_to_candidate(
+    parent_doc: &Document,
+    parent_manifest: &OwnedInputManifest,
+    candidate_doc: &Document,
+    candidate_manifest: &OwnedInputManifest,
+    expectations: &ReviewExpectations,
+    start_us: u64,
+    end_us: u64,
+) -> Vec<ReviewSpan> {
+    let mut mapped = Vec::new();
+    for lane in [ReviewLane::Video, ReviewLane::Audio] {
+        let target_kind = match lane {
+            ReviewLane::Video => TrackKind::Video,
+            ReviewLane::Audio => TrackKind::Audio,
+        };
+        for track in &parent_doc.tracks {
+            if track.kind != target_kind {
+                continue;
+            }
+            for clip in &track.clips {
+                if !clip.enabled {
+                    continue;
+                }
+                let Some(parent_asset) = parent_doc.asset(clip.asset) else {
+                    continue;
+                };
+                if parent_asset.source_fingerprint.content_sha256.is_none()
+                    || parent_asset.source_fingerprint.byte_len.is_none()
+                {
+                    continue;
+                }
+                let Some(parent_entry) = parent_manifest
+                    .entries
+                    .iter()
+                    .find(|entry| entry.matches_media_asset(parent_asset))
+                else {
+                    continue;
+                };
+                let Ok(duration) = parent_doc.clip_duration(clip) else {
+                    continue;
+                };
+                let Some(clip_end_tc) = clip.timeline_start.checked_add(duration) else {
+                    continue;
+                };
+                let (Ok(clip_start_exact), Ok(clip_end_exact)) = (
+                    ExactMicros::frames(clip.timeline_start, parent_doc.fps),
+                    ExactMicros::frames(clip_end_tc, parent_doc.fps),
+                ) else {
+                    continue;
+                };
+                let clip_start_u = clip_start_exact.floor();
+                let clip_end_u = clip_end_exact.floor();
+                let ov_start = start_us.max(clip_start_u);
+                let ov_end = end_us.min(clip_end_u);
+                if ov_start >= ov_end {
+                    continue;
+                }
+                let Ok(src_in_exact) =
+                    ExactMicros::frames(clip.source_range.start, parent_asset.fps)
+                else {
+                    continue;
+                };
+                let src_in_u = src_in_exact.floor();
+                let speed = u128::from(clip.speed_percent.max(1));
+                let rel_start = u128::from(ov_start.saturating_sub(clip_start_u));
+                let rel_end = u128::from(ov_end.saturating_sub(clip_start_u));
+                let src_start_u = u64::try_from(u128::from(src_in_u) + (rel_start * speed) / 100)
+                    .unwrap_or(u64::MAX);
+                let src_end_u = u64::try_from(u128::from(src_in_u) + (rel_end * speed) / 100)
+                    .unwrap_or(u64::MAX);
+                if src_start_u >= src_end_u {
+                    continue;
+                }
+
+                for seg in &expectations.segments {
+                    if seg.id.lane != lane {
+                        continue;
+                    }
+                    let Some(cand_asset) = candidate_doc.asset(seg.asset) else {
+                        continue;
+                    };
+                    if cand_asset.source_fingerprint != parent_asset.source_fingerprint {
+                        continue;
+                    }
+                    if !candidate_manifest.entries.iter().any(|entry| {
+                        entry.object == parent_entry.object && entry.matches_media_asset(cand_asset)
+                    }) {
+                        continue;
+                    }
+                    let seg_src_start = seg.source.start.floor();
+                    let seg_src_end = seg.source.end.floor();
+                    let seg_ov_start = src_start_u.max(seg_src_start);
+                    let seg_ov_end = src_end_u.min(seg_src_end);
+                    if seg_ov_start >= seg_ov_end || seg_src_end <= seg_src_start {
+                        continue;
+                    }
+                    let seg_src_len = u128::from(seg_src_end - seg_src_start);
+                    let seg_out_start = seg.output.start.floor();
+                    let seg_out_end = seg.output.end.floor();
+                    let seg_out_len = u128::from(seg_out_end.saturating_sub(seg_out_start));
+                    let mapped_start = u64::try_from(
+                        u128::from(seg_out_start)
+                            + (u128::from(seg_ov_start - seg_src_start) * seg_out_len)
+                                / seg_src_len,
+                    )
+                    .unwrap_or(seg_out_start);
+                    let mapped_end = u64::try_from(
+                        u128::from(seg_out_start)
+                            + (u128::from(seg_ov_end - seg_src_start) * seg_out_len) / seg_src_len,
+                    )
+                    .unwrap_or(seg_out_end)
+                    .max(mapped_start);
+                    mapped
+                        .push(ExactMicros::integer(mapped_start)..ExactMicros::integer(mapped_end));
+                }
+            }
+        }
+        if !mapped.is_empty() {
+            break;
+        }
+    }
+    mapped
+}
+
+/// Extract commented and repaired output regions solely from frozen snapshot and editorial records,
+/// mapping cross-version feedback through `ProjectBundle::resolve_feedback` and parent blocking
+/// audits through source-time lineage. Unreadable or unmappable regions are recorded explicitly in
+/// `uncovered_regions` (never silently dropped).
 pub(super) fn extract_plan_input_from_snapshot(
     bundle: &ProjectBundle,
     token: &ReviewToken,
+    expectations: &ReviewExpectations,
+    document: &Document,
 ) -> Result<ReviewStillPlanInput, BundleError> {
     let snapshot = bundle.read_snapshot(&token.snapshot)?;
     let mut input = ReviewStillPlanInput::default();
+    let out_dur = output_duration_micros(expectations).unwrap_or(ExactMicros::ZERO);
 
+    // 1. Feedback revisions attached to this snapshot.
     for rev_ref in &snapshot.descriptor.revision_refs {
-        if let Ok(revision) = bundle.store().read_record::<FeedbackRevision>(rev_ref)
-            && let Ok(fps) = Rational::new(
+        let revision = match bundle.store().read_record::<FeedbackRevision>(rev_ref) {
+            Ok(revision) => revision,
+            Err(error) => {
+                input.uncovered_regions.push(UncoveredStillRegion {
+                    reason: ReviewStillReason::CommentedRegion,
+                    detail: format!(
+                        "failed to read feedback revision {}: {error}",
+                        rev_ref.sha256
+                    ),
+                });
+                continue;
+            }
+        };
+        if revision.anchor.snapshot == token.snapshot {
+            let mapped = Rational::new(
                 revision.anchor.fps.numerator,
                 revision.anchor.fps.denominator,
             )
-            && fps.is_valid()
-            && revision.anchor.frame >= 0
-            && let Ok(at) = ExactMicros::frames(TimeCode(revision.anchor.frame), fps)
-        {
-            input.commented_regions.push(at..at);
+            .ok()
+            .and_then(|fps| {
+                project_frame_to_output_micros(revision.anchor.frame, fps, expectations, document)
+            });
+            if let Some(at) = mapped {
+                input.commented_regions.push(at..at);
+            } else {
+                input.uncovered_regions.push(UncoveredStillRegion {
+                    reason: ReviewStillReason::CommentedRegion,
+                    detail: format!(
+                        "feedback revision {} frame {} cannot be mapped onto snapshot clock",
+                        rev_ref.sha256, revision.anchor.frame
+                    ),
+                });
+            }
+        } else {
+            match bundle.resolve_feedback(
+                &ResolveFeedback {
+                    comment_revision_ref: rev_ref.clone(),
+                    candidate_checkpoint_ref: snapshot.descriptor.checkpoint_ref.clone(),
+                    beat_map_ref: None,
+                },
+                None,
+            ) {
+                Err(error) => {
+                    input.uncovered_regions.push(UncoveredStillRegion {
+                        reason: ReviewStillReason::CommentedRegion,
+                        detail: format!(
+                            "failed to resolve cross-version feedback {}: {error}",
+                            rev_ref.sha256
+                        ),
+                    });
+                }
+                Ok(mapped) => match mapped.resolution.temporal {
+                    TemporalStatus::Exact | TemporalStatus::Mapped => {
+                        let mut added = 0_usize;
+                        for cand in &mapped.candidates {
+                            if let Some(at) = project_frame_to_output_micros(
+                                cand.frame,
+                                expectations.project_fps,
+                                expectations,
+                                document,
+                            ) {
+                                input.commented_regions.push(at..at);
+                                added += 1;
+                            }
+                        }
+                        if added == 0 {
+                            input.uncovered_regions.push(UncoveredStillRegion {
+                                reason: ReviewStillReason::CommentedRegion,
+                                detail: format!(
+                                    "feedback revision {} resolved outside candidate output clock",
+                                    rev_ref.sha256
+                                ),
+                            });
+                        }
+                    }
+                    TemporalStatus::Removed => {}
+                    TemporalStatus::Ambiguous => {
+                        for cand in mapped.candidates.iter().take(8) {
+                            if let Some(at) = project_frame_to_output_micros(
+                                cand.frame,
+                                expectations.project_fps,
+                                expectations,
+                                document,
+                            ) {
+                                input.commented_regions.push(at..at);
+                            }
+                        }
+                        input.uncovered_regions.push(UncoveredStillRegion {
+                            reason: ReviewStillReason::CommentedRegion,
+                            detail: format!(
+                                "feedback revision {} mapped ambiguously across {} candidate frames",
+                                rev_ref.sha256,
+                                mapped.candidates.len()
+                            ),
+                        });
+                    }
+                    TemporalStatus::Unresolved => {
+                        input.uncovered_regions.push(UncoveredStillRegion {
+                            reason: ReviewStillReason::CommentedRegion,
+                            detail: format!(
+                                "feedback revision {} could not be temporally mapped onto candidate cut",
+                                rev_ref.sha256
+                            ),
+                        });
+                    }
+                },
+            }
         }
     }
 
-    if let Some(parent_version) = &snapshot.descriptor.parent_version
-        && let Ok(versions) = bundle.version_index()
-        && let Some(parent_desc) = versions.snapshots.get(parent_version)
-        && let Some(audit_ref) = &parent_desc.audit_ref
-        && let Ok(audit) = bundle.store().read_record::<EditorialAudit>(audit_ref)
-    {
-        for entry in audit.entries() {
-            if entry.disposition == AuditDisposition::Blocking {
-                let start = ExactMicros::integer(entry.observation.output.start_micros);
-                let end = ExactMicros::integer(entry.observation.output.end_micros);
-                if start <= end {
-                    input.repaired_regions.push(start..end);
+    // 2. Current snapshot's resolved audit entries (already in this candidate's output clock).
+    let mut resolved_keys: Vec<(String, AuditKind)> = Vec::new();
+    if let Some(audit_ref) = &snapshot.descriptor.audit_ref {
+        match bundle.store().read_record::<EditorialAudit>(audit_ref) {
+            Err(error) => {
+                input.uncovered_regions.push(UncoveredStillRegion {
+                    reason: ReviewStillReason::RepairedRegion,
+                    detail: format!("failed to read current audit {}: {error}", audit_ref.sha256),
+                });
+            }
+            Ok(audit) => {
+                for entry in audit.entries() {
+                    if entry.disposition == AuditDisposition::Resolved {
+                        resolved_keys.push((
+                            entry.observation.line_or_beat.clone(),
+                            entry.observation.kind,
+                        ));
+                        let start = ExactMicros::integer(entry.observation.output.start_micros);
+                        let end = ExactMicros::integer(entry.observation.output.end_micros);
+                        if start <= end && start <= out_dur {
+                            input.repaired_regions.push(start..end.min(out_dur));
+                        } else {
+                            input.uncovered_regions.push(UncoveredStillRegion {
+                                reason: ReviewStillReason::RepairedRegion,
+                                detail: format!(
+                                    "resolved audit entry '{}' ({}..{} us) lies outside output duration",
+                                    entry.observation.line_or_beat,
+                                    entry.observation.output.start_micros,
+                                    entry.observation.output.end_micros,
+                                ),
+                            });
+                        }
+                    }
                 }
             }
         }
     }
 
-    if let Some(audit_ref) = &snapshot.descriptor.audit_ref
-        && let Ok(audit) = bundle.store().read_record::<EditorialAudit>(audit_ref)
-    {
-        for entry in audit.entries() {
-            if entry.disposition == AuditDisposition::Resolved {
-                let start = ExactMicros::integer(entry.observation.output.start_micros);
-                let end = ExactMicros::integer(entry.observation.output.end_micros);
-                if start <= end {
-                    input.repaired_regions.push(start..end);
+    // 3. Parent snapshot's blocking audit entries not already superseded by current Resolved entries.
+    if let Some(parent_version) = &snapshot.descriptor.parent_version {
+        let versions = match bundle.version_index() {
+            Ok(versions) => Some(versions),
+            Err(error) => {
+                input.uncovered_regions.push(UncoveredStillRegion {
+                    reason: ReviewStillReason::RepairedRegion,
+                    detail: format!(
+                        "failed to read version index for parent {}: {error}",
+                        parent_version.as_str()
+                    ),
+                });
+                None
+            }
+        };
+        if let Some(versions) = versions {
+            let Some(parent_desc) = versions.snapshots.get(parent_version) else {
+                input.uncovered_regions.push(UncoveredStillRegion {
+                    reason: ReviewStillReason::RepairedRegion,
+                    detail: format!(
+                        "parent version {} missing from version index",
+                        parent_version.as_str()
+                    ),
+                });
+                return Ok(input);
+            };
+            if let Some(parent_audit_ref) = &parent_desc.audit_ref {
+                match bundle
+                    .store()
+                    .read_record::<EditorialAudit>(parent_audit_ref)
+                {
+                    Err(error) => {
+                        input.uncovered_regions.push(UncoveredStillRegion {
+                            reason: ReviewStillReason::RepairedRegion,
+                            detail: format!(
+                                "failed to read parent audit {}: {error}",
+                                parent_audit_ref.sha256
+                            ),
+                        });
+                    }
+                    Ok(parent_audit) => {
+                        let pending_blocking: Vec<_> = parent_audit
+                            .entries()
+                            .filter(|entry| {
+                                entry.disposition == AuditDisposition::Blocking
+                                    && !resolved_keys.contains(&(
+                                        entry.observation.line_or_beat.clone(),
+                                        entry.observation.kind,
+                                    ))
+                            })
+                            .collect();
+                        if !pending_blocking.is_empty() {
+                            let same_cut = parent_desc.document_ref
+                                == snapshot.descriptor.document_ref
+                                && parent_desc.input_manifest_ref
+                                    == snapshot.descriptor.input_manifest_ref;
+                            if same_cut {
+                                for entry in pending_blocking {
+                                    let start =
+                                        ExactMicros::integer(entry.observation.output.start_micros);
+                                    let end =
+                                        ExactMicros::integer(entry.observation.output.end_micros);
+                                    if start <= end && start <= out_dur {
+                                        input.repaired_regions.push(start..end.min(out_dur));
+                                    } else {
+                                        input.uncovered_regions.push(UncoveredStillRegion {
+                                            reason: ReviewStillReason::RepairedRegion,
+                                            detail: format!(
+                                                "parent blocking entry '{}' ({}..{} us) lies outside output duration",
+                                                entry.observation.line_or_beat,
+                                                entry.observation.output.start_micros,
+                                                entry.observation.output.end_micros,
+                                            ),
+                                        });
+                                    }
+                                }
+                            } else {
+                                let parent_records = (
+                                    bundle
+                                        .store()
+                                        .read_record::<Document>(&parent_desc.document_ref),
+                                    bundle
+                                        .store()
+                                        .read_input_manifest(&parent_desc.input_manifest_ref),
+                                    bundle.store().read_input_manifest(
+                                        &snapshot.descriptor.input_manifest_ref,
+                                    ),
+                                );
+                                match parent_records {
+                                    (
+                                        Ok(parent_doc),
+                                        Ok(parent_manifest),
+                                        Ok(candidate_manifest),
+                                    ) => {
+                                        for entry in pending_blocking {
+                                            let mapped = map_parent_output_span_to_candidate(
+                                                &parent_doc,
+                                                &parent_manifest,
+                                                document,
+                                                &candidate_manifest,
+                                                expectations,
+                                                entry.observation.output.start_micros,
+                                                entry.observation.output.end_micros,
+                                            );
+                                            if mapped.is_empty() {
+                                                input.uncovered_regions.push(UncoveredStillRegion {
+                                                    reason: ReviewStillReason::RepairedRegion,
+                                                    detail: format!(
+                                                        "parent blocking entry '{}' ({}..{} us) could not be mapped onto candidate output clock",
+                                                        entry.observation.line_or_beat,
+                                                        entry.observation.output.start_micros,
+                                                        entry.observation.output.end_micros,
+                                                    ),
+                                                });
+                                            } else {
+                                                input.repaired_regions.extend(mapped);
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        input.uncovered_regions.push(UncoveredStillRegion {
+                                            reason: ReviewStillReason::RepairedRegion,
+                                            detail: format!(
+                                                "parent version {} records unreadable for {} blocking audit entries",
+                                                parent_version.as_str(),
+                                                pending_blocking.len(),
+                                            ),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -629,6 +1076,7 @@ fn parse_cursor(
 }
 
 /// Prepared off-lock state for one `read_review_stills` page decode.
+/// Holds only pinned object descriptors; zero media bytes are hashed under the host lock.
 pub(super) struct PreparedReviewStillsRead {
     binding: ActiveStillBinding,
     binding_tag: String,
@@ -636,12 +1084,19 @@ pub(super) struct PreparedReviewStillsRead {
     page_start_sample: u32,
     page_end_sample: u32,
     next_offset: Option<usize>,
+    dropped_count: usize,
+    dropped_repaired_or_commented: usize,
+    uncovered_regions_total: usize,
     page_samples: Vec<PlannedReviewStill>,
     artifact_timing: ReviewOutputTiming,
-    artifact_file: File,
+    artifact: PreparedReviewArtifact,
     expectations: StorageReservation<StoredReviewExpectations>,
     document: StorageReservation<Document>,
     pinned_images: BTreeMap<([u8; 32], u64), InputLeaseRequest>,
+    config: ReviewStillsConfig,
+    cancellation: ExportCancellation,
+    #[cfg(all(test, target_os = "linux"))]
+    render_hook: Option<Arc<dyn Fn(&ExportCancellation) + Send + Sync>>,
 }
 
 /// Rendered off-lock PNGs and metadata awaiting re-verified host recording.
@@ -652,11 +1107,37 @@ pub(super) struct RenderedReviewStillsPage {
 }
 
 impl PreparedReviewStillsRead {
-    /// Decode the requested page of stills and encode bounded PNGs completely off the host lock.
+    /// Verify artifact bytes, decode the requested page of stills (with seeking), and encode
+    /// bounded PNGs completely off the host lock while honouring Stop and task cancellation.
     pub(super) fn render(
         mut self,
-        cancellation: &ExportCancellation,
+        endpoint: &TaskEndpoint,
     ) -> Result<RenderedReviewStillsPage, HostError> {
+        #[cfg(all(test, target_os = "linux"))]
+        if let Some(hook) = &self.render_hook {
+            hook(&self.cancellation);
+        }
+        let check_live = |cancel: &ExportCancellation| -> Result<(), HostError> {
+            if cancel.is_cancelled() || !endpoint.media_read_live() {
+                cancel.cancel();
+                return Err(refused("Output review stills read was cancelled."));
+            }
+            Ok(())
+        };
+        check_live(&self.cancellation)?;
+
+        let artifact_file = self
+            .artifact
+            .open_verified_cancellable(&self.cancellation)
+            .map_err(|error| {
+                if self.cancellation.is_cancelled() || !endpoint.media_read_live() {
+                    refused("Output review stills read was cancelled.")
+                } else {
+                    refused(&error.to_string())
+                }
+            })?;
+        check_live(&self.cancellation)?;
+
         let mut loader =
             |sha256: [u8; 32], byte_length: u64| -> Result<Box<dyn ReviewReadSeek>, MediaError> {
                 let lease_request = self
@@ -673,21 +1154,23 @@ impl PreparedReviewStillsRead {
                 Ok(Box::new(lease))
             };
         let decoded = decode_review_stills_page(
-            self.artifact_file,
+            artifact_file,
             &self.artifact_timing,
             &self.expectations.0,
             &self.document,
             &mut loader,
             &self.page_samples,
-            MAX_STILL_LONG_EDGE,
-            cancellation,
+            &self.config,
+            &self.cancellation,
         )
         .map_err(|error| refused(&error.to_string()))?;
 
-        let mut stills = Vec::with_capacity(decoded.len());
-        let mut images = Vec::with_capacity(decoded.len());
-        for entry in decoded {
-            let (still, image) = encode_served_still(&self.binding, &entry)?;
+        let mut stills = Vec::with_capacity(decoded.stills.len());
+        let mut images = Vec::with_capacity(decoded.stills.len());
+        for entry in decoded.stills {
+            check_live(&self.cancellation)?;
+            let (still, image) =
+                encode_served_still(&self.binding, &entry, self.config.max_png_bytes)?;
             stills.push(still);
             images.push(image);
         }
@@ -705,6 +1188,9 @@ impl PreparedReviewStillsRead {
             page_start_sample: self.page_start_sample,
             page_end_sample: self.page_end_sample,
             next_cursor,
+            dropped_count: self.dropped_count,
+            dropped_repaired_or_commented: self.dropped_repaired_or_commented,
+            uncovered_regions_total: self.uncovered_regions_total,
             stills,
         };
         Ok(RenderedReviewStillsPage {
@@ -718,8 +1204,10 @@ impl PreparedReviewStillsRead {
 fn encode_served_still(
     binding: &ActiveStillBinding,
     still: &DecodedReviewStill,
+    max_png_bytes: usize,
 ) -> Result<(ServedReviewStill, TaskImageBlock), HostError> {
-    let (width, height, png) = encode_bounded_png(&still.rgba8, still.width, still.height)?;
+    let (width, height, png) =
+        encode_bounded_png(&still.rgba8, still.width, still.height, max_png_bytes)?;
     let png_sha256 = sha256_bytes(&png);
     let png_byte_length = u64::try_from(png.len()).unwrap_or(u64::MAX);
     let still_id = ReviewStillId::derive(
@@ -727,6 +1215,7 @@ fn encode_served_still(
         &binding.artifact_ref,
         &binding.artifact_media_ref,
         &binding.reviewer_attempt,
+        &binding.plan_sha256,
         still.sample_index,
         still.frame_index,
         still.pts,
@@ -746,10 +1235,12 @@ fn encode_served_still(
         height,
         png_sha256,
         png_byte_length,
+        plan_sha256: binding.plan_sha256.clone(),
         artifact_ref: binding.artifact_ref.clone(),
         artifact_media_ref: binding.artifact_media_ref.clone(),
         review_token: binding.review_token.clone(),
         reviewer_attempt: binding.reviewer_attempt.clone(),
+        omitted_overlays: still.omitted_overlays.clone(),
     };
     Ok((
         served,
@@ -764,6 +1255,7 @@ fn encode_bounded_png(
     rgba8: &[u8],
     width: u32,
     height: u32,
+    max_png_bytes: usize,
 ) -> Result<(u32, u32, Vec<u8>), HostError> {
     let mut current_w = width;
     let mut current_h = height;
@@ -780,7 +1272,7 @@ fn encode_bounded_png(
                 image::ExtendedColorType::Rgba8,
             )
             .map_err(|error| refused(&format!("PNG encoding failed: {error}")))?;
-        if png.len() <= MAX_STILL_PNG_BYTES {
+        if png.len() <= max_png_bytes {
             return Ok((current_w, current_h, png));
         }
         if round == MAX_PNG_DOWNSCALE_ROUNDS {
@@ -806,9 +1298,33 @@ fn encode_bounded_png(
 }
 
 impl HostCommandOwner {
-    /// Prepare a Reviewer-only `read_review_stills` page under the host lock.
+    /// Configure the validated reviewer-stills limits enforced by `read_review_stills`.
+    ///
+    /// # Errors
+    /// Refuses invalid or out-of-range configuration limits.
+    pub fn set_review_stills_config(
+        &mut self,
+        config: ReviewStillsConfig,
+    ) -> Result<(), HostError> {
+        config
+            .validate()
+            .map_err(|error| refused(&error.to_string()))?;
+        self.review_stills.config = config;
+        Ok(())
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn set_review_stills_render_hook(
+        &mut self,
+        hook: Option<Arc<dyn Fn(&ExportCancellation) + Send + Sync>>,
+    ) {
+        self.review_runtime.stills_render_hook = hook;
+    }
+
+    /// Prepare a Reviewer-only `read_review_stills` page under the host lock without hashing any
+    /// media bytes. Enforces per-attempt page budgets before releasing the lock.
     pub(super) fn prepare_review_stills_read(
-        &self,
+        &mut self,
         task: &TaskRecord,
         authority: &RuntimeTaskAuthority,
         request: &ReviewStillPageRequest,
@@ -819,74 +1335,143 @@ impl HostCommandOwner {
             ));
         }
         let reviewer_attempt = authority.attempt.0.clone();
-        let (job, bundle) = self.require_active_reviewer_job(&reviewer_attempt)?;
-        let snapshot = bundle.read_snapshot(&job.token.snapshot)?;
-        if snapshot.descriptor.checkpoint_ref != task.brief.scope.base.checkpoint {
-            return Err(scope_refused(
-                "Active review snapshot is outside the Reviewer task cut.",
-            ));
-        }
-        let artifact_ref = job
-            .artifact_ref
-            .clone()
-            .ok_or_else(|| refused("The output review artifact has not been published."))?;
-        let review_request = bundle
-            .store()
-            .read_record::<ReviewRequest>(&job.request_ref)?;
-        let document = bundle
-            .store()
-            .read_record::<Document>(&review_request.document_ref)?;
-        let expectations = bundle
-            .store()
-            .read_record::<StoredReviewExpectations>(&review_request.expectations_ref)?;
-        let manifest = bundle
-            .store()
-            .read_input_manifest(&review_request.input_manifest_ref)?;
-        let (artifact, artifact_file) = bundle.open_review_artifact(&job.token)?;
-        let plan_input = extract_plan_input_from_snapshot(bundle, &job.token)?;
-        let plan = plan_review_stills(&expectations.0, &artifact.output, &plan_input)
+        let config = self.review_stills.config.clone();
+        config
+            .validate()
             .map_err(|error| refused(&error.to_string()))?;
-        let plan_sha256 = plan_digest(&plan)?;
 
-        let binding = ActiveStillBinding {
-            review_token: job.token.clone(),
-            artifact_ref,
-            artifact_media_ref: artifact.media_ref.clone(),
-            reviewer_attempt,
-            plan_sha256,
+        let (
+            job_token,
+            binding,
+            binding_tag,
+            total_samples,
+            start,
+            end,
+            next_offset,
+            dropped_count,
+            dropped_repaired_or_commented,
+            uncovered_regions_total,
+            page_samples,
+            artifact_timing,
+            artifact,
+            expectations,
+            document,
+            pinned_images,
+        ) = {
+            let (job, bundle) = self.require_active_reviewer_job(&reviewer_attempt)?;
+            let snapshot = bundle.read_snapshot(&job.token.snapshot)?;
+            if snapshot.descriptor.checkpoint_ref != task.brief.scope.base.checkpoint {
+                return Err(scope_refused(
+                    "Active review snapshot is outside the Reviewer task cut.",
+                ));
+            }
+            let artifact_ref = job
+                .artifact_ref
+                .clone()
+                .ok_or_else(|| refused("The output review artifact has not been published."))?;
+            let review_request = bundle
+                .store()
+                .read_record::<ReviewRequest>(&job.request_ref)?;
+            let document = bundle
+                .store()
+                .read_record::<Document>(&review_request.document_ref)?;
+            let expectations = bundle
+                .store()
+                .read_record::<StoredReviewExpectations>(&review_request.expectations_ref)?;
+            let manifest = bundle
+                .store()
+                .read_input_manifest(&review_request.input_manifest_ref)?;
+            let artifact = bundle.prepare_review_artifact(&job.token)?;
+            let plan_input =
+                extract_plan_input_from_snapshot(bundle, &job.token, &expectations.0, &document)?;
+            let plan = plan_review_stills(
+                &expectations.0,
+                &artifact.artifact.output,
+                &plan_input,
+                &config,
+            )
+            .map_err(|error| refused(&error.to_string()))?;
+            let plan_sha256 = plan_digest(&plan)?;
+
+            let binding = ActiveStillBinding {
+                review_token: job.token.clone(),
+                artifact_ref,
+                artifact_media_ref: artifact.artifact.media_ref.clone(),
+                reviewer_attempt,
+                plan_sha256,
+            };
+            let binding_tag = cursor_binding_tag(&binding)?;
+            let start = match request.cursor.as_deref() {
+                Some(cursor) => parse_cursor(cursor, &binding_tag, plan.samples.len())?,
+                None => 0,
+            };
+            let page_size = request
+                .page_size
+                .map_or(config.max_stills_per_page, usize::from)
+                .clamp(1, config.max_stills_per_page);
+            let end = start.saturating_add(page_size).min(plan.samples.len());
+            let next_offset = (end < plan.samples.len()).then_some(end);
+            let page_samples = plan.samples[start..end].to_vec();
+            let pinned_images = collect_pinned_image_leases(
+                bundle.store(),
+                &review_request.input_manifest_ref,
+                &manifest,
+                &expectations.0,
+            )?;
+            let artifact_timing = artifact.artifact.output.clone();
+            (
+                job.token.clone(),
+                binding,
+                binding_tag,
+                u32::try_from(plan.samples.len()).unwrap_or(u32::MAX),
+                start,
+                end,
+                next_offset,
+                plan.dropped_count,
+                plan.dropped_repaired_or_commented,
+                plan.uncovered_regions_total,
+                page_samples,
+                artifact_timing,
+                artifact,
+                expectations,
+                document,
+                pinned_images,
+            )
         };
-        let binding_tag = cursor_binding_tag(&binding)?;
-        let start = match request.cursor.as_deref() {
-            Some(cursor) => parse_cursor(cursor, &binding_tag, plan.samples.len())?,
-            None => 0,
+
+        self.review_stills
+            .admit_page(&binding, config.max_pages_per_attempt)?;
+
+        #[cfg(target_os = "linux")]
+        let cancellation = self
+            .review_runtime
+            .register_review_cancellation(&job_token, None);
+        #[cfg(not(target_os = "linux"))]
+        let cancellation = {
+            let _ = &job_token;
+            ExportCancellation::default()
         };
-        let page_size = request
-            .page_size
-            .map_or(MAX_STILLS_PER_PAGE, usize::from)
-            .clamp(1, MAX_STILLS_PER_PAGE);
-        let end = start.saturating_add(page_size).min(plan.samples.len());
-        let next_offset = (end < plan.samples.len()).then_some(end);
-        let page_samples = plan.samples[start..end].to_vec();
-        let pinned_images = collect_pinned_image_leases(
-            bundle.store(),
-            &review_request.input_manifest_ref,
-            &manifest,
-            &expectations.0,
-        )?;
 
         Ok(PreparedReviewStillsRead {
             binding,
             binding_tag,
-            total_samples: u32::try_from(plan.samples.len()).unwrap_or(u32::MAX),
+            total_samples,
             page_start_sample: u32::try_from(start).unwrap_or(u32::MAX),
             page_end_sample: u32::try_from(end).unwrap_or(u32::MAX),
             next_offset,
+            dropped_count,
+            dropped_repaired_or_commented,
+            uncovered_regions_total,
             page_samples,
-            artifact_timing: artifact.output.clone(),
-            artifact_file,
+            artifact_timing,
+            artifact,
             expectations,
             document,
             pinned_images,
+            config,
+            cancellation,
+            #[cfg(all(test, target_os = "linux"))]
+            render_hook: self.review_runtime.stills_render_hook.clone(),
         })
     }
 
@@ -962,18 +1547,21 @@ impl HostCommandOwner {
         Ok((job, bundle))
     }
 
-    /// Validate a reviewer's visual judgment against the frozen plan and served still ledger, then
-    /// record `RequiredReviewRow::IndependentVisualReview` exclusively through `record_review_check`.
+    /// Validate a reviewer's visual judgment against the bound configuration, frozen plan, and
+    /// served still ledger, then record `RequiredReviewRow::IndependentVisualReview` exclusively
+    /// through `record_review_check`.
     ///
     /// # Errors
-    /// Refuses with a descriptive error (without recording any check row) when the judgment omits
-    /// any planned sample point, cites a still ID from another attempt, fails binding checks, or
-    /// the Stop/checking fence rejects recording.
+    /// Refuses with a descriptive error (without recording any check row) when the configuration
+    /// fails validation or disagrees with `binding.configuration_sha256`, the judgment omits any
+    /// planned sample point, cites a still ID from another attempt or plan, fails binding checks,
+    /// or the Stop/checking fence rejects recording.
     #[cfg(target_os = "linux")]
     pub fn record_visual_review_judgment(
         &mut self,
         token: &ReviewToken,
         binding: kinewright_project::review_job::ReviewCheckBinding,
+        config: &super::review_overlays::C6CheckConfiguration,
         judgment: &VisualJudgment,
     ) -> Result<
         (
@@ -985,8 +1573,14 @@ impl HostCommandOwner {
         use kinewright_core::output_review::RequiredReviewRow;
         use kinewright_project::review_job::UpdateReviewJob;
 
+        config.validate()?;
+        if binding.configuration_sha256 != config.configuration_sha256() {
+            return Err(refused(
+                "Visual review configuration does not match the bound configuration digest.",
+            ));
+        }
         self.review_can_record(token)?;
-        let (plan, artifact_ref, artifact_media_ref) = {
+        let (plan, plan_sha256, artifact_ref, artifact_media_ref) = {
             let bundle = self.owner()?.review_source_bundle(&token.project)?;
             let job = bundle
                 .review_job()?
@@ -1009,21 +1603,32 @@ impl HostCommandOwner {
             let review_request = bundle
                 .store()
                 .read_record::<ReviewRequest>(&job.request_ref)?;
+            let document = bundle
+                .store()
+                .read_record::<Document>(&review_request.document_ref)?;
             let expectations = bundle
                 .store()
                 .read_record::<StoredReviewExpectations>(&review_request.expectations_ref)?;
             let artifact = bundle
                 .store()
                 .read_record::<kinewright_project::review_job::ReviewArtifact>(&artifact_ref)?;
-            let plan_input = extract_plan_input_from_snapshot(bundle, token)?;
-            let plan = plan_review_stills(&expectations.0, &artifact.output, &plan_input)
-                .map_err(|error| refused(&error.to_string()))?;
-            (plan, artifact_ref, artifact.media_ref.clone())
+            let plan_input =
+                extract_plan_input_from_snapshot(bundle, token, &expectations.0, &document)?;
+            let plan = plan_review_stills(
+                &expectations.0,
+                &artifact.output,
+                &plan_input,
+                &config.stills,
+            )
+            .map_err(|error| refused(&error.to_string()))?;
+            let plan_sha256 = plan_digest(&plan)?;
+            (plan, plan_sha256, artifact_ref, artifact.media_ref.clone())
         };
 
         let retired = self.review_stills.retired.make_contiguous();
         let context = VisualReviewContext {
             plan: &plan,
+            plan_sha256: &plan_sha256,
             token,
             artifact_ref: &artifact_ref,
             artifact_media_ref: &artifact_media_ref,
@@ -1047,7 +1652,11 @@ impl HostCommandOwner {
 
     /// Expose the frozen still plan for an active review job (read-only).
     #[cfg(target_os = "linux")]
-    pub fn review_still_plan(&self, token: &ReviewToken) -> Result<ReviewStillPlan, HostError> {
+    pub fn review_still_plan(
+        &self,
+        token: &ReviewToken,
+        config: &ReviewStillsConfig,
+    ) -> Result<ReviewStillPlan, HostError> {
         let bundle = self.owner()?.review_source_bundle(&token.project)?;
         let job = bundle
             .review_job()?
@@ -1060,14 +1669,18 @@ impl HostCommandOwner {
         let review_request = bundle
             .store()
             .read_record::<ReviewRequest>(&job.request_ref)?;
+        let document = bundle
+            .store()
+            .read_record::<Document>(&review_request.document_ref)?;
         let expectations = bundle
             .store()
             .read_record::<StoredReviewExpectations>(&review_request.expectations_ref)?;
         let artifact = bundle
             .store()
             .read_record::<kinewright_project::review_job::ReviewArtifact>(artifact_ref)?;
-        let plan_input = extract_plan_input_from_snapshot(bundle, token)?;
-        plan_review_stills(&expectations.0, &artifact.output, &plan_input)
+        let plan_input =
+            extract_plan_input_from_snapshot(bundle, token, &expectations.0, &document)?;
+        plan_review_stills(&expectations.0, &artifact.output, &plan_input, config)
             .map_err(|error| refused(&error.to_string()))
     }
 }
