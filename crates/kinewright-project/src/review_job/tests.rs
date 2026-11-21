@@ -220,7 +220,7 @@ fn s5_review_collection_keeps_version_evidence_and_releases_retired_execution() 
     let frozen = bundle.read_snapshot(&started.key).unwrap().descriptor;
     let token = queue(&mut bundle, &frozen, (128, 128));
     bundle
-        .set_review_annotations(&frozen.key, empty_annotations(&frozen))
+        .set_review_annotations_unfenced_for_test(&frozen.key, empty_annotations(&frozen))
         .unwrap();
     let active = bundle.review_job().unwrap().unwrap();
     let request = bundle
@@ -845,5 +845,706 @@ fn ja1_s5a_check_inputs_bind_every_record_to_the_token() {
     assert!(
         refused.to_string().contains("job is not checking"),
         "{refused}"
+    );
+}
+
+// JA-1 S5a commit 7: the seal, its receipt and its transaction.
+
+const C7_DIGEST: [u8; 32] = [7; 32];
+
+struct C7Ready {
+    token: ReviewToken,
+    binding: ReviewCheckBinding,
+}
+
+fn c7_attempt(bundle: &ProjectBundle) -> crate::orchestration_records::ExecutionIdentity {
+    let fresh = || SessionId::fresh().unwrap();
+    crate::orchestration_records::ExecutionIdentity {
+        version: 1,
+        project: bundle.project_id().clone(),
+        run: crate::orchestration_records::RunId(fresh()),
+        task: crate::orchestration_records::TaskId(fresh()),
+        attempt: crate::orchestration_records::AttemptId(fresh()),
+        nonce: fresh(),
+        owner_instance: fresh(),
+    }
+}
+
+/// The Reviewer's complete audit; `blocking` adds a missing required beat.
+fn c7_audit(bundle: &mut ProjectBundle, key: &SnapshotKey, blocking: bool) {
+    use crate::editorial::{AuditFinding, AuditKind, AuditObservation, AuditSubmission};
+    let entry = |kind, finding, start_micros, text: &str| AuditObservation {
+        kind,
+        line_or_beat: "Opening".into(),
+        output: crate::studio_records::AudioRange {
+            start_micros,
+            end_micros: start_micros + 1000,
+        },
+        text: text.into(),
+        finding,
+    };
+    let mut entries = vec![
+        entry(AuditKind::Retention, AuditFinding::Resolved, 0, "It holds."),
+        entry(
+            AuditKind::Hook,
+            AuditFinding::Resolved,
+            0,
+            "The opening works.",
+        ),
+        entry(AuditKind::Story, AuditFinding::Taste, 0, "A longer pause."),
+    ];
+    if blocking {
+        entries.push(entry(
+            AuditKind::Story,
+            AuditFinding::MissingRequiredBeat,
+            5000,
+            "The promised beat is missing.",
+        ));
+    }
+    let (target, part) = AuditSubmission {
+        version: key.version.clone(),
+        snapshot: key.clone(),
+        rulebook_ref: None,
+        entries,
+    }
+    .attribute(c7_attempt(bundle));
+    let change = MetadataChange::RetainEditorial {
+        target,
+        role: crate::orchestration_records::Role::Reviewer,
+        frozen: crate::editorial::FrozenRulebook { revision: None },
+        part,
+    };
+    let issuer = bundle.issue_metadata_issuer().unwrap();
+    let envelope = bundle.metadata_envelope(crate::receipts::CommandId {
+        issuer,
+        sequence: 1,
+    });
+    let update = crate::studio_records::MetadataUpdate {
+        expected_root_generation: bundle.generation,
+        change,
+    };
+    let lookup = bundle
+        .metadata_command(
+            &envelope,
+            crate::studio_records::MetadataScope::Editorial,
+            &update,
+        )
+        .unwrap();
+    assert!(
+        matches!(lookup, crate::receipts::ReceiptLookup::Committed(_)),
+        "C7_AUDIT_COMMITTED"
+    );
+}
+
+/// A checked job: published artifact, staging retired unless kept, one
+/// binding and every row but `skip` recorded Pass by its attempt.
+fn c7_checked_staged(
+    bundle: &mut ProjectBundle,
+    temp: &kinewright_media::test_support::TempDirectory,
+    blocking: bool,
+    skip: Option<RequiredReviewRow>,
+    retire_stage: bool,
+) -> C7Ready {
+    let descriptor = version(bundle);
+    c7_audit(bundle, &descriptor.key, blocking);
+    let queued = queue(bundle, &descriptor, (64, 64));
+    let encoding = bundle
+        .update_review_job(
+            &queued,
+            UpdateReviewJob::BeginEncoding(ReviewStage {
+                id: SessionId::fresh().unwrap(),
+                boot: "00000000-0000-0000-0000-000000000000".into(),
+                pid: 1,
+                process_start: 1,
+                byte_limit: 1 << 20,
+            }),
+        )
+        .unwrap();
+    let bytes = descriptor.key.version.as_str().as_bytes();
+    let path = temp.path(&format!("c7-artifact-{}", descriptor.key.version.as_str()));
+    std::fs::write(&path, bytes).unwrap();
+    let object = ObjectRef {
+        sha256: kinewright_media::sha256_bytes(bytes),
+        byte_length: bytes.len() as u64,
+        record_kind: RecordKind::OwnedMedia,
+    };
+    let token = bundle
+        .publish_review_artifact(
+            &encoding.token,
+            &mut std::fs::File::open(path).unwrap(),
+            &object,
+            fixture_timing(),
+        )
+        .unwrap()
+        .token;
+    if retire_stage {
+        bundle
+            .update_review_job(&token, UpdateReviewJob::RetireStage)
+            .unwrap();
+    }
+    let binding = ReviewCheckBinding {
+        configuration_sha256: C7_DIGEST,
+        reviewer_attempt: SessionId::fresh().unwrap(),
+    };
+    bundle
+        .update_review_job(&token, UpdateReviewJob::BindChecks(binding.clone()))
+        .unwrap();
+    for &row in CoverageProfileId::OutputReviewV1.required_rows() {
+        if Some(row) != skip {
+            c7_record(bundle, &token, &binding, row);
+        }
+    }
+    C7Ready { token, binding }
+}
+
+fn c7_checked(
+    bundle: &mut ProjectBundle,
+    temp: &kinewright_media::test_support::TempDirectory,
+    blocking: bool,
+    skip: Option<RequiredReviewRow>,
+) -> C7Ready {
+    c7_checked_staged(bundle, temp, blocking, skip, true)
+}
+
+fn c7_record(
+    bundle: &mut ProjectBundle,
+    token: &ReviewToken,
+    binding: &ReviewCheckBinding,
+    row: RequiredReviewRow,
+) {
+    bundle
+        .update_review_job(
+            token,
+            UpdateReviewJob::RecordCheck {
+                binding: binding.clone(),
+                row,
+                result: ReviewRowResult::Pass,
+            },
+        )
+        .unwrap();
+}
+
+fn c7_verified(bundle: &ProjectBundle, token: &ReviewToken) -> VerifiedReviewArtifact {
+    bundle
+        .prepare_review_artifact(token)
+        .unwrap()
+        .verify_for_seal(&ExportCancellation::default())
+        .unwrap()
+}
+
+fn c7_seal(bundle: &mut ProjectBundle, ready: &C7Ready) -> Result<SealResult, BundleError> {
+    let verified = c7_verified(bundle, &ready.token);
+    bundle.seal_review(
+        &ready.token,
+        &SessionId::fresh().unwrap(),
+        C7_DIGEST,
+        &verified,
+    )
+}
+
+fn c7_receipts(bundle: &ProjectBundle, key: &SnapshotKey) -> Vec<ReviewReceipt> {
+    let descriptor = bundle.read_snapshot(key).unwrap().descriptor;
+    bundle
+        .review_receipts(&descriptor)
+        .unwrap()
+        .into_iter()
+        .map(|(_, receipt)| receipt.take())
+        .collect()
+}
+
+/// The findings of a seal that was refused; the job is Paused with them.
+fn c7_refused(bundle: &mut ProjectBundle, result: SealResult) -> Vec<ReviewFinding> {
+    let SealResult::Paused(status) = result else {
+        panic!("C7_SEAL_EXPECTED_REFUSAL: {result:?}");
+    };
+    let ReviewPhase::Paused { findings, .. } = &status.phase else {
+        panic!("C7_SEAL_EXPECTED_PAUSED: {:?}", status.phase);
+    };
+    assert_eq!(
+        bundle.review_job().unwrap().unwrap().phase,
+        status.phase,
+        "C7_PAUSE_DURABLE"
+    );
+    assert!(
+        c7_receipts(bundle, &status.token.snapshot).is_empty(),
+        "C7_REFUSED_SEAL_HAS_NO_RECEIPT"
+    );
+    for finding in findings {
+        assert_eq!(finding.version, status.token.snapshot.version);
+    }
+    findings.clone()
+}
+
+/// Receipts as they persist; settings equality includes a live handle.
+fn c7_same(left: &ReviewReceipt, right: &ReviewReceipt) -> bool {
+    serde_json::to_value(left).unwrap() == serde_json::to_value(right).unwrap()
+}
+
+fn c7_has(findings: &[ReviewFinding], row: Option<RequiredReviewRow>, note: &str) -> bool {
+    findings
+        .iter()
+        .any(|finding| finding.row == row && finding.note == note)
+}
+
+#[test]
+fn ja1_s5a_c7_seal_publishes_one_receipt_and_retires_the_job() {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "c7-seal");
+    let (core, mut bundle, _) = saved_bundle(&temp);
+    let ready = c7_checked(&mut bundle, &temp, false, None);
+    let key = ready.token.snapshot.clone();
+    assert!(matches!(
+        bundle.review_job().unwrap().unwrap().phase,
+        ReviewPhase::ReadyToSeal { .. }
+    ));
+    let command = SessionId::fresh().unwrap();
+    let verified = c7_verified(&bundle, &ready.token);
+    let SealResult::Sealed(sealed) = bundle
+        .seal_review(&ready.token, &command, C7_DIGEST, &verified)
+        .unwrap()
+    else {
+        panic!("C7_SEALED");
+    };
+    assert!(!sealed.replayed);
+    assert_eq!(sealed.receipt.token, ready.token);
+    assert_eq!(sealed.receipt.command, command);
+    assert_eq!(
+        sealed.receipt.key.reviewer_attempt,
+        ready.binding.reviewer_attempt
+    );
+    assert_eq!(sealed.receipt.key.configuration_sha256, C7_DIGEST);
+    assert!(
+        sealed
+            .receipt
+            .rows
+            .values()
+            .all(|result| *result == ReviewRowResult::Pass)
+    );
+    // The fixture's overlay inventory is not determined: never Delivered.
+    let kinewright_core::output_review::SealedReviewOutcome::ReviewedFactsNotChecked { exceptions } =
+        &sealed.receipt.outcome
+    else {
+        panic!("C7_NOT_DELIVERED: {:?}", sealed.receipt.outcome);
+    };
+    assert!(exceptions.contains(
+        &kinewright_core::output_review::DeliveryException::OverlayInventoryNotDetermined(
+            kinewright_core::output_review::OverlayKind::Caption
+        )
+    ));
+    assert!(bundle.review_job().unwrap().is_none(), "C7_JOB_RETIRED");
+    let receipts = c7_receipts(&bundle, &key);
+    assert!(receipts.len() == 1 && c7_same(&receipts[0], &sealed.receipt));
+
+    // A lost reply: the same token returns the same receipt; nothing is sealed twice.
+    let replay = bundle.sealed_review(&ready.token).unwrap().unwrap();
+    assert!(replay.replayed);
+    assert!(c7_same(&replay.receipt, &sealed.receipt));
+    let SealResult::Sealed(again) = bundle
+        .seal_review(
+            &ready.token,
+            &SessionId::fresh().unwrap(),
+            C7_DIGEST,
+            &verified,
+        )
+        .unwrap()
+    else {
+        panic!("C7_REPLAYED");
+    };
+    assert!(again.replayed && c7_same(&again.receipt, &sealed.receipt));
+    assert_eq!(c7_receipts(&bundle, &key).len(), 1, "C7_ONE_RECEIPT");
+
+    // A sealed version and profile is never reviewed or sealed again.
+    let descriptor = bundle.read_snapshot(&key).unwrap().descriptor;
+    let refused = bundle
+        .queue_review(
+            &descriptor,
+            None,
+            bundle
+                .store
+                .read_record::<ReviewRequest>(&sealed.receipt.key.request_ref)
+                .unwrap()
+                .settings
+                .clone(),
+            1 << 20,
+            bundle
+                .store
+                .read_record::<StoredReviewExpectations>(&sealed.receipt.key.expectations_ref)
+                .unwrap()
+                .0
+                .clone(),
+        )
+        .err()
+        .unwrap();
+    assert!(
+        refused
+            .to_string()
+            .contains("already has a sealed output review"),
+        "{refused}"
+    );
+
+    // Reopen: one immutable receipt, no job.
+    drop(verified);
+    let path = temp.path("project.kinewright");
+    drop(bundle);
+    let reopened = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::read(&path).unwrap(),
+        core.history_pool(),
+    )
+    .unwrap();
+    assert!(reopened.review_job().unwrap().is_none());
+    let receipts = c7_receipts(&reopened, &key);
+    assert!(receipts.len() == 1 && c7_same(&receipts[0], &sealed.receipt));
+}
+
+#[test]
+fn ja1_s5a_c7_seal_refuses_missing_unknown_and_stale_rows() {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "c7-refusals");
+    let (_core, mut bundle, _) = saved_bundle(&temp);
+
+    // A missing row.
+    let ready = c7_checked(
+        &mut bundle,
+        &temp,
+        false,
+        Some(RequiredReviewRow::OverlayVerification),
+    );
+    let result = c7_seal(&mut bundle, &ready).unwrap();
+    let findings = c7_refused(&mut bundle, result);
+    assert!(
+        c7_has(
+            &findings,
+            Some(RequiredReviewRow::OverlayVerification),
+            "This check has no recorded result."
+        ),
+        "C7_MISSING_ROW: {findings:?}"
+    );
+    bundle
+        .update_review_job(&ready.token, UpdateReviewJob::Stop)
+        .unwrap();
+    bundle
+        .update_review_job(&ready.token, UpdateReviewJob::RetireStopped)
+        .unwrap();
+
+    // An Unknown row keeps its reason.
+    let ready = c7_checked(
+        &mut bundle,
+        &temp,
+        false,
+        Some(RequiredReviewRow::LoudnessAndPeak),
+    );
+    bundle
+        .update_review_job(
+            &ready.token,
+            UpdateReviewJob::RecordUnknown {
+                binding: ready.binding.clone(),
+                row: RequiredReviewRow::LoudnessAndPeak,
+                reason: "The decoder stalled.".into(),
+            },
+        )
+        .unwrap();
+    let result = c7_seal(&mut bundle, &ready).unwrap();
+    let findings = c7_refused(&mut bundle, result);
+    assert!(
+        c7_has(
+            &findings,
+            Some(RequiredReviewRow::LoudnessAndPeak),
+            "The decoder stalled."
+        ),
+        "C7_UNKNOWN_ROW: {findings:?}"
+    );
+    c7_retire(&mut bundle, &ready.token);
+}
+
+#[test]
+fn ja1_s5a_c7_seal_refuses_changed_inputs() {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "c7-inputs");
+    let (_core, mut bundle, _) = saved_bundle(&temp);
+
+    // A changed configuration digest.
+    let ready = c7_checked(&mut bundle, &temp, false, None);
+    let verified = c7_verified(&bundle, &ready.token);
+    let result = bundle
+        .seal_review(
+            &ready.token,
+            &SessionId::fresh().unwrap(),
+            [9; 32],
+            &verified,
+        )
+        .unwrap();
+    let findings = c7_refused(&mut bundle, result);
+    assert!(
+        c7_has(
+            &findings,
+            None,
+            "The checker configuration differs from the bound configuration."
+        ),
+        "C7_CONFIG: {findings:?}"
+    );
+    c7_retire(&mut bundle, &ready.token);
+
+    // A changed artifact: the verified bytes of another job.
+    let other = c7_checked(&mut bundle, &temp, false, None);
+    let foreign = c7_verified(&bundle, &other.token);
+    c7_retire(&mut bundle, &other.token);
+    let ready = c7_checked(&mut bundle, &temp, false, None);
+    let result = bundle
+        .seal_review(
+            &ready.token,
+            &SessionId::fresh().unwrap(),
+            C7_DIGEST,
+            &foreign,
+        )
+        .unwrap();
+    let findings = c7_refused(&mut bundle, result);
+    assert!(
+        c7_has(
+            &findings,
+            None,
+            "The verified bytes are not the reviewed artifact."
+        ),
+        "C7_ARTIFACT: {findings:?}"
+    );
+    c7_retire(&mut bundle, &ready.token);
+
+    // A stale reviewer attempt: rows of an earlier attempt after a rebind.
+    let ready = c7_checked(
+        &mut bundle,
+        &temp,
+        false,
+        Some(RequiredReviewRow::IndependentVisualReview),
+    );
+    bundle
+        .update_review_job(&ready.token, UpdateReviewJob::UnbindChecks)
+        .unwrap();
+    let rebound = ReviewCheckBinding {
+        configuration_sha256: C7_DIGEST,
+        reviewer_attempt: SessionId::fresh().unwrap(),
+    };
+    bundle
+        .update_review_job(&ready.token, UpdateReviewJob::BindChecks(rebound.clone()))
+        .unwrap();
+    c7_record(
+        &mut bundle,
+        &ready.token,
+        &rebound,
+        RequiredReviewRow::IndependentVisualReview,
+    );
+    let result = c7_seal(&mut bundle, &ready).unwrap();
+    let findings = c7_refused(&mut bundle, result);
+    assert!(
+        c7_has(
+            &findings,
+            Some(RequiredReviewRow::StructureAndAvIntegrity),
+            "This check was recorded by an earlier reviewer attempt."
+        ),
+        "C7_STALE_ATTEMPT: {findings:?}"
+    );
+    c7_retire(&mut bundle, &ready.token);
+}
+
+#[test]
+fn ja1_s5a_c7_seal_refuses_blocking_findings_and_changed_annotations() {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "c7-audit");
+    let (_core, mut bundle, _) = saved_bundle(&temp);
+
+    // An unresolved blocking finding, linked to its output time.
+    let ready = c7_checked(&mut bundle, &temp, true, None);
+    let result = c7_seal(&mut bundle, &ready).unwrap();
+    let findings = c7_refused(&mut bundle, result);
+    assert!(
+        findings.iter().any(|finding| {
+            finding.row == Some(RequiredReviewRow::EditorialAuditPresent)
+                && finding.note == "The promised beat is missing."
+                && finding.output
+                    == Some(crate::studio_records::AudioRange {
+                        start_micros: 5000,
+                        end_micros: 6000,
+                    })
+        }),
+        "C7_BLOCKING: {findings:?}"
+    );
+    c7_retire(&mut bundle, &ready.token);
+
+    // Annotations changed after the freeze; Annotate itself is refused.
+    let ready = c7_checked(&mut bundle, &temp, false, None);
+    let descriptor = bundle
+        .read_snapshot(&ready.token.snapshot)
+        .unwrap()
+        .descriptor;
+    let mut changed = empty_annotations(&descriptor);
+    changed.intended_pauses.push(TimeCode(0)..TimeCode(1));
+    let refused = bundle
+        .set_review_annotations(&ready.token.snapshot, changed.clone())
+        .err()
+        .unwrap();
+    assert!(
+        refused
+            .to_string()
+            .contains("must finish or stop before its annotations change"),
+        "C7_ANNOTATE_REFUSED: {refused}"
+    );
+    bundle
+        .set_review_annotations_unfenced_for_test(&ready.token.snapshot, changed)
+        .unwrap();
+    let result = c7_seal(&mut bundle, &ready).unwrap();
+    let findings = c7_refused(&mut bundle, result);
+    assert!(
+        c7_has(
+            &findings,
+            None,
+            "The version's annotations changed after the review froze them."
+        ),
+        "C7_ANNOTATIONS: {findings:?}"
+    );
+}
+
+fn c7_retire(bundle: &mut ProjectBundle, token: &ReviewToken) {
+    bundle
+        .update_review_job(token, UpdateReviewJob::Stop)
+        .unwrap();
+    bundle
+        .update_review_job(token, UpdateReviewJob::RetireStopped)
+        .unwrap();
+}
+
+#[test]
+fn ja1_s5a_c7_storage_exhausted_during_seal_keeps_work_and_retries() {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "c7-exhausted");
+    let (_core, mut bundle, _) = saved_bundle(&temp);
+    let ready = c7_checked(&mut bundle, &temp, false, None);
+    let before = bundle.review_job().unwrap().unwrap().take();
+    let verified = c7_verified(&bundle, &ready.token);
+    let command = SessionId::fresh().unwrap();
+    let exhausted =
+        crate::io_observer::fail_native_once("review_seal_before_admission", 28, || {
+            bundle.seal_review(&ready.token, &command, C7_DIGEST, &verified)
+        });
+    assert!(exhausted.is_err(), "C7_EXHAUSTED_REPORTED: {exhausted:?}");
+    let after = bundle.review_job().unwrap().unwrap().take();
+    assert_eq!(after, before, "C7_JOB_STAYS_READY_TO_SEAL");
+    assert!(c7_receipts(&bundle, &ready.token.snapshot).is_empty());
+    let SealResult::Sealed(sealed) = bundle
+        .seal_review(&ready.token, &command, C7_DIGEST, &verified)
+        .unwrap()
+    else {
+        panic!("C7_RETRY_SEALS");
+    };
+    assert!(!sealed.replayed);
+    assert_eq!(c7_receipts(&bundle, &ready.token.snapshot).len(), 1);
+}
+
+#[test]
+fn ja1_s5a_c7_kill_between_publication_and_ack_reopens_sealed() {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "c7-kill");
+    let (core, mut bundle, _) = saved_bundle(&temp);
+    let ready = c7_checked(&mut bundle, &temp, false, None);
+    let verified = c7_verified(&bundle, &ready.token);
+    let command = SessionId::fresh().unwrap();
+    // The root is renamed but its parent sync fails: published, never acknowledged.
+    let uncertain = crate::io_observer::fail_once("root_parent_sync", || {
+        bundle.seal_review(&ready.token, &command, C7_DIGEST, &verified)
+    });
+    assert!(uncertain.is_err(), "C7_ACK_LOST: {uncertain:?}");
+    drop(verified);
+    let path = temp.path("project.kinewright");
+    drop(bundle);
+    let mut reopened = ProjectBundle::activate(
+        &path,
+        BundleWriteAdmission::read(&path).unwrap(),
+        core.history_pool(),
+    )
+    .unwrap();
+    assert!(reopened.review_job().unwrap().is_none(), "C7_JOB_RETIRED");
+    let receipts = c7_receipts(&reopened, &ready.token.snapshot);
+    assert_eq!(receipts.len(), 1, "C7_RECEIPT_FOUND");
+    assert_eq!(receipts[0].command, command);
+    let replay = reopened.sealed_review(&ready.token).unwrap().unwrap();
+    assert!(
+        c7_same(&replay.receipt, &receipts[0]),
+        "C7_RETRY_SAME_RECEIPT"
+    );
+}
+
+#[test]
+fn ja1_s5a_c7_seal_leaves_the_working_edit_and_save_as_copy_alone() {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "c7-working");
+    let (core, mut bundle, inputs) = saved_bundle(&temp);
+    // A prior sealed version the copy keeps.
+    let prior = c7_checked(&mut bundle, &temp, false, None);
+    assert!(matches!(
+        c7_seal(&mut bundle, &prior).unwrap(),
+        SealResult::Sealed(_)
+    ));
+    let ready = c7_checked(&mut bundle, &temp, false, None);
+    // The working edit advances while the job is ReadyToSeal.
+    core.request(kinewright_core::Command::Do(
+        kinewright_core::Operation::AddMarker {
+            marker: kinewright_core::Marker {
+                id: kinewright_core::MarkerId(11),
+                position: TimeCode(1),
+                label: "after freeze".into(),
+                color_token: 0,
+            },
+        },
+    ))
+    .unwrap();
+    bundle.save(&core, &inputs).unwrap();
+    let head = bundle.manual_head().unwrap().clone();
+    // Save As during ReadyToSeal: the copy has the prior receipt and no job.
+    let crate::bundle_copy::SaveAsOutcome::Copied(copy) =
+        bundle.save_as(&temp.path("copy.kinewright")).unwrap()
+    else {
+        panic!("C7_COPY");
+    };
+    let copied = copy
+        .into_destination()
+        .unwrap_or_else(|_| panic!("C7_COPY_COMMITTED"));
+    assert!(copied.review_job().unwrap().is_none(), "C7_COPY_HAS_NO_JOB");
+    assert_eq!(c7_receipts(&copied, &prior.token.snapshot).len(), 1);
+    assert!(c7_receipts(&copied, &ready.token.snapshot).is_empty());
+    drop(copied);
+
+    assert!(matches!(
+        c7_seal(&mut bundle, &ready).unwrap(),
+        SealResult::Sealed(_)
+    ));
+    assert_eq!(
+        bundle.manual_head().unwrap(),
+        &head,
+        "C7_WORKING_EDIT_NOT_ROLLED_BACK"
+    );
+    assert_eq!(c7_receipts(&bundle, &ready.token.snapshot).len(), 1);
+    assert_eq!(c7_receipts(&bundle, &prior.token.snapshot).len(), 1);
+    let versions = bundle.version_index().unwrap();
+    let with_receipts = versions
+        .snapshots
+        .values()
+        .filter(|descriptor| !c7_receipts(&bundle, &descriptor.key).is_empty())
+        .count();
+    assert_eq!(with_receipts, 2, "C7_ONLY_FROZEN_VERSIONS_SEALED");
+}
+
+#[test]
+fn ja1_s5a_c7_seal_refuses_while_staging_is_held() {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "c7-staging");
+    let (_core, mut bundle, _) = saved_bundle(&temp);
+    let ready = c7_checked_staged(&mut bundle, &temp, false, None, false);
+    let result = c7_seal(&mut bundle, &ready).unwrap();
+    let findings = c7_refused(&mut bundle, result);
+    assert!(
+        c7_has(
+            &findings,
+            None,
+            "Review staging is still held by the encode."
+        ),
+        "C7_STAGING: {findings:?}"
     );
 }
