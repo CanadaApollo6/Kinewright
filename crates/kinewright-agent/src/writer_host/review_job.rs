@@ -75,6 +75,11 @@ pub(super) struct ReviewRuntime {
     pub(super) overlay_verify_hook: Option<ReviewCancelHook>,
     #[cfg(test)]
     pub(super) stills_render_hook: Option<ReviewCancelHook>,
+    // Production always drives a checking job; legacy fixtures bind by hand.
+    #[cfg(test)]
+    pub(super) auto_drive: bool,
+    #[cfg(test)]
+    pub(super) seal_hook: Option<Arc<dyn Fn() -> Result<(), HostError> + Send + Sync>>,
 }
 
 #[cfg(test)]
@@ -212,6 +217,41 @@ const DRIVER_RUNNING: &str = "The output review checks are still running.";
 const BUSY_WORKER: &str =
     "Another output review is still encoding or retiring; stop it or wait for it to finish first.";
 
+/// Fixtures whose reopened host drives its review as production does.
+#[cfg(test)]
+pub(super) static AUTO_DRIVE_ON_OPEN: Mutex<BTreeSet<std::path::PathBuf>> =
+    Mutex::new(BTreeSet::new());
+
+/// After the endpoint serves: verify a reopened job's artifact off the
+/// caller's thread and start its driver.
+pub(super) fn resume_after_open(host: &Arc<Mutex<HostCommandOwner>>) {
+    let weak = Arc::downgrade(host);
+    let _ = thread::Builder::new()
+        .name("output-review-reopen".into())
+        .spawn(move || {
+            let Some(host) = weak.upgrade() else {
+                return;
+            };
+            let Ok(mut owner) = host.lock() else {
+                return;
+            };
+            #[cfg(test)]
+            if let Some(path) = &owner.config.path
+                && AUTO_DRIVE_ON_OPEN
+                    .lock()
+                    .is_ok_and(|paths| paths.contains(path))
+            {
+                owner.review_runtime.auto_drive = true;
+            }
+            if !owner.auto_drive() || owner.owner.is_none() {
+                return;
+            }
+            if owner.reconcile_review_job().is_ok() && owner.verify_reopened_review().is_ok() {
+                let _ = owner.ensure_review_driver();
+            }
+        });
+}
+
 fn unavailable() -> HostError {
     HostRefusal::new("review_unavailable", "Output review owner is unavailable.").into()
 }
@@ -254,6 +294,8 @@ pub(super) fn execute(
                     let mut owner = lock(host)?;
                     owner.authorize_review(bearer, request)?;
                     owner.reconcile_review_job()?;
+                    // Straight after a reopen: verify the retained artifact first.
+                    owner.verify_reopened_review()?;
                     // A lost reply: the job is already retired with its receipt.
                     if let Some(sealed) = owner
                         .owner_mut()?
@@ -361,6 +403,11 @@ fn queue(
     };
     // Source-clock transcripts come from the media store, bound to the
     // frozen version's pins. A missing one leaves its speech unchecked.
+    // Tests pass explicit roots and never discover the person's data.
+    #[cfg(test)]
+    let data_dir =
+        data_dir.ok_or_else(|| refused("Review fixture requires a private data directory."))?;
+    #[cfg(not(test))]
     let data_dir = data_dir
         .map_or_else(kinewright_media::default_data_dir, Ok)
         .map_err(|error| refused(&error.to_string()))?;
@@ -422,6 +469,19 @@ impl HostCommandOwner {
     #[cfg(test)]
     pub(super) fn review_fixture_exhaust_artifact(&mut self, exhaust: bool) {
         self.review_runtime.exhaust_artifact = exhaust;
+    }
+
+    #[cfg(test)]
+    pub(super) fn review_fixture_auto_drive(&mut self, auto: bool) {
+        self.review_runtime.auto_drive = auto;
+    }
+
+    #[cfg(test)]
+    pub(super) fn review_fixture_driver_done(&self) -> bool {
+        self.review_runtime
+            .driver
+            .as_ref()
+            .is_none_or(|driver| driver.thread.as_ref().is_none_or(JoinHandle::is_finished))
     }
 
     #[cfg(test)]
@@ -551,11 +611,15 @@ impl HostCommandOwner {
             }
             return Err(error);
         }
-        if matches!(control, ReviewControl::Status | ReviewControl::Resume(_)) {
+        if matches!(
+            control,
+            ReviewControl::Status | ReviewControl::Resume(_) | ReviewControl::Check { .. }
+        ) {
             self.verify_reopened_review()?;
         }
         match control {
-            ReviewControl::Status => {}
+            // A reopened Checking or ReadyToSeal job resumes its driver.
+            ReviewControl::Status => self.ensure_review_driver()?,
             ReviewControl::Annotate { snapshot, fields } => {
                 let pinned = self.owner()?.read_snapshot(snapshot)?;
                 let annotations = kinewright_core::output_review::ReviewAnnotations {
@@ -568,7 +632,10 @@ impl HostCommandOwner {
                 self.owner_mut()?
                     .set_review_annotations(snapshot, annotations)?;
             }
-            ReviewControl::Resume(token) => self.resume_review(token)?,
+            ReviewControl::Resume(token) => {
+                self.resume_review(token)?;
+                self.ensure_review_driver()?;
+            }
             ReviewControl::Check {
                 token,
                 reviewer_attempt,
@@ -1124,6 +1191,48 @@ impl HostCommandOwner {
         }
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(clippy::unused_self, reason = "only the test build reads a switch")
+    )]
+    fn auto_drive(&self) -> bool {
+        #[cfg(test)]
+        return self.review_runtime.auto_drive;
+        #[cfg(not(test))]
+        true
+    }
+
+    /// Start the driver for the current job when it is Checking or
+    /// `ReadyToSeal` on the artifact this host verified and none runs. Called
+    /// on entry to Checking, on Resume and on Status, so a reopened job
+    /// continues to its seal.
+    pub(super) fn ensure_review_driver(&mut self) -> Result<(), HostError> {
+        if !self.auto_drive() {
+            return Ok(());
+        }
+        self.retire_finished_driver();
+        if self.review_runtime.driver.is_some() {
+            return Ok(());
+        }
+        let Some(job) = self.owner()?.review_bundle()?.review_job()? else {
+            return Ok(());
+        };
+        let token = job.token.clone();
+        let drivable = matches!(
+            job.phase,
+            ReviewPhase::Checking(_) | ReviewPhase::ReadyToSeal { .. }
+        );
+        drop(job);
+        if !drivable
+            || self.review_runtime.verified.as_ref() != Some(&token)
+            || self.review_authority(&token).is_err()
+        {
+            return Ok(());
+        }
+        self.spawn_review_driver(&token, SessionId::fresh()?)
+    }
+
+    /// `Check` names the Reviewer attempt itself: bind it, then drive.
     fn start_review_driver(
         &mut self,
         token: &ReviewToken,
@@ -1131,36 +1240,106 @@ impl HostCommandOwner {
         command: &SessionId,
     ) -> Result<(), HostError> {
         self.retire_finished_driver();
-        if self.review_runtime.driver.is_some() {
+        let waiting = self
+            .review_runtime
+            .driver
+            .as_ref()
+            .is_some_and(|driver| &driver.token == token);
+        if self.review_runtime.driver.is_some() && !waiting {
             return Err(refused(DRIVER_RUNNING));
         }
         self.review_can_record(token)?;
+        let bound = self.bound_reviewer(token)?;
+        if bound
+            .as_ref()
+            .is_some_and(|bound| bound != reviewer_attempt)
+        {
+            return Err(refused(
+                "Another reviewer attempt is already bound to this output review.",
+            ));
+        }
+        if waiting && bound.is_some() {
+            return Err(refused(DRIVER_RUNNING));
+        }
+        self.claim_review_check(token, reviewer_attempt)?;
+        if waiting {
+            return Ok(());
+        }
+        self.spawn_review_driver(token, command.clone())
+    }
+
+    fn bound_reviewer(&self, token: &ReviewToken) -> Result<Option<SessionId>, HostError> {
+        let bundle = self.owner()?.review_source_bundle(&token.project)?;
+        Ok(bundle
+            .review_job()?
+            .filter(|job| &job.token == token)
+            .and_then(|job| match &job.phase {
+                ReviewPhase::Checking(checks) => checks.reviewer_attempt.clone(),
+                _ => None,
+            }))
+    }
+
+    /// Bind `attempt`, a live Reviewer of the cut, with the production
+    /// configuration. The waiting driver then runs the checks.
+    fn claim_review_check(
+        &mut self,
+        token: &ReviewToken,
+        attempt: &SessionId,
+    ) -> Result<(), HostError> {
+        self.require_reviewer_of_cut(token, attempt)?;
+        let config = review_driver::DriverConfiguration::production(attempt);
+        let binding = config.binding(attempt);
+        self.record_review_check(token, UpdateReviewJob::BindChecks(binding.clone()))?;
+        self.register_bound_c6_configuration(token, &binding, &config.c6)
+    }
+
+    /// The Reviewer's first stills read claims a checking job that a
+    /// driver waits on and no attempt is bound to.
+    pub(super) fn claim_waiting_review(&mut self, attempt: &SessionId) -> Result<(), HostError> {
+        let Some(token) = self
+            .review_runtime
+            .driver
+            .as_ref()
+            .filter(|driver| {
+                driver
+                    .thread
+                    .as_ref()
+                    .is_some_and(|thread| !thread.is_finished())
+            })
+            .map(|driver| driver.token.clone())
+        else {
+            return Ok(());
+        };
+        let unbound = self
+            .owner()?
+            .review_source_bundle(&token.project)?
+            .review_job()?
+            .is_some_and(|job| {
+                job.token == token
+                    && matches!(&job.phase, ReviewPhase::Checking(checks) if checks.reviewer_attempt.is_none())
+            });
+        if !unbound || self.review_can_record(&token).is_err() {
+            return Ok(());
+        }
+        self.claim_review_check(&token, attempt)
+    }
+
+    fn spawn_review_driver(
+        &mut self,
+        token: &ReviewToken,
+        command: SessionId,
+    ) -> Result<(), HostError> {
         let cancellation = self
             .review_runtime
             .register_review_cancellation(token, None);
         let weak = self.runtime_owner.clone();
         let thread = {
             let token = token.clone();
-            let attempt = reviewer_attempt.clone();
-            let command = command.clone();
             let cancellation = cancellation.clone();
             thread::Builder::new()
                 .name("output-review-checks".into())
                 .spawn(move || {
-                    let config = review_driver::DriverConfiguration::production(&attempt);
-                    let check =
-                        review_checks::commit_5_check(&config.scan, &config.speech, &cancellation);
-                    // Refusals leave the recorded rows; Status shows the job.
-                    let _ = review_driver::drive_review(
-                        &weak,
-                        &token,
-                        &attempt,
-                        &command,
-                        &config,
-                        &check,
-                        &mut review_driver::AwaitReviewer,
-                        &cancellation,
-                    );
+                    review_driver::run_review_driver(&weak, &token, &command, &cancellation);
                 })?
         };
         self.review_runtime.driver = Some(Driver {
@@ -1324,6 +1503,9 @@ fn encode_review(
             #[cfg(not(test))]
             publish()?;
             owner.review_runtime.verified = Some(token.clone());
+            // Entry to Checking: the driver waits for the Reviewer's claim. A
+            // driver that cannot start yet starts on the next Status.
+            let _ = owner.ensure_review_driver();
         }
         #[cfg(test)]
         probe(ReviewPoint::AfterPublication);

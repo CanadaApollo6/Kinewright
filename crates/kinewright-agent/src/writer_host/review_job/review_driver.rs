@@ -24,7 +24,7 @@ use kinewright_media::{
 };
 use kinewright_project::{
     bundle_records::SessionId,
-    orchestration_records::{AttemptState, Role},
+    orchestration_records::AttemptState,
     review_job::{ReviewCheckBinding, ReviewPhase, ReviewToken, SealResult, UpdateReviewJob},
 };
 
@@ -161,6 +161,111 @@ fn cancelled(cancel: &ExportCancellation) -> Result<(), HostError> {
     Ok(())
 }
 
+/// What the driver does next for its job.
+enum DriverStep {
+    /// Checking with no Reviewer bound yet, or the encode worker still
+    /// returning: wait.
+    Wait,
+    Drive(SessionId),
+    Seal,
+    Done,
+}
+
+fn driver_step(
+    host: &Weak<Mutex<HostCommandOwner>>,
+    token: &ReviewToken,
+) -> Result<DriverStep, HostError> {
+    let host = upgrade(host)?;
+    let mut owner = lock(&host)?;
+    owner.review_authority(token)?;
+    // The encode worker holds the staging until it is retired; the seal
+    // refuses while it is held, so retire a finished worker here and wait
+    // for one that is still returning.
+    owner.retire_review_worker()?;
+    if owner
+        .review_runtime
+        .worker
+        .as_ref()
+        .is_some_and(|worker| &worker.token == token)
+    {
+        return Ok(DriverStep::Wait);
+    }
+    let bundle = owner.owner()?.review_source_bundle(&token.project)?;
+    Ok(
+        match bundle
+            .review_job()?
+            .filter(|job| &job.token == token)
+            .map(|job| job.phase.clone())
+        {
+            Some(ReviewPhase::ReadyToSeal { .. }) => DriverStep::Seal,
+            Some(ReviewPhase::Checking(checks)) => checks
+                .reviewer_attempt
+                .map_or(DriverStep::Wait, DriverStep::Drive),
+            _ => DriverStep::Done,
+        },
+    )
+}
+
+/// The production driver: wait for a Reviewer of the cut to claim the
+/// check, run every check, then seal. A `ReadyToSeal` job is sealed directly.
+/// A refusal that leaves the job checking pauses it with the reason, so
+/// `Resume` binds afresh; a Stop or shutdown cancels it instead.
+pub(in crate::writer_host) fn run_review_driver(
+    host: &Weak<Mutex<HostCommandOwner>>,
+    token: &ReviewToken,
+    command: &SessionId,
+    cancel: &ExportCancellation,
+) {
+    let result = loop {
+        if cancel.is_cancelled() {
+            return;
+        }
+        match driver_step(host, token) {
+            Ok(DriverStep::Wait) => thread::sleep(REVIEWER_POLL),
+            Ok(DriverStep::Done) | Err(_) => return,
+            Ok(DriverStep::Drive(attempt)) => {
+                let config = DriverConfiguration::production(&attempt);
+                let check =
+                    super::review_checks::commit_5_check(&config.scan, &config.speech, cancel);
+                break drive_review(
+                    host,
+                    token,
+                    &attempt,
+                    command,
+                    &config,
+                    &check,
+                    &mut AwaitReviewer,
+                    cancel,
+                );
+            }
+            Ok(DriverStep::Seal) => {
+                let sealed = (|| {
+                    let host = upgrade(host)?;
+                    let expected = lock(&host)?.production_review_digest(token)?;
+                    seal_checked_review(&host, token, command, expected, cancel)
+                })();
+                // A failed seal stays ReadyToSeal; the next Status retries it.
+                let _ = sealed;
+                return;
+            }
+        }
+    };
+    let Err(error) = result else {
+        return;
+    };
+    if cancel.is_cancelled() {
+        return;
+    }
+    if let Some(host) = host.upgrade()
+        && let Ok(mut owner) = host.lock()
+        && owner.review_can_record(token).is_ok()
+        && let Ok(session) = owner.owner_mut()
+        && let Ok(bundle) = session.review_source_bundle_mut(&token.project)
+    {
+        let _ = bundle.update_review_job(token, UpdateReviewJob::Pause(error.to_string()));
+    }
+}
+
 /// Bind once, run every check with the lock released, record each row, then
 /// seal.
 ///
@@ -289,6 +394,10 @@ pub(in crate::writer_host) fn seal_checked_review(
             return Ok(SealResult::Sealed(Box::new(sealed)));
         }
         owner.review_can_seal(token)?;
+        #[cfg(test)]
+        if let Some(hook) = owner.review_runtime.seal_hook.clone() {
+            hook()?;
+        }
         owner
             .owner()?
             .review_source_bundle(&token.project)?
@@ -340,29 +449,10 @@ impl HostCommandOwner {
             .descriptor
             .checkpoint_ref
             .clone();
-        let runs: Vec<_> = bundle.run_index()?.orchestration.keys().cloned().collect();
-        for run in runs {
-            let Some(projection) = bundle.orchestration_projection(&run)? else {
-                continue;
-            };
-            let Some(reservation) = projection
-                .attempts
-                .iter()
-                .find(|reservation| &reservation.identity.attempt.0 == attempt)
-            else {
-                continue;
-            };
-            let reviewer = projection.tasks.iter().any(|task| {
-                task.id == reservation.identity.task
-                    && task.brief.role == Role::Reviewer
-                    && task.brief.scope.base.checkpoint == checkpoint
-            });
-            return Ok(reviewer.then(|| reservation.state.clone()));
-        }
-        Ok(None)
+        Ok(bundle.reviewer_attempt_on_cut(&checkpoint, attempt)?)
     }
 
-    fn require_reviewer_of_cut(
+    pub(super) fn require_reviewer_of_cut(
         &self,
         token: &ReviewToken,
         attempt: &SessionId,

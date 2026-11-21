@@ -83,6 +83,9 @@ struct C7Job {
     token: ReviewToken,
     attempt: ExecutionIdentity,
     reviewer: C4Mcp,
+    run: RunId,
+    parent: ExecutionIdentity,
+    director: C4Mcp,
 }
 
 #[cfg(target_os = "linux")]
@@ -96,8 +99,24 @@ fn c7_job(doc: Document) -> C7Job {
 }
 
 #[cfg(target_os = "linux")]
-fn c7_job_on(mut f: Fixture) -> C7Job {
-    let (_, parent, director) = c4_director(&f);
+fn c7_job_on(f: Fixture) -> C7Job {
+    c7_job_driven(f, false)
+}
+
+/// `auto`: the production driver starts on entry to Checking.
+#[cfg(target_os = "linux")]
+fn c7_job_driven(f: Fixture, auto: bool) -> C7Job {
+    c7_job_with(f, auto, s5_c6_start_and_finish_encode)
+}
+
+/// `encode` queues the version and returns once it is checking.
+#[cfg(target_os = "linux")]
+fn c7_job_with(
+    mut f: Fixture,
+    auto: bool,
+    encode: fn(&Fixture, &kinewright_project::studio_records::SnapshotKey) -> ReviewToken,
+) -> C7Job {
+    let (run, parent, director) = c4_director(&f);
     let (attempt, _, reviewer) = s5_child(&f, &director, &parent, Role::Reviewer);
     holder(&mut f);
     let key = s5_c6_publish_version(&f, None, vec![]);
@@ -118,13 +137,30 @@ fn c7_job_on(mut f: Fixture) -> C7Job {
             ]
         }),
     );
-    let token = s5_c6_start_and_finish_encode(&f, &key);
+    if auto {
+        c7_auto_drive(&f, true);
+    }
+    let token = encode(&f, &key);
     C7Job {
         f,
         token,
         attempt,
         reviewer,
+        run,
+        parent,
+        director,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn c7_auto_drive(f: &Fixture, auto: bool) {
+    f.host
+        .owner
+        .upgrade()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .review_fixture_auto_drive(auto);
 }
 
 /// The production commit-5 check with its default configurations.
@@ -416,20 +452,29 @@ fn ja1_s5a_c7_stop_fences_late_rows_and_annotate_is_refused() {
     );
     // The reviewer is still judging when the person stops the review.
     let mut reviewer = C7Reviewer(|token: &ReviewToken| {
+        let (stills, _, _) = s5_c6_read_all_stills(&job.reviewer, 4);
+        assert!(!stills.is_empty(), "C7_STILLS_SERVED_BEFORE_STOP");
         let stopped = s5_review_call(&job.f.editor, ReviewControl::Stop(token.clone())).unwrap();
         assert!(
             !matches!(stopped.phase, ReviewPhase::Checking(_)),
             "C7_STOPPED: {:?}",
             stopped.phase
         );
-        let late = job.reviewer.wire(
+        // Real still IDs served under the binding: refused by the fence,
+        // not by an empty list.
+        let late = s5_refusal(
+            &job.reviewer,
             "submit_visual_judgment",
-            serde_json::json!({"verdict": "pass", "reviewed_still_ids": [], "findings": []}),
+            serde_json::json!({
+                "verdict": "pass",
+                "reviewed_still_ids": stills.iter().map(|still| still.still_id.clone()).collect::<Vec<_>>(),
+                "findings": []
+            }),
+            "No active output review job is checking.",
         );
-        assert_eq!(
-            late.is_error,
-            Some(true),
-            "C7_LATE_JUDGMENT_REFUSED {late:?}"
+        assert!(
+            late.is_none(),
+            "C7_LATE_JUDGMENT_REFUSED_BY_THE_FENCE: {late:?}"
         );
         Ok(())
     });

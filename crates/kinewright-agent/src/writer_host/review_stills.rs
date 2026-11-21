@@ -1521,6 +1521,9 @@ impl HostCommandOwner {
             ));
         }
         let reviewer_attempt = authority.attempt.0.clone();
+        // The first read of a Reviewer on the cut binds a job the driver waits on.
+        #[cfg(target_os = "linux")]
+        self.claim_waiting_review(&reviewer_attempt)?;
 
         let (
             job_token,

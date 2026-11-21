@@ -610,6 +610,9 @@ impl WriterHost {
             .route("/mcp", post(mcp_request))
             .with_state(state);
         let server = serve(listener, router, "kinewright-writer-host", stop)?;
+        // A reopened Checking or ReadyToSeal job continues to its seal.
+        #[cfg(target_os = "linux")]
+        review_job::resume_after_open(&owner);
         Ok(Self {
             lifecycle,
             endpoint,
