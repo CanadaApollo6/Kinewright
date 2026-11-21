@@ -926,6 +926,7 @@ impl ProjectBundle {
             if self.pending_publication.is_some()
                 || self.pending_command.is_some()
                 || self.pending_result.is_some()
+                || self.pending_terminal_publication.is_some()
             {
                 return Err(BundleError::Unsettled);
             }

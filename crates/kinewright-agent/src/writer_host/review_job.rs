@@ -325,6 +325,35 @@ impl HostCommandOwner {
                 worker.cleanup = cleanup;
             }
         }
+        // A clean shutdown retires its own stage as the next open in this
+        // process would, so another process need not wait for this one to
+        // exit. A failure leaves it to the next open.
+        if let Ok(mut owner) = host.lock() {
+            let _ = owner.retire_for_shutdown();
+        }
+    }
+
+    fn retire_for_shutdown(&mut self) -> Result<(), HostError> {
+        if self.settlement_owned_elsewhere() {
+            return Ok(());
+        }
+        if let Some(worker) = &mut self.review_runtime.worker {
+            if worker.thread.is_some() {
+                return Ok(());
+            }
+            let stage = worker.stage.clone();
+            let project = worker.token.project.clone();
+            if let Some(cleanup) = &mut worker.cleanup {
+                cleanup.retry()?;
+            }
+            self.owner()?
+                .review_source_bundle(&project)?
+                .store()
+                .sweep_review_staging(&stage)?;
+            // Releases the staging charge after the sweep.
+            self.review_runtime.worker = None;
+        }
+        self.reconcile_review_job()
     }
 
     fn authorize_review(&mut self, bearer: &str, request: &HostRequest) -> Result<(), HostError> {
@@ -398,6 +427,15 @@ impl HostCommandOwner {
         Ok(self.owner()?.review_bundle()?.review_status()?)
     }
 
+    /// An uncertain publication whose own owner settles it: a writer hook's,
+    /// or a recovery or branch switch's root. Review writes wait behind it.
+    pub(super) fn settlement_owned_elsewhere(&self) -> bool {
+        self.hooks.pending.is_some()
+            || self
+                .owner()
+                .is_ok_and(|session| session.switch_publication_unresolved())
+    }
+
     fn stop_review_job(&mut self, token: &ReviewToken) -> Result<Option<ReviewStatus>, HostError> {
         if self
             .review_runtime
@@ -413,7 +451,7 @@ impl HostCommandOwner {
             // Arm the fence before any read that capacity or an unsettled root
             // can refuse; such a read only leaves the phase unknown. Behind
             // another owner's uncertain publication nothing is read or settled.
-            let pending_owner = self.hooks.pending.is_some();
+            let pending_owner = self.settlement_owned_elsewhere();
             let phase = match self.owner_mut().map_err(drop).and_then(|session| {
                 if pending_owner {
                     return Err(());
@@ -454,7 +492,7 @@ impl HostCommandOwner {
                 self.review_runtime.pending_stop.push(pending);
                 // A finished worker is swept and its charge released; its
                 // retirement persists the waiting Stop with the space it frees.
-                if self.hooks.pending.is_none() && self.review_runtime.worker.is_some() {
+                if !self.settlement_owned_elsewhere() && self.review_runtime.worker.is_some() {
                     let _ = self.retire_review_worker();
                 }
                 if self.review_runtime.fenced(token) {
@@ -482,7 +520,7 @@ impl HostCommandOwner {
     /// `Ok(true)`: Stopping is durable. `Ok(false)`: no fence is needed, as the
     /// job is definitely not current or its source writer is gone.
     fn persist_review_stop(&mut self, token: &ReviewToken) -> Result<bool, HostError> {
-        if self.hooks.pending.is_some() {
+        if self.settlement_owned_elsewhere() {
             return Err(BundleError::Unsettled.into());
         }
         let session = self.owner_mut()?;
@@ -528,7 +566,7 @@ impl HostCommandOwner {
     }
 
     pub(super) fn reconcile_review_job(&mut self) -> Result<(), HostError> {
-        if self.hooks.pending.is_some() {
+        if self.settlement_owned_elsewhere() {
             return Err(BundleError::Unsettled.into());
         }
         // A finished worker is swept and its charge released even while a Stop

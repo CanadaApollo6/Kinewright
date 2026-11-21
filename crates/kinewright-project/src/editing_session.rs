@@ -1308,6 +1308,14 @@ impl Ja1EditingSession {
     pub fn has_prepared_selection(&self) -> bool {
         self.prepared.is_some()
     }
+    /// A recovery or branch switch published a root whose outcome only its
+    /// own retry settles.
+    #[must_use]
+    pub fn switch_publication_unresolved(&self) -> bool {
+        self.prepared
+            .as_ref()
+            .is_some_and(crate::bundle_switch::PreparedProjectSelection::publication_started)
+    }
     #[must_use]
     pub fn preliminary_save_pending(&self) -> bool {
         self.recovery_save_pending
