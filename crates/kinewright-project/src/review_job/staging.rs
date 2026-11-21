@@ -58,6 +58,8 @@ struct LiveStage {
     /// compression, no copy on write. Otherwise a stage still being written
     /// earns no credit.
     exact: bool,
+    /// The ledger generation of this stage's charge.
+    generation: u64,
 }
 
 /// The one review stage whose charge is live in this store.
@@ -67,24 +69,26 @@ pub(crate) struct LiveStageSlot(Arc<Mutex<Option<LiveStage>>>);
 impl LiveStageSlot {
     /// Bytes the stage already holds on disk under its own charge. They lower
     /// free space and stay in the reservation, so the check credits them once.
-    /// Once the writer finished, no further staging bytes can land.
-    pub(crate) fn credit(&self) -> u64 {
+    /// Once the writer finished, no further staging bytes can land. Returns
+    /// the credit and the generation of the charge it offsets.
+    pub(crate) fn credit(&self) -> (u64, u64) {
         let Ok(slot) = self.0.lock() else {
-            return 0;
+            return (0, 0);
         };
         let Some(live) = slot.as_ref() else {
-            return 0;
+            return (0, 0);
         };
-        if live.finished {
-            return live.bytes;
-        }
-        if !live.exact {
-            return 0;
-        }
-        live.directory
-            .as_ref()
-            .and_then(|directory| staged_bytes(directory).ok())
-            .map_or(0, |staged| staged.min(live.bytes))
+        let credit = if live.finished {
+            live.bytes
+        } else if !live.exact {
+            0
+        } else {
+            live.directory
+                .as_ref()
+                .and_then(|directory| staged_bytes(directory).ok())
+                .map_or(0, |staged| staged.min(live.bytes))
+        };
+        (credit, live.generation)
     }
 }
 
@@ -194,7 +198,7 @@ impl ProjectStore {
         stage: &ReviewStage,
     ) -> Result<ReviewStageCharge, BundleError> {
         let mut reservation = self.reserve_copy(stage.byte_limit)?;
-        reservation.charge_review_stage()?;
+        let generation = reservation.charge_review_stage()?;
         let slot = &self.review_stage_slot().0;
         let mut live = slot
             .lock()
@@ -208,6 +212,7 @@ impl ProjectStore {
             finished: false,
             directory: None,
             exact: false,
+            generation,
         });
         Ok(ReviewStageCharge {
             slot: Arc::clone(slot),

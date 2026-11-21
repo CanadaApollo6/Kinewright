@@ -467,6 +467,58 @@ fn s5_review_store_filling_keeps_terminal_writes_and_publication() {
     }
 }
 
+/// The stage writes and finishes between the two samples of one ordinary
+/// reservation. The credit is sampled first, so the finished stage's credit is
+/// never paired with free space read before its bytes landed.
+#[test]
+fn s5_review_stage_credit_is_sampled_before_free_space() {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    const STAGE: u64 = 64 << 20;
+    const STAGED: usize = 8 << 20;
+    const CAPACITY: u64 = STAGE + (64 << 20);
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "review-credit-order");
+    let (_core, bundle, _) = saved_bundle(&temp);
+    let stage = ReviewStage {
+        id: SessionId::fresh().unwrap(),
+        boot: "00000000-0000-0000-0000-000000000000".into(),
+        pid: 1,
+        process_start: 1,
+        byte_limit: STAGE,
+    };
+    let charge = std::sync::Arc::new(bundle.store.reserve_review_stage(&stage).unwrap());
+    let staging = bundle.store.create_review_staging(&stage, &charge).unwrap();
+    bundle.store.free_space_probe(Some(CAPACITY)).unwrap();
+    let destination = staging.destination();
+    let writer = std::sync::Arc::clone(&charge);
+    bundle
+        .store
+        .free_sample_probe(Box::new(move || {
+            std::fs::write(&destination, incompressible(STAGED)).unwrap();
+            writer.finish_writing();
+        }))
+        .unwrap();
+    // Free space after the stage finished is CAPACITY - STAGED and the stage
+    // needs no more; anything past it is space the disk does not have.
+    let over = CAPACITY - STAGED as u64 + (1 << 20);
+    assert!(
+        matches!(
+            bundle.store.reserve(over, 0, false),
+            Err(BundleError::Capacity("disk reserve"))
+        ),
+        "T1_CREDIT_NEVER_COVERS_UNSAMPLED_BYTES"
+    );
+    let honest = CAPACITY - STAGED as u64 - (1 << 20);
+    drop(
+        bundle
+            .store
+            .reserve(honest, 0, false)
+            .expect("T1_FINISHED_CREDIT_HONOURED"),
+    );
+    drop(staging);
+    bundle.store.sweep_review_staging(&stage).unwrap();
+    drop(charge);
+}
+
 /// Limits at the reduced ceiling for the run's ordinary writes. Returns the
 /// disk room left past the stage charge.
 fn fill_to_ceiling(bundle: &mut ProjectBundle, ending: StagedEnding, stage: u64) -> u64 {

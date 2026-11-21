@@ -125,6 +125,8 @@ struct StoreInner {
     // Simulated free space: (capacity, physical bytes when it was set).
     #[cfg(any(test, feature = "test-util"))]
     free_probe: Mutex<Option<(u64, u64)>>,
+    #[cfg(any(test, feature = "test-util"))]
+    free_sample_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     limits: StorageLimits,
     root_bytes: Mutex<u64>,
     inventory_bytes: Mutex<u64>,
@@ -740,6 +742,8 @@ impl ProjectStore {
                 review_stage: crate::review_job::LiveStageSlot::default(),
                 #[cfg(any(test, feature = "test-util"))]
                 free_probe: Mutex::new(None),
+                #[cfg(any(test, feature = "test-util"))]
+                free_sample_probe: Mutex::new(None),
                 root_bytes: Mutex::new(root_bytes),
                 inventory_bytes: Mutex::new(inventory_bytes),
                 limits,
@@ -863,17 +867,46 @@ impl ProjectStore {
     /// Free disk bytes, crediting bytes a live review stage already wrote under
     /// its own charge so they are not counted on both sides of the check.
     fn free_bytes(&self) -> Result<crate::storage_budget::FreeSpace, BundleError> {
+        // The credit is sampled first: bytes the stage writes, and a finish,
+        // after this read only lower the free space read next, so the credit
+        // never covers bytes that sample did not see.
+        #[cfg(target_os = "linux")]
+        let (stage_credit, stage_generation) = self.inner.review_stage.credit();
+        #[cfg(not(target_os = "linux"))]
+        let (stage_credit, stage_generation) = (0, 0);
+        #[cfg(any(test, feature = "test-util"))]
+        self.run_free_sample_probe()?;
         let free = self.with_namespace(|n| n.available_bytes())?;
         #[cfg(any(test, feature = "test-util"))]
         let free = self.simulated_free(free)?;
-        #[cfg(target_os = "linux")]
-        let stage_credit = self.inner.review_stage.credit();
-        #[cfg(not(target_os = "linux"))]
-        let stage_credit = 0;
         Ok(crate::storage_budget::FreeSpace::crediting_stage(
             free,
             stage_credit,
+            stage_generation,
         ))
+    }
+    /// Run `probe` once, between the next stage credit and free space samples.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn free_sample_probe(&self, probe: Box<dyn FnOnce() + Send>) -> Result<(), BundleError> {
+        *self
+            .inner
+            .free_sample_probe
+            .lock()
+            .map_err(|_| BundleError::Capacity("free sample probe poisoned"))? = Some(probe);
+        Ok(())
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    fn run_free_sample_probe(&self) -> Result<(), BundleError> {
+        let probe = self
+            .inner
+            .free_sample_probe
+            .lock()
+            .map_err(|_| BundleError::Capacity("free sample probe poisoned"))?
+            .take();
+        if let Some(probe) = probe {
+            probe();
+        }
+        Ok(())
     }
     /// Replace free disk space with `capacity`, less the physical bytes sealed
     /// since and the bytes a live review stage holds on disk.
