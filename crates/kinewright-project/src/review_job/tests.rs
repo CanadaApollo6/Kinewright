@@ -488,8 +488,9 @@ fn fill_to_ceiling(bundle: &mut ProjectBundle, ending: StagedEnding, stage: u64)
         "the charge would overflow the owned-media allowance"
     );
     let room = if matches!(ending, StagedEnding::Publish) {
-        // Ordinary room after the disk headroom: 8 MiB for a 4 MiB artifact.
-        40 << 20
+        // 2 MiB of ordinary room after the disk headroom: the 4 MiB artifact
+        // fits only through the finished stage's unused charge.
+        DISK_HEADROOM + (2 << 20)
     } else {
         // Objects and disk at the reduced ceiling; 2 MiB is under the
         // staged bytes, so counting them twice leaves no room at all.

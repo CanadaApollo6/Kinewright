@@ -810,12 +810,13 @@ fn s5_review_save(host: &WriterHost, client: &HostClient, marker: u64) -> HostRe
 )]
 #[allow(
     clippy::too_many_lines,
-    reason = "one filled store through two endings"
+    reason = "one filled store through three endings"
 )]
 fn s5_review_full_store_releases_the_stage_before_a_pending_stop() {
     use std::sync::atomic::Ordering;
     const STAGE: u64 = 64 << 20;
-    for publish in [false, true] {
+    // The pending Stop is retried by Status, or by the person pressing Stop again.
+    for (publish, retry_stop) in [(false, false), (false, true), (true, false)] {
         let temp = kinewright_media::test_support::TempDirectory::new("review-full");
         s5_review_seed(temp.root());
         let (host, client) = s5_review_host(temp.root());
@@ -869,6 +870,9 @@ fn s5_review_full_store_releases_the_stage_before_a_pending_stop() {
                 s5_review_save(&host, &client, 31),
                 "REVIEW_SAVE_WHILE_ENCODING",
             );
+            // No ordinary room past the 32 MiB revocation headroom: the
+            // artifact publishes only through the finished stage's credit.
+            probe(STAGE + (32 << 20));
             release.store(true, Ordering::Release);
             let checking =
                 s5_review_wait(&client, |phase| matches!(phase, ReviewPhase::Checking(_)));
@@ -914,7 +918,12 @@ fn s5_review_full_store_releases_the_stage_before_a_pending_stop() {
                 },
                 "REVIEW_FULL_WORKER_FINISHED",
             );
-            let _ = client.request(HostCommand::Review(ReviewControl::Status));
+            let retry = if retry_stop {
+                ReviewControl::Stop(token.clone())
+            } else {
+                ReviewControl::Status
+            };
+            let _ = client.request(HostCommand::Review(retry));
             let held = shared
                 .lock()
                 .unwrap()
@@ -928,7 +937,7 @@ fn s5_review_full_store_releases_the_stage_before_a_pending_stop() {
             assert_eq!(
                 (held, s5_review_stage_count(&temp)),
                 (0, 0),
-                "REVIEW_RETIREMENT_BEFORE_PENDING_STOP"
+                "REVIEW_RETIREMENT_BEFORE_PENDING_STOP retry_stop={retry_stop}"
             );
             probe(STAGE);
             let status = s5_review_call(&client, ReviewControl::Status).unwrap();
@@ -1696,4 +1705,135 @@ fn s5_review_stop_reads_terminally_and_never_settles_another_owner() {
         eprintln!("S5_REVIEW_STOP_CASE {case:?}");
         s5_review_stop_case(case);
     }
+}
+
+/// After Save As the source's worker is still encoding: the copy cannot
+/// queue a second worker until the first has retired.
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn s5_review_live_worker_refuses_a_second_queue() {
+    use std::sync::atomic::Ordering;
+    let temp = kinewright_media::test_support::TempDirectory::new("review-live-queue");
+    s5_review_seed(temp.root());
+    let (host, client) = s5_review_host(temp.root());
+    let key = s5_review_version(&host);
+    let (arrived, release, _) = s5_review_hold(&host, ReviewPoint::BeforeEncode);
+    let source = s5_review_start(&client, &key);
+    s5_review_until(|| arrived.load(Ordering::Acquire), "REVIEW_LIVE_HOLD");
+    let shared = host.owner.upgrade().unwrap();
+    shared
+        .lock()
+        .unwrap()
+        .owner_mut()
+        .unwrap()
+        .save_as(&temp.path("copy.kinewright"), StorageLimits::default())
+        .unwrap();
+    let copy_key = s5_review_version(&host);
+    let queued = client
+        .request(HostCommand::Review(ReviewControl::QueueDefault(
+            copy_key.clone(),
+        )))
+        .unwrap();
+    release.store(true, Ordering::Release);
+    assert!(
+        queued
+            .error
+            .as_ref()
+            .is_some_and(|error| error.message.contains("still encoding or retiring")),
+        "REVIEW_SECOND_QUEUE_REFUSED {:?}",
+        queued.error
+    );
+    s5_review_until(
+        || {
+            shared
+                .lock()
+                .unwrap()
+                .review_fixture_worker()
+                .is_some_and(|(_, done)| done)
+        },
+        "REVIEW_LIVE_WORKER_FINISHED",
+    );
+    let copy = s5_review_call(&client, ReviewControl::QueueDefault(copy_key)).unwrap();
+    assert_ne!(
+        copy.token.project, source.project,
+        "REVIEW_QUEUE_AFTER_RETIREMENT"
+    );
+    assert!(
+        shared.lock().unwrap().review_fixture_worker().is_none(),
+        "the source worker retired before the copy queued"
+    );
+}
+
+/// A retained source whose disk is full cannot record its worker's
+/// retirement; the active copy's commands are not failed by it.
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn s5_review_retained_retirement_failure_stays_with_its_project() {
+    let temp = kinewright_media::test_support::TempDirectory::new("review-retained-retire");
+    s5_review_seed(temp.root());
+    let (host, client) = s5_review_host(temp.root());
+    let key = s5_review_version(&host);
+    let source = s5_review_start(&client, &key);
+    let shared = host.owner.upgrade().unwrap();
+    // No Status: the finished source worker is still unretired at Save As.
+    s5_review_until(
+        || {
+            shared
+                .lock()
+                .unwrap()
+                .review_fixture_worker()
+                .is_some_and(|(_, done)| done)
+        },
+        "REVIEW_RETAINED_WORKER_FINISHED",
+    );
+    {
+        let mut owner = shared.lock().unwrap();
+        owner
+            .owner_mut()
+            .unwrap()
+            .save_as(&temp.path("copy.kinewright"), StorageLimits::default())
+            .unwrap();
+        owner
+            .owner()
+            .unwrap()
+            .review_source_bundle(&source.project)
+            .unwrap()
+            .store()
+            .free_space_probe(Some(0))
+            .unwrap();
+    }
+    let status = client
+        .request(HostCommand::Review(ReviewControl::Status))
+        .unwrap();
+    assert!(
+        status.error.is_none(),
+        "REVIEW_RETAINED_FAILURE_STAYS_WITH_ITS_PROJECT {:?}",
+        status.error
+    );
+    let owner = shared.lock().unwrap();
+    assert!(
+        owner.review_fixture_worker().is_none(),
+        "the worker retired"
+    );
+    let bundle = owner
+        .owner()
+        .unwrap()
+        .review_source_bundle(&source.project)
+        .unwrap();
+    bundle.store().free_space_probe(None).unwrap();
+    assert!(
+        bundle
+            .review_job()
+            .unwrap()
+            .is_some_and(|job| job.stage.is_some()),
+        "the source records its stage for its own next command"
+    );
 }
