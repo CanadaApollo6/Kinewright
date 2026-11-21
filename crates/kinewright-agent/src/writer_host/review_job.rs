@@ -433,7 +433,7 @@ impl HostCommandOwner {
         self.hooks.pending.is_some()
             || self
                 .owner()
-                .is_ok_and(|session| session.switch_publication_unresolved())
+                .is_ok_and(kinewright_project::editing_session::Ja1EditingSession::switch_publication_unresolved)
     }
 
     fn stop_review_job(&mut self, token: &ReviewToken) -> Result<Option<ReviewStatus>, HostError> {
