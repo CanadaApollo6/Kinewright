@@ -51,8 +51,22 @@ mod title;
 mod transcript;
 // JA-1 S3 C5
 mod review_output;
+// JA-1 S5a C6
+mod review_overlays;
+mod review_stills;
 mod verify;
 pub use review_output::{ReviewOutputStream, ReviewOutputTiming, inspect_review_output};
+pub use review_overlays::{
+    MAX_OVERLAY_FINDINGS, MAX_OVERLAY_FRAME_SCAN, OVERLAY_DECODE_WINDOW_FRAMES,
+    OverlayElementStatus, OverlayElementSummary, OverlayFinding, OverlayFindingKind,
+    OverlayVerificationConfig, OverlayVerificationReport, ReviewReadSeek, verify_review_overlays,
+};
+pub use review_stills::{
+    DecodedReviewStill, MAX_REVIEW_STILLS, MAX_STILL_LONG_EDGE, MAX_STILL_PNG_BYTES,
+    MAX_STILLS_PER_PAGE, PlannedReviewStill, ReviewStillKind, ReviewStillPlan,
+    ReviewStillPlanInput, ReviewStillReason, bounded_still_dimensions, decode_review_stills_page,
+    plan_review_stills,
+};
 pub mod voice_note;
 mod worker;
 
