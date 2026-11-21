@@ -878,13 +878,15 @@ fn s5_review_full_store_releases_the_stage_before_a_pending_stop() {
                 s5_review_wait(&client, |phase| matches!(phase, ReviewPhase::Checking(_)));
             assert_eq!(checking.token, token, "REVIEW_PUBLISHED_ON_A_FULL_STORE");
             assert_eq!(s5_review_artifact(&host, &token).output.video_frames, 6);
+            // A Status that finds the thread already gone retires the worker,
+            // so a retired worker has finished too.
             s5_review_until(
                 || {
                     shared
                         .lock()
                         .unwrap()
                         .review_fixture_worker()
-                        .is_some_and(|(_, done)| done)
+                        .is_none_or(|(_, done)| done)
                 },
                 "REVIEW_FULL_WORKER_FINISHED",
             );
