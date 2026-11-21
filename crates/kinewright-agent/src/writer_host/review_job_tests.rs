@@ -1007,6 +1007,31 @@ fn s5_review_shutdown_joins_a_held_encode_before_reopen() {
     });
     drop(client);
     drop(host);
+    // Without any host: a clean shutdown left no stage for another process to
+    // prove retired.
+    assert_eq!(
+        s5_review_stage_count(&temp),
+        0,
+        "REVIEW_CLEAN_SHUTDOWN_SWEEPS_ITS_STAGE"
+    );
+    {
+        let pool = kinewright_project::operation_history::HistoryPool::new(
+            kinewright_project::operation_history::PoolLimits::default(),
+        );
+        let session = Ja1EditingSession::open(&temp.path("project.kinewright"), &pool).unwrap();
+        let job = session
+            .review_bundle()
+            .unwrap()
+            .review_job()
+            .unwrap()
+            .unwrap();
+        assert!(
+            job.token.job == token.job && job.stage.is_none() && job.phase == ReviewPhase::Queued,
+            "REVIEW_CLEAN_SHUTDOWN_RETIRES_ITS_STAGE {:?} {:?}",
+            job.phase,
+            job.stage
+        );
+    }
     let (_host, client) = s5_review_host(temp.root());
     let status = s5_review_call(&client, ReviewControl::Status).unwrap();
     assert_eq!(
@@ -1483,6 +1508,34 @@ enum S5StopCase {
     /// An orchestration publication is pending behind the review's own
     /// uncertain write; nothing may settle until it is.
     HooksPending,
+    /// A recovery switch published a root with an unknown outcome; only the
+    /// switch's own retry settles it.
+    SwitchUnknown,
+}
+
+/// An orchestration publication with an unknown outcome, owned by the hooks.
+fn s5_review_pending_publication(
+    owner: &mut HostCommandOwner,
+    project: &kinewright_project::bundle_records::ProjectId,
+) {
+    let id = |n: u8| serde_json::Value::String(format!("{n:x}").repeat(32));
+    let project_value = serde_json::to_value(project).unwrap();
+    let identity = serde_json::from_value(serde_json::json!({
+        "version": 1, "project": project_value, "run": id(1), "task": id(2),
+        "attempt": id(3), "nonce": id(4), "owner_instance": id(5),
+    }))
+    .unwrap();
+    let record = serde_json::from_value(serde_json::json!({
+        "version": 1, "project": project_value, "run": id(1), "revision": 0,
+        "start_unix_ms": 0, "deadline_unix_ms": 0, "last_unix_ms": 0,
+        "elapsed_ms": 0, "clock_uncertain": false, "durable_event_bytes": 0,
+        "tasks": [],
+    }))
+    .unwrap();
+    owner.hooks.pending = Some(super::super::orchestration::PendingPublication::Cumulative(
+        Box::new(identity),
+        Box::new(record),
+    ));
 }
 
 fn s5_review_uncertain_annotation(
@@ -1534,6 +1587,11 @@ fn s5_review_stop_case(case: S5StopCase) {
         s5_review_call(&client, ReviewControl::Status).unwrap();
         token
     };
+    if matches!(case, S5StopCase::SwitchUnknown) {
+        // Checkpoints a recovery switch can select.
+        ok(s5_review_save(&host, &client, 51), "REVIEW_STOP_CASE_SAVE");
+        ok(s5_review_save(&host, &client, 52), "REVIEW_STOP_CASE_SAVE");
+    }
     let mut token = checked();
     let stale = matches!(case, S5StopCase::Ceiling | S5StopCase::Unsettled).then(|| {
         // A Stop for a replaced job is answered by reading the live job.
@@ -1607,25 +1665,21 @@ fn s5_review_stop_case(case: S5StopCase) {
             }
             S5StopCase::HooksPending => {
                 s5_review_uncertain_annotation(&mut owner, &key);
-                let id = |n: u8| serde_json::Value::String(format!("{n:x}").repeat(32));
-                let project_value = serde_json::to_value(&project).unwrap();
-                let identity = serde_json::from_value(serde_json::json!({
-                    "version": 1, "project": project_value, "run": id(1), "task": id(2),
-                    "attempt": id(3), "nonce": id(4), "owner_instance": id(5),
-                }))
-                .unwrap();
-                let record = serde_json::from_value(serde_json::json!({
-                    "version": 1, "project": project_value, "run": id(1), "revision": 0,
-                    "start_unix_ms": 0, "deadline_unix_ms": 0, "last_unix_ms": 0,
-                    "elapsed_ms": 0, "clock_uncertain": false, "durable_event_bytes": 0,
-                    "tasks": [],
-                }))
-                .unwrap();
-                owner.hooks.pending =
-                    Some(super::super::orchestration::PendingPublication::Cumulative(
-                        Box::new(identity),
-                        Box::new(record),
-                    ));
+                s5_review_pending_publication(&mut owner, &project);
+            }
+            S5StopCase::SwitchUnknown => {
+                let session = owner.owner_mut().unwrap();
+                let target = session.list_recovery_points().unwrap().pop().unwrap();
+                session.prepare_recovery(target).unwrap();
+                let selected = fail_once("root_parent_sync", || session.select_local());
+                assert!(
+                    matches!(
+                        selected,
+                        kinewright_project::bundle_switch::ProjectSelectionResult::Unknown
+                    ),
+                    "REVIEW_STOP_CASE_SWITCH_UNKNOWN {selected:?}"
+                );
+                assert!(session.switch_publication_unresolved());
             }
         }
     }
@@ -1686,6 +1740,30 @@ fn s5_review_stop_case(case: S5StopCase) {
                 "REVIEW_STOP_SETTLES_ITS_OWN_WRITE_ONCE_FREE {stopped:?}"
             );
         }
+        S5StopCase::SwitchUnknown => {
+            assert!(reply.stop_pending, "REVIEW_STOP_WAITS_FOR_SWITCH {reply:?}");
+            let mut owner = shared.lock().unwrap();
+            let session = owner.owner_mut().unwrap();
+            assert!(
+                session.switch_publication_unresolved(),
+                "REVIEW_STOP_LEAVES_THE_SWITCH_TO_ITS_OWNER"
+            );
+            // The switch's own retry proves its landed root.
+            let selected = session.select_local();
+            assert!(
+                matches!(
+                    selected,
+                    kinewright_project::bundle_switch::ProjectSelectionResult::Activated(_)
+                ),
+                "REVIEW_STOP_CASE_SWITCH_SETTLES {selected:?}"
+            );
+            drop(owner);
+            let stopped = s5_review_call(&client, ReviewControl::Stop(token.clone())).unwrap();
+            assert!(
+                !stopped.stop_pending && stopped.phase == ReviewPhase::Stopped,
+                "REVIEW_STOP_AFTER_THE_SWITCH_SETTLES {stopped:?}"
+            );
+        }
     }
 }
 
@@ -1701,6 +1779,7 @@ fn s5_review_stop_reads_terminally_and_never_settles_another_owner() {
         S5StopCase::Unsettled,
         S5StopCase::ForeignSave,
         S5StopCase::HooksPending,
+        S5StopCase::SwitchUnknown,
     ] {
         eprintln!("S5_REVIEW_STOP_CASE {case:?}");
         s5_review_stop_case(case);
@@ -1835,5 +1914,186 @@ fn s5_review_retained_retirement_failure_stays_with_its_project() {
             .unwrap()
             .is_some_and(|job| job.stage.is_some()),
         "the source records its stage for its own next command"
+    );
+}
+
+/// A Stop for a replaced job, armed behind a pending owner, is dropped by the
+/// next Stop through a terminal read even at the metadata ceiling.
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn s5_review_stale_pending_stop_is_dropped_at_the_ceiling() {
+    let temp = kinewright_media::test_support::TempDirectory::new("review-stale-pending");
+    s5_review_seed(temp.root());
+    let (host, client) = s5_review_host(temp.root());
+    let key = s5_review_version(&host);
+    let shared = host.owner.upgrade().unwrap();
+    let checked = || {
+        let token = s5_review_start(&client, &key);
+        s5_review_wait(&client, |phase| matches!(phase, ReviewPhase::Checking(_)));
+        s5_review_until(
+            || {
+                shared
+                    .lock()
+                    .unwrap()
+                    .review_fixture_worker()
+                    .is_none_or(|(_, done)| done)
+            },
+            "REVIEW_STALE_PENDING_WORKER_FINISHED",
+        );
+        s5_review_call(&client, ReviewControl::Status).unwrap();
+        token
+    };
+    let stale = checked();
+    let stopped = s5_review_call(&client, ReviewControl::Stop(stale.clone())).unwrap();
+    assert_eq!(stopped.phase, ReviewPhase::Stopped);
+    let token = checked();
+    s5_review_pending_publication(&mut shared.lock().unwrap(), &token.project);
+    let armed = s5_review_call(&client, ReviewControl::Stop(stale)).unwrap();
+    assert!(armed.stop_pending, "REVIEW_STALE_STOP_ARMED {armed:?}");
+    {
+        let mut owner = shared.lock().unwrap();
+        owner.hooks.pending = None;
+        // Over the revocation headroom, under a full decoded record.
+        let bundle = owner
+            .owner_mut()
+            .unwrap()
+            .review_source_bundle_mut(&token.project)
+            .unwrap();
+        bundle
+            .restrict_limits_probe(kinewright_project::storage_budget::StorageLimits {
+                metadata_bytes: 100 << 20,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(bundle.review_status().is_err(), "ordinary reads refused");
+    }
+    let reply = client
+        .request(HostCommand::Review(ReviewControl::Stop(token.clone())))
+        .unwrap();
+    assert!(
+        reply.error.is_none()
+            && reply.review.as_ref().is_some_and(|status| {
+                status.token == token
+                    && !status.stop_pending
+                    && matches!(status.phase, ReviewPhase::Stopping | ReviewPhase::Stopped)
+            }),
+        "REVIEW_STALE_PENDING_STOP_DROPPED_AT_CEILING {:?} {:?}",
+        reply.error,
+        reply.review
+    );
+}
+
+/// A released copy never takes a live review worker or an unretired stage
+/// with it; a finished worker retires before the copy is released.
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn s5_review_release_waits_for_the_review_worker() {
+    use std::sync::atomic::Ordering;
+    let temp = kinewright_media::test_support::TempDirectory::new("review-release");
+    s5_review_seed(temp.root());
+    let (host, client) = s5_review_host(temp.root());
+    let key = s5_review_version(&host);
+    let (arrived, release, _) = s5_review_hold(&host, ReviewPoint::BeforeEncode);
+    let source = s5_review_start(&client, &key);
+    s5_review_until(|| arrived.load(Ordering::Acquire), "REVIEW_RELEASE_HOLD");
+    let shared = host.owner.upgrade().unwrap();
+    let source_path = temp.path("project.kinewright");
+    let prepared = (|| {
+        let mut owner = shared.lock().unwrap();
+        owner
+            .owner_mut()
+            .unwrap()
+            .save_as(&temp.path("copy.kinewright"), StorageLimits::default())
+            .map_err(|error| format!("save as: {error}"))?;
+        owner
+            .core()
+            .request(kinewright_core::Command::Do(history_marker(61)))
+            .map_err(|error| format!("edit: {error:?}"))?;
+        let session = owner.owner_mut().unwrap();
+        session
+            .save_active()
+            .map_err(|error| format!("save: {error}"))?;
+        // Selecting the copy's predecessor seals the source's actor.
+        let target = session
+            .list_recovery_points()
+            .map_err(|error| format!("points: {error}"))?
+            .pop()
+            .ok_or("no recovery point")?;
+        session
+            .prepare_recovery(target)
+            .map_err(|error| format!("prepare: {error}"))?;
+        match session.select_local() {
+            kinewright_project::bundle_switch::ProjectSelectionResult::Activated(_) => {}
+            other => return Err(format!("select: {other:?}")),
+        }
+        if !session.is_capture_destination(&source_path) {
+            return Err("the source is not a completed capture".into());
+        }
+        Ok::<_, String>(())
+    })();
+    let live = prepared.as_ref().ok().map(|()| {
+        let preview = client
+            .request(HostCommand::PreviewRelease {
+                destination: source_path.clone(),
+            })
+            .unwrap();
+        assert!(preview.error.is_none(), "{:?}", preview.error);
+        client.request(HostCommand::Release).unwrap()
+    });
+    release.store(true, Ordering::Release);
+    prepared.unwrap_or_else(|error| panic!("REVIEW_RELEASE_FIXTURE {error}"));
+    let live = live.unwrap();
+    assert!(
+        live.error
+            .as_ref()
+            .is_some_and(|error| error.message.contains("still encoding or retiring")),
+        "REVIEW_LIVE_WORKER_KEEPS_ITS_COPY {:?}",
+        live.error
+    );
+    s5_review_until(
+        || {
+            shared
+                .lock()
+                .unwrap()
+                .review_fixture_worker()
+                .is_some_and(|(_, done)| done)
+        },
+        "REVIEW_RELEASE_WORKER_FINISHED",
+    );
+    let preview = client
+        .request(HostCommand::PreviewRelease {
+            destination: source_path.clone(),
+        })
+        .unwrap();
+    assert!(preview.error.is_none(), "{:?}", preview.error);
+    let released = client.request(HostCommand::Release).unwrap();
+    assert!(
+        released.error.is_none(),
+        "REVIEW_FINISHED_WORKER_RETIRES_BEFORE_RELEASE {:?}",
+        released.error
+    );
+    let owner = shared.lock().unwrap();
+    assert!(
+        owner.review_fixture_worker().is_none()
+            && owner
+                .owner()
+                .unwrap()
+                .review_source_bundle(&source.project)
+                .is_err(),
+        "REVIEW_RELEASED_COPY_TOOK_NO_WORKER"
+    );
+    drop(owner);
+    assert_eq!(
+        s5_review_stage_count(&temp),
+        0,
+        "REVIEW_RELEASE_STAGE_SWEPT"
     );
 }
