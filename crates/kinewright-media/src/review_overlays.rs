@@ -6,8 +6,7 @@
 //! time with O(1) memory independent of overlay count.
 
 use std::{
-    cmp::Reverse,
-    collections::{BTreeMap, BTreeSet, BinaryHeap},
+    collections::{BTreeMap, BTreeSet},
     fs::File,
     ops::Range,
     path::Path,
@@ -26,12 +25,13 @@ use kinewright_core::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    compositor::{GpuContext, LayerParams},
+    compositor::{GpuContext, LayerParams, params_for_at},
     decode::{backend, color_description_from_decoder, managed_filter_graph},
     locator::DenyLocatorOpens,
     owned_io::PlaybackInputs,
     render::{DecodeStrategy, FrameRenderer, RenderScale},
     review_output::ReviewOutputTiming,
+    timeline::{title_alpha, transition_render_params},
 };
 
 /// Cap on findings retained in one [`OverlayVerificationReport`].
@@ -43,8 +43,12 @@ pub const OVERLAY_DECODE_WINDOW_FRAMES: usize = 1;
 
 const TILE_SIZE: usize = 8;
 const TILE_STEP: usize = 4;
-const TILE_MIN_SUPPORT_PIXELS: usize = 8;
 const BOX_PAD_PX: i32 = 2;
+/// Physical upper bound on compression-noise adaptation so a whole-frame occluder or corrupted
+/// decode (for example `global_noise_rms > 100`) can never inflate ceilings or measurability
+/// floors to disguise a real failure as codec noise.
+const MAX_ADAPTIVE_GLOBAL_NOISE_RMS: f32 = 16.0;
+const MAX_ADAPTIVE_TILE_NOISE_P99: f32 = 30.0;
 
 /// Fixed, validated configuration governing L14 with/without-overlay verification.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -55,26 +59,39 @@ pub struct OverlayVerificationConfig {
     pub min_pixel_signal: f32,
     /// Minimum number of active support pixels on a frame for that frame to be measurable.
     pub min_support_pixels: usize,
-    /// Minimum RMS reference separation (`d(with, without)`) over active support pixels for a
-    /// frame to be measurable. Frames below this floor are `NotMeasurable`, never silent passes.
+    /// Fixed floor on RMS reference separation (`d(with, without)`) over active support pixels.
+    /// Combined with `noise_measurability_multiplier * frame_global_noise_rms`; frames below
+    /// that floor are `NotMeasurable`, never silent passes.
     pub min_reference_separation: f32,
+    /// Multiple of the frame's measured outside-overlay global noise RMS added to the
+    /// measurability separation floor so overlays buried in delivery codec noise are
+    /// classified `NotMeasurable` rather than false-failing or false-passing.
+    pub noise_measurability_multiplier: f32,
     /// Maximum allowed `with_rms / without_rms` ratio on measurable frames (the decoded output
     /// must match the with-overlay reference clearly better than the without-overlay reference).
     pub max_with_to_without_ratio: f32,
     /// Minimum absolute advantage `without_rms - with_rms` on measurable frames.
     pub min_advantage_margin: f32,
-    /// Absolute RMS ceiling on `d(decoded, with_overlay)` over active support pixels.
+    /// Fixed floor on the global RMS ceiling for `d(decoded, with_overlay)` over active support
+    /// pixels (scaled by `global_noise_ceiling_multiplier * frame_global_noise_rms`).
     pub max_codec_error_rms: f32,
+    /// Multiple of the frame's measured outside-overlay global noise RMS added to the global
+    /// in-range codec ceiling and the outside-cue absence ceiling.
+    pub global_noise_ceiling_multiplier: f32,
     /// Relative RMS ceiling (`ref_rms * max_relative_error`) on `d(decoded, with_overlay)`.
     pub max_relative_error: f32,
-    /// Localized `8x8` overlapping tile RMS ceiling on `d(decoded, with_overlay)` inside the
-    /// overlay bounds (catches single-digit or single-word substitutions in long lines).
+    /// Fixed floor on the localized `8x8` overlapping tile RMS ceiling inside the overlay bounds
+    /// (scaled by `tile_noise_ceiling_multiplier * frame_tile_noise_p99`).
     pub max_tile_error_rms: f32,
+    /// Multiple of the frame's measured outside-overlay 99th-percentile `8x8` tile noise RMS
+    /// added to the localized `8x8` tile ceiling.
+    pub tile_noise_ceiling_multiplier: f32,
     /// Minimum fraction of an element's expected visible frames that must be measurable for the
     /// element to pass (in addition to at least one measurable frame per animated extreme).
     pub min_measurable_frame_ratio: f32,
-    /// Maximum allowed RMS departure from `without_overlay` on outside-cue timing probes
-    /// (`cue_start - 1` and `cue_end`) before flagging an early or lingering overlay.
+    /// Fixed floor on allowed RMS departure from `without_overlay` on outside-cue timing probes
+    /// (`cue_start - 1` and `cue_end`), scaled by `global_noise_ceiling_multiplier *
+    /// frame_global_noise_rms`.
     pub timing_max_without_rms: f32,
     /// Maximum number of findings recorded in the report (must be in `1..=MAX_OVERLAY_FINDINGS`).
     pub max_findings: usize,
@@ -86,13 +103,16 @@ impl Default for OverlayVerificationConfig {
             min_pixel_signal: 6.0,
             min_support_pixels: 16,
             min_reference_separation: 12.0,
+            noise_measurability_multiplier: 2.2,
             max_with_to_without_ratio: 0.45,
             min_advantage_margin: 6.0,
-            max_codec_error_rms: 24.0,
+            max_codec_error_rms: 20.0,
+            global_noise_ceiling_multiplier: 1.5,
             max_relative_error: 0.30,
-            max_tile_error_rms: 26.0,
+            max_tile_error_rms: 22.0,
+            tile_noise_ceiling_multiplier: 2.0,
             min_measurable_frame_ratio: 0.50,
-            timing_max_without_rms: 22.0,
+            timing_max_without_rms: 10.0,
             max_findings: MAX_OVERLAY_FINDINGS,
         }
     }
@@ -119,6 +139,12 @@ impl OverlayVerificationConfig {
             2.0,
             128.0,
         )?;
+        check_range(
+            "noise_measurability_multiplier",
+            self.noise_measurability_multiplier,
+            0.5,
+            8.0,
+        )?;
         if self.min_reference_separation < self.min_pixel_signal {
             return Err(MediaError::Backend(
                 "invalid overlay verification config: min_reference_separation must be >= min_pixel_signal"
@@ -133,8 +159,20 @@ impl OverlayVerificationConfig {
         )?;
         check_range("min_advantage_margin", self.min_advantage_margin, 1.0, 64.0)?;
         check_range("max_codec_error_rms", self.max_codec_error_rms, 2.0, 64.0)?;
+        check_range(
+            "global_noise_ceiling_multiplier",
+            self.global_noise_ceiling_multiplier,
+            0.5,
+            8.0,
+        )?;
         check_range("max_relative_error", self.max_relative_error, 0.05, 0.75)?;
         check_range("max_tile_error_rms", self.max_tile_error_rms, 4.0, 80.0)?;
+        check_range(
+            "tile_noise_ceiling_multiplier",
+            self.tile_noise_ceiling_multiplier,
+            0.5,
+            8.0,
+        )?;
         check_range(
             "min_measurable_frame_ratio",
             self.min_measurable_frame_ratio,
@@ -167,15 +205,18 @@ impl OverlayVerificationConfig {
     #[must_use]
     pub fn sha256(&self) -> [u8; 32] {
         let mut hasher = kinewright_hash::Sha256::new();
-        hasher.update(b"kinewright-overlay-verification-config-v2\0");
+        hasher.update(b"kinewright-overlay-verification-config-v3\0");
         for value in [
             self.min_pixel_signal,
             self.min_reference_separation,
+            self.noise_measurability_multiplier,
             self.max_with_to_without_ratio,
             self.min_advantage_margin,
             self.max_codec_error_rms,
+            self.global_noise_ceiling_multiplier,
             self.max_relative_error,
             self.max_tile_error_rms,
+            self.tile_noise_ceiling_multiplier,
             self.min_measurable_frame_ratio,
             self.timing_max_without_rms,
         ] {
@@ -210,10 +251,14 @@ pub struct OverlayElementSummary {
     pub checked_frames: u64,
     pub animated_extreme_frames: u64,
     pub measured_extreme_frames: u64,
+    pub expected_boundary_probes: u64,
     pub boundary_checked_frames: u64,
+    pub boundary_unmeasured_frames: u64,
     pub failed_frames: u64,
     pub worst_with_rms: f32,
     pub min_without_rms: f32,
+    pub worst_tile_rms: f32,
+    pub worst_boundary_without_rms: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,6 +288,9 @@ pub enum OverlayFindingKind {
         expected_extremes: u64,
         measured_extremes: u64,
     },
+    UnmeasurableBoundaryProbe {
+        reason: String,
+    },
     CompositorReferenceMismatch {
         with_rms_tenths: u16,
         without_rms_tenths: u16,
@@ -250,6 +298,11 @@ pub enum OverlayFindingKind {
         worst_tile_rms_tenths: u16,
     },
     UnexpectedOverlayOutsideCue {
+        without_rms_tenths: u16,
+        with_injected_rms_tenths: u16,
+        ref_rms_tenths: u16,
+    },
+    OutsideCueReferenceMismatch {
         without_rms_tenths: u16,
         with_injected_rms_tenths: u16,
         ref_rms_tenths: u16,
@@ -275,6 +328,9 @@ pub struct OverlayVerificationReport {
     pub unmeasurable_frames: u64,
     pub animated_extreme_frames: u64,
     pub boundary_checked_frames: u64,
+    pub boundary_unmeasured_frames: u64,
+    pub max_frame_global_noise_rms: f32,
+    pub max_frame_tile_noise_p99: f32,
     pub total_findings: usize,
     pub findings_truncated: bool,
     pub findings: Vec<OverlayFinding>,
@@ -292,6 +348,9 @@ impl OverlayVerificationReport {
                 unmeasurable_frames: 0,
                 animated_extreme_frames: 0,
                 boundary_checked_frames: 0,
+                boundary_unmeasured_frames: 0,
+                max_frame_global_noise_rms: 0.0,
+                max_frame_tile_noise_p99: 0.0,
                 total_findings: 0,
                 findings_truncated: false,
                 findings: Vec::new(),
@@ -435,7 +494,13 @@ pub fn verify_review_overlays(
     // Prepare lightweight per-overlay schedules ONLY (zero per-element raster buffers: Opus B1).
     let mut schedules: Vec<OverlaySchedule> = Vec::with_capacity(all_overlays.len());
     for overlay in all_overlays {
-        match build_overlay_schedule(overlay, expectations, frozen_document, total_output_frames) {
+        match build_overlay_schedule(
+            overlay,
+            expectations,
+            frozen_document,
+            total_output_frames,
+            config.min_support_pixels,
+        ) {
             Ok(schedule) => schedules.push(schedule),
             Err(reason) => {
                 unresolved = true;
@@ -459,10 +524,14 @@ pub fn verify_review_overlays(
                     checked_frames: 0,
                     animated_extreme_frames: 0,
                     measured_extreme_frames: 0,
+                    expected_boundary_probes: 0,
                     boundary_checked_frames: 0,
+                    boundary_unmeasured_frames: 0,
                     failed_frames: 0,
                     worst_with_rms: 0.0,
                     min_without_rms: 0.0,
+                    worst_tile_rms: 0.0,
+                    worst_boundary_without_rms: 0.0,
                 });
             }
         }
@@ -727,6 +796,33 @@ pub fn verify_review_overlays(
             full_u16_range: frame_out.full_u16_range,
         };
 
+        // Measure this frame's compression noise floor outside every active-overlay and
+        // boundary-probe padded box so ceilings adapt to delivery bitrates without being
+        // contaminated by seeded overlay or outside-cue defects.
+        let mut excluded_boxes: Vec<(usize, usize, usize, usize)> = Vec::new();
+        if let Some(entries) = active_by_frame.get(&frame_idx) {
+            for &(_, bounds) in entries {
+                excluded_boxes.push(padded_box(bounds, expectations.raster));
+            }
+        }
+        if let Some(probes) = boundary_by_frame.get(&frame_idx) {
+            for probe in probes {
+                excluded_boxes.push(padded_box(probe.bounds, expectations.raster));
+            }
+        }
+        let frame_noise = measure_frame_noise_floor(
+            decoded_slice,
+            &base_delivery.rgba64le,
+            expectations.raster,
+            &excluded_boxes,
+        );
+        report.max_frame_global_noise_rms = report
+            .max_frame_global_noise_rms
+            .max(frame_noise.global_noise_rms);
+        report.max_frame_tile_noise_p99 = report
+            .max_frame_tile_noise_p99
+            .max(frame_noise.tile_noise_p99);
+
         // 1. Check every overlay expected visible on this frame against with/without references.
         if let Some(entries) = active_by_frame.get(&frame_idx) {
             for &(sched_idx, bounds) in entries {
@@ -769,6 +865,7 @@ pub fn verify_review_overlays(
                     &without_delivery.rgba64le,
                     expectations.raster,
                     bounds,
+                    frame_noise,
                     config,
                 );
                 drop(without_delivery);
@@ -811,55 +908,112 @@ pub fn verify_review_overlays(
             }
         }
 
-        // 2. Check outside-cue timing probes (`cue_start - 1` and `cue_end`) against `without` vs injected.
+        // 2. Check outside-cue timing probes (`cue_start - 1` and `cue_end`). Every probe renders
+        //    its max-opacity injected reference so measurability over the outside-cue backdrop is
+        //    proven explicitly, and passes only when the decoded box matches `without` within the
+        //    frame's noise floor (L12/L14).
         if let Some(probes) = boundary_by_frame.get(&frame_idx) {
             for probe in probes {
                 if cancellation.is_cancelled() {
                     return Err(MediaError::Cancelled);
                 }
-                // Exact upper-bound fast path: if even the top-`min_support_pixels` worst pixel
-                // deviations between `decoded` and `base_delivery` inside `probe.bounds` have
-                // RMS <= 0.65 * timing_max_without_rms, no support subset can exceed the leak
-                // threshold under any injected overlay render.
-                match boundary_probe_can_leak(
-                    decoded_slice,
-                    &base_delivery.rgba64le,
-                    expectations.raster,
-                    probe.bounds,
-                    config,
-                ) {
-                    None => continue,
-                    Some(false) => {
-                        let state = &mut states[probe.schedule_index];
-                        state.boundary_checked_frames =
-                            state.boundary_checked_frames.saturating_add(1);
-                        report.boundary_checked_frames =
-                            report.boundary_checked_frames.saturating_add(1);
-                        continue;
-                    }
-                    Some(true) => {}
-                }
                 let schedule = &schedules[probe.schedule_index];
-                let Ok(rep_project_at) = output_frame_to_project_at(
-                    probe.representative_in_cue_frame,
+                let vis_project_at = match output_frame_to_project_at(
+                    probe.visibility_in_cue_frame,
                     expectations,
                     frozen_document,
-                ) else {
-                    continue;
+                ) {
+                    Ok(at) => at,
+                    Err(reason) => {
+                        let state = &mut states[probe.schedule_index];
+                        state.boundary_unmeasured_frames =
+                            state.boundary_unmeasured_frames.saturating_add(1);
+                        report.boundary_unmeasured_frames =
+                            report.boundary_unmeasured_frames.saturating_add(1);
+                        report.push_finding(
+                            finding_cap,
+                            OverlayFinding {
+                                element: Some(schedule.element),
+                                overlay_kind: Some(schedule.kind),
+                                frame_index: Some(frame_idx),
+                                pts: Some(pts),
+                                detail: OverlayFindingKind::UnmeasurableBoundaryProbe {
+                                    reason: format!(
+                                        "outside-cue visibility frame mapping failed: {reason}"
+                                    ),
+                                },
+                            },
+                        );
+                        continue;
+                    }
+                };
+                let place_project_at = match output_frame_to_project_at(
+                    probe.placement_in_cue_frame,
+                    expectations,
+                    frozen_document,
+                ) {
+                    Ok(at) => at,
+                    Err(reason) => {
+                        let state = &mut states[probe.schedule_index];
+                        state.boundary_unmeasured_frames =
+                            state.boundary_unmeasured_frames.saturating_add(1);
+                        report.boundary_unmeasured_frames =
+                            report.boundary_unmeasured_frames.saturating_add(1);
+                        report.push_finding(
+                            finding_cap,
+                            OverlayFinding {
+                                element: Some(schedule.element),
+                                overlay_kind: Some(schedule.kind),
+                                frame_index: Some(frame_idx),
+                                pts: Some(pts),
+                                detail: OverlayFindingKind::UnmeasurableBoundaryProbe {
+                                    reason: format!(
+                                        "outside-cue placement frame mapping failed: {reason}"
+                                    ),
+                                },
+                            },
+                        );
+                        continue;
+                    }
                 };
                 let injected = match renderer.stage_single_clip_for_boundary(
                     frozen_document,
                     schedule.element,
-                    rep_project_at,
+                    vis_project_at,
+                    place_project_at,
                     expectations.raster,
                     RenderScale::FullResolution,
                     DecodeStrategy::Seek,
                 ) {
                     Ok(Some(layer)) => layer,
-                    Ok(None) => continue,
+                    Ok(None) => {
+                        let state = &mut states[probe.schedule_index];
+                        state.boundary_unmeasured_frames =
+                            state.boundary_unmeasured_frames.saturating_add(1);
+                        report.boundary_unmeasured_frames =
+                            report.boundary_unmeasured_frames.saturating_add(1);
+                        report.push_finding(
+                            finding_cap,
+                            OverlayFinding {
+                                element: Some(schedule.element),
+                                overlay_kind: Some(schedule.kind),
+                                frame_index: Some(frame_idx),
+                                pts: Some(pts),
+                                detail: OverlayFindingKind::UnmeasurableBoundaryProbe {
+                                    reason: "outside-cue probe clip could not be staged at its representative in-cue frame".into(),
+                                },
+                            },
+                        );
+                        continue;
+                    }
                     Err(MediaError::Cancelled) => return Err(MediaError::Cancelled),
                     Err(error) => {
                         stream_unknown = true;
+                        let state = &mut states[probe.schedule_index];
+                        state.boundary_unmeasured_frames =
+                            state.boundary_unmeasured_frames.saturating_add(1);
+                        report.boundary_unmeasured_frames =
+                            report.boundary_unmeasured_frames.saturating_add(1);
                         report.push_finding(
                             finding_cap,
                             OverlayFinding {
@@ -888,6 +1042,11 @@ pub fn verify_review_overlays(
                     Err(MediaError::Cancelled) => return Err(MediaError::Cancelled),
                     Err(error) => {
                         stream_unknown = true;
+                        let state = &mut states[probe.schedule_index];
+                        state.boundary_unmeasured_frames =
+                            state.boundary_unmeasured_frames.saturating_add(1);
+                        report.boundary_unmeasured_frames =
+                            report.boundary_unmeasured_frames.saturating_add(1);
                         report.push_finding(
                             finding_cap,
                             OverlayFinding {
@@ -911,16 +1070,34 @@ pub fn verify_review_overlays(
                     &with_injected.rgba64le,
                     expectations.raster,
                     probe.bounds,
+                    frame_noise,
                     config,
                 );
                 drop(with_injected);
 
                 let state = &mut states[probe.schedule_index];
                 match outcome {
-                    OutsideCueOutcome::NotMeasurable => {}
-                    OutsideCueOutcome::Absent => {
+                    OutsideCueOutcome::NotMeasurable { reason } => {
+                        state.boundary_unmeasured_frames =
+                            state.boundary_unmeasured_frames.saturating_add(1);
+                        report.boundary_unmeasured_frames =
+                            report.boundary_unmeasured_frames.saturating_add(1);
+                        report.push_finding(
+                            finding_cap,
+                            OverlayFinding {
+                                element: Some(schedule.element),
+                                overlay_kind: Some(schedule.kind),
+                                frame_index: Some(frame_idx),
+                                pts: Some(pts),
+                                detail: OverlayFindingKind::UnmeasurableBoundaryProbe { reason },
+                            },
+                        );
+                    }
+                    OutsideCueOutcome::Absent { without_rms } => {
                         state.boundary_checked_frames =
                             state.boundary_checked_frames.saturating_add(1);
+                        state.worst_boundary_without_rms =
+                            state.worst_boundary_without_rms.max(without_rms);
                         report.boundary_checked_frames =
                             report.boundary_checked_frames.saturating_add(1);
                     }
@@ -932,6 +1109,8 @@ pub fn verify_review_overlays(
                         state.boundary_checked_frames =
                             state.boundary_checked_frames.saturating_add(1);
                         state.failed_frames = state.failed_frames.saturating_add(1);
+                        state.worst_boundary_without_rms =
+                            state.worst_boundary_without_rms.max(without_rms);
                         report.boundary_checked_frames =
                             report.boundary_checked_frames.saturating_add(1);
                         hard_failed = true;
@@ -943,6 +1122,34 @@ pub fn verify_review_overlays(
                                 frame_index: Some(frame_idx),
                                 pts: Some(pts),
                                 detail: OverlayFindingKind::UnexpectedOverlayOutsideCue {
+                                    without_rms_tenths: to_tenths(without_rms),
+                                    with_injected_rms_tenths: to_tenths(with_injected_rms),
+                                    ref_rms_tenths: to_tenths(ref_rms),
+                                },
+                            },
+                        );
+                    }
+                    OutsideCueOutcome::OutsideCueMismatch {
+                        without_rms,
+                        with_injected_rms,
+                        ref_rms,
+                    } => {
+                        state.boundary_checked_frames =
+                            state.boundary_checked_frames.saturating_add(1);
+                        state.failed_frames = state.failed_frames.saturating_add(1);
+                        state.worst_boundary_without_rms =
+                            state.worst_boundary_without_rms.max(without_rms);
+                        report.boundary_checked_frames =
+                            report.boundary_checked_frames.saturating_add(1);
+                        hard_failed = true;
+                        report.push_finding(
+                            finding_cap,
+                            OverlayFinding {
+                                element: Some(schedule.element),
+                                overlay_kind: Some(schedule.kind),
+                                frame_index: Some(frame_idx),
+                                pts: Some(pts),
+                                detail: OverlayFindingKind::OutsideCueReferenceMismatch {
                                     without_rms_tenths: to_tenths(without_rms),
                                     with_injected_rms_tenths: to_tenths(with_injected_rms),
                                     ref_rms_tenths: to_tenths(ref_rms),
@@ -976,6 +1183,9 @@ pub fn verify_review_overlays(
     for (schedule, state) in schedules.iter().zip(states.iter()) {
         let expected_extremes = schedule.extreme_buckets.len() as u64;
         let measured_extremes = state.measured_extreme_buckets.len() as u64;
+        let expected_boundary_probes = schedule.boundary_probes.len() as u64;
+        let boundary_complete = state.boundary_unmeasured_frames == 0
+            && state.boundary_checked_frames >= expected_boundary_probes;
         #[allow(clippy::cast_precision_loss)]
         let measurable_ratio = if schedule.expected_frames == 0 {
             0.0
@@ -986,16 +1196,34 @@ pub fn verify_review_overlays(
             && measurable_ratio >= config.min_measurable_frame_ratio
             && measured_extremes >= expected_extremes;
 
-        let element_status =
-            if state.failed_frames > 0 || hard_failed && state.measurable_frames == 0 {
-                OverlayElementStatus::Failed
-            } else if stream_unknown
-                || state.measurable_frames + state.unmeasurable_frames < schedule.expected_frames
-            {
-                any_unknown_element = true;
-                OverlayElementStatus::Unknown
-            } else if !sufficient_measurability {
-                any_unknown_element = true;
+        let element_status = if state.failed_frames > 0 {
+            OverlayElementStatus::Failed
+        } else if stream_unknown
+            || state.measurable_frames + state.unmeasurable_frames < schedule.expected_frames
+        {
+            any_unknown_element = true;
+            OverlayElementStatus::Unknown
+        } else if !sufficient_measurability {
+            any_unknown_element = true;
+            report.push_finding(
+                finding_cap,
+                OverlayFinding {
+                    element: Some(schedule.element),
+                    overlay_kind: Some(schedule.kind),
+                    frame_index: None,
+                    pts: None,
+                    detail: OverlayFindingKind::UnmeasurableOverlay {
+                        expected_frames: schedule.expected_frames,
+                        measurable_frames: state.measurable_frames,
+                        expected_extremes,
+                        measured_extremes,
+                    },
+                },
+            );
+            OverlayElementStatus::Unknown
+        } else if !boundary_complete {
+            any_unknown_element = true;
+            if state.boundary_unmeasured_frames == 0 {
                 report.push_finding(
                     finding_cap,
                     OverlayFinding {
@@ -1003,18 +1231,19 @@ pub fn verify_review_overlays(
                         overlay_kind: Some(schedule.kind),
                         frame_index: None,
                         pts: None,
-                        detail: OverlayFindingKind::UnmeasurableOverlay {
-                            expected_frames: schedule.expected_frames,
-                            measurable_frames: state.measurable_frames,
-                            expected_extremes,
-                            measured_extremes,
+                        detail: OverlayFindingKind::UnmeasurableBoundaryProbe {
+                            reason: format!(
+                                "only {} of {} outside-cue timing probes were measured",
+                                state.boundary_checked_frames, expected_boundary_probes
+                            ),
                         },
                     },
                 );
-                OverlayElementStatus::Unknown
-            } else {
-                OverlayElementStatus::Passed
-            };
+            }
+            OverlayElementStatus::Unknown
+        } else {
+            OverlayElementStatus::Passed
+        };
 
         report.animated_extreme_frames = report
             .animated_extreme_frames
@@ -1029,7 +1258,9 @@ pub fn verify_review_overlays(
             checked_frames: state.measurable_frames,
             animated_extreme_frames: expected_extremes,
             measured_extreme_frames: measured_extremes,
+            expected_boundary_probes,
             boundary_checked_frames: state.boundary_checked_frames,
+            boundary_unmeasured_frames: state.boundary_unmeasured_frames,
             failed_frames: state.failed_frames,
             worst_with_rms: state.worst_with_rms,
             min_without_rms: if state.seen_measurable {
@@ -1037,6 +1268,8 @@ pub fn verify_review_overlays(
             } else {
                 0.0
             },
+            worst_tile_rms: state.worst_tile_rms,
+            worst_boundary_without_rms: state.worst_boundary_without_rms,
         });
     }
 
@@ -1114,7 +1347,10 @@ struct FrameBoundsRun {
 struct BoundaryProbe {
     schedule_index: usize,
     outside_frame: u64,
-    representative_in_cue_frame: u64,
+    /// Most visible (maximum-opacity) in-cue frame used for content, opacity, and coverage.
+    visibility_in_cue_frame: u64,
+    /// In-cue frame whose spatial transform/offset places the injected reference at the probe.
+    placement_in_cue_frame: u64,
     bounds: TitlePixelBounds,
 }
 
@@ -1133,10 +1369,13 @@ struct OverlayRunState {
     measurable_frames: u64,
     unmeasurable_frames: u64,
     boundary_checked_frames: u64,
+    boundary_unmeasured_frames: u64,
     failed_frames: u64,
     seen_measurable: bool,
     worst_with_rms: f32,
     min_without_rms: f32,
+    worst_tile_rms: f32,
+    worst_boundary_without_rms: f32,
     measured_extreme_buckets: BTreeSet<usize>,
 }
 
@@ -1146,10 +1385,13 @@ impl OverlayRunState {
             measurable_frames: 0,
             unmeasurable_frames: 0,
             boundary_checked_frames: 0,
+            boundary_unmeasured_frames: 0,
             failed_frames: 0,
             seen_measurable: false,
             worst_with_rms: 0.0,
             min_without_rms: f32::INFINITY,
+            worst_tile_rms: 0.0,
+            worst_boundary_without_rms: 0.0,
             measured_extreme_buckets: BTreeSet::new(),
         }
     }
@@ -1158,6 +1400,7 @@ impl OverlayRunState {
         self.seen_measurable = true;
         self.worst_with_rms = self.worst_with_rms.max(metrics.with_rms);
         self.min_without_rms = self.min_without_rms.min(metrics.without_rms);
+        self.worst_tile_rms = self.worst_tile_rms.max(metrics.worst_tile_rms);
     }
 
     fn mark_extremes_measured(&mut self, schedule: &OverlaySchedule, frame_idx: u64) {
@@ -1183,6 +1426,7 @@ fn build_overlay_schedule(
     expectations: &ReviewExpectations,
     frozen_document: &Document,
     total_output_frames: u64,
+    min_support_pixels: usize,
 ) -> Result<OverlaySchedule, String> {
     if overlay.visible.is_empty() {
         return Err("overlay has no visible runs".into());
@@ -1260,7 +1504,15 @@ fn build_overlay_schedule(
 
     let expected_frames = visible_frame_set.len() as u64;
     let extreme_buckets = compute_extreme_buckets(&runs);
-    let boundary_probes = compute_boundary_probes(&runs, &visible_frame_set, total_output_frames);
+    let boundary_probes = compute_boundary_probes(
+        clip,
+        expectations,
+        frozen_document,
+        &runs,
+        &visible_frame_set,
+        total_output_frames,
+        min_support_pixels,
+    )?;
 
     Ok(OverlaySchedule {
         element: overlay.element,
@@ -1270,6 +1522,36 @@ fn build_overlay_schedule(
         extreme_buckets,
         boundary_probes,
     })
+}
+
+fn overlay_visibility_score(
+    document: &Document,
+    clip: &Clip,
+    project_at: TimeCode,
+) -> Result<f32, String> {
+    let mut transition = transition_render_params(clip, project_at);
+    if let ClipContent::Title(title) = &clip.content {
+        transition.alpha *= title_alpha(document, clip, title, project_at)
+            .map_err(|error| format!("overlay title alpha evaluation failed: {error}"))?;
+    }
+    let local = TimeCode(project_at.0.saturating_sub(clip.timeline_start.0));
+    let params = params_for_at(&clip.effects, transition, Some(local));
+    let coverage = if params.coverage_on > 0.5 {
+        if params.coverage_on < 1.5 {
+            params.coverage_edge.clamp(0.0, 1.0)
+        } else {
+            (1.0 - params.coverage_edge).clamp(0.0, 1.0)
+        }
+    } else {
+        1.0
+    };
+    Ok(params.opacity.clamp(0.0, 1.0) * coverage)
+}
+
+fn bounds_area(bounds: TitlePixelBounds) -> usize {
+    let w = usize::try_from(bounds.right.saturating_sub(bounds.left).max(0)).unwrap_or(0);
+    let h = usize::try_from(bounds.bottom.saturating_sub(bounds.top).max(0)).unwrap_or(0);
+    w.saturating_mul(h)
 }
 
 fn compute_extreme_buckets(runs: &[FrameBoundsRun]) -> Vec<BTreeSet<u64>> {
@@ -1316,12 +1598,56 @@ fn compute_extreme_buckets(runs: &[FrameBoundsRun]) -> Vec<BTreeSet<u64>> {
     buckets
 }
 
+fn push_boundary_edge_probes(
+    probes: &mut Vec<BoundaryProbe>,
+    outside_frame: u64,
+    vis_frame: u64,
+    edge_frame: u64,
+    vis_bounds: TitlePixelBounds,
+    edge_bounds: TitlePixelBounds,
+    min_support_pixels: usize,
+) {
+    if edge_bounds == vis_bounds {
+        probes.push(BoundaryProbe {
+            schedule_index: 0,
+            outside_frame,
+            visibility_in_cue_frame: vis_frame,
+            placement_in_cue_frame: vis_frame,
+            bounds: vis_bounds,
+        });
+    } else {
+        // Moving overlay: probe the document's edge placement (with max-opacity content,
+        // catching 1-frame-early/late leaks) AND the settled max-opacity placement (catching
+        // overlays shifted far enough to sit at their settled position on the boundary frame).
+        if bounds_area(edge_bounds) >= min_support_pixels {
+            probes.push(BoundaryProbe {
+                schedule_index: 0,
+                outside_frame,
+                visibility_in_cue_frame: vis_frame,
+                placement_in_cue_frame: edge_frame,
+                bounds: edge_bounds,
+            });
+        }
+        probes.push(BoundaryProbe {
+            schedule_index: 0,
+            outside_frame,
+            visibility_in_cue_frame: vis_frame,
+            placement_in_cue_frame: vis_frame,
+            bounds: vis_bounds,
+        });
+    }
+}
+
 fn compute_boundary_probes(
+    clip: &Clip,
+    expectations: &ReviewExpectations,
+    frozen_document: &Document,
     runs: &[FrameBoundsRun],
     visible_frames: &BTreeSet<u64>,
     total_output_frames: u64,
-) -> Vec<BoundaryProbe> {
-    // Merge contiguous visible runs into cue spans so we probe only just before each cue's start
+    min_support_pixels: usize,
+) -> Result<Vec<BoundaryProbe>, String> {
+    // Merge contiguous visible runs into cue spans so we probe just before each cue's start
     // and just after each cue's end.
     let mut sorted_indices: Vec<usize> = (0..runs.len()).collect();
     sorted_indices.sort_unstable_by_key(|&i| runs[i].frames.start);
@@ -1341,51 +1667,75 @@ fn compute_boundary_probes(
         }
     }
 
+    let bounds_at = |frame: u64| -> Option<TitlePixelBounds> {
+        runs.iter()
+            .find(|r| r.frames.contains(&frame))
+            .map(|r| r.bounds)
+    };
+
     let mut probes = Vec::new();
     for (start, end, start_bounds, end_bounds) in spans {
-        let mid_frame = start + (end - start) / 2;
-        let mid_bounds = runs
-            .iter()
-            .find(|r| r.frames.contains(&mid_frame))
-            .map(|r| r.bounds);
+        // Select the overlay's maximum-opacity (most visible) in-cue frame so fading or sliding
+        // cues are still fully measurable at their boundaries.
+        let mut best_start_vis = start;
+        let mut best_start_score = -1.0_f32;
+        let mut best_end_vis = end.saturating_sub(1);
+        let mut best_end_score = -1.0_f32;
+        for frame in start..end {
+            let project_at = output_frame_to_project_at(frame, expectations, frozen_document)?;
+            let score = overlay_visibility_score(frozen_document, clip, project_at)?;
+            if score > best_start_score + 1e-4 {
+                best_start_score = score;
+                best_start_vis = frame;
+            }
+            if score >= best_end_score - 1e-4 {
+                best_end_score = score;
+                best_end_vis = frame;
+            }
+        }
+        let best_start_bounds = bounds_at(best_start_vis).unwrap_or(start_bounds);
+        let best_end_bounds = bounds_at(best_end_vis).unwrap_or(end_bounds);
+
         if let Some(before) = start.checked_sub(1)
             && !visible_frames.contains(&before)
         {
-            // When bounds are stationary across the cue, use the midpoint so fade-in cues still
-            // produce a full-opacity injected probe; for moving overlays use the exact edge frame.
-            let rep = if end - start >= 3 && mid_bounds == Some(start_bounds) {
-                mid_frame
-            } else {
-                start
-            };
-            probes.push(BoundaryProbe {
-                schedule_index: 0,
-                outside_frame: before,
-                representative_in_cue_frame: rep,
-                bounds: start_bounds,
-            });
+            push_boundary_edge_probes(
+                &mut probes,
+                before,
+                best_start_vis,
+                start,
+                best_start_bounds,
+                start_bounds,
+                min_support_pixels,
+            );
         }
         if end < total_output_frames && !visible_frames.contains(&end) {
-            let rep = if end - start >= 3 && mid_bounds == Some(end_bounds) {
-                mid_frame
-            } else {
-                end - 1
-            };
-            probes.push(BoundaryProbe {
-                schedule_index: 0,
-                outside_frame: end,
-                representative_in_cue_frame: rep,
-                bounds: end_bounds,
-            });
+            push_boundary_edge_probes(
+                &mut probes,
+                end,
+                best_end_vis,
+                end.saturating_sub(1),
+                best_end_bounds,
+                end_bounds,
+                min_support_pixels,
+            );
         }
     }
-    probes
+    Ok(probes)
 }
 
 #[derive(Clone, Copy)]
 struct DecodedRgba64<'a> {
     bytes: &'a [u8],
     full_u16_range: bool,
+}
+
+/// Measured compression noise floor of one decoded frame relative to its with-overlay compositor
+/// reference outside every active-overlay and boundary-probe padded box.
+#[derive(Clone, Copy, Default)]
+struct FrameNoiseFloor {
+    global_noise_rms: f32,
+    tile_noise_p99: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -1404,9 +1754,18 @@ enum InRangeOutcome {
 }
 
 enum OutsideCueOutcome {
-    NotMeasurable,
-    Absent,
+    NotMeasurable {
+        reason: String,
+    },
+    Absent {
+        without_rms: f32,
+    },
     UnexpectedOverlay {
+        without_rms: f32,
+        with_injected_rms: f32,
+        ref_rms: f32,
+    },
+    OutsideCueMismatch {
         without_rms: f32,
         with_injected_rms: f32,
         ref_rms: f32,
@@ -1448,6 +1807,123 @@ fn padded_box(bounds: TitlePixelBounds, raster: (u32, u32)) -> (usize, usize, us
     (x0, y0, x1, y1)
 }
 
+#[inline]
+const fn rect_intersects(a: (usize, usize, usize, usize), b: (usize, usize, usize, usize)) -> bool {
+    a.0 < b.2 && b.0 < a.2 && a.1 < b.3 && b.1 < a.3
+}
+
+/// Measure the decoded frame's compression noise floor relative to `base_delivery` across all
+/// full `8x8` tiles on a deterministic strided grid strictly outside every excluded overlay or
+/// boundary-probe box.
+///
+/// Region: every `8x8` tile on the grid `step = tile_stride * 8` (where `tile_stride =
+/// ((tiles_x * tiles_y) / 2048).isqrt().max(1)`, so 100% of tiles at <=640x360 and ~3,600 evenly
+/// spaced tiles at 1080p) disjoint from every active-overlay and boundary-probe padded box.
+/// Statistics: overall BT.709 YCbCr RMS (`global_noise_rms`) and 99th-percentile per-`8x8`-tile
+/// RMS (`tile_noise_p99`).
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn measure_frame_noise_floor(
+    decoded: DecodedRgba64<'_>,
+    base_delivery: &[u8],
+    raster: (u32, u32),
+    excluded_boxes: &[(usize, usize, usize, usize)],
+) -> FrameNoiseFloor {
+    let width = raster.0 as usize;
+    let height = raster.1 as usize;
+    let tiles_x = width / TILE_SIZE;
+    let tiles_y = height / TILE_SIZE;
+    if tiles_x == 0 || tiles_y == 0 {
+        return FrameNoiseFloor::default();
+    }
+    let total_tiles = tiles_x.saturating_mul(tiles_y);
+    let tile_stride = (total_tiles / 2048).isqrt().max(1);
+    let step = tile_stride.saturating_mul(TILE_SIZE);
+
+    let mut tile_rms_values: Vec<f32> =
+        Vec::with_capacity((total_tiles / (tile_stride * tile_stride)).min(4096));
+    let mut sum_all_sq = 0.0_f64;
+    let mut pixel_count = 0_usize;
+
+    let mut ty = 0;
+    while ty + TILE_SIZE <= height {
+        let mut tx = 0;
+        while tx + TILE_SIZE <= width {
+            let tile_rect = (tx, ty, tx + TILE_SIZE, ty + TILE_SIZE);
+            if !excluded_boxes
+                .iter()
+                .any(|&ex| rect_intersects(tile_rect, ex))
+            {
+                let mut tile_sq = 0.0_f64;
+                for y in ty..(ty + TILE_SIZE) {
+                    let row_base = y * width;
+                    for x in tx..(tx + TILE_SIZE) {
+                        let px = row_base + x;
+                        let d = rgba64_pixel_to_ycbcr(decoded.bytes, px, decoded.full_u16_range);
+                        let w = rgba64_pixel_to_ycbcr(base_delivery, px, false);
+                        tile_sq += f64::from(ycbcr_dist_sq(d, w));
+                    }
+                }
+                sum_all_sq += tile_sq;
+                pixel_count += TILE_SIZE * TILE_SIZE;
+                let tile_rms = (tile_sq / (TILE_SIZE * TILE_SIZE) as f64).sqrt() as f32;
+                tile_rms_values.push(tile_rms);
+            }
+            tx += step;
+        }
+        ty += step;
+    }
+
+    if tile_rms_values.is_empty() || pixel_count == 0 {
+        return FrameNoiseFloor::default();
+    }
+    tile_rms_values.sort_unstable_by(f32::total_cmp);
+    let p99_idx = ((tile_rms_values.len() - 1) * 99) / 100;
+    FrameNoiseFloor {
+        global_noise_rms: (sum_all_sq / pixel_count as f64).sqrt() as f32,
+        tile_noise_p99: tile_rms_values[p99_idx],
+    }
+}
+
+fn clamped_global_noise(noise: FrameNoiseFloor) -> f32 {
+    noise.global_noise_rms.min(MAX_ADAPTIVE_GLOBAL_NOISE_RMS)
+}
+
+fn clamped_tile_noise(noise: FrameNoiseFloor) -> f32 {
+    noise.tile_noise_p99.min(MAX_ADAPTIVE_TILE_NOISE_P99)
+}
+
+fn effective_timing_absence_ceiling(
+    config: &OverlayVerificationConfig,
+    noise: FrameNoiseFloor,
+) -> f32 {
+    config.timing_max_without_rms
+        + config.global_noise_ceiling_multiplier * clamped_global_noise(noise)
+}
+
+fn effective_min_reference_separation(
+    config: &OverlayVerificationConfig,
+    noise: FrameNoiseFloor,
+) -> f32 {
+    let from_noise = config.min_reference_separation
+        + config.noise_measurability_multiplier * clamped_global_noise(noise);
+    let above_absence = effective_timing_absence_ceiling(config, noise) * 1.15;
+    from_noise.max(above_absence)
+}
+
+fn effective_global_ceiling(
+    config: &OverlayVerificationConfig,
+    noise: FrameNoiseFloor,
+    ref_rms: f32,
+) -> f32 {
+    (config.max_codec_error_rms
+        + config.global_noise_ceiling_multiplier * clamped_global_noise(noise))
+    .max(ref_rms * config.max_relative_error)
+}
+
+fn effective_tile_ceiling(config: &OverlayVerificationConfig, noise: FrameNoiseFloor) -> f32 {
+    config.max_tile_error_rms + config.tile_noise_ceiling_multiplier * clamped_tile_noise(noise)
+}
+
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -1459,6 +1935,7 @@ fn compare_in_range_frame(
     without_ref: &[u8],
     raster: (u32, u32),
     bounds: TitlePixelBounds,
+    noise: FrameNoiseFloor,
     config: &OverlayVerificationConfig,
 ) -> InRangeOutcome {
     let (x0, y0, x1, y1) = padded_box(bounds, raster);
@@ -1470,12 +1947,10 @@ fn compare_in_range_frame(
     let box_h = y1 - y0;
     let min_sig_sq = config.min_pixel_signal * config.min_pixel_signal;
 
-    // Store compact per-pixel squared distances inside the bounded overlay box only (no full-frame
-    // buffers retained across elements or frames).
+    // Store compact per-pixel squared error against `with_ref` inside the bounded overlay box
+    // only (no full-frame buffers retained across elements or frames).
     let pixel_count = box_w.saturating_mul(box_h);
-    let mut ref_sq = Vec::with_capacity(pixel_count);
     let mut with_sq = Vec::with_capacity(pixel_count);
-    let mut without_sq = Vec::with_capacity(pixel_count);
 
     let mut support = 0_usize;
     let mut sum_ref_sq = 0.0_f64;
@@ -1492,17 +1967,13 @@ fn compare_in_range_frame(
 
             let r2 = ycbcr_dist_sq(w, b);
             let w2 = ycbcr_dist_sq(d, w);
-            let b2 = ycbcr_dist_sq(d, b);
-
-            ref_sq.push(r2);
             with_sq.push(w2);
-            without_sq.push(b2);
 
             if r2 >= min_sig_sq {
                 support += 1;
                 sum_ref_sq += f64::from(r2);
                 sum_with_sq += f64::from(w2);
-                sum_without_sq += f64::from(b2);
+                sum_without_sq += f64::from(ycbcr_dist_sq(d, b));
             }
         }
     }
@@ -1510,20 +1981,24 @@ fn compare_in_range_frame(
     if support < config.min_support_pixels {
         return InRangeOutcome::NotMeasurable;
     }
+    let min_ref_sep = effective_min_reference_separation(config, noise);
     let ref_rms = (sum_ref_sq / support as f64).sqrt() as f32;
-    if ref_rms < config.min_reference_separation {
+    if ref_rms < min_ref_sep {
         return InRangeOutcome::NotMeasurable;
     }
 
     let with_rms = (sum_with_sq / support as f64).sqrt() as f32;
     let without_rms = (sum_without_sq / support as f64).sqrt() as f32;
 
-    // Localized overlapping tile scan inside the overlay box to catch single-digit/word
-    // substitutions ("1,250" -> "1,850") and localized extra ink.
+    // Localized overlapping 8x8 tile scan inside the overlay box with noise-adapted ceiling
+    // (`max_tile_error_rms + tile_noise_ceiling_multiplier * clamped_tile_noise_p99`) to catch
+    // single-digit/word substitutions ("1,250" -> "1,850") and localized extra ink without
+    // false-failing on delivery-bitrate grain or outline ringing.
     let tile_w = TILE_SIZE.min(box_w);
     let tile_h = TILE_SIZE.min(box_h);
     let step_x = TILE_STEP.min(tile_w).max(1);
     let step_y = TILE_STEP.min(tile_h).max(1);
+    let base_tile_ceiling = effective_tile_ceiling(config, noise);
     let mut worst_tile_rms = 0.0_f32;
     let mut tile_failed = false;
 
@@ -1538,46 +2013,20 @@ fn compare_in_range_frame(
 
             let mut tile_n = 0_usize;
             let mut tile_all_with_sq = 0.0_f64;
-            let mut tile_sup = 0_usize;
-            let mut tile_sup_ref_sq = 0.0_f64;
-            let mut tile_sup_with_sq = 0.0_f64;
-            let mut tile_sup_without_sq = 0.0_f64;
 
             for ly in y_start..y_end {
                 let row = ly * box_w;
                 for lx in x_start..x_end {
-                    let i = row + lx;
-                    let r2 = ref_sq[i];
-                    let w2 = with_sq[i];
                     tile_n += 1;
-                    tile_all_with_sq += f64::from(w2);
-                    if r2 >= min_sig_sq {
-                        tile_sup += 1;
-                        tile_sup_ref_sq += f64::from(r2);
-                        tile_sup_with_sq += f64::from(w2);
-                        tile_sup_without_sq += f64::from(without_sq[i]);
-                    }
+                    tile_all_with_sq += f64::from(with_sq[row + lx]);
                 }
             }
 
             if tile_n > 0 {
                 let tile_rms = (tile_all_with_sq / tile_n as f64).sqrt() as f32;
                 worst_tile_rms = worst_tile_rms.max(tile_rms);
-                if tile_rms > config.max_tile_error_rms {
+                if tile_rms > base_tile_ceiling {
                     tile_failed = true;
-                }
-            }
-            if tile_sup >= TILE_MIN_SUPPORT_PIXELS {
-                let t_ref = (tile_sup_ref_sq / tile_sup as f64).sqrt() as f32;
-                if t_ref >= config.min_reference_separation {
-                    let t_with = (tile_sup_with_sq / tile_sup as f64).sqrt() as f32;
-                    let t_without = (tile_sup_without_sq / tile_sup as f64).sqrt() as f32;
-                    let tile_ceiling = config
-                        .max_tile_error_rms
-                        .max(t_ref * (config.max_relative_error * 0.75));
-                    if t_with > tile_ceiling || t_with > t_without * 0.72 {
-                        tile_failed = true;
-                    }
                 }
             }
 
@@ -1599,9 +2048,7 @@ fn compare_in_range_frame(
         worst_tile_rms,
     };
 
-    let global_ceiling = config
-        .max_codec_error_rms
-        .max(ref_rms * config.max_relative_error);
+    let global_ceiling = effective_global_ceiling(config, noise, ref_rms);
     let matches_with = with_rms <= global_ceiling
         && with_rms <= without_rms * config.max_with_to_without_ratio
         && (without_rms - with_rms) >= config.min_advantage_margin
@@ -1615,62 +2062,20 @@ fn compare_in_range_frame(
 }
 
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-fn boundary_probe_can_leak(
-    decoded: DecodedRgba64<'_>,
-    without_ref: &[u8],
-    raster: (u32, u32),
-    bounds: TitlePixelBounds,
-    config: &OverlayVerificationConfig,
-) -> Option<bool> {
-    let (x0, y0, x1, y1) = padded_box(bounds, raster);
-    if x1 <= x0 || y1 <= y0 {
-        return None;
-    }
-    let m = config.min_support_pixels.max(1);
-    let box_pixels = (x1 - x0).saturating_mul(y1 - y0);
-    if box_pixels < m {
-        return None;
-    }
-    let width = raster.0 as usize;
-    let mut top = BinaryHeap::<Reverse<u32>>::with_capacity(m + 1);
-    for y in y0..y1 {
-        let row_base = y * width;
-        for x in x0..x1 {
-            let px = row_base + x;
-            let d = rgba64_pixel_to_ycbcr(decoded.bytes, px, decoded.full_u16_range);
-            let b = rgba64_pixel_to_ycbcr(without_ref, px, false);
-            let d2 = ycbcr_dist_sq(d, b);
-            let bits = d2.to_bits();
-            if top.len() < m {
-                top.push(Reverse(bits));
-            } else if let Some(&Reverse(min_bits)) = top.peek()
-                && bits > min_bits
-            {
-                top.pop();
-                top.push(Reverse(bits));
-            }
-        }
-    }
-    let sum_top: f64 = top
-        .into_iter()
-        .map(|Reverse(bits)| f64::from(f32::from_bits(bits)))
-        .sum();
-    let max_possible_without_rms = (sum_top / m as f64).sqrt() as f32;
-    Some(max_possible_without_rms > config.timing_max_without_rms * 0.65)
-}
-
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 fn compare_outside_cue_frame(
     decoded: DecodedRgba64<'_>,
     without_ref: &[u8],
     with_injected_ref: &[u8],
     raster: (u32, u32),
     bounds: TitlePixelBounds,
+    noise: FrameNoiseFloor,
     config: &OverlayVerificationConfig,
 ) -> OutsideCueOutcome {
     let (x0, y0, x1, y1) = padded_box(bounds, raster);
     if x1 <= x0 || y1 <= y0 {
-        return OutsideCueOutcome::NotMeasurable;
+        return OutsideCueOutcome::NotMeasurable {
+            reason: "outside-cue probe box is empty after clipping to output raster".into(),
+        };
     }
     let width = raster.0 as usize;
     let min_sig_sq = config.min_pixel_signal * config.min_pixel_signal;
@@ -1698,7 +2103,7 @@ fn compare_outside_cue_frame(
             sum_without_sq += f64::from(ycbcr_dist_sq(d, b));
             sum_with_sq += f64::from(ycbcr_dist_sq(d, w));
 
-            // Weighted inner product <(D - B), (W - B)> detects even partial-opacity early/lingering cues.
+            // Weighted inner product <(D - B), (W - B)> identifies partial-opacity ghosts.
             let proj_luma = f64::from(d[0] - b[0]) * f64::from(w[0] - b[0]);
             let proj_blue = 0.25 * f64::from(d[1] - b[1]) * f64::from(w[1] - b[1]);
             let proj_red = 0.25 * f64::from(d[2] - b[2]) * f64::from(w[2] - b[2]);
@@ -1707,12 +2112,23 @@ fn compare_outside_cue_frame(
     }
 
     if support < config.min_support_pixels {
-        return OutsideCueOutcome::NotMeasurable;
+        return OutsideCueOutcome::NotMeasurable {
+            reason: format!(
+                "outside-cue probe support {support} is below minimum {}",
+                config.min_support_pixels
+            ),
+        };
     }
+    let min_ref_sep = effective_min_reference_separation(config, noise);
     let ref_rms = (sum_ref_sq / support as f64).sqrt() as f32;
-    if ref_rms < config.min_reference_separation {
-        return OutsideCueOutcome::NotMeasurable;
+    if ref_rms < min_ref_sep {
+        return OutsideCueOutcome::NotMeasurable {
+            reason: format!(
+                "outside-cue probe separation {ref_rms:.1} is below noise-adjusted floor {min_ref_sep:.1}"
+            ),
+        };
     }
+
     let without_rms = (sum_without_sq / support as f64).sqrt() as f32;
     let with_injected_rms = (sum_with_sq / support as f64).sqrt() as f32;
     let projection_ratio = if sum_ref_sq > 0.0 {
@@ -1721,17 +2137,24 @@ fn compare_outside_cue_frame(
         0.0
     };
 
-    let leaked = (without_rms > config.timing_max_without_rms && with_injected_rms <= without_rms)
-        || (without_rms > config.timing_max_without_rms * 0.65 && projection_ratio >= 0.35);
-
-    if leaked {
+    // L14: an outside-cue frame proves absence ONLY when the decoded support matches the
+    // without-overlay reference within the frame's noise floor.
+    let absence_ceiling = effective_timing_absence_ceiling(config, noise);
+    if without_rms <= absence_ceiling {
+        return OutsideCueOutcome::Absent { without_rms };
+    }
+    if with_injected_rms <= without_rms || projection_ratio >= 0.15 {
         OutsideCueOutcome::UnexpectedOverlay {
             without_rms,
             with_injected_rms,
             ref_rms,
         }
     } else {
-        OutsideCueOutcome::Absent
+        OutsideCueOutcome::OutsideCueMismatch {
+            without_rms,
+            with_injected_rms,
+            ref_rms,
+        }
     }
 }
 

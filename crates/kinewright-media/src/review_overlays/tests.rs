@@ -1917,3 +1917,1084 @@ fn s5_c6_fix1_caption_heavy_1080p_cost_and_bounded_memory() {
         "S5_C6_FIX1_1080P_MEMORY_BOUNDED: rss_delta_mib={rss_delta_mib:.1}"
     );
 }
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::similar_names
+)]
+fn generate_moving_grainy_mp4(path: &Path, width: u32, height: u32, frames: u32) {
+    use std::io::Write as _;
+
+    let raw_path = path.with_extension("yuv");
+    let w = width as usize;
+    let h = height as usize;
+    let cw = w / 2;
+    let ch = h / 2;
+    let mut file = std::io::BufWriter::new(File::create(&raw_path).unwrap());
+    let mut y_plane = vec![0_u8; w * h];
+    let mut u_plane = vec![128_u8; cw * ch];
+    let mut v_plane = vec![128_u8; cw * ch];
+    let mut rng: u64 = 0x9E37_79B9_7F4A_7C15 ^ (u64::from(width) << 32) ^ u64::from(height);
+    let mut next_u32 = || -> u32 {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        (rng >> 32) as u32
+    };
+
+    for f in 0..frames {
+        let fi = f as usize;
+        // Realistic handheld camera drift + moving subject + textured mid-frequency background
+        // (foliage/window gradients and patterned shirt) plus triangular camera film grain so
+        // libx264 at Youtube1080p (8 Mbps) / VerticalShort (10 Mbps) hits steady-state delivery
+        // compression without degenerating into uncompressible white-noise QP=51 meltdown.
+        let pan_x = (fi as i64) * 5;
+        let pan_y = ((fi as i64) * 3) / 2;
+        let head_cx = (w / 2) as i64 + (((fi as i64) * 7) % 140) - 70;
+        let head_cy = (h / 2) as i64 + (((fi as i64) * 3) % 60) - 30;
+        let head_rx = (w / 6) as i64;
+        let head_ry = (h / 4) as i64;
+        let head_rx2 = head_rx * head_rx;
+        let head_ry2 = head_ry * head_ry;
+        let head_rhs = head_rx2 * head_ry2;
+
+        // Precompute smooth periodic luma wave tables for realistic moving texture.
+        let tri = |v: i64, period: i64| -> i32 {
+            let m = v.rem_euclid(period);
+            let half = period / 2;
+            let tri_val = if m < half { m } else { period - m };
+            ((tri_val * 255) / half.max(1)) as i32
+        };
+
+        for y in 0..h {
+            let row = y * w;
+            let sy = y as i64 + pan_y;
+            let bg_v = tri(sy, 180);
+            let leaf_y = tri(sy * 3 + (fi as i64) * 4, 64);
+            let ry = y as i64 - head_cy;
+            let ry_term = ry * ry * head_rx2;
+            for x in 0..w {
+                let sx = x as i64 + pan_x;
+                let bg_h = tri(sx, 240);
+                let leaf_x = tri(sx * 2 + sy, 72);
+                // Natural mid-frequency sunlit foliage / interior lighting variation (luma ~55..195).
+                let mut luma = 58 + (bg_h + bg_v) / 6 + (leaf_x + leaf_y) / 10;
+
+                // Moving talking-head subject with subtle fabric weave over the lower-middle area.
+                let rx = x as i64 - head_cx;
+                if rx * rx * head_ry2 + ry_term < head_rhs {
+                    let weave = tri(sx * 2 - sy, 36);
+                    luma = 82 + weave / 4;
+                } else if y > (h * 2) / 3 && (x as i64 - head_cx).abs() < head_rx * 2 {
+                    // Patterned shirt behind the caption zone (busy area).
+                    let stripe = tri((sx + sy) * 2, 28);
+                    luma = 64 + stripe / 3;
+                }
+
+                // Triangular-distributed temporal+spatial camera grain (~±9 luma, sigma ~4.0).
+                let g1 = (next_u32() % 11) as i32;
+                let g2 = (next_u32() % 11) as i32;
+                let grain = g1 - g2;
+                y_plane[row + x] = (luma + grain).clamp(16, 235) as u8;
+            }
+        }
+        for y in 0..ch {
+            let row = y * cw;
+            let sy = (y as i64) * 2 + pan_y;
+            for x in 0..cw {
+                let sx = (x as i64) * 2 + pan_x;
+                let cu_wave = tri(sx + sy / 2, 200) / 8;
+                let cv_wave = tri(sx / 2 + sy, 220) / 8;
+                let cg1 = (next_u32() % 5) as i32 - (next_u32() % 5) as i32;
+                let cg2 = (next_u32() % 5) as i32 - (next_u32() % 5) as i32;
+                u_plane[row + x] = (112 + cu_wave + cg1).clamp(16, 240) as u8;
+                v_plane[row + x] = (140 - cv_wave + cg2).clamp(16, 240) as u8;
+            }
+        }
+        file.write_all(&y_plane).unwrap();
+        file.write_all(&u_plane).unwrap();
+        file.write_all(&v_plane).unwrap();
+    }
+    file.flush().unwrap();
+    drop(file);
+
+    let size = format!("{width}x{height}");
+    run_ffmpeg(
+        &[
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
+            "-s",
+            &size,
+            "-r",
+            "24",
+            "-i",
+            raw_path.to_str().unwrap(),
+            "-threads",
+            "2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "12",
+            "-pix_fmt",
+            "yuv420p",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-x264-params",
+            "colorprim=bt709:transfer=bt709:colormatrix=bt709:range=tv",
+        ],
+        path,
+    );
+    let _ = std::fs::remove_file(&raw_path);
+}
+
+fn certify_video_asset(path: &Path, asset_id: AssetId) -> (MediaAsset, CertifiedSource) {
+    let bytes = std::fs::read(path).unwrap();
+    let hex = crate::sha256_bytes(&bytes);
+    let mut sha = [0_u8; 32];
+    for (i, slot) in sha.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap();
+    }
+    let len = bytes.len() as u64;
+    let mut asset = probe_path(path, asset_id).unwrap();
+    asset.source_fingerprint.content_sha256 = Some(hex);
+    asset.source_fingerprint.byte_len = Some(len);
+    let chunks: Vec<[u8; 32]> = bytes
+        .chunks(CHUNK_BYTES)
+        .map(|chunk| {
+            let mut h = kinewright_hash::Sha256::new();
+            h.update(chunk);
+            h.finalize()
+        })
+        .collect();
+    let mut table_hash = kinewright_hash::Sha256::new();
+    for chunk in &chunks {
+        table_hash.update(chunk);
+    }
+    let certified = CertifiedSource::verify(
+        File::open(path).unwrap(),
+        sha,
+        len,
+        table_hash.finalize(),
+        Arc::from(chunks),
+        Arc::new(()),
+        Arc::new(|_| Ok(Arc::new(()))),
+    )
+    .unwrap();
+    (asset, certified)
+}
+
+/// Fix round 2 (Opus M1 & GLM R1) witnesses:
+/// 1. A slide-and-fade lower third shown 1 second early (and 1 frame early) fails outside-cue
+///    timing verification while its clean control passes.
+/// 2. A caption lingering at ~30% opacity on `cue_end` fails (no longer false-passes).
+/// 3. An outside-cue probe that cannot be measured (white unscrimmed title ending on a cut to
+///    a pure-white frame) records `UnmeasurableBoundaryProbe` and yields `Unknown`, never `Pass`.
+#[test]
+fn s5_c6_fix2_outside_cue_slide_fade_early_ghost_and_unmeasurable_probe() {
+    let dir = TempDirectory::new("s5-c6-fix2-outside-cue");
+
+    // 1. Slide-and-fade lower third: 72 frames (3.0s at 24fps), cue at frames 36..64.
+    let slide_transform = Effect {
+        id: EffectId(10),
+        name: "transform".into(),
+        enabled: true,
+        enabled_curve: None,
+        parameters: BTreeMap::new(),
+        keyframes: BTreeMap::from([(
+            "x_percent".into(),
+            AutomationCurve {
+                keyframes: vec![
+                    Keyframe {
+                        at: TimeCode(0),
+                        value: -25,
+                        interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
+                    },
+                    Keyframe {
+                        at: TimeCode(12),
+                        value: 0,
+                        interpolation: KeyframeInterpolation::Linear,
+                        tangent_in: 0,
+                        tangent_out: 0,
+                    },
+                ],
+            },
+        )]),
+    };
+    let lower_third = Title {
+        text: "Dr. Morgan Vance — Lead Architect".into(),
+        font_size_token: 1,
+        color_token: 0,
+        position: TitlePosition::LowerThird,
+        background_scrim: true,
+        fade_in_frames: TimeCode(12),
+        fade_out_frames: TimeCode(8),
+        caption_preset: None,
+    };
+    let mut lower_clip = title_clip(2, 36, 28, lower_third);
+    lower_clip.effects.push(slide_transform);
+
+    let frozen_slide = document_with(
+        vec![
+            Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                name: None,
+                sync_lock: false,
+                clips: vec![solid_clip(
+                    1,
+                    72,
+                    SolidColor {
+                        r: 26,
+                        g: 42,
+                        b: 68,
+                    },
+                )],
+            },
+            Track {
+                id: TrackId(2),
+                kind: TrackKind::Video,
+                name: None,
+                sync_lock: false,
+                clips: vec![lower_clip],
+            },
+        ],
+        Vec::new(),
+        72,
+    );
+    let slide_expectations = derive_overlay_expectations_for_test(&frozen_slide, &BTreeMap::new());
+    let slide_inputs = admit_inputs(&frozen_slide, BTreeMap::new());
+
+    // 1a. Clean slide-and-fade lower third passes with zero unmeasured boundary probes.
+    let (clean_slide_file, clean_slide_timing) =
+        encode_doc(&frozen_slide, BTreeMap::new(), &dir.path("slide-clean.mp4"));
+    let rep_clean_slide = verify_review_overlays(
+        clean_slide_file,
+        &clean_slide_timing,
+        &slide_expectations,
+        &slide_inputs,
+        fallback_gpu().context(),
+        &OverlayVerificationConfig::default(),
+        &ExportCancellation::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        rep_clean_slide.row_result,
+        ReviewRowResult::Pass,
+        "S5_C6_FIX2_SLIDE_FADE_CLEAN_PASSES: {:?}",
+        rep_clean_slide.findings
+    );
+    assert_eq!(
+        rep_clean_slide.boundary_unmeasured_frames, 0,
+        "S5_C6_FIX2_SLIDE_FADE_BOUNDARIES_MEASURED"
+    );
+    assert!(
+        rep_clean_slide.boundary_checked_frames >= 2,
+        "S5_C6_FIX2_SLIDE_FADE_BOUNDARIES_CHECKED"
+    );
+
+    // 1b. Same slide-and-fade lower third shown 1 second (24 frames) early -> MUST FAIL at frame 35.
+    let mut early_1s_doc = frozen_slide.clone();
+    early_1s_doc.tracks[1].clips[0].timeline_start = TimeCode(12);
+    early_1s_doc.tracks[1].clips[0].source_range = TimeCode::ZERO..TimeCode(52);
+    let (early_1s_file, early_1s_timing) = encode_doc(
+        &early_1s_doc,
+        BTreeMap::new(),
+        &dir.path("slide-early-1s.mp4"),
+    );
+    let rep_early_1s = verify_review_overlays(
+        early_1s_file,
+        &early_1s_timing,
+        &slide_expectations,
+        &slide_inputs,
+        fallback_gpu().context(),
+        &OverlayVerificationConfig::default(),
+        &ExportCancellation::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        rep_early_1s.row_result,
+        ReviewRowResult::Failed,
+        "S5_C6_FIX2_SLIDE_FADE_1S_EARLY_FAILS: {rep_early_1s:?}"
+    );
+    // With fade_in_frames=12, local frame 0 (frame 36) has title_alpha=0 (Hidden), so the visible
+    // cue begins at frame 37 and its outside-cue start probe runs on frame 36.
+    assert!(
+        rep_early_1s.findings.iter().any(|f| {
+            f.frame_index == Some(36)
+                && matches!(
+                    f.detail,
+                    OverlayFindingKind::UnexpectedOverlayOutsideCue { .. }
+                        | OverlayFindingKind::OutsideCueReferenceMismatch { .. }
+                )
+        }),
+        "S5_C6_FIX2_SLIDE_FADE_1S_EARLY_AT_PROBE_FRAME: {:?}",
+        rep_early_1s.findings
+    );
+
+    // 2. Caption lingering at ~30% opacity on `cue_end` (Opus M1 scenario) -> MUST FAIL.
+    let cap_title = CaptionPreset::Clean.title("Closing line");
+    let frozen_ghost = document_with(
+        vec![
+            Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                name: None,
+                sync_lock: false,
+                clips: vec![solid_clip(
+                    1,
+                    14,
+                    SolidColor {
+                        r: 22,
+                        g: 34,
+                        b: 56,
+                    },
+                )],
+            },
+            Track {
+                id: TrackId(2),
+                kind: TrackKind::Video,
+                name: None,
+                sync_lock: false,
+                clips: vec![title_clip(2, 4, 6, cap_title.clone())],
+            },
+        ],
+        Vec::new(),
+        14,
+    );
+    let ghost_expectations = derive_overlay_expectations_for_test(&frozen_ghost, &BTreeMap::new());
+    let ghost_inputs = admit_inputs(&frozen_ghost, BTreeMap::new());
+
+    let (clean_ghost_file, clean_ghost_timing) =
+        encode_doc(&frozen_ghost, BTreeMap::new(), &dir.path("ghost-clean.mp4"));
+    let rep_clean_ghost = verify_review_overlays(
+        clean_ghost_file,
+        &clean_ghost_timing,
+        &ghost_expectations,
+        &ghost_inputs,
+        fallback_gpu().context(),
+        &OverlayVerificationConfig::default(),
+        &ExportCancellation::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        rep_clean_ghost.row_result,
+        ReviewRowResult::Pass,
+        "S5_C6_FIX2_GHOST_CLEAN_PASSES: {:?}",
+        rep_clean_ghost.findings
+    );
+
+    // Add a 1-frame 30%-opacity lingering ghost of the caption on `cue_end` (frame 10).
+    let mut ghost_doc = frozen_ghost.clone();
+    let mut ghost_clip = title_clip(99, 10, 1, cap_title);
+    ghost_clip.effects.push(Effect {
+        id: EffectId(20),
+        name: "opacity".into(),
+        enabled: true,
+        enabled_curve: None,
+        parameters: BTreeMap::from([("percent".into(), ParamValue::Integer(30))]),
+        keyframes: BTreeMap::new(),
+    });
+    ghost_doc.tracks[1].clips.push(ghost_clip);
+    let (ghost_file, ghost_timing) =
+        encode_doc(&ghost_doc, BTreeMap::new(), &dir.path("ghost-30pct.mp4"));
+    let rep_ghost = verify_review_overlays(
+        ghost_file,
+        &ghost_timing,
+        &ghost_expectations,
+        &ghost_inputs,
+        fallback_gpu().context(),
+        &OverlayVerificationConfig::default(),
+        &ExportCancellation::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        rep_ghost.row_result,
+        ReviewRowResult::Failed,
+        "S5_C6_FIX2_30PCT_GHOST_ON_CUE_END_FAILS: {rep_ghost:?}"
+    );
+    assert!(
+        rep_ghost.findings.iter().any(|f| {
+            f.frame_index == Some(10)
+                && matches!(
+                    f.detail,
+                    OverlayFindingKind::UnexpectedOverlayOutsideCue { .. }
+                )
+        }),
+        "S5_C6_FIX2_30PCT_GHOST_FINDING_AT_CUE_END: {:?}",
+        rep_ghost.findings
+    );
+
+    // 3. Unmeasurable boundary probe: title on Track 2 over dark navy on frames 2..8 is 100%
+    //    measurable in range, while an opaque full-frame solid clip on Track 3 (above Track 2)
+    //    begins at frame 8 (`cue_end`). Injecting Track 2 at its document z-order on frame 8 is
+    //    completely occluded by Track 3 (`ref_rms == 0`), so the `cue_end` probe is NotMeasurable
+    //    and MUST yield `Unknown` with `UnmeasurableBoundaryProbe` (never `Pass`).
+    let mut upper_occluder = solid_clip(
+        4,
+        4,
+        SolidColor {
+            r: 40,
+            g: 46,
+            b: 60,
+        },
+    );
+    upper_occluder.timeline_start = TimeCode(8);
+    let clean_title = Title {
+        text: "Occluded At Cue End".into(),
+        font_size_token: 1,
+        color_token: 0,
+        position: TitlePosition::Center,
+        background_scrim: false,
+        fade_in_frames: TimeCode::ZERO,
+        fade_out_frames: TimeCode::ZERO,
+        caption_preset: None,
+    };
+    let unmeas_probe_doc = document_with(
+        vec![
+            Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                name: None,
+                sync_lock: false,
+                clips: vec![solid_clip(
+                    1,
+                    12,
+                    SolidColor {
+                        r: 18,
+                        g: 30,
+                        b: 54,
+                    },
+                )],
+            },
+            Track {
+                id: TrackId(2),
+                kind: TrackKind::Video,
+                name: None,
+                sync_lock: false,
+                clips: vec![title_clip(3, 2, 6, clean_title)],
+            },
+            Track {
+                id: TrackId(3),
+                kind: TrackKind::Video,
+                name: None,
+                sync_lock: false,
+                clips: vec![upper_occluder],
+            },
+        ],
+        Vec::new(),
+        12,
+    );
+    let unmeas_expectations =
+        derive_overlay_expectations_for_test(&unmeas_probe_doc, &BTreeMap::new());
+    let unmeas_inputs = admit_inputs(&unmeas_probe_doc, BTreeMap::new());
+    let (unmeas_file, unmeas_timing) = encode_doc(
+        &unmeas_probe_doc,
+        BTreeMap::new(),
+        &dir.path("unmeas-probe.mp4"),
+    );
+    let rep_unmeas = verify_review_overlays(
+        unmeas_file,
+        &unmeas_timing,
+        &unmeas_expectations,
+        &unmeas_inputs,
+        fallback_gpu().context(),
+        &OverlayVerificationConfig::default(),
+        &ExportCancellation::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        rep_unmeas.row_result,
+        ReviewRowResult::Unknown,
+        "S5_C6_FIX2_UNMEASURABLE_PROBE_IS_UNKNOWN: {rep_unmeas:?}"
+    );
+    assert_eq!(
+        rep_unmeas.overlays[0].status,
+        OverlayElementStatus::Unknown,
+        "S5_C6_FIX2_UNMEASURABLE_PROBE_ELEMENT_UNKNOWN"
+    );
+    assert_eq!(
+        rep_unmeas.overlays[0].measurable_frames, 6,
+        "S5_C6_FIX2_IN_RANGE_ALL_MEASURED"
+    );
+    assert_eq!(
+        rep_unmeas.boundary_unmeasured_frames, 1,
+        "S5_C6_FIX2_ONE_UNMEASURED_BOUNDARY"
+    );
+    assert!(
+        rep_unmeas.findings.iter().any(|f| {
+            f.frame_index == Some(8)
+                && matches!(
+                    f.detail,
+                    OverlayFindingKind::UnmeasurableBoundaryProbe { .. }
+                )
+        }),
+        "S5_C6_FIX2_UNMEASURABLE_BOUNDARY_FINDING: {:?}",
+        rep_unmeas.findings
+    );
+}
+
+/// Fix round 2 (Opus M2 & GLM R2) delivery-bitrate calibration witness:
+/// Procedurally generated moving grainy footage encoded at the product's `Youtube1080p` (8 Mbps,
+/// 1920x1080) and `VerticalShort` (10 Mbps, 1080x1920) profiles with an outline caption over the
+/// busy moving area, a faint/translucent card, and a slide-and-fade lower third.
+/// Clean encodes must Pass; seeded missing caption, one-digit change, early start, and lingering
+/// 30% ghost on the same `Youtube1080p` footage must all Fail.
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn s5_c6_fix2_delivery_bitrate_moving_grain_calibration() {
+    let dir = TempDirectory::new("s5-c6-fix2-delivery-calib");
+
+    // Create a faint/translucent badge card PNG (45% alpha fill + 55% alpha border) so it tests
+    // translucent overlays at delivery bitrate while leaving moving-grain tiles outside its box.
+    let card_w = 480_u32;
+    let card_h = 270_u32;
+    let mut card_rgba = vec![0_u8; (card_w * card_h * 4) as usize];
+    for y in 0..card_h {
+        for x in 0..card_w {
+            let i = ((y * card_w + x) * 4) as usize;
+            let border = x < 8 || x >= card_w - 8 || y < 8 || y >= card_h - 8;
+            if border {
+                card_rgba[i] = 240;
+                card_rgba[i + 1] = 220;
+                card_rgba[i + 2] = 120;
+                card_rgba[i + 3] = 148; // ~58% alpha crisp border
+            } else {
+                card_rgba[i] = 20;
+                card_rgba[i + 1] = 36;
+                card_rgba[i + 2] = 74;
+                card_rgba[i + 3] = 115; // ~45% alpha translucent body
+            }
+        }
+    }
+    let card_path = dir.path("translucent-badge.png");
+    write_png_rgba(&card_path, card_w, card_h, &card_rgba);
+    let (card_asset, card_cert, card_sha, card_len) = certify_image_asset(&card_path, AssetId(2));
+
+    let make_card_clip = |start: i64, dur: i64| Clip {
+        id: ClipId(20),
+        asset: AssetId(2),
+        timeline_start: TimeCode(start),
+        source_range: TimeCode::ZERO..TimeCode(dur),
+        content: ClipContent::Freeze(kinewright_core::FreezeFrame {
+            source_frame: TimeCode::ZERO,
+        }),
+        effects: vec![Effect {
+            id: EffectId(21),
+            name: "transform".into(),
+            enabled: true,
+            enabled_curve: None,
+            parameters: BTreeMap::from([
+                ("scale_percent".into(), ParamValue::Integer(30)),
+                ("x_percent".into(), ParamValue::Integer(28)),
+                ("y_percent".into(), ParamValue::Integer(-28)),
+            ]),
+            keyframes: BTreeMap::new(),
+        }],
+        transition_in: None,
+        link: None,
+        audio_gain_tenth_db: 0,
+        audio_fade_in_frames: TimeCode::ZERO,
+        audio_fade_out_frames: TimeCode::ZERO,
+        audio_gain_curve: None,
+        speed_percent: 100,
+        enabled: true,
+        enabled_curve: None,
+        blend_mode: BlendMode::Normal,
+    };
+
+    let make_lower_third = |start: i64, dur: i64| {
+        let mut c = title_clip(
+            30,
+            start,
+            dur,
+            Title {
+                text: "Field Dispatch — Sector 4".into(),
+                font_size_token: 1,
+                color_token: 0,
+                position: TitlePosition::Top,
+                background_scrim: true,
+                fade_in_frames: TimeCode(2),
+                fade_out_frames: TimeCode(2),
+                caption_preset: None,
+            },
+        );
+        c.effects.push(Effect {
+            id: EffectId(31),
+            name: "transform".into(),
+            enabled: true,
+            enabled_curve: None,
+            parameters: BTreeMap::new(),
+            keyframes: BTreeMap::from([(
+                "x_percent".into(),
+                AutomationCurve {
+                    keyframes: vec![
+                        Keyframe {
+                            at: TimeCode(0),
+                            value: -10,
+                            interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
+                        },
+                        Keyframe {
+                            at: TimeCode(3),
+                            value: 0,
+                            interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
+                        },
+                    ],
+                },
+            )]),
+        });
+        c
+    };
+
+    // --- Lane 1: Youtube1080p (1920x1080, 8 Mbps) over 36 frames (1.5s) of moving grain ---
+    let yt_frames = 36_u32;
+    let yt_src_path = dir.path("moving-grain-1080p.mp4");
+    generate_moving_grainy_mp4(&yt_src_path, 1920, 1080, yt_frames);
+    let (yt_asset, yt_cert) = certify_video_asset(&yt_src_path, AssetId(1));
+
+    let yt_bg_clip = Clip {
+        id: ClipId(1),
+        asset: AssetId(1),
+        timeline_start: TimeCode::ZERO,
+        source_range: TimeCode::ZERO..TimeCode(i64::from(yt_frames)),
+        content: ClipContent::Media,
+        effects: Vec::new(),
+        transition_in: None,
+        link: None,
+        audio_gain_tenth_db: 0,
+        audio_fade_in_frames: TimeCode::ZERO,
+        audio_fade_out_frames: TimeCode::ZERO,
+        audio_gain_curve: None,
+        speed_percent: 100,
+        enabled: true,
+        enabled_curve: None,
+        blend_mode: BlendMode::Normal,
+    };
+    let yt_doc = document_with_raster(
+        (1920, 1080),
+        vec![
+            Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                name: None,
+                sync_lock: false,
+                clips: vec![yt_bg_clip],
+            },
+            Track {
+                id: TrackId(2),
+                kind: TrackKind::Video,
+                name: None,
+                sync_lock: false,
+                clips: vec![make_card_clip(16, 6)],
+            },
+            Track {
+                id: TrackId(3),
+                kind: TrackKind::Video,
+                name: None,
+                sync_lock: false,
+                clips: vec![title_clip(
+                    10,
+                    16,
+                    6,
+                    CaptionPreset::Social.title("Total revenue: 1,250"),
+                )],
+            },
+            Track {
+                id: TrackId(4),
+                kind: TrackKind::Video,
+                name: None,
+                sync_lock: false,
+                clips: vec![make_lower_third(16, 6)],
+            },
+        ],
+        vec![yt_asset, card_asset.clone()],
+        i64::from(yt_frames),
+    );
+    let pinned_cards = BTreeMap::from([(AssetId(2), (card_sha, card_len))]);
+    let yt_expectations = derive_overlay_expectations_for_test(&yt_doc, &pinned_cards);
+    let yt_sources = || {
+        BTreeMap::from([
+            (AssetId(1), yt_cert.clone()),
+            (AssetId(2), card_cert.clone()),
+        ])
+    };
+    let yt_inputs = admit_inputs(&yt_doc, yt_sources());
+    let yt_settings = DeliveryProfile::Youtube1080p.export_settings(
+        &yt_doc,
+        DeliveryEncodeDepth::Eight,
+        ExportCancellation::default(),
+    );
+
+    let yt_clean_path = dir.path("yt-1080p-clean.mp4");
+    let (yt_clean_file, yt_clean_timing) =
+        encode_doc_with_settings(&yt_doc, yt_sources(), &yt_settings, &yt_clean_path);
+    let yt_clean_bytes = std::fs::metadata(&yt_clean_path).unwrap().len();
+    let yt_clean_mbps = (yt_clean_bytes as f64 * 8.0) / (f64::from(yt_frames) / 24.0) / 1_000_000.0;
+    let rep_yt_clean = verify_review_overlays(
+        yt_clean_file,
+        &yt_clean_timing,
+        &yt_expectations,
+        &yt_inputs,
+        fallback_gpu().context(),
+        &OverlayVerificationConfig::default(),
+        &ExportCancellation::default(),
+    )
+    .unwrap();
+    let yt_clean_cap = rep_yt_clean
+        .overlays
+        .iter()
+        .find(|o| o.element == ClipId(10))
+        .unwrap();
+    let yt_clean_card = rep_yt_clean
+        .overlays
+        .iter()
+        .find(|o| o.element == ClipId(20))
+        .unwrap();
+    let yt_clean_lt = rep_yt_clean
+        .overlays
+        .iter()
+        .find(|o| o.element == ClipId(30))
+        .unwrap();
+    println!(
+        "S5_C6_FIX2_YT1080P_CLEAN mbps={yt_clean_mbps:.2} global_noise={:.2} tile_p99={:.2} \
+         cap(with={:.2},tile={:.2},bnd={:.2},min_wo={:.2}) \
+         card(with={:.2},tile={:.2},bnd={:.2},min_wo={:.2}) \
+         lt(with={:.2},tile={:.2},bnd={:.2},min_wo={:.2}) status={:?}",
+        rep_yt_clean.max_frame_global_noise_rms,
+        rep_yt_clean.max_frame_tile_noise_p99,
+        yt_clean_cap.worst_with_rms,
+        yt_clean_cap.worst_tile_rms,
+        yt_clean_cap.worst_boundary_without_rms,
+        yt_clean_cap.min_without_rms,
+        yt_clean_card.worst_with_rms,
+        yt_clean_card.worst_tile_rms,
+        yt_clean_card.worst_boundary_without_rms,
+        yt_clean_card.min_without_rms,
+        yt_clean_lt.worst_with_rms,
+        yt_clean_lt.worst_tile_rms,
+        yt_clean_lt.worst_boundary_without_rms,
+        yt_clean_lt.min_without_rms,
+        rep_yt_clean.row_result,
+    );
+    assert_eq!(
+        rep_yt_clean.row_result,
+        ReviewRowResult::Pass,
+        "S5_C6_FIX2_YT1080P_CLEAN_MUST_PASS: {:?}",
+        rep_yt_clean.findings
+    );
+    assert_eq!(rep_yt_clean.boundary_unmeasured_frames, 0);
+    for ov in &rep_yt_clean.overlays {
+        assert_eq!(
+            ov.status,
+            OverlayElementStatus::Passed,
+            "S5_C6_FIX2_YT1080P_ELEMENT_PASSED: {ov:?}"
+        );
+    }
+
+    // Seeded defect 1 on Youtube1080p: missing caption.
+    let mut yt_missing = yt_doc.clone();
+    yt_missing.tracks[2].clips[0].enabled = false;
+    let (file_miss, timing_miss) = encode_doc_with_settings(
+        &yt_missing,
+        yt_sources(),
+        &yt_settings,
+        &dir.path("yt-missing.mp4"),
+    );
+    let rep_miss = verify_review_overlays(
+        file_miss,
+        &timing_miss,
+        &yt_expectations,
+        &yt_inputs,
+        fallback_gpu().context(),
+        &OverlayVerificationConfig::default(),
+        &ExportCancellation::default(),
+    )
+    .unwrap();
+    let miss_cap = rep_miss
+        .overlays
+        .iter()
+        .find(|o| o.element == ClipId(10))
+        .unwrap();
+    println!(
+        "S5_C6_FIX2_YT1080P_MISSING status={:?} cap_with={:.2} cap_tile={:.2}",
+        rep_miss.row_result, miss_cap.worst_with_rms, miss_cap.worst_tile_rms
+    );
+    assert_eq!(
+        rep_miss.row_result,
+        ReviewRowResult::Failed,
+        "S5_C6_FIX2_YT1080P_MISSING_FAILS"
+    );
+
+    // Seeded defect 2 on Youtube1080p: one-digit change ("1,250" -> "1,850").
+    let mut yt_digit = yt_doc.clone();
+    yt_digit.tracks[2].clips[0].content =
+        ClipContent::Title(CaptionPreset::Social.title("Total revenue: 1,850"));
+    let (file_digit, timing_digit) = encode_doc_with_settings(
+        &yt_digit,
+        yt_sources(),
+        &yt_settings,
+        &dir.path("yt-digit.mp4"),
+    );
+    let rep_digit = verify_review_overlays(
+        file_digit,
+        &timing_digit,
+        &yt_expectations,
+        &yt_inputs,
+        fallback_gpu().context(),
+        &OverlayVerificationConfig::default(),
+        &ExportCancellation::default(),
+    )
+    .unwrap();
+    let digit_cap = rep_digit
+        .overlays
+        .iter()
+        .find(|o| o.element == ClipId(10))
+        .unwrap();
+    println!(
+        "S5_C6_FIX2_YT1080P_DIGIT status={:?} cap_with={:.2} cap_tile={:.2}",
+        rep_digit.row_result, digit_cap.worst_with_rms, digit_cap.worst_tile_rms
+    );
+    assert_eq!(
+        rep_digit.row_result,
+        ReviewRowResult::Failed,
+        "S5_C6_FIX2_YT1080P_ONE_DIGIT_FAILS"
+    );
+
+    // Seeded defect 3 on Youtube1080p: caption starts 1 frame early (frame 15).
+    let mut yt_early = yt_doc.clone();
+    yt_early.tracks[2].clips[0].timeline_start = TimeCode(15);
+    yt_early.tracks[2].clips[0].source_range = TimeCode::ZERO..TimeCode(7);
+    let (file_early, timing_early) = encode_doc_with_settings(
+        &yt_early,
+        yt_sources(),
+        &yt_settings,
+        &dir.path("yt-early.mp4"),
+    );
+    let rep_early = verify_review_overlays(
+        file_early,
+        &timing_early,
+        &yt_expectations,
+        &yt_inputs,
+        fallback_gpu().context(),
+        &OverlayVerificationConfig::default(),
+        &ExportCancellation::default(),
+    )
+    .unwrap();
+    let early_cap = rep_early
+        .overlays
+        .iter()
+        .find(|o| o.element == ClipId(10))
+        .unwrap();
+    println!(
+        "S5_C6_FIX2_YT1080P_EARLY status={:?} cap_bnd_wo={:.2}",
+        rep_early.row_result, early_cap.worst_boundary_without_rms
+    );
+    assert_eq!(
+        rep_early.row_result,
+        ReviewRowResult::Failed,
+        "S5_C6_FIX2_YT1080P_EARLY_FAILS"
+    );
+
+    // Seeded defect 4 on Youtube1080p: caption lingers at 30% opacity on `cue_end` (frame 22).
+    let mut yt_ghost = yt_doc.clone();
+    let mut ghost = title_clip(
+        99,
+        22,
+        1,
+        CaptionPreset::Social.title("Total revenue: 1,250"),
+    );
+    ghost.effects.push(Effect {
+        id: EffectId(98),
+        name: "opacity".into(),
+        enabled: true,
+        enabled_curve: None,
+        parameters: BTreeMap::from([("percent".into(), ParamValue::Integer(30))]),
+        keyframes: BTreeMap::new(),
+    });
+    yt_ghost.tracks[2].clips.push(ghost);
+    let (file_ghost, timing_ghost) = encode_doc_with_settings(
+        &yt_ghost,
+        yt_sources(),
+        &yt_settings,
+        &dir.path("yt-ghost.mp4"),
+    );
+    let rep_ghost = verify_review_overlays(
+        file_ghost,
+        &timing_ghost,
+        &yt_expectations,
+        &yt_inputs,
+        fallback_gpu().context(),
+        &OverlayVerificationConfig::default(),
+        &ExportCancellation::default(),
+    )
+    .unwrap();
+    let ghost_cap = rep_ghost
+        .overlays
+        .iter()
+        .find(|o| o.element == ClipId(10))
+        .unwrap();
+    println!(
+        "S5_C6_FIX2_YT1080P_LINGER_30PCT status={:?} cap_bnd_wo={:.2}",
+        rep_ghost.row_result, ghost_cap.worst_boundary_without_rms
+    );
+    assert_eq!(
+        rep_ghost.row_result,
+        ReviewRowResult::Failed,
+        "S5_C6_FIX2_YT1080P_LINGER_FAILS"
+    );
+
+    // --- Lane 2: VerticalShort (1080x1920, 10 Mbps) over 24 frames (1.0s) of moving grain ---
+    let vs_frames = 24_u32;
+    let vs_src_path = dir.path("moving-grain-vertical.mp4");
+    generate_moving_grainy_mp4(&vs_src_path, 1080, 1920, vs_frames);
+    let (vs_asset, vs_cert) = certify_video_asset(&vs_src_path, AssetId(1));
+
+    let vs_bg_clip = Clip {
+        id: ClipId(1),
+        asset: AssetId(1),
+        timeline_start: TimeCode::ZERO,
+        source_range: TimeCode::ZERO..TimeCode(i64::from(vs_frames)),
+        content: ClipContent::Media,
+        effects: Vec::new(),
+        transition_in: None,
+        link: None,
+        audio_gain_tenth_db: 0,
+        audio_fade_in_frames: TimeCode::ZERO,
+        audio_fade_out_frames: TimeCode::ZERO,
+        audio_gain_curve: None,
+        speed_percent: 100,
+        enabled: true,
+        enabled_curve: None,
+        blend_mode: BlendMode::Normal,
+    };
+    let vs_doc = document_with_raster(
+        (1080, 1920),
+        vec![
+            Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                name: None,
+                sync_lock: false,
+                clips: vec![vs_bg_clip],
+            },
+            Track {
+                id: TrackId(2),
+                kind: TrackKind::Video,
+                name: None,
+                sync_lock: false,
+                clips: vec![make_card_clip(9, 6)],
+            },
+            Track {
+                id: TrackId(3),
+                kind: TrackKind::Video,
+                name: None,
+                sync_lock: false,
+                clips: vec![title_clip(
+                    10,
+                    9,
+                    6,
+                    CaptionPreset::Social.title("Vertical 1,250"),
+                )],
+            },
+            Track {
+                id: TrackId(4),
+                kind: TrackKind::Video,
+                name: None,
+                sync_lock: false,
+                clips: vec![make_lower_third(9, 6)],
+            },
+        ],
+        vec![vs_asset, card_asset],
+        i64::from(vs_frames),
+    );
+    let vs_expectations = derive_overlay_expectations_for_test(&vs_doc, &pinned_cards);
+    let vs_sources = BTreeMap::from([(AssetId(1), vs_cert), (AssetId(2), card_cert)]);
+    let vs_inputs = admit_inputs(&vs_doc, vs_sources.clone());
+    let vs_settings = DeliveryProfile::VerticalShort.export_settings(
+        &vs_doc,
+        DeliveryEncodeDepth::Eight,
+        ExportCancellation::default(),
+    );
+    let vs_clean_path = dir.path("vs-1080x1920-clean.mp4");
+    let (vs_clean_file, vs_clean_timing) =
+        encode_doc_with_settings(&vs_doc, vs_sources, &vs_settings, &vs_clean_path);
+    let vs_clean_bytes = std::fs::metadata(&vs_clean_path).unwrap().len();
+    let vs_clean_mbps = (vs_clean_bytes as f64 * 8.0) / (f64::from(vs_frames) / 24.0) / 1_000_000.0;
+    let rep_vs_clean = verify_review_overlays(
+        vs_clean_file,
+        &vs_clean_timing,
+        &vs_expectations,
+        &vs_inputs,
+        fallback_gpu().context(),
+        &OverlayVerificationConfig::default(),
+        &ExportCancellation::default(),
+    )
+    .unwrap();
+    let vs_cap = rep_vs_clean
+        .overlays
+        .iter()
+        .find(|o| o.element == ClipId(10))
+        .unwrap();
+    let vs_card = rep_vs_clean
+        .overlays
+        .iter()
+        .find(|o| o.element == ClipId(20))
+        .unwrap();
+    let vs_lt = rep_vs_clean
+        .overlays
+        .iter()
+        .find(|o| o.element == ClipId(30))
+        .unwrap();
+    println!(
+        "S5_C6_FIX2_VERTICAL_CLEAN mbps={vs_clean_mbps:.2} global_noise={:.2} tile_p99={:.2} \
+         cap(with={:.2},tile={:.2},bnd={:.2},min_wo={:.2}) \
+         card(with={:.2},tile={:.2},bnd={:.2},min_wo={:.2}) \
+         lt(with={:.2},tile={:.2},bnd={:.2},min_wo={:.2}) status={:?}",
+        rep_vs_clean.max_frame_global_noise_rms,
+        rep_vs_clean.max_frame_tile_noise_p99,
+        vs_cap.worst_with_rms,
+        vs_cap.worst_tile_rms,
+        vs_cap.worst_boundary_without_rms,
+        vs_cap.min_without_rms,
+        vs_card.worst_with_rms,
+        vs_card.worst_tile_rms,
+        vs_card.worst_boundary_without_rms,
+        vs_card.min_without_rms,
+        vs_lt.worst_with_rms,
+        vs_lt.worst_tile_rms,
+        vs_lt.worst_boundary_without_rms,
+        vs_lt.min_without_rms,
+        rep_vs_clean.row_result,
+    );
+    assert_eq!(
+        rep_vs_clean.row_result,
+        ReviewRowResult::Pass,
+        "S5_C6_FIX2_VERTICAL_CLEAN_MUST_PASS: {:?}",
+        rep_vs_clean.findings
+    );
+    assert_eq!(rep_vs_clean.boundary_unmeasured_frames, 0);
+    for ov in &rep_vs_clean.overlays {
+        assert_eq!(
+            ov.status,
+            OverlayElementStatus::Passed,
+            "S5_C6_FIX2_VERTICAL_ELEMENT_PASSED: {ov:?}"
+        );
+    }
+}

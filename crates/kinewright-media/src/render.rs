@@ -10,8 +10,9 @@ use std::{
 use kinewright_core::{
     AssetId, ClipId, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
     ColorRange, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, Document, Effect,
-    EffectId, FrameTexture, LinearRgbaImage, MatteProofError, MediaError, MediaSourceFingerprint,
-    Rational, SourceColorRefusal, TimeCode, Title, classify_source_with_assumption,
+    EffectId, EffectUniform, FrameTexture, LinearRgbaImage, MatteProofError, MediaError,
+    MediaSourceFingerprint, Rational, SourceColorRefusal, TimeCode, Title,
+    classify_source_with_assumption, effect_descriptor,
 };
 
 use crate::{
@@ -1242,13 +1243,16 @@ impl FrameRenderer {
             .map_err(|error| attribute_layer_refs(&filtered, project_at, error))
     }
 
-    /// Stage a single overlay clip at its representative active project frame so an
-    /// outside-cue timing probe can inject it at its exact track z-order.
+    /// Stage a single overlay clip from its most visible in-cue frame (`visibility_at`),
+    /// placed where the document places it at `placement_at`, so an outside-cue timing probe
+    /// can inject a full-opacity reference even for fading or sliding entrances.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn stage_single_clip_for_boundary(
         &mut self,
         document: &Document,
         clip_id: ClipId,
-        representative_at: TimeCode,
+        visibility_at: TimeCode,
+        placement_at: TimeCode,
         resolution: (u32, u32),
         scale: RenderScale,
         strategy: DecodeStrategy,
@@ -1261,15 +1265,23 @@ impl FrameRenderer {
         document
             .validate()
             .map_err(|error| MediaError::InvalidDocument(Box::new(error)))?;
-        let layer_specs = visual_layers_at(document, representative_at)?;
-        let Some(spec) = layer_specs.into_iter().find(|layer| match layer {
-            TimelineVisualLayer::Video(v) => v.source.clip == clip_id,
-            TimelineVisualLayer::Title(t) => t.clip == clip_id,
-            TimelineVisualLayer::Solid(s) => s.clip == clip_id,
-            TimelineVisualLayer::Adjustment(a) => a.clip == clip_id,
-        }) else {
+        let layer_specs = visual_layers_at(document, visibility_at)?;
+        let Some(mut spec) = layer_specs
+            .into_iter()
+            .find(|layer| layer.clip() == clip_id)
+        else {
             return Ok(None);
         };
+        if placement_at != visibility_at {
+            let placement_specs = visual_layers_at(document, placement_at)?;
+            let Some(placement_spec) = placement_specs
+                .into_iter()
+                .find(|layer| layer.clip() == clip_id)
+            else {
+                return Ok(None);
+            };
+            merge_boundary_placement(&mut spec, &placement_spec);
+        }
         let layer =
             self.stage_one_layer(document, spec, resolution, scale, Video::Decode(strategy))?;
         Ok(Some(StagedClipLayer {
@@ -2050,6 +2062,111 @@ fn clip_track_order(document: &Document, clip_id: ClipId) -> usize {
                 .then_some(track_index)
         })
         .unwrap_or(usize::MAX)
+}
+
+const fn is_spatial_uniform(uniform: EffectUniform) -> bool {
+    matches!(
+        uniform,
+        EffectUniform::Scale
+            | EffectUniform::ScaleX
+            | EffectUniform::ScaleY
+            | EffectUniform::ScaleFine
+            | EffectUniform::OffsetX
+            | EffectUniform::OffsetY
+            | EffectUniform::OffsetXBasisPoints
+            | EffectUniform::OffsetYBasisPoints
+            | EffectUniform::Rotation
+            | EffectUniform::AnchorX
+            | EffectUniform::AnchorY
+    )
+}
+
+fn effect_is_spatial_only(effect: &Effect) -> bool {
+    effect_descriptor(&effect.name).is_some_and(|desc| {
+        !desc.parameters.is_empty()
+            && desc
+                .parameters
+                .iter()
+                .all(|param| is_spatial_uniform(param.uniform))
+    })
+}
+
+fn effect_has_spatial_param(effect: &Effect) -> bool {
+    effect_descriptor(&effect.name).is_some_and(|desc| {
+        desc.parameters
+            .iter()
+            .any(|param| is_spatial_uniform(param.uniform))
+    })
+}
+
+fn layer_effects_and_transition_mut(
+    layer: &mut TimelineVisualLayer,
+) -> (&mut Vec<Effect>, &mut TransitionRenderParams) {
+    match layer {
+        TimelineVisualLayer::Video(v) => (&mut v.effects, &mut v.transition),
+        TimelineVisualLayer::Title(t) => (&mut t.effects, &mut t.transition),
+        TimelineVisualLayer::Solid(s) => (&mut s.effects, &mut s.transition),
+        TimelineVisualLayer::Adjustment(a) => (&mut a.effects, &mut a.transition),
+    }
+}
+
+fn layer_effects_and_transition(
+    layer: &TimelineVisualLayer,
+) -> (&[Effect], &TransitionRenderParams) {
+    match layer {
+        TimelineVisualLayer::Video(v) => (&v.effects, &v.transition),
+        TimelineVisualLayer::Title(t) => (&t.effects, &t.transition),
+        TimelineVisualLayer::Solid(s) => (&s.effects, &s.transition),
+        TimelineVisualLayer::Adjustment(a) => (&a.effects, &a.transition),
+    }
+}
+
+/// Apply spatial placement (transform effects and transition slide offset) from `placement`
+/// onto `visibility`, preserving the maximally visible opacity, coverage, and colour state.
+fn merge_boundary_placement(visibility: &mut TimelineVisualLayer, placement: &TimelineVisualLayer) {
+    let (vis_effects, vis_transition) = layer_effects_and_transition_mut(visibility);
+    let (place_effects, place_transition) = layer_effects_and_transition(placement);
+    vis_transition.offset = place_transition.offset;
+
+    // Remove spatial-only effects from the visibility frame; they will be replaced by the
+    // placement frame's evaluated spatial transforms.
+    vis_effects.retain(|effect| !effect_is_spatial_only(effect));
+
+    for place_effect in place_effects {
+        if !effect_has_spatial_param(place_effect) {
+            continue;
+        }
+        if effect_is_spatial_only(place_effect) {
+            vis_effects.push(place_effect.clone());
+            continue;
+        }
+        if let Some(desc) = effect_descriptor(&place_effect.name) {
+            if let Some(existing) = vis_effects.iter_mut().find(|e| e.id == place_effect.id) {
+                for param in desc
+                    .parameters
+                    .iter()
+                    .filter(|p| is_spatial_uniform(p.uniform))
+                {
+                    if let Some(val) = place_effect.parameters.get(param.name) {
+                        existing
+                            .parameters
+                            .insert(param.name.to_owned(), val.clone());
+                    } else {
+                        existing.parameters.remove(param.name);
+                    }
+                    if let Some(curve) = place_effect.keyframes.get(param.name) {
+                        existing
+                            .keyframes
+                            .insert(param.name.to_owned(), curve.clone());
+                    } else {
+                        existing.keyframes.remove(param.name);
+                    }
+                }
+            } else {
+                vis_effects.push(place_effect.clone());
+            }
+        }
+    }
 }
 
 /// Borrow the staged layers as compositor layers, preserving z-order.
