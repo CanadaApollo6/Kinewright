@@ -84,7 +84,7 @@ pub(crate) enum Action {
     DismissManualNotice,
     StudioVersions,
     StudioEditorial(Option<SnapshotKey>),
-    StudioReview(Box<kinewright_project::review_job::ReviewControl>),
+    StudioReview(Box<crate::studio_review::ReviewAction>),
     StudioRulebook {
         decision: RulebookDecision,
         version: Option<SnapshotKey>,
@@ -461,8 +461,8 @@ impl Ja1Attachment {
             return Err(BundleError::Unsettled);
         }
         self.end_manual_gestures();
-        if let Action::StudioReview(control) = action {
-            let result = self.studio_review(*control);
+        if let Action::StudioReview(review) = action {
+            let result = self.studio_review(*review);
             if let Err(error) = &result {
                 self.studio_error_ready = Some(crate::studio::StudioFailure::from_bundle(
                     error.to_string(),
@@ -957,8 +957,9 @@ impl Ja1Attachment {
     }
     fn studio_review(
         &mut self,
-        control: kinewright_project::review_job::ReviewControl,
+        review: crate::studio_review::ReviewAction,
     ) -> Result<(), BundleError> {
+        let crate::studio_review::ReviewAction { control, version } = review;
         let host = self.host.as_ref().ok_or_else(|| {
             BundleError::Identity(
                 "Output review requires a saved project attached to the writer host.".into(),
@@ -972,6 +973,11 @@ impl Ja1Attachment {
             return Err(BundleError::Corrupt(error.message));
         }
         self.studio_review_ready = Some(crate::studio_review::ReviewRefresh(reply.review));
+        // A Refresh or a seal can bring a new receipt: reload the selected
+        // version's details so its label shows.
+        if let Some(version) = version {
+            return self.read_studio_editorial(Some(&version));
+        }
         Ok(())
     }
 

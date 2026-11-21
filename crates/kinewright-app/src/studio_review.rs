@@ -9,6 +9,54 @@ use crate::ja1_attachment::Action;
 
 pub(crate) struct ReviewRefresh(pub(crate) Option<ReviewStatus>);
 
+/// A review control and the version selected when it was sent; the reply
+/// reloads that version's details, so a new receipt shows.
+pub(crate) struct ReviewAction {
+    pub(crate) control: ReviewControl,
+    pub(crate) version: Option<SnapshotKey>,
+}
+
+/// What the panel shows for the selected version.
+struct ReviewView<'a> {
+    receipt: Option<(&'static str, Vec<String>)>,
+    saved: Option<&'a ReviewAnnotationFields>,
+    /// The details are the selected version's own.
+    current: bool,
+}
+
+impl<'a> ReviewView<'a> {
+    fn new(
+        details: Option<&'a crate::ja1_attachment::EditorialDetails>,
+        selected: Option<&SnapshotKey>,
+    ) -> Self {
+        Self::of(
+            details.and_then(|details| details.version.as_ref()),
+            details
+                .and_then(|details| details.receipt.as_ref())
+                .map(|receipt| (&receipt.key.snapshot, &receipt.outcome)),
+            details.and_then(|details| details.annotations.as_ref()),
+            selected,
+        )
+    }
+
+    fn of(
+        read: Option<&SnapshotKey>,
+        sealed: Option<(&SnapshotKey, &SealedReviewOutcome)>,
+        saved: Option<&'a ReviewAnnotationFields>,
+        selected: Option<&SnapshotKey>,
+    ) -> Self {
+        // Details read for another version say nothing about this one.
+        let current = read.is_some() && read == selected;
+        Self {
+            receipt: sealed
+                .filter(|_| current)
+                .and_then(|(snapshot, outcome)| receipt_lines(snapshot, outcome, selected)),
+            saved: saved.filter(|_| current),
+            current,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct OutputReview {
     status: Option<ReviewStatus>,
@@ -41,8 +89,10 @@ impl OutputReview {
         &mut self,
         ui: &mut egui::Ui,
         details: Option<&crate::ja1_attachment::EditorialDetails>,
+        selected: Option<&SnapshotKey>,
     ) -> Option<Action> {
-        let version = details.and_then(|details| details.version.as_ref());
+        let version = selected;
+        let view = ReviewView::new(details, selected);
         ui.separator();
         ui.strong("Output review");
         let mut control = ui
@@ -92,7 +142,7 @@ impl OutputReview {
             });
         }
 
-        show_receipt(ui, details, version);
+        show_receipt(ui, view.receipt);
 
         if let Some(version) = version {
             if self
@@ -103,9 +153,10 @@ impl OutputReview {
             {
                 control = Some(ReviewControl::QueueDefault(version.clone()));
             }
-            if self.annotation_version.as_ref() != Some(version) {
+            // Saved fields load once the selected version's details arrive.
+            if view.current && self.annotation_version.as_ref() != Some(version) {
                 self.annotation_version = Some(version.clone());
-                let saved = details.and_then(|details| details.annotations.as_ref());
+                let saved = view.saved;
                 self.sourced_elements = json_array(saved.map(|saved| &saved.sourced_elements));
                 self.text_cards = json_array(saved.map(|saved| &saved.text_cards));
                 self.intended_pauses = json_array(saved.map(|saved| &saved.intended_pauses));
@@ -135,7 +186,7 @@ impl OutputReview {
                 }
             });
         }
-        control.map(|control| Action::StudioReview(Box::new(control)))
+        control.map(|control| review_action(control, selected))
     }
 
     fn annotation_fields(&self) -> Result<ReviewAnnotationFields, serde_json::Error> {
@@ -153,16 +204,16 @@ fn json_array<T: serde::Serialize>(value: Option<&Vec<T>>) -> String {
         .unwrap_or_else(|| "[]".into())
 }
 
+fn review_action(control: ReviewControl, selected: Option<&SnapshotKey>) -> Action {
+    Action::StudioReview(Box::new(ReviewAction {
+        control,
+        version: selected.cloned(),
+    }))
+}
+
 /// The seal label of the selected version only, with what was not checked.
-fn show_receipt(
-    ui: &mut egui::Ui,
-    details: Option<&crate::ja1_attachment::EditorialDetails>,
-    version: Option<&SnapshotKey>,
-) {
-    let receipt = details.and_then(|details| details.receipt.as_ref());
-    if let Some((label, not_checked)) =
-        receipt.and_then(|receipt| receipt_lines(&receipt.key.snapshot, &receipt.outcome, version))
-    {
+fn show_receipt(ui: &mut egui::Ui, receipt: Option<(&'static str, Vec<String>)>) {
+    if let Some((label, not_checked)) = receipt {
         ui.strong(label);
         if !not_checked.is_empty() {
             ui.label("Not checked:");
@@ -261,5 +312,42 @@ mod tests {
             "C7_OTHER_VERSION"
         );
         assert_eq!(receipt_lines(&sealed, &facts, None), None, "C7_NO_VERSION");
+    }
+
+    #[test]
+    fn ja1_s5a_c7_fix1_label_follows_the_person_selection() {
+        let a = key();
+        let b = key();
+        let saved = ReviewAnnotationFields::default();
+        let delivered = SealedReviewOutcome::Delivered;
+        let view =
+            |selected| ReviewView::of(Some(&a), Some((&a, &delivered)), Some(&saved), selected);
+        // Selection A with A's details: A's label.
+        let shown = view(Some(&a));
+        assert_eq!(
+            shown.receipt,
+            Some(("Delivered", Vec::new())),
+            "C7F_SELECTED_LABEL"
+        );
+        assert!(shown.current && shown.saved.is_some());
+        // The person selects B before B's details arrive: no label, and A's
+        // saved annotations are not shown as B's.
+        let shown = view(Some(&b));
+        assert_eq!(shown.receipt, None, "C7F_LABEL_FOLLOWS_SELECTION");
+        assert!(
+            !shown.current && shown.saved.is_none(),
+            "C7F_STALE_DETAILS_IGNORED"
+        );
+        assert!(view(None).receipt.is_none());
+    }
+
+    #[test]
+    fn ja1_s5a_c7_fix1_refresh_reloads_the_selected_version() {
+        let b = key();
+        let Action::StudioReview(review) = review_action(ReviewControl::Status, Some(&b)) else {
+            panic!("C7F_REVIEW_ACTION");
+        };
+        assert!(matches!(review.control, ReviewControl::Status));
+        assert_eq!(review.version, Some(b), "C7F_REFRESH_NAMES_THE_SELECTION");
     }
 }

@@ -867,9 +867,16 @@ impl KinewrightApp {
                             editorial_action = Some(action);
                         }
                         let studio = &mut self.focused_mut().studio;
-                        if let Some(action) =
-                            studio.output_review.show(ui, studio.editorial.as_ref())
-                        {
+                        // The person's selection, not the last details read.
+                        let selected = studio
+                            .selection
+                            .as_ref()
+                            .map(|context| context.snapshot.descriptor.key.clone());
+                        if let Some(action) = studio.output_review.show(
+                            ui,
+                            studio.editorial.as_ref(),
+                            selected.as_ref(),
+                        ) {
                             editorial_action = Some(action);
                         }
                     });
