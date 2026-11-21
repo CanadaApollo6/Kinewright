@@ -101,6 +101,14 @@ struct Look {
     ten_bit: bool,
     /// A higher voice and other words: nothing about the check is English.
     spanish: bool,
+    /// Sensor noise of about ±4 codes on every pixel of every frame.
+    noisy: bool,
+    /// The source file is full range (the encode stays limited).
+    full_range: bool,
+    /// The third word ("we") is spoken 12 dB quieter.
+    quiet_word: bool,
+    /// The source's audio stops at 4.4 s; its picture runs on.
+    short_audio: bool,
 }
 
 /// Speech envelope of the source at `t` seconds: syllables inside words.
@@ -127,12 +135,17 @@ fn voice(n: usize, look: Look) -> [f32; 2] {
     let carrier: f64 = (1..=8)
         .map(|k| (2.0 * std::f64::consts::PI * f64::from(k) * f0 * t).sin() / f64::from(k))
         .sum();
-    let mut value = 0.12 * envelope(t) * carrier;
+    let quiet = if look.quiet_word && (1.5..1.75).contains(&t) {
+        0.25
+    } else {
+        1.0
+    };
+    let mut value = 0.12 * quiet * envelope(t) * carrier;
     // Plosive: a short broadband burst at every word onset.
     for &(start, _) in &WORDS {
         let first = sample_of_us(start);
         if n >= first && n < first + 200 {
-            value += 0.35 * f64::from(noise(n as u64 * 7 + 3));
+            value += 0.35 * quiet * f64::from(noise(n as u64 * 7 + 3));
         }
     }
     let room = |channel: u64| 0.0015 * noise(n as u64 * 2 + channel + 11);
@@ -199,6 +212,9 @@ fn source_luma(frame: u64, look: Look, heads: &[f64]) -> Vec<u8> {
             if look.dark {
                 value = 16.0 + (value - 16.0) * 0.15;
             }
+            if look.noisy {
+                value += 4.0 * f64::from(noise(frame * 9_973 + (y * WIDTH + x) as u64));
+            }
             value = 16.0 + (value - 16.0) * fade;
             plane.push(value.round().clamp(16.0, 235.0) as u8);
         }
@@ -233,6 +249,10 @@ struct EncodeOptions {
     extra_audio: bool,
     /// Container offset of the audio input, in milliseconds.
     audio_offset_ms: i32,
+    /// Map the picture twice: a second video stream.
+    extra_video: bool,
+    /// Tag and convert the picture to full range.
+    full_range: bool,
 }
 
 const PLAIN: EncodeOptions = EncodeOptions {
@@ -240,6 +260,8 @@ const PLAIN: EncodeOptions = EncodeOptions {
     audio: true,
     extra_audio: false,
     audio_offset_ms: 0,
+    extra_video: false,
+    full_range: false,
 };
 
 fn encode(
@@ -280,6 +302,9 @@ fn encode(
         if options.extra_audio {
             arguments.extend(["-map", "1:a"]);
         }
+        if options.extra_video {
+            arguments.extend(["-map", "0:v"]);
+        }
         arguments.extend(["-c:a", "aac", "-b:a", "192k"]);
     } else {
         arguments.extend(["-map", "0:v"]);
@@ -296,7 +321,7 @@ fn encode(
         "-x264-params",
         "colorprim=bt709:transfer=bt709:colormatrix=bt709",
         "-color_range",
-        "tv",
+        if options.full_range { "pc" } else { "tv" },
         "-movflags",
         "+faststart",
     ]);
@@ -369,9 +394,15 @@ impl Sources {
             look.ten_bit,
         );
         let samples = sample_of_frame(SOURCE_FRAMES);
-        let pcm: Vec<f32> = (0..samples).flat_map(|n| voice(n, look)).collect();
+        let spoken = if look.short_audio {
+            sample_of_us(4_400_000)
+        } else {
+            samples
+        };
+        let pcm: Vec<f32> = (0..spoken).flat_map(|n| voice(n, look)).collect();
         let options = EncodeOptions {
             ten_bit: look.ten_bit,
+            full_range: look.full_range,
             ..PLAIN
         };
         let speech_path = encode(&directory, "speech-source", &picture, &pcm, options);
@@ -418,6 +449,9 @@ struct Cut {
     /// A solid-colour clip over these output frames, on the top track.
     solid: Option<Range<u64>>,
     mute_speech: bool,
+    /// Per-channel pan ratios of the speech and the music tracks (R11).
+    speech_pan: [f32; 2],
+    music_pan: [f32; 2],
 }
 
 fn standard_cut() -> Cut {
@@ -437,6 +471,8 @@ fn standard_cut() -> Cut {
         insert_at: None,
         solid: None,
         mute_speech: false,
+        speech_pan: [1.0; 2],
+        music_pan: [1.0; 2],
     }
 }
 
@@ -771,11 +807,16 @@ fn render(sources: &Sources, cut: &Cut, seed: Seed) -> (Vec<u8>, Vec<f32>) {
             && let Some(source) = n.checked_sub(delay).and_then(|n| cut.source_sample(n))
         {
             value = voice(source, look);
+            if look.short_audio && source >= sample_of_us(4_400_000) {
+                value = [0.0; 2];
+            }
+            value[0] *= cut.speech_pan[0];
+            value[1] *= cut.speech_pan[1];
         }
         if cut.music {
             let bed = music(n);
-            value[0] += music_gain * bed[0];
-            value[1] += music_gain * bed[1];
+            value[0] += music_gain * cut.music_pan[0] * bed[0];
+            value[1] += music_gain * cut.music_pan[1] * bed[1];
         }
         pcm.extend(value);
     }
@@ -858,7 +899,30 @@ fn check_with(
     technical: &TechnicalScanConfig,
     adjust: impl FnOnce(&mut ExportSettings),
 ) -> Checked {
-    let (document, expectations) = frozen(sources, cut);
+    check_doc(
+        sources,
+        cut,
+        encoded,
+        technical,
+        &RetainedSpeechConfig::default(),
+        |_, _| {},
+        adjust,
+    )
+}
+
+/// `check_with`, with the frozen document and expectations adjusted first
+/// (the settings follow the adjusted document) and a speech configuration.
+fn check_doc(
+    sources: &Sources,
+    cut: &Cut,
+    encoded: &Encoded,
+    technical: &TechnicalScanConfig,
+    speech: &RetainedSpeechConfig,
+    frozen_adjust: impl FnOnce(&mut Document, &mut ReviewExpectations),
+    adjust: impl FnOnce(&mut ExportSettings),
+) -> Checked {
+    let (mut document, mut expectations) = frozen(sources, cut);
+    frozen_adjust(&mut document, &mut expectations);
     let mut settings = settings(&document, sources.look.ten_bit);
     adjust(&mut settings);
     let report = check_review_artifact(
@@ -871,7 +935,7 @@ fn check_with(
             sources: &sources.pinned,
         },
         technical,
-        &RetainedSpeechConfig::default(),
+        speech,
         &ExportCancellation::default(),
     )
     .unwrap();
@@ -1573,4 +1637,625 @@ fn ja1_s5a_resampled_output_audio_is_flushed() {
         resampled.abs_diff(expected) <= 2,
         "{resampled} of {expected}"
     );
+}
+
+// ---------------------------------------------------------------- fix round 2
+
+/// An encode of an already rendered picture and sound.
+fn encode_raw(
+    sources: &Sources,
+    name: &str,
+    picture: &[u8],
+    pcm: &[f32],
+    options: EncodeOptions,
+) -> Encoded {
+    let options = EncodeOptions {
+        ten_bit: sources.look.ten_bit,
+        ..options
+    };
+    let path = encode(&sources.directory, name, picture, pcm, options);
+    let timing =
+        crate::inspect_review_output(File::open(&path).unwrap(), &ExportCancellation::default())
+            .unwrap();
+    Encoded { path, timing }
+}
+
+fn effect(id: u64, name: &str, enabled: bool) -> kinewright_core::Effect {
+    kinewright_core::Effect {
+        id: kinewright_core::EffectId(id),
+        name: name.into(),
+        parameters: BTreeMap::new(),
+        keyframes: BTreeMap::new(),
+        enabled,
+        enabled_curve: None,
+    }
+}
+
+fn sync_unmeasured(kind: &FindingKind) -> bool {
+    matches!(kind, FindingKind::SyncUnmeasured { .. })
+}
+
+/// R1 (GLM F1 / Neon R1): processing that leaves no hop comparable leaves
+/// sync unmeasured, never silently passed; a disabled effect changes
+/// nothing.
+#[test]
+fn ja1_s5a_fix2_uncomparable_sync_is_unknown() {
+    let sources = Sources::new("ja1-s5-fix2-sync", Look::default());
+    let cut = standard_cut();
+    let encoded = encode_review(&sources, "review", &cut, Seed::Clean, PLAIN);
+    let technical = TechnicalScanConfig::default();
+    let speech = RetainedSpeechConfig::default();
+    let master = check_doc(
+        &sources,
+        &cut,
+        &encoded,
+        &technical,
+        &speech,
+        |document, _| {
+            document
+                .audio_mix
+                .master
+                .effects
+                .push(effect(1, "audio_gain", true));
+        },
+        |_| {},
+    )
+    .report;
+    assert!(
+        master.structure.has(|kind| *kind
+            == FindingKind::SyncUnmeasured {
+                signal: SyncSignal::Audio,
+                measured: 0,
+                needed: 2,
+            }),
+        "{:?}",
+        master.structure.findings
+    );
+    assert_ne!(master.structure.result, ReviewRowResult::Pass);
+    // Disabled clip effects, video and audio, leave every row decided.
+    let disabled = check_doc(
+        &sources,
+        &cut,
+        &encoded,
+        &technical,
+        &speech,
+        |document, _| {
+            let clip = &mut document.tracks[0].clips[0];
+            clip.effects.push(effect(2, "brightness", false));
+            clip.effects.push(effect(3, "audio_gain", false));
+        },
+        |_| {},
+    );
+    assert_all_pass("disabled effects", &disabled);
+    assert!(!disabled.report.structure.has(sync_unmeasured));
+}
+
+/// R2: audio that ends early is never a clean sound scan or a measured
+/// loudness of the cut.
+#[test]
+fn ja1_s5a_fix2_short_audio_is_never_clean() {
+    let sources = Sources::new("ja1-s5-fix2-short", Look::default());
+    let cut = standard_cut();
+    let (picture, pcm) = render(&sources, &cut, Seed::Clean);
+    for (label, seconds) in [("short", 2.0), ("nearly empty", 0.05)] {
+        let keep = (seconds * f64::from(RATE)) as usize * 2;
+        let encoded = encode_raw(&sources, label, &picture, &pcm[..keep], PLAIN);
+        let report = check(&sources, &cut, &encoded).report;
+        assert!(
+            report.defects.has(|kind| matches!(
+                kind,
+                FindingKind::SoundNotCompared { reason } if reason.contains("ends before")
+            )),
+            "{label}: {:?}",
+            report.defects.findings
+        );
+        assert_not_pass(label, &report.defects);
+        assert!(
+            report
+                .loudness
+                .has(|kind| *kind == FindingKind::LoudnessUnmeasured),
+            "{label}: {:?}",
+            report.loudness.findings
+        );
+        assert_not_pass(label, &report.loudness);
+        assert_eq!(report.structure.result, ReviewRowResult::Failed, "{label}");
+    }
+}
+
+fn gain_changed(kind: &FindingKind) -> bool {
+    matches!(kind, FindingKind::GainChanged { .. })
+}
+
+/// R3: a level the mix did not set fails; under normalisation one shared
+/// gain is the export's, a part off it fails.
+#[test]
+fn ja1_s5a_fix2_a_gain_the_mix_did_not_set_fails() {
+    let sources = Sources::new("ja1-s5-fix2-gain", Look::default());
+    let cut = standard_cut();
+    let (picture, pcm) = render(&sources, &cut, Seed::Clean);
+    let scaled = |db: f32, from: usize| -> Vec<f32> {
+        let gain = 10_f32.powf(db / 20.0);
+        pcm.iter()
+            .enumerate()
+            .map(|(index, value)| if index >= from { value * gain } else { *value })
+            .collect()
+    };
+    let technical = TechnicalScanConfig::default();
+    let quiet = encode_raw(&sources, "quiet", &picture, &scaled(-30.0, 0), PLAIN);
+    let report = check(&sources, &cut, &quiet).report;
+    assert_failed("unnormalised -30 dB", &report.defects, gain_changed, none);
+    let target = LoudnessTarget {
+        integrated_lufs_hundredths: -2_300,
+        tolerance_lu_hundredths: 1_000,
+        true_peak_ceiling_dbtp_hundredths: 0,
+        loudness_range_max_lu_hundredths: None,
+    };
+    let normalised = |settings: &mut ExportSettings| {
+        settings.loudness_normalization = Some(target);
+    };
+    let uniform = encode_raw(&sources, "uniform", &picture, &scaled(-6.0, 0), PLAIN);
+    let report = check_with(&sources, &cut, &uniform, &technical, normalised).report;
+    assert_pass("normalised uniform", &report.defects);
+    // The second part (output 2 s on) 10 dB below the first.
+    let uneven = encode_raw(
+        &sources,
+        "uneven",
+        &picture,
+        &scaled(-10.0, sample_of_frame(60) * 2),
+        PLAIN,
+    );
+    let report = check_with(&sources, &cut, &uneven, &technical, normalised).report;
+    assert_failed("normalised uneven", &report.defects, gain_changed, |kind| {
+        matches!(kind, FindingKind::Dropout { .. })
+    });
+}
+
+/// R4: a missing audio start (`AV_NOPTS_VALUE`) is Unknown, never an
+/// overflow.
+#[test]
+fn ja1_s5a_fix2_a_missing_audio_start_is_unknown() {
+    let sources = Sources::new("ja1-s5-fix2-nopts", Look::default());
+    let cut = standard_cut();
+    let mut encoded = encode_review(&sources, "review", &cut, Seed::Clean, PLAIN);
+    encoded.timing.audio.as_mut().unwrap().start_pts = i64::MIN;
+    let report = check(&sources, &cut, &encoded).report;
+    assert!(
+        report
+            .structure
+            .has(|kind| *kind == FindingKind::AudioStartUnknown),
+        "{:?}",
+        report.structure.findings
+    );
+    assert_eq!(report.structure.result, ReviewRowResult::Unknown);
+}
+
+/// R4: a straight run of one part continues its source windows: one seek
+/// per part.
+#[test]
+fn ja1_s5a_fix2_source_windows_continue_without_a_seek() {
+    let sources = Sources::new("ja1-s5-fix2-seeks", Look::default());
+    let cut = standard_cut();
+    let encoded = encode_review(&sources, "review", &cut, Seed::Clean, PLAIN);
+    let (document, expectations) = frozen(&sources, &cut);
+    let settings = settings(&document, false);
+    let inputs = ReviewScanInputs {
+        timing: &encoded.timing,
+        expectations: &expectations,
+        document: &document,
+        settings: &settings,
+        sources: &sources.pinned,
+    };
+    let plan = plan::Plan::new(&inputs);
+    let scan = picture::scan(
+        &File::open(&encoded.path).unwrap(),
+        &inputs,
+        &plan,
+        &TechnicalScanConfig::default(),
+        &ExportCancellation::default(),
+    )
+    .unwrap();
+    assert_eq!(scan.frames.len(), 120);
+    assert!(scan.source_seeks <= 2, "{} seeks", scan.source_seeks);
+}
+
+/// R4: a mapping past the source's last frame is not compared with a
+/// stale frame.
+#[test]
+fn ja1_s5a_fix2_frames_past_the_source_end_are_not_compared() {
+    let mut sources = Sources::new("ja1-s5-fix2-eof", Look::default());
+    // The probe overstates the source: 240 frames, the file holds 180.
+    sources.speech.duration = TimeCode(240);
+    let cut = Cut {
+        parts: vec![Part {
+            source: 120..220,
+            at: 0,
+        }],
+        frames: 100,
+        ..standard_cut()
+    };
+    let look = sources.look;
+    // The encode holds the last source frame, as a decoder at EOF does.
+    let picture = raw_frames(
+        (0..100)
+            .map(|frame| source_luma((120 + frame).min(SOURCE_FRAMES - 1), look, &sources.heads)),
+        false,
+    );
+    let pcm: Vec<f32> = (0..sample_of_frame(100))
+        .flat_map(|n| {
+            let source = sample_of_frame(120) + n;
+            if source < sample_of_frame(SOURCE_FRAMES) {
+                voice(source, look)
+            } else {
+                [0.0; 2]
+            }
+        })
+        .collect();
+    let encoded = encode_raw(&sources, "held", &picture, &pcm, PLAIN);
+    let report = check(&sources, &cut, &encoded).report;
+    assert!(
+        report.defects.has(|kind| matches!(
+            kind,
+            FindingKind::PictureNotCompared { reason } if reason.contains("no frame at the mapped time")
+        )),
+        "{:?}",
+        report.defects.findings
+    );
+    assert_not_pass("past the end", &report.defects);
+}
+
+/// R4: a second video stream is flagged like a second audio stream.
+#[test]
+fn ja1_s5a_fix2_an_extra_video_stream_fails_structure() {
+    let sources = Sources::new("ja1-s5-fix2-video", Look::default());
+    let cut = standard_cut();
+    let extra = EncodeOptions {
+        extra_video: true,
+        ..PLAIN
+    };
+    let encoded = encode_review(&sources, "extra", &cut, Seed::Clean, extra);
+    let report = check(&sources, &cut, &encoded).report;
+    assert_failed(
+        "extra video",
+        &report.structure,
+        |kind| *kind == FindingKind::ExtraVideoStream { streams: 2 },
+        none,
+    );
+}
+
+/// Rescale a generated file's picture, keeping its sound.
+fn rescaled(sources: &Sources, path: &Path, name: &str, size: (u32, u32)) -> PathBuf {
+    let out = sources.directory.path(&format!("{name}.mp4"));
+    let input = path.to_string_lossy().into_owned();
+    let scale = format!("scale={}:{}:flags=area", size.0, size.1);
+    run_ffmpeg(
+        &[
+            "-i",
+            &input,
+            "-vf",
+            &scale,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "10",
+            "-pix_fmt",
+            "yuv420p",
+            "-x264-params",
+            "colorprim=bt709:transfer=bt709:colormatrix=bt709",
+            "-color_range",
+            "tv",
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+        ],
+        &out,
+    );
+    out
+}
+
+/// R6: the aspect is judged from the true source dimensions. 136×72
+/// (1.889:1, which a 64-pixel thumbnail floors to 64×33) matches itself.
+#[test]
+fn ja1_s5a_fix2_the_true_source_aspect_is_compared() {
+    let mut sources = Sources::new("ja1-s5-fix2-aspect", Look::default());
+    let size = (136, 72);
+    let source_path = rescaled(&sources, &sources.speech.path.clone(), "speech-136", size);
+    let certified = certify(&source_path);
+    sources.speech = asset(&source_path, SPEECH, &certified);
+    sources.pinned.0.insert(SPEECH, certified);
+    let cut = standard_cut();
+    let encoded = encode_review(&sources, "review", &cut, Seed::Clean, PLAIN);
+    let path = rescaled(&sources, &encoded.path, "review-136", size);
+    let timing =
+        crate::inspect_review_output(File::open(&path).unwrap(), &ExportCancellation::default())
+            .unwrap();
+    let encoded = Encoded { path, timing };
+    let checked = check_doc(
+        &sources,
+        &cut,
+        &encoded,
+        &TechnicalScanConfig::default(),
+        &RetainedSpeechConfig::default(),
+        |document, expectations| {
+            document.resolution = size;
+            expectations.raster = size;
+        },
+        |_| {},
+    );
+    let defects = &checked.report.defects;
+    assert!(
+        !defects.has(|kind| matches!(kind, FindingKind::PictureNotCompared { .. })),
+        "{:?}",
+        defects.findings
+    );
+    assert_all_pass("136x72", &checked);
+}
+
+/// R7: sensor noise on a still camera and a full-range source pass with
+/// the export's own colour path on the source side.
+#[test]
+fn ja1_s5a_fix2_noisy_and_full_range_controls_pass() {
+    for (label, look) in [
+        (
+            "noisy tripod",
+            Look {
+                tripod: true,
+                noisy: true,
+                ..Look::default()
+            },
+        ),
+        (
+            "full range",
+            Look {
+                full_range: true,
+                ..Look::default()
+            },
+        ),
+    ] {
+        let sources = Sources::new(&format!("ja1-s5-fix2-{}", label.replace(' ', "-")), look);
+        if look.full_range {
+            assert_eq!(
+                sources.speech.color_description.range,
+                kinewright_core::ColorRange::Full,
+                "{label}"
+            );
+        }
+        let cut = standard_cut();
+        let encoded = encode_review(&sources, "review", &cut, Seed::Clean, PLAIN);
+        let checked = check(&sources, &cut, &encoded);
+        assert_all_pass(label, &checked);
+        // The freeze seed is still found on this footage.
+        let frozen = encode_review(&sources, "freeze", &cut, Seed::Freeze, PLAIN);
+        let report = check(&sources, &cut, &frozen).report;
+        assert!(
+            report.defects.has(|kind| *kind == FindingKind::Freeze),
+            "{label}: {:?}",
+            report.defects.findings
+        );
+    }
+}
+
+/// R9: a segment edge within one sample of its source's end cuts nothing.
+#[test]
+fn ja1_s5a_fix2_an_edge_at_the_quantised_source_end_is_uncut() {
+    let fps = Rational::new(30_000, 1_001).unwrap();
+    let duration = ExactMicros::frames(TimeCode(181), fps).unwrap();
+    assert_ne!(ExactMicros::integer(duration.floor()), duration);
+    let end = Some(duration);
+    assert!(speech::uncut_edge(
+        ExactMicros::integer(duration.floor()),
+        end
+    ));
+    assert!(speech::uncut_edge(
+        ExactMicros::integer(duration.ceil()),
+        end
+    ));
+    // An end quantised on another clock: under one 48 kHz sample short.
+    assert!(speech::uncut_edge(
+        ExactMicros::integer(duration.floor() - 20),
+        end
+    ));
+    assert!(!speech::uncut_edge(
+        ExactMicros::integer(duration.floor() - 1_000),
+        end
+    ));
+    assert!(speech::uncut_edge(ExactMicros::integer(0), end));
+}
+
+fn profile_unavailable(kind: &FindingKind) -> bool {
+    matches!(kind, FindingKind::ProfileUnavailable { .. })
+}
+
+/// R9: cuts far from every kept word still have the speaker's level, and a
+/// source whose sound stops early profiles only what it decoded.
+#[test]
+fn ja1_s5a_fix2_joins_are_measured_away_from_words() {
+    let sources = Sources::new("ja1-s5-fix2-far", Look::default());
+    let cut = standard_cut();
+    let encoded = encode_review(&sources, "review", &cut, Seed::Clean, PLAIN);
+    // 150 ms windows: no kept word falls in any edge's window.
+    let narrow = RetainedSpeechConfig {
+        join_window_us: 150_000,
+        ..RetainedSpeechConfig::default()
+    };
+    let report = check_doc(
+        &sources,
+        &cut,
+        &encoded,
+        &TechnicalScanConfig::default(),
+        &narrow,
+        |_, _| {},
+        |_| {},
+    )
+    .report;
+    assert!(
+        !report.speech.has(profile_unavailable),
+        "{:?}",
+        report.speech.findings
+    );
+    assert_pass("far from words", &report.speech);
+    let short = Sources::new(
+        "ja1-s5-fix2-short-source",
+        Look {
+            short_audio: true,
+            ..Look::default()
+        },
+    );
+    let encoded = encode_review(&short, "review", &cut, Seed::Clean, PLAIN);
+    let report = check(&short, &cut, &encoded).report;
+    assert!(
+        !report.speech.has(profile_unavailable),
+        "{:?}",
+        report.speech.findings
+    );
+    let joins = report
+        .speech
+        .coverage
+        .iter()
+        .find(|coverage| coverage.unit == CoverageUnit::Joins)
+        .unwrap();
+    // The edge at source 5.0 s lies past the decoded sound (4.4 s).
+    assert_eq!(
+        (joins.checked, joins.expected),
+        (2, 3),
+        "{:?}",
+        report.speech.findings
+    );
+}
+
+/// R10: word boxes padded before the sound, a codec shift of a few
+/// milliseconds, and a quiet word under a music bed are all decided; the
+/// quiet word's deletion fails.
+#[test]
+fn ja1_s5a_fix2_padded_and_quiet_words_are_decided() {
+    let sources = Sources::new(
+        "ja1-s5-fix2-words",
+        Look {
+            quiet_word: true,
+            ..Look::default()
+        },
+    );
+    let cut = Cut {
+        music: true,
+        ..standard_cut()
+    };
+    let shifted = EncodeOptions {
+        audio_offset_ms: 4,
+        ..PLAIN
+    };
+    let encoded = encode_review(&sources, "review", &cut, Seed::Clean, shifted);
+    let checked = check_doc(
+        &sources,
+        &cut,
+        &encoded,
+        &TechnicalScanConfig::default(),
+        &RetainedSpeechConfig::default(),
+        |_, expectations| {
+            let ReviewInventory::Present { first, rest } = &mut expectations.kept_words else {
+                panic!("kept words");
+            };
+            for word in std::iter::once(first).chain(rest.iter_mut()) {
+                let start = word.output.start.floor().saturating_sub(46_000);
+                word.output = us(start)..word.output.end;
+            }
+        },
+        |_| {},
+    );
+    assert_pass("padded, shifted, quiet", &checked.report.speech);
+    let (picture, mut pcm) = render(&sources, &cut, Seed::Clean);
+    for n in sample_of_us(1_500_000)..sample_of_us(1_750_000) {
+        let bed = music(n);
+        let gain = 10_f32.powf(MUSIC_GAIN_TENTH_DB as f32 / 200.0);
+        pcm[n * 2] = gain * bed[0];
+        pcm[n * 2 + 1] = gain * bed[1];
+    }
+    let deleted = encode_raw(&sources, "deleted", &picture, &pcm, PLAIN);
+    let report = check(&sources, &cut, &deleted).report;
+    assert_failed(
+        "quiet word deleted",
+        &report.speech,
+        |kind| matches!(kind, FindingKind::WordMissing { word_index: 2, .. }),
+        none,
+    );
+}
+
+/// R11: the pan law is part of the expected level; an enable curve is not
+/// a mute.
+#[test]
+fn ja1_s5a_fix2_pan_law_and_enable_curves_are_modelled() {
+    let sources = Sources::new("ja1-s5-fix2-pan", Look::default());
+    let law = kinewright_core::PanLaw::ConstantPower;
+    let ratio = |pan: i32| crate::audio::pan_channel_ratios(law, pan);
+    let cut = Cut {
+        music: true,
+        speech_pan: ratio(0),
+        music_pan: ratio(90),
+        ..standard_cut()
+    };
+    let encoded = encode_review(&sources, "panned", &cut, Seed::Clean, PLAIN);
+    let checked = check_doc(
+        &sources,
+        &cut,
+        &encoded,
+        &TechnicalScanConfig::default(),
+        &RetainedSpeechConfig::default(),
+        |document, _| {
+            document.audio_mix.pan_law = law;
+            for mix in &mut document.audio_mix.tracks {
+                if mix.track == MUSIC_TRACK {
+                    mix.pan_percent = 90;
+                }
+            }
+            document.audio_mix.tracks.push(mix(SPEECH_TRACK, 0, false));
+        },
+        |_| {},
+    );
+    assert_all_pass("constant power, music at 90 %", &checked);
+    // A disabled clip whose enable curve switches it on is heard.
+    let cut = standard_cut();
+    let encoded = encode_review(&sources, "enabled", &cut, Seed::Clean, PLAIN);
+    let report = check_doc(
+        &sources,
+        &cut,
+        &encoded,
+        &TechnicalScanConfig::default(),
+        &RetainedSpeechConfig::default(),
+        |document, _| {
+            let clip = &mut document.tracks[0].clips[0];
+            clip.enabled = false;
+            clip.enabled_curve = Some(kinewright_core::AutomationCurve {
+                keyframes: vec![kinewright_core::Keyframe {
+                    at: TimeCode::ZERO,
+                    value: 1,
+                    interpolation: kinewright_core::KeyframeInterpolation::Hold,
+                    tangent_in: 0,
+                    tangent_out: 0,
+                }],
+            });
+        },
+        |_| {},
+    )
+    .report;
+    for row in report.rows() {
+        assert!(
+            !row.has(|kind| matches!(
+                kind,
+                FindingKind::SilenceOverSpeech { .. }
+                    | FindingKind::WordMuted { .. }
+                    | FindingKind::UnexpectedAudio
+            )),
+            "{:?}: {:?}",
+            row.row,
+            row.findings
+        );
+        assert_ne!(
+            row.result,
+            ReviewRowResult::Failed,
+            "{:?}: {:?}",
+            row.row,
+            row.findings
+        );
+    }
 }

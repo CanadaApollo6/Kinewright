@@ -2067,3 +2067,7 @@ fn joins_row(row: &mut ReviewRowReport, joins: &Result<JoinScan, MediaError>) {
     }
     row.cover(CoverageUnit::Joins, checked, 0, scan.expected);
 }
+
+#[cfg(test)]
+#[path = "judge_tests.rs"]
+mod tests;
