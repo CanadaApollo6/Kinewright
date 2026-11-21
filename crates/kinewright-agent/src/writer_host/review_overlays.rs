@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, fs::File, sync::Mutex};
 use kinewright_core::{Document, ExportCancellation, MediaError, output_review::RequiredReviewRow};
 use kinewright_media::{
     OverlayVerificationConfig, OverlayVerificationReport, ReviewOutputTiming, ReviewReadSeek,
-    verify_review_overlays,
+    ReviewStillsConfig, verify_review_overlays,
 };
 use kinewright_project::{
     bundle_records::ObjectRef,
@@ -24,6 +24,21 @@ use super::{HostCommandOwner, HostError, HostRefusal, review_stills::collect_pin
 
 fn refused(message: &str) -> HostError {
     HostRefusal::new("review_overlays", message).into()
+}
+
+/// Stable SHA-256 digest of the overlay-verification and reviewer-stills configurations combined.
+/// Callers combine this with C5's check configuration digest into a single `ReviewCheckBinding`
+/// before calling `BindChecks`; neither C6 runner binds checks on its own.
+#[must_use]
+pub fn overlay_and_stills_check_configuration(
+    overlay: &OverlayVerificationConfig,
+    stills: &ReviewStillsConfig,
+) -> [u8; 32] {
+    let mut hasher = kinewright_hash::Sha256::new();
+    hasher.update(b"kinewright-overlay-and-stills-check-config-v1\0");
+    hasher.update(&overlay.sha256());
+    hasher.update(&stills.sha256());
+    hasher.finalize()
 }
 
 /// Frozen overlay verification inputs opened under the host lock and executed purely off-lock.

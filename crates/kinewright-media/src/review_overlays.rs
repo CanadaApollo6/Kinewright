@@ -76,6 +76,33 @@ impl Default for OverlayVerificationConfig {
     }
 }
 
+impl OverlayVerificationConfig {
+    /// Stable canonical SHA-256 digest of this overlay verification configuration, ready to be
+    /// combined with other review-check digests into one `ReviewCheckBinding`.
+    #[must_use]
+    pub fn sha256(&self) -> [u8; 32] {
+        let mut hasher = kinewright_hash::Sha256::new();
+        hasher.update(b"kinewright-overlay-verification-config-v1\0");
+        for value in [
+            self.luma_tolerance,
+            self.chroma_tolerance,
+            self.min_glyph_match_ratio,
+            self.min_glyph_correlation,
+            self.min_local_group_correlation,
+            self.max_extra_ink_ratio,
+            self.min_card_match_ratio,
+            self.min_measurable_opacity,
+        ] {
+            let normalized = if value == 0.0 { 0.0_f32 } else { value };
+            hasher.update(&normalized.to_bits().to_le_bytes());
+        }
+        let max_findings = u64::try_from(self.max_findings.clamp(1, MAX_OVERLAY_FINDINGS))
+            .unwrap_or(MAX_OVERLAY_FINDINGS as u64);
+        hasher.update(&max_findings.to_le_bytes());
+        hasher.finalize()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OverlayElementStatus {

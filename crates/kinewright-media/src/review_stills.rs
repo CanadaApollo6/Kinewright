@@ -33,6 +33,42 @@ pub const MAX_STILL_LONG_EDGE: u32 = 960;
 /// Maximum byte length of one encoded PNG served to the reviewer.
 pub const MAX_STILL_PNG_BYTES: usize = 512 * 1024;
 
+/// Fixed configuration governing reviewer still planning, paging, and PNG caps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewStillsConfig {
+    pub max_stills: usize,
+    pub max_stills_per_page: usize,
+    pub max_long_edge: u32,
+    pub max_png_bytes: usize,
+}
+
+impl Default for ReviewStillsConfig {
+    fn default() -> Self {
+        Self {
+            max_stills: MAX_REVIEW_STILLS,
+            max_stills_per_page: MAX_STILLS_PER_PAGE,
+            max_long_edge: MAX_STILL_LONG_EDGE,
+            max_png_bytes: MAX_STILL_PNG_BYTES,
+        }
+    }
+}
+
+impl ReviewStillsConfig {
+    /// Stable canonical SHA-256 digest of this reviewer-stills configuration, ready to be
+    /// combined with other review-check digests into one `ReviewCheckBinding`.
+    #[must_use]
+    pub fn sha256(&self) -> [u8; 32] {
+        let mut hasher = kinewright_hash::Sha256::new();
+        hasher.update(b"kinewright-review-stills-config-v1\0");
+        hasher.update(&(u64::try_from(self.max_stills).unwrap_or(u64::MAX)).to_le_bytes());
+        hasher.update(&(u64::try_from(self.max_stills_per_page).unwrap_or(u64::MAX)).to_le_bytes());
+        hasher.update(&self.max_long_edge.to_le_bytes());
+        hasher.update(&(u64::try_from(self.max_png_bytes).unwrap_or(u64::MAX)).to_le_bytes());
+        hasher.finalize()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewStillReason {
