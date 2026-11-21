@@ -1432,6 +1432,11 @@ impl Ja1EditingSession {
         {
             return Err(BundleError::Identity("only a proven completed capture copy may be released; rescue sources remain retained".into()));
         }
+        // Releasing unlocks the copy; a review stage this process still owns
+        // there could then never be swept by another opener.
+        if bundle.review_job()?.is_some_and(|job| job.stage.is_some()) {
+            return Err(BundleError::Identity("an output review on this copy is still encoding or retiring; stop it and wait before releasing the copy".into()));
+        }
         self.retained_destinations.remove(index);
         Ok(())
     }

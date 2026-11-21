@@ -117,11 +117,36 @@ fn s5_review_start(
         .token
 }
 
+/// Every wait in these witnesses is on a real signal; the deadline only guards
+/// against a hang. Debug encodes in loaded CI shards took over 20 s (R8).
+const S5_REVIEW_HANG: Duration = Duration::from_secs(120);
+
+fn s5_review_until(mut ready: impl FnMut() -> bool, marker: &str) {
+    let started = std::time::Instant::now();
+    while !ready() {
+        assert!(
+            started.elapsed() < S5_REVIEW_HANG,
+            "{marker} after {:?}",
+            started.elapsed()
+        );
+        std::thread::park_timeout(Duration::from_millis(2));
+    }
+    s5_review_note_slow(started, marker);
+}
+
+fn s5_review_note_slow(started: std::time::Instant, marker: &str) {
+    if started.elapsed() > Duration::from_secs(20) {
+        eprintln!("S5_REVIEW_SLOW_WAIT {marker} {:?}", started.elapsed());
+    }
+}
+
 fn s5_review_wait(client: &HostClient, ready: impl Fn(&ReviewPhase) -> bool) -> ReviewStatus {
-    let until = std::time::Instant::now() + Duration::from_secs(30);
+    let started = std::time::Instant::now();
+    let until = started + S5_REVIEW_HANG;
     loop {
         let status = s5_review_call(client, ReviewControl::Status).unwrap();
         if ready(&status.phase) {
+            s5_review_note_slow(started, "REVIEW_PHASE");
             return status;
         }
         assert!(
@@ -200,7 +225,7 @@ fn s5_review_hold(
             }
             if at == point {
                 arrived.store(true, Ordering::Release);
-                let until = std::time::Instant::now() + Duration::from_secs(30);
+                let until = std::time::Instant::now() + S5_REVIEW_HANG;
                 while !release.load(Ordering::Acquire) {
                     assert!(
                         std::time::Instant::now() < until,
@@ -232,7 +257,7 @@ fn s5_review_pending_and_durable_stop_fence_the_real_install_gate() {
         let key = s5_review_version(&host);
         let (arrived, release, installed) = s5_review_hold(&host, ReviewPoint::BeforeInstall);
         let token = s5_review_start(&client, &key);
-        c4_wait(|| arrived.load(Ordering::Acquire), "REVIEW_INSTALL_HELD");
+        s5_review_until(|| arrived.load(Ordering::Acquire), "REVIEW_INSTALL_HELD");
         let shared = host.owner.upgrade().unwrap();
         if let Some(fault) = fault {
             let mut owner = shared.lock().unwrap();
@@ -263,7 +288,7 @@ fn s5_review_pending_and_durable_stop_fence_the_real_install_gate() {
             .reserved_copy_bytes;
         assert!(reserved > 0, "REVIEW_LIVE_STAGE_CHARGE");
         release.store(true, Ordering::Release);
-        c4_wait(
+        s5_review_until(
             || {
                 shared
                     .lock()
@@ -334,7 +359,7 @@ fn s5_review_stop_after_installation_never_publishes_after_acknowledgement() {
                     _ => return,
                 };
                 held.store(step, Ordering::Release);
-                let until = std::time::Instant::now() + Duration::from_secs(30);
+                let until = std::time::Instant::now() + S5_REVIEW_HANG;
                 while release.load(Ordering::Acquire) < step {
                     assert!(
                         std::time::Instant::now() < until,
@@ -345,7 +370,7 @@ fn s5_review_stop_after_installation_never_publishes_after_acknowledgement() {
             });
     }
     let token = s5_review_start(&client, &key);
-    c4_wait(
+    s5_review_until(
         || held.load(Ordering::Acquire) == 1,
         "REVIEW_INSTALL_INSIDE_GATE",
     );
@@ -354,7 +379,7 @@ fn s5_review_stop_after_installation_never_publishes_after_acknowledgement() {
         std::thread::sleep(Duration::from_millis(300));
         assert!(!stop.is_finished(), "REVIEW_STOP_WAITS_FOR_THE_GATE");
         release.store(1, Ordering::Release);
-        c4_wait(
+        s5_review_until(
             || held.load(Ordering::Acquire) == 2,
             "REVIEW_INSTALLED_EXPORT_SUCCEEDED",
         );
@@ -366,7 +391,7 @@ fn s5_review_stop_after_installation_never_publishes_after_acknowledgement() {
         ReviewPhase::Stopping | ReviewPhase::Stopped
     ));
     let shared = host.owner.upgrade().unwrap();
-    c4_wait(
+    s5_review_until(
         || {
             shared
                 .lock()
@@ -537,7 +562,7 @@ fn s5_review_crash_child() {
         // ends before the worker retires.
         let (arrived, _release, _) = s5_review_hold(&host, ReviewPoint::BeforeInstall);
         let token = s5_review_start(&client, &snapshot);
-        c4_wait(
+        s5_review_until(
             || arrived.load(std::sync::atomic::Ordering::Acquire),
             "REVIEW_CRASH_HOLD",
         );
@@ -825,7 +850,7 @@ fn s5_review_full_store_releases_the_stage_before_a_pending_stop() {
         let token = s5_review_call(&client, ReviewControl::Resume(queued.token))
             .unwrap()
             .token;
-        c4_wait(|| arrived.load(Ordering::Acquire), "REVIEW_FULL_HOLD");
+        s5_review_until(|| arrived.load(Ordering::Acquire), "REVIEW_FULL_HOLD");
         let probe = |capacity| {
             shared
                 .lock()
@@ -849,7 +874,7 @@ fn s5_review_full_store_releases_the_stage_before_a_pending_stop() {
                 s5_review_wait(&client, |phase| matches!(phase, ReviewPhase::Checking(_)));
             assert_eq!(checking.token, token, "REVIEW_PUBLISHED_ON_A_FULL_STORE");
             assert_eq!(s5_review_artifact(&host, &token).output.video_frames, 6);
-            c4_wait(
+            s5_review_until(
                 || {
                     shared
                         .lock()
@@ -879,7 +904,7 @@ fn s5_review_full_store_releases_the_stage_before_a_pending_stop() {
             // No room at all: the Stop still cannot persist once the worker ends.
             probe(0);
             release.store(true, Ordering::Release);
-            c4_wait(
+            s5_review_until(
                 || {
                     shared
                         .lock()
@@ -962,7 +987,7 @@ fn s5_review_shutdown_joins_a_held_encode_before_reopen() {
     let key = s5_review_version(&host);
     let (arrived, release, _) = s5_review_hold(&host, ReviewPoint::BeforeEncode);
     let token = s5_review_start(&client, &key);
-    c4_wait(|| arrived.load(Ordering::Acquire), "REVIEW_SHUTDOWN_HOLD");
+    s5_review_until(|| arrived.load(Ordering::Acquire), "REVIEW_SHUTDOWN_HOLD");
     std::thread::scope(|scope| {
         let shutdown = scope.spawn(|| client.request(HostCommand::Shutdown).unwrap());
         std::thread::sleep(Duration::from_millis(300));
@@ -1018,7 +1043,7 @@ fn s5_review_check_attempt_survives_status_and_dies_with_its_process() {
     let token = s5_review_start(&client, &key);
     // No Status before the first bind: Status verification would mask a
     // publishing host that forgot its own artifact.
-    c4_wait(
+    s5_review_until(
         || {
             let owner = host.owner.upgrade().unwrap();
             let owner = owner.lock().unwrap();
@@ -1118,7 +1143,7 @@ fn s5_review_pending_stop_stays_with_its_project_across_save_as() {
     let source = s5_review_start(&client, &key);
     let shared = host.owner.upgrade().unwrap();
     // No Status: the finished source worker is still unretired at Save As.
-    c4_wait(
+    s5_review_until(
         || {
             shared
                 .lock()
@@ -1226,7 +1251,7 @@ fn s5_review_edits_undo_copy_and_checker_attempt_stay_bound_to_the_frozen_versio
     let key = s5_review_version(&host);
     let (arrived, release, _) = s5_review_hold(&host, ReviewPoint::BeforeEncode);
     let token = s5_review_start(&client, &key);
-    c4_wait(
+    s5_review_until(
         || arrived.load(Ordering::Acquire),
         "REVIEW_COPY_HOLDS_ENCODE",
     );
@@ -1326,7 +1351,7 @@ fn s5_review_edits_undo_copy_and_checker_attempt_stay_bound_to_the_frozen_versio
         );
     }
     release.store(true, Ordering::Release);
-    c4_wait(
+    s5_review_until(
         || {
             shared
                 .lock()
@@ -1435,4 +1460,240 @@ fn s5_review_edits_undo_copy_and_checker_attempt_stay_bound_to_the_frozen_versio
         "REVIEW_COLD_COPY_RETAINS_PUBLISHED_EVIDENCE"
     );
     copy.store().verify(&artifact.media_ref).unwrap();
+}
+
+#[derive(Clone, Copy, Debug)]
+enum S5StopCase {
+    /// Ordinary metadata reads are refused; the terminal budget is not.
+    Ceiling,
+    /// The review's own root write has an unknown outcome, so the bundle and
+    /// its ledger are unsettled until the Stop settles them.
+    Unsettled,
+    /// A manual save's outcome is unknown; only the save may settle it.
+    ForeignSave,
+    /// An orchestration publication is pending behind the review's own
+    /// uncertain write; nothing may settle until it is.
+    HooksPending,
+}
+
+fn s5_review_uncertain_annotation(
+    owner: &mut HostCommandOwner,
+    key: &kinewright_project::studio_records::SnapshotKey,
+) {
+    let descriptor = owner
+        .owner()
+        .unwrap()
+        .read_snapshot(key)
+        .unwrap()
+        .descriptor;
+    let annotate = kinewright_project::io_observer::fail_once("root_rename_io", || {
+        owner.owner_mut().unwrap().set_review_annotations(
+            key,
+            kinewright_project::review_job::empty_annotations(&descriptor),
+        )
+    });
+    assert!(
+        matches!(
+            annotate,
+            Err(kinewright_project::bundle::BundleError::DurabilityUnknown)
+        ),
+        "{annotate:?}"
+    );
+}
+
+fn s5_review_stop_case(case: S5StopCase) {
+    use kinewright_project::bundle::BundleError;
+    use kinewright_project::io_observer::fail_once;
+    let temp = kinewright_media::test_support::TempDirectory::new("review-stop-case");
+    s5_review_seed(temp.root());
+    let (host, client) = s5_review_host(temp.root());
+    let key = s5_review_version(&host);
+    let shared = host.owner.upgrade().unwrap();
+    let checked = || {
+        let token = s5_review_start(&client, &key);
+        s5_review_wait(&client, |phase| matches!(phase, ReviewPhase::Checking(_)));
+        s5_review_until(
+            || {
+                shared
+                    .lock()
+                    .unwrap()
+                    .review_fixture_worker()
+                    .is_none_or(|(_, done)| done)
+            },
+            "REVIEW_STOP_CASE_WORKER_FINISHED",
+        );
+        s5_review_call(&client, ReviewControl::Status).unwrap();
+        token
+    };
+    let mut token = checked();
+    let stale = matches!(case, S5StopCase::Ceiling | S5StopCase::Unsettled).then(|| {
+        // A Stop for a replaced job is answered by reading the live job.
+        let stopped = s5_review_call(&client, ReviewControl::Stop(token.clone())).unwrap();
+        assert_eq!(
+            stopped.phase,
+            ReviewPhase::Stopped,
+            "REVIEW_STOP_CASE_STOPPED"
+        );
+        std::mem::replace(&mut token, checked())
+    });
+    let project = token.project.clone();
+    {
+        let mut owner = shared.lock().unwrap();
+        assert!(owner.review_fixture_worker().is_none(), "worker retired");
+        match case {
+            S5StopCase::Ceiling => {
+                // Over the revocation headroom, under a full decoded record.
+                let limits = kinewright_project::storage_budget::StorageLimits {
+                    metadata_bytes: 100 << 20,
+                    ..Default::default()
+                };
+                let bundle = owner
+                    .owner_mut()
+                    .unwrap()
+                    .review_source_bundle_mut(&project)
+                    .unwrap();
+                bundle.restrict_limits_probe(limits).unwrap();
+                assert!(
+                    bundle.review_status().is_err(),
+                    "REVIEW_STOP_CASE_ORDINARY_READ_REFUSED"
+                );
+            }
+            S5StopCase::Unsettled => {
+                s5_review_uncertain_annotation(&mut owner, &key);
+                assert!(
+                    owner
+                        .owner()
+                        .unwrap()
+                        .store()
+                        .unwrap()
+                        .usage()
+                        .unwrap()
+                        .unsettled,
+                    "REVIEW_STOP_CASE_LEDGER_UNSETTLED"
+                );
+            }
+            S5StopCase::ForeignSave => {
+                assert!(
+                    owner
+                        .core()
+                        .request(kinewright_core::Command::Do(history_marker(41)))
+                        .is_ok()
+                );
+                let save = fail_once("root_rename_io", || {
+                    owner.owner_mut().unwrap().save_active()
+                });
+                assert!(
+                    matches!(save, Err(BundleError::DurabilityUnknown)),
+                    "{save:?}"
+                );
+                assert!(
+                    owner
+                        .owner()
+                        .unwrap()
+                        .review_source_bundle(&project)
+                        .unwrap()
+                        .pending_attempt()
+                        .is_some()
+                );
+            }
+            S5StopCase::HooksPending => {
+                s5_review_uncertain_annotation(&mut owner, &key);
+                let id = |n: u8| serde_json::Value::String(format!("{n:x}").repeat(32));
+                let project_value = serde_json::to_value(&project).unwrap();
+                let identity = serde_json::from_value(serde_json::json!({
+                    "version": 1, "project": project_value, "run": id(1), "task": id(2),
+                    "attempt": id(3), "nonce": id(4), "owner_instance": id(5),
+                }))
+                .unwrap();
+                let record = serde_json::from_value(serde_json::json!({
+                    "version": 1, "project": project_value, "run": id(1), "revision": 0,
+                    "start_unix_ms": 0, "deadline_unix_ms": 0, "last_unix_ms": 0,
+                    "elapsed_ms": 0, "clock_uncertain": false, "durable_event_bytes": 0,
+                    "tasks": [],
+                }))
+                .unwrap();
+                owner.hooks.pending =
+                    Some(super::super::orchestration::PendingPublication::Cumulative(
+                        Box::new(identity),
+                        Box::new(record),
+                    ));
+            }
+        }
+    }
+    if let Some(stale) = stale {
+        let refused = client
+            .request(HostCommand::Review(ReviewControl::Stop(stale)))
+            .unwrap();
+        assert!(
+            refused
+                .error
+                .as_ref()
+                .is_some_and(|error| error.message.contains("generation or version changed")),
+            "REVIEW_STALE_STOP_READ_TERMINALLY {case:?} {refused:?}"
+        );
+    }
+    let reply = s5_review_call(&client, ReviewControl::Stop(token.clone())).unwrap();
+    assert_eq!(reply.token, token);
+    match case {
+        S5StopCase::Ceiling | S5StopCase::Unsettled => {
+            assert!(
+                !reply.stop_pending
+                    && matches!(reply.phase, ReviewPhase::Stopping | ReviewPhase::Stopped),
+                "REVIEW_STOP_TERMINAL_WRITE {case:?} {reply:?}"
+            );
+        }
+        S5StopCase::ForeignSave => {
+            assert!(reply.stop_pending, "REVIEW_STOP_WAITS_FOR_SAVE {reply:?}");
+            assert!(
+                shared
+                    .lock()
+                    .unwrap()
+                    .owner()
+                    .unwrap()
+                    .review_source_bundle(&project)
+                    .unwrap()
+                    .pending_attempt()
+                    .is_some(),
+                "REVIEW_STOP_LEAVES_THE_SAVE_TO_ITS_OWNER"
+            );
+        }
+        S5StopCase::HooksPending => {
+            assert!(reply.stop_pending, "REVIEW_STOP_WAITS_FOR_HOOKS {reply:?}");
+            let mut owner = shared.lock().unwrap();
+            assert!(
+                owner
+                    .owner_mut()
+                    .unwrap()
+                    .review_source_bundle_mut(&project)
+                    .unwrap()
+                    .unsettled_probe(),
+                "REVIEW_STOP_NEVER_SETTLES_BEHIND_A_PENDING_OWNER"
+            );
+            owner.hooks.pending = None;
+            drop(owner);
+            let stopped = s5_review_call(&client, ReviewControl::Stop(token.clone())).unwrap();
+            assert!(
+                !stopped.stop_pending && stopped.phase == ReviewPhase::Stopped,
+                "REVIEW_STOP_SETTLES_ITS_OWN_WRITE_ONCE_FREE {stopped:?}"
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn s5_review_stop_reads_terminally_and_never_settles_another_owner() {
+    for case in [
+        S5StopCase::Ceiling,
+        S5StopCase::Unsettled,
+        S5StopCase::ForeignSave,
+        S5StopCase::HooksPending,
+    ] {
+        eprintln!("S5_REVIEW_STOP_CASE {case:?}");
+        s5_review_stop_case(case);
+    }
 }

@@ -2880,6 +2880,11 @@ impl HostCommandOwner {
                 let Some(Choice::Release(path)) = self.choice.take() else {
                     return Err(BundleError::HistoryChanged.into());
                 };
+                // A finished review worker retires first, so its stage is
+                // swept while this process still holds the copy's lock.
+                if self.hooks.pending.is_none() {
+                    let _ = self.retire_review_worker();
+                }
                 self.owner_mut()?.release_completed_capture(&path)?;
                 self.message =
                     "Completed capture owner released. Originating source retention is unchanged."

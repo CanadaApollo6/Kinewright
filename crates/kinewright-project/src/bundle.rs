@@ -967,6 +967,11 @@ impl ProjectBundle {
     }
     #[cfg(any(test, feature = "test-util"))]
     #[must_use]
+    pub const fn unsettled_probe(&self) -> bool {
+        self.unsettled
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
     pub fn has_publication_tag_probe(&self) -> bool {
         self.publication_tag.is_some()
     }

@@ -139,6 +139,9 @@ impl ReviewRuntime {
     }
 }
 
+const BUSY_WORKER: &str =
+    "Another output review is still encoding or retiring; stop it or wait for it to finish first.";
+
 fn unavailable() -> HostError {
     HostRefusal::new("review_unavailable", "Output review owner is unavailable.").into()
 }
@@ -206,6 +209,11 @@ fn queue(
         let bundle = owner.owner()?.review_bundle()?;
         if bundle.review_job()?.is_some() {
             return Err(refused("An output review is already active."));
+        }
+        // One encoding worker is tracked at a time; a second would detach the
+        // first from cancellation and shutdown.
+        if owner.review_runtime.worker.is_some() {
+            return Err(refused(BUSY_WORKER));
         }
         (
             bundle.project_id().clone(),
@@ -403,8 +411,13 @@ impl HostCommandOwner {
         }
         if self.review_runtime.pending_for(&token.project).is_none() {
             // Arm the fence before any read that capacity or an unsettled root
-            // can refuse; such a read only leaves the phase unknown.
+            // can refuse; such a read only leaves the phase unknown. Behind
+            // another owner's uncertain publication nothing is read or settled.
+            let pending_owner = self.hooks.pending.is_some();
             let phase = match self.owner_mut().map_err(drop).and_then(|session| {
+                if pending_owner {
+                    return Err(());
+                }
                 session
                     .review_source_bundle_mut(&token.project)
                     .and_then(kinewright_project::bundle::ProjectBundle::review_status_for_stop)
@@ -439,7 +452,14 @@ impl HostCommandOwner {
                 // The reply is a copy; the fence stays armed.
                 let reply = pending.clone();
                 self.review_runtime.pending_stop.push(pending);
-                return Ok(Some(reply));
+                // A finished worker is swept and its charge released; its
+                // retirement persists the waiting Stop with the space it frees.
+                if self.hooks.pending.is_none() && self.review_runtime.worker.is_some() {
+                    let _ = self.retire_review_worker();
+                }
+                if self.review_runtime.fenced(token) {
+                    return Ok(Some(reply));
+                }
             }
         }
         // The durable Stopping phase already fences every writer. A cleanup error
@@ -452,7 +472,7 @@ impl HostCommandOwner {
         Ok(Some(match status {
             Ok(Some(status)) if &status.token == token => status,
             _ => ReviewStatus {
-                token: pending.token,
+                token: token.clone(),
                 phase: ReviewPhase::Stopping,
                 stop_pending: false,
             },
@@ -473,7 +493,7 @@ impl HostCommandOwner {
         let bundle = session.review_source_bundle_mut(&token.project)?;
         if let Err(error) = bundle.update_review_job(token, UpdateReviewJob::Stop) {
             if bundle
-                .review_status()
+                .review_status_for_stop()
                 .is_ok_and(|status| status.is_none_or(|status| &status.token != token))
             {
                 return Ok(false);
@@ -589,7 +609,27 @@ impl HostCommandOwner {
         Ok(())
     }
 
-    fn retire_review_worker(&mut self) -> Result<(), HostError> {
+    /// A retained project's retirement failure waits for its next command or
+    /// reopen; only the active project's failure is returned.
+    pub(super) fn retire_review_worker(&mut self) -> Result<(), HostError> {
+        let Some(project) = self
+            .review_runtime
+            .worker
+            .as_ref()
+            .map(|worker| worker.token.project.clone())
+        else {
+            return Ok(());
+        };
+        let retired = self.retire_finished_worker();
+        let active = self.owner()?.project_id().ok();
+        if active.as_ref() == Some(&project) {
+            retired
+        } else {
+            Ok(())
+        }
+    }
+
+    fn retire_finished_worker(&mut self) -> Result<(), HostError> {
         let Some(worker) = &mut self.review_runtime.worker else {
             return Ok(());
         };
@@ -640,13 +680,7 @@ impl HostCommandOwner {
             let pending = self.review_runtime.pending_stop.remove(index);
             if let Err(error) = self.persist_review_stop(&token) {
                 self.review_runtime.pending_stop.push(pending);
-                // Another project's Stop stays armed without blocking this one.
-                let active = self.owner()?.project_id().ok();
-                return if active.as_ref() == Some(&token.project) {
-                    Err(error)
-                } else {
-                    Ok(())
-                };
+                return Err(error);
             }
         }
         let bundle = self.owner_mut()?.review_source_bundle_mut(&token.project)?;
@@ -726,6 +760,9 @@ impl HostCommandOwner {
         settings: ExportSettings,
         context: FrozenContextRequest,
     ) -> Result<(), HostError> {
+        if self.review_runtime.worker.is_some() {
+            return Err(refused(BUSY_WORKER));
+        }
         let bundle = self.owner()?.review_bundle()?;
         let charge = Arc::new(bundle.store().reserve_review_stage(&stage)?);
         let working = bundle.store().reserve_review_working();
