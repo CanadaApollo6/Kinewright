@@ -18,6 +18,8 @@ use kinewright_project::{
     studio_store::FrozenContextRequest,
 };
 
+pub(super) mod review_checks;
+
 use super::{
     AttachmentRole, HostCommand, HostCommandOwner, HostError, HostRefusal, HostReply, HostRequest,
     review_expectations::{ReviewExpectationInput, derive_review_expectations},
