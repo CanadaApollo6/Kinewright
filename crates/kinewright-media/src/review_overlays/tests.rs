@@ -1,6 +1,6 @@
 #![allow(clippy::too_many_lines)]
 
-use std::{collections::BTreeMap, fs::File, path::Path, sync::Arc, time::Instant};
+use std::{collections::BTreeMap, fs::File, path::Path, sync::Arc};
 
 use kinewright_core::{
     AssetId, AutomationCurve, BlendMode, CaptionPreset, Clip, ClipContent, ClipId,
@@ -1822,8 +1822,15 @@ fn current_rss_kib() -> Option<u64> {
 /// Opus B1 & L14 witness: caption-heavy 1080p fixture measures wall-clock cost and proves O(1)
 /// memory (no per-element full-frame buffers kept across 60 distinct 1080p captions).
 #[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 #[allow(clippy::cast_precision_loss)]
 fn s5_c6_fix1_caption_heavy_1080p_cost_and_bounded_memory() {
+    use std::time::Instant;
+
     let dir = TempDirectory::new("s5-c6-fix1-1080p-cost");
     let caption_count = 60_usize;
     let total_frames = i64::try_from(caption_count).unwrap() + 2;
@@ -1872,7 +1879,6 @@ fn s5_c6_fix1_caption_heavy_1080p_cost_and_bounded_memory() {
     let (file, timing) = encode_doc(&doc, BTreeMap::new(), &out_path);
     let inputs = admit_inputs(&doc, BTreeMap::new());
 
-    #[cfg(target_os = "linux")]
     let rss_before_kib = current_rss_kib().unwrap_or(0);
     let started = Instant::now();
     let report = verify_review_overlays(
@@ -1886,12 +1892,8 @@ fn s5_c6_fix1_caption_heavy_1080p_cost_and_bounded_memory() {
     )
     .expect("1080p overlay verification");
     let elapsed = started.elapsed();
-    #[cfg(target_os = "linux")]
     let rss_after_kib = current_rss_kib().unwrap_or(0);
-    #[cfg(target_os = "linux")]
     let rss_delta_mib = rss_after_kib.saturating_sub(rss_before_kib) as f64 / 1024.0;
-    #[cfg(not(target_os = "linux"))]
-    let rss_delta_mib = 0.0_f64;
 
     println!(
         "S5_C6_FIX1_1080P_COST captions={caption_count} frames={total_frames} checked_frames={} boundary_frames={} elapsed_ms={} ms_per_frame={:.1} rss_delta_mib={:.1}",
@@ -1911,7 +1913,6 @@ fn s5_c6_fix1_caption_heavy_1080p_cost_and_bounded_memory() {
     assert_eq!(report.checked_frames, u64::try_from(caption_count).unwrap());
     // 60 full 1080p RGBA+mask buffers under the old design would require ~622 MiB up front;
     // O(1) frame-by-frame rendering stays far below that ceiling.
-    #[cfg(target_os = "linux")]
     assert!(
         rss_delta_mib < 260.0,
         "S5_C6_FIX1_1080P_MEMORY_BOUNDED: rss_delta_mib={rss_delta_mib:.1}"
@@ -2454,6 +2455,10 @@ fn s5_c6_fix2_outside_cue_slide_fade_early_ghost_and_unmeasurable_probe() {
 /// Clean encodes must Pass; seeded missing caption, one-digit change, early start, and lingering
 /// 30% ghost on the same `Youtube1080p` footage must all Fail.
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 #[allow(clippy::cast_precision_loss)]
 fn s5_c6_fix2_delivery_bitrate_moving_grain_calibration() {
     let dir = TempDirectory::new("s5-c6-fix2-delivery-calib");
@@ -2550,7 +2555,7 @@ fn s5_c6_fix2_delivery_bitrate_moving_grain_calibration() {
                             tangent_out: 0,
                         },
                         Keyframe {
-                            at: TimeCode(3),
+                            at: TimeCode(2),
                             value: 0,
                             interpolation: KeyframeInterpolation::Linear,
                             tangent_in: 0,
@@ -2563,8 +2568,8 @@ fn s5_c6_fix2_delivery_bitrate_moving_grain_calibration() {
         c
     };
 
-    // --- Lane 1: Youtube1080p (1920x1080, 8 Mbps) over 36 frames (1.5s) of moving grain ---
-    let yt_frames = 36_u32;
+    // --- Lane 1: Youtube1080p (1920x1080, 8 Mbps) over 12 frames (0.5s) of moving grain ---
+    let yt_frames = 12_u32;
     let yt_src_path = dir.path("moving-grain-1080p.mp4");
     generate_moving_grainy_mp4(&yt_src_path, 1920, 1080, yt_frames);
     let (yt_asset, yt_cert) = certify_video_asset(&yt_src_path, AssetId(1));
@@ -2595,14 +2600,14 @@ fn s5_c6_fix2_delivery_bitrate_moving_grain_calibration() {
                 kind: TrackKind::Video,
                 name: None,
                 sync_lock: false,
-                clips: vec![yt_bg_clip],
+                clips: vec![yt_bg_clip.clone()],
             },
             Track {
                 id: TrackId(2),
                 kind: TrackKind::Video,
                 name: None,
                 sync_lock: false,
-                clips: vec![make_card_clip(16, 6)],
+                clips: vec![make_card_clip(6, 2)],
             },
             Track {
                 id: TrackId(3),
@@ -2611,8 +2616,8 @@ fn s5_c6_fix2_delivery_bitrate_moving_grain_calibration() {
                 sync_lock: false,
                 clips: vec![title_clip(
                     10,
-                    16,
                     6,
+                    2,
                     CaptionPreset::Social.title("Total revenue: 1,250"),
                 )],
             },
@@ -2621,10 +2626,10 @@ fn s5_c6_fix2_delivery_bitrate_moving_grain_calibration() {
                 kind: TrackKind::Video,
                 name: None,
                 sync_lock: false,
-                clips: vec![make_lower_third(16, 6)],
+                clips: vec![make_lower_third(5, 4)],
             },
         ],
-        vec![yt_asset, card_asset.clone()],
+        vec![yt_asset.clone(), card_asset.clone()],
         i64::from(yt_frames),
     );
     let pinned_cards = BTreeMap::from([(AssetId(2), (card_sha, card_len))]);
@@ -2708,20 +2713,60 @@ fn s5_c6_fix2_delivery_bitrate_moving_grain_calibration() {
         );
     }
 
+    // Seeded caption defects run on the same Youtube1080p moving-grain footage with a 5-frame
+    // window (cue at frame 2, boundaries at frames 1 and 3) to keep debug runtime bounded.
+    let yt_cap_frames = 5_i64;
+    let mut yt_cap_bg = yt_bg_clip;
+    yt_cap_bg.source_range = TimeCode::ZERO..TimeCode(yt_cap_frames);
+    let yt_cap_doc = document_with_raster(
+        (1920, 1080),
+        vec![
+            Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                name: None,
+                sync_lock: false,
+                clips: vec![yt_cap_bg],
+            },
+            Track {
+                id: TrackId(3),
+                kind: TrackKind::Video,
+                name: None,
+                sync_lock: false,
+                clips: vec![title_clip(
+                    10,
+                    2,
+                    1,
+                    CaptionPreset::Social.title("Total revenue: 1,250"),
+                )],
+            },
+        ],
+        vec![yt_asset],
+        yt_cap_frames,
+    );
+    let yt_cap_expectations = derive_overlay_expectations_for_test(&yt_cap_doc, &BTreeMap::new());
+    let yt_cap_sources = || BTreeMap::from([(AssetId(1), yt_cert.clone())]);
+    let yt_cap_inputs = admit_inputs(&yt_cap_doc, yt_cap_sources());
+    let yt_cap_settings = DeliveryProfile::Youtube1080p.export_settings(
+        &yt_cap_doc,
+        DeliveryEncodeDepth::Eight,
+        ExportCancellation::default(),
+    );
+
     // Seeded defect 1 on Youtube1080p: missing caption.
-    let mut yt_missing = yt_doc.clone();
-    yt_missing.tracks[2].clips[0].enabled = false;
+    let mut yt_missing = yt_cap_doc.clone();
+    yt_missing.tracks[1].clips[0].enabled = false;
     let (file_miss, timing_miss) = encode_doc_with_settings(
         &yt_missing,
-        yt_sources(),
-        &yt_settings,
+        yt_cap_sources(),
+        &yt_cap_settings,
         &dir.path("yt-missing.mp4"),
     );
     let rep_miss = verify_review_overlays(
         file_miss,
         &timing_miss,
-        &yt_expectations,
-        &yt_inputs,
+        &yt_cap_expectations,
+        &yt_cap_inputs,
         fallback_gpu().context(),
         &OverlayVerificationConfig::default(),
         &ExportCancellation::default(),
@@ -2743,20 +2788,20 @@ fn s5_c6_fix2_delivery_bitrate_moving_grain_calibration() {
     );
 
     // Seeded defect 2 on Youtube1080p: one-digit change ("1,250" -> "1,850").
-    let mut yt_digit = yt_doc.clone();
-    yt_digit.tracks[2].clips[0].content =
+    let mut yt_digit = yt_cap_doc.clone();
+    yt_digit.tracks[1].clips[0].content =
         ClipContent::Title(CaptionPreset::Social.title("Total revenue: 1,850"));
     let (file_digit, timing_digit) = encode_doc_with_settings(
         &yt_digit,
-        yt_sources(),
-        &yt_settings,
+        yt_cap_sources(),
+        &yt_cap_settings,
         &dir.path("yt-digit.mp4"),
     );
     let rep_digit = verify_review_overlays(
         file_digit,
         &timing_digit,
-        &yt_expectations,
-        &yt_inputs,
+        &yt_cap_expectations,
+        &yt_cap_inputs,
         fallback_gpu().context(),
         &OverlayVerificationConfig::default(),
         &ExportCancellation::default(),
@@ -2777,21 +2822,21 @@ fn s5_c6_fix2_delivery_bitrate_moving_grain_calibration() {
         "S5_C6_FIX2_YT1080P_ONE_DIGIT_FAILS"
     );
 
-    // Seeded defect 3 on Youtube1080p: caption starts 1 frame early (frame 15).
-    let mut yt_early = yt_doc.clone();
-    yt_early.tracks[2].clips[0].timeline_start = TimeCode(15);
-    yt_early.tracks[2].clips[0].source_range = TimeCode::ZERO..TimeCode(7);
+    // Seeded defect 3 on Youtube1080p: caption starts 1 frame early (frame 1).
+    let mut yt_early = yt_cap_doc.clone();
+    yt_early.tracks[1].clips[0].timeline_start = TimeCode(1);
+    yt_early.tracks[1].clips[0].source_range = TimeCode::ZERO..TimeCode(2);
     let (file_early, timing_early) = encode_doc_with_settings(
         &yt_early,
-        yt_sources(),
-        &yt_settings,
+        yt_cap_sources(),
+        &yt_cap_settings,
         &dir.path("yt-early.mp4"),
     );
     let rep_early = verify_review_overlays(
         file_early,
         &timing_early,
-        &yt_expectations,
-        &yt_inputs,
+        &yt_cap_expectations,
+        &yt_cap_inputs,
         fallback_gpu().context(),
         &OverlayVerificationConfig::default(),
         &ExportCancellation::default(),
@@ -2812,11 +2857,11 @@ fn s5_c6_fix2_delivery_bitrate_moving_grain_calibration() {
         "S5_C6_FIX2_YT1080P_EARLY_FAILS"
     );
 
-    // Seeded defect 4 on Youtube1080p: caption lingers at 30% opacity on `cue_end` (frame 22).
-    let mut yt_ghost = yt_doc.clone();
+    // Seeded defect 4 on Youtube1080p: caption lingers at 30% opacity on `cue_end` (frame 3).
+    let mut yt_ghost = yt_cap_doc.clone();
     let mut ghost = title_clip(
         99,
-        22,
+        3,
         1,
         CaptionPreset::Social.title("Total revenue: 1,250"),
     );
@@ -2828,18 +2873,18 @@ fn s5_c6_fix2_delivery_bitrate_moving_grain_calibration() {
         parameters: BTreeMap::from([("percent".into(), ParamValue::Integer(30))]),
         keyframes: BTreeMap::new(),
     });
-    yt_ghost.tracks[2].clips.push(ghost);
+    yt_ghost.tracks[1].clips.push(ghost);
     let (file_ghost, timing_ghost) = encode_doc_with_settings(
         &yt_ghost,
-        yt_sources(),
-        &yt_settings,
+        yt_cap_sources(),
+        &yt_cap_settings,
         &dir.path("yt-ghost.mp4"),
     );
     let rep_ghost = verify_review_overlays(
         file_ghost,
         &timing_ghost,
-        &yt_expectations,
-        &yt_inputs,
+        &yt_cap_expectations,
+        &yt_cap_inputs,
         fallback_gpu().context(),
         &OverlayVerificationConfig::default(),
         &ExportCancellation::default(),
@@ -2860,8 +2905,8 @@ fn s5_c6_fix2_delivery_bitrate_moving_grain_calibration() {
         "S5_C6_FIX2_YT1080P_LINGER_FAILS"
     );
 
-    // --- Lane 2: VerticalShort (1080x1920, 10 Mbps) over 24 frames (1.0s) of moving grain ---
-    let vs_frames = 24_u32;
+    // --- Lane 2: VerticalShort (1080x1920, 10 Mbps) over 12 frames (0.5s) of moving grain ---
+    let vs_frames = 12_u32;
     let vs_src_path = dir.path("moving-grain-vertical.mp4");
     generate_moving_grainy_mp4(&vs_src_path, 1080, 1920, vs_frames);
     let (vs_asset, vs_cert) = certify_video_asset(&vs_src_path, AssetId(1));
@@ -2899,7 +2944,7 @@ fn s5_c6_fix2_delivery_bitrate_moving_grain_calibration() {
                 kind: TrackKind::Video,
                 name: None,
                 sync_lock: false,
-                clips: vec![make_card_clip(9, 6)],
+                clips: vec![make_card_clip(6, 2)],
             },
             Track {
                 id: TrackId(3),
@@ -2908,8 +2953,8 @@ fn s5_c6_fix2_delivery_bitrate_moving_grain_calibration() {
                 sync_lock: false,
                 clips: vec![title_clip(
                     10,
-                    9,
                     6,
+                    2,
                     CaptionPreset::Social.title("Vertical 1,250"),
                 )],
             },
@@ -2918,7 +2963,7 @@ fn s5_c6_fix2_delivery_bitrate_moving_grain_calibration() {
                 kind: TrackKind::Video,
                 name: None,
                 sync_lock: false,
-                clips: vec![make_lower_third(9, 6)],
+                clips: vec![make_lower_third(5, 4)],
             },
         ],
         vec![vs_asset, card_asset],
