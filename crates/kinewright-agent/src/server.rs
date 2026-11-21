@@ -1788,6 +1788,7 @@ impl KinewrightMcp {
                     "read_task_result"
                         | "read_task_evidence"
                         | "read_child_result"
+                        | "read_review_stills"
                         | "get_timeline_state"
                 )
             {
@@ -1796,7 +1797,26 @@ impl KinewrightMcp {
                         &request.name,
                         serde_json::Value::Object(request.arguments.unwrap_or_default()),
                     ) {
-                        Ok(result) => success_structured("task outcome", result),
+                        Ok(crate::writer_host::task_mcp::TaskMcpReply::Json(result)) => {
+                            success_structured("task outcome", result)
+                        }
+                        Ok(crate::writer_host::task_mcp::TaskMcpReply::WithImages {
+                            summary,
+                            structured,
+                            images,
+                        }) => {
+                            let mut blocks = Vec::with_capacity(1 + images.len());
+                            blocks.push(ContentBlock::text(summary));
+                            for image in images {
+                                blocks.push(ContentBlock::image(
+                                    BASE64.encode(image.bytes),
+                                    image.mime_type,
+                                ));
+                            }
+                            let mut result = CallToolResult::success(blocks);
+                            result.structured_content = Some(structured);
+                            result
+                        }
                         Err(error) => error_text(error.to_string()),
                     },
                 );
@@ -36850,13 +36870,17 @@ fn task_role_tools_uncached(names: &[&'static str]) -> Result<Vec<Tool>, String>
                 "prepare_edit_plan" => Some(task_prepare_edit_plan_tool()),
                 "commit_edit_plan" => Some(compact_commit_edit_plan_tool()),
                 "discard_edit_plan" => Some(compact_discard_edit_plan_tool()),
-                "read_task_result" | "read_task_evidence" | "read_child_result" => {
+                "read_task_result"
+                | "read_task_evidence"
+                | "read_child_result"
+                | "read_review_stills" => {
                     let schema = crate::writer_host::task_mcp::schema::context_read(name);
                     Some(Tool::new(
                         *name,
                         match *name {
                             "read_task_result" => "Read a host-owned result reference once (20 KiB limit). For larger results use read_child_result with the published child and source head. The eight-page task budget is shared by all three read tools. Reading never widens edit authority.",
                             "read_task_evidence" => "Read revision-bound timeline, original text, proof or owned media samples in pages up to 24 KiB. Child proof revisions must name the child's durable result head. Eight distinct pages shared across all three read tools. Exact page retries cost no extra expansion. Media retries re-decode. Verification still running invites retry shortly at no page cost; on a decode or seek timeout, don't retry this read; replan without guessing. Reading never widens edit authority.",
+                            "read_review_stills" => "Reviewer-only read of paged decoded PNG stills and frozen overlay reference stills for the active output review artifact. Returns capped PNG image blocks and bound still IDs covering opening, middle, end, cuts, overlay transitions, and repaired or commented regions. Every planned still must be reviewed and cited in the visual judgment. Reading never widens edit authority.",
                             _ => "Read a direct child's published records, including explanation, delta, artifacts, evidence, projected usage and history, in pages up to 24 KiB. Supply its exact result reference and source head. Eight distinct pages shared across all three read tools; exact page retries cost no extra expansion. Artifact and evidence rows precede bulk records. Oversized records are explicitly omitted; an omitted artifact or evidence record prevents acceptance. Judge note and proof fate from the records. Reading never widens edit authority.",
                         },
                         Arc::new(schema.as_object().unwrap().clone()),

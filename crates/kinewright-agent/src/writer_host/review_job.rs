@@ -887,7 +887,7 @@ impl HostCommandOwner {
 
     /// The checking variant of the fence: the artifact this host published or
     /// verified, in a durable checking phase, with no Stop pending.
-    fn review_can_record(&self, token: &ReviewToken) -> Result<(), HostError> {
+    pub(super) fn review_can_record(&self, token: &ReviewToken) -> Result<(), HostError> {
         self.review_authority(token)?;
         if self.review_runtime.verified.as_ref() != Some(token) {
             return Err(refused(
@@ -905,10 +905,6 @@ impl HostCommandOwner {
     }
 
     /// The one path by which commits 5 to 7 bind a checker and record results.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the checks of commits 5 and 6 call this seam")
-    )]
     pub(super) fn record_review_check(
         &mut self,
         token: &ReviewToken,

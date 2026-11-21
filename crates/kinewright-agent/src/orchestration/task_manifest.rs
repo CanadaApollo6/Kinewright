@@ -53,6 +53,7 @@ pub(crate) const REVIEWER: &[&str] = &[
     "get_timeline_state",
     "read_task_evidence",
     "read_task_result",
+    "read_review_stills",
     "task_status",
     "wait_task",
     "freeze_task",

@@ -26,6 +26,9 @@ pub mod receipt_reconciliation;
 mod recovery;
 mod resolve;
 pub mod review_expectations;
+#[cfg(target_os = "linux")]
+pub mod review_overlays;
+pub mod review_stills;
 mod revise;
 pub(crate) mod run_inputs;
 pub(crate) mod spending;
@@ -1683,6 +1686,7 @@ pub struct HostCommandOwner {
     )>,
     #[cfg(target_os = "linux")]
     review_runtime: review_job::ReviewRuntime,
+    review_stills: review_stills::ServedReviewStills,
     voice_jobs: BTreeMap<kinewright_project::studio_records::NoteId, voice::Job>,
     prepared_owned_media: Option<kinewright_project::owned_inputs::PreparedOwnedMedia>,
     confirmed_switch: Option<switch::SwitchConfirmation>,
@@ -1882,6 +1886,7 @@ impl HostCommandOwner {
             voice_payload: None,
             #[cfg(target_os = "linux")]
             review_runtime: review_job::ReviewRuntime::default(),
+            review_stills: review_stills::ServedReviewStills::default(),
             voice_jobs: BTreeMap::new(),
             prepared_owned_media: None,
             pending_switch: None,
