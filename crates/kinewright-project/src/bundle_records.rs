@@ -94,6 +94,7 @@ pub enum RecordKind {
     ReviewJob,
     ReviewArtifact,
     ReviewEvidence,
+    ReviewReceipt,
     FeedbackIndex,
     FeedbackRevision,
     FeedbackBatch,
@@ -139,6 +140,7 @@ impl RecordKind {
                 | Self::ReviewJob
                 | Self::ReviewArtifact
                 | Self::ReviewEvidence
+                | Self::ReviewReceipt
                 | Self::FeedbackIndex
                 | Self::FeedbackRevision
                 | Self::FeedbackBatch

@@ -33,6 +33,26 @@ pub(crate) fn capability(name: &str) -> Value {
     use kinewright_project::editorial::{
         MAX_AUDIT_ENTRIES, MAX_AUDIT_TEXT, MAX_BEAT_TEXT, MAX_RULE_TEXT,
     };
+    if name == "submit_visual_judgment" {
+        use super::super::review_stills::{MAX_VISUAL_FINDINGS, MAX_VISUAL_NOTE_BYTES};
+        let still = json!({"type":"string","minLength":1,"maxLength":256});
+        let finding = object(
+            json!({
+                "still_id":still,
+                "severity":{"enum":["blocking","advisory"]},
+                "summary":{"type":"string","maxLength":MAX_VISUAL_NOTE_BYTES}
+            }),
+            &["still_id", "severity", "summary"],
+        );
+        return object(
+            json!({
+                "verdict":{"enum":["pass","findings"]},
+                "reviewed_still_ids":array(still, 4096),
+                "findings":array(finding, MAX_VISUAL_FINDINGS)
+            }),
+            &["verdict", "reviewed_still_ids"],
+        );
+    }
     if name == "propose_rulebook_revision" {
         return object(
             json!({"rule":{"type":"string","maxLength":MAX_RULE_TEXT}}),

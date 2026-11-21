@@ -865,6 +865,9 @@ pub struct HostReply {
     pub review: Option<kinewright_project::review_job::ReviewStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_annotations: Option<kinewright_project::review_job::ReviewAnnotationFields>,
+    /// The seal receipt of the version, or of the seal this command made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_receipt: Option<kinewright_project::review_job::ReviewReceipt>,
     pub snapshot_lease: Option<kinewright_project::store::snapshot_reader::SnapshotLease>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_edit_lease: Option<kinewright_project::store::snapshot_reader::CurrentEditLease>,

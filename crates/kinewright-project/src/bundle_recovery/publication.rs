@@ -499,6 +499,9 @@ pub(super) fn validate(
             RecordKind::ReviewEvidence => {
                 control!(crate::review_job::ReviewEvidence);
             }
+            RecordKind::ReviewReceipt => {
+                control!(crate::review_job::ReviewReceipt);
+            }
             RecordKind::FeedbackIndex => {
                 control!(crate::studio_records::FeedbackIndex);
             }

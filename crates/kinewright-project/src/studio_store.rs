@@ -496,6 +496,8 @@ pub(crate) enum PendingRulebookUpdate {
 pub(crate) enum PendingReviewUpdate {
     Set(ObjectRef),
     Retired(crate::review_job::ReviewToken),
+    /// The receipt is in the same root; nothing remains to stop.
+    Sealed(crate::review_job::ReviewToken),
 }
 
 #[derive(Default)]
@@ -534,6 +536,11 @@ impl ValidatedMetadataUpdate {
             Some(PendingReviewUpdate::Retired(token)) => {
                 root.active_review_ref = None;
                 root.stopped_review = Some(token.clone());
+            }
+            Some(PendingReviewUpdate::Sealed(token)) => {
+                let _ = token;
+                root.active_review_ref = None;
+                root.stopped_review = None;
             }
             None => {}
         }

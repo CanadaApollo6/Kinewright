@@ -12,13 +12,14 @@ use kinewright_project::{
     bundle_records::{ObjectRef, RecordKind, SessionId},
     review_job::{
         ReviewControl, ReviewJob, ReviewPhase, ReviewRequest, ReviewStage, ReviewStageCharge,
-        ReviewStaging, ReviewStatus, ReviewToken, UpdateReviewJob, empty_annotations,
+        ReviewStaging, ReviewStatus, ReviewToken, SealResult, UpdateReviewJob, empty_annotations,
     },
     studio_records::SnapshotKey,
     studio_store::FrozenContextRequest,
 };
 
 pub(super) mod review_checks;
+pub(super) mod review_driver;
 
 use super::{
     AttachmentRole, HostCommand, HostCommandOwner, HostError, HostRefusal, HostReply, HostRequest,
@@ -62,6 +63,8 @@ pub(super) struct ReviewRuntime {
     verified: Option<ReviewToken>,
     // Active off-lock check / stills reads cancelled immediately on Stop or host shutdown.
     active_cancellations: Vec<(ReviewToken, ExportCancellation)>,
+    // The check driver; Stop and shutdown cancel it, shutdown joins it.
+    driver: Option<Driver>,
     #[cfg(test)]
     probe: Option<Arc<dyn Fn(ReviewPoint) + Send + Sync>>,
     #[cfg(test)]
@@ -108,11 +111,22 @@ struct Worker {
     _charge: Arc<ReviewStageCharge>,
 }
 
+struct Driver {
+    token: ReviewToken,
+    cancellation: ExportCancellation,
+    thread: Option<JoinHandle<()>>,
+}
+
 // The runtime drops before the editing session, so the worker is joined while
 // the project lock is still held.
 impl Drop for ReviewRuntime {
     fn drop(&mut self) {
         self.cancel_for_shutdown();
+        if let Some(thread) = self.driver.as_mut().and_then(|driver| driver.thread.take())
+            && thread.thread().id() != thread::current().id()
+        {
+            let _ = thread.join();
+        }
         let Some(worker) = &mut self.worker else {
             return;
         };
@@ -131,6 +145,9 @@ impl ReviewRuntime {
     pub(super) fn cancel_for_shutdown(&self) {
         if let Some(worker) = &self.worker {
             worker.cancellation.cancel();
+        }
+        if let Some(driver) = &self.driver {
+            driver.cancellation.cancel();
         }
         for (_, cancel) in &self.active_cancellations {
             cancel.cancel();
@@ -159,6 +176,11 @@ impl ReviewRuntime {
     }
 
     pub(super) fn cancel_review_work(&mut self, token: &ReviewToken) {
+        if let Some(driver) = &self.driver
+            && &driver.token == token
+        {
+            driver.cancellation.cancel();
+        }
         for (active_token, cancel) in &self.active_cancellations {
             if active_token == token {
                 cancel.cancel();
@@ -184,6 +206,7 @@ impl ReviewRuntime {
     }
 }
 
+const DRIVER_RUNNING: &str = "The output review checks are still running.";
 const BUSY_WORKER: &str =
     "Another output review is still encoding or retiring; stop it or wait for it to finish first.";
 
@@ -205,6 +228,7 @@ pub(super) fn execute(
     request: &HostRequest,
     control: &ReviewControl,
 ) -> HostReply {
+    let mut receipt = None;
     let result = (|| {
         match control {
             ReviewControl::Queue {
@@ -223,6 +247,40 @@ pub(super) fn execute(
             ReviewControl::QueueDefault(snapshot) => {
                 return queue(host, bearer, request, snapshot, None);
             }
+            ReviewControl::Seal { token, command } => {
+                let (expected, cancel) = {
+                    let mut owner = lock(host)?;
+                    owner.authorize_review(bearer, request)?;
+                    owner.reconcile_review_job()?;
+                    // A lost reply: the job is already retired with its receipt.
+                    if let Some(sealed) = owner
+                        .owner_mut()?
+                        .review_source_bundle_mut(&token.project)?
+                        .sealed_review(token)?
+                    {
+                        receipt = Some(sealed.receipt);
+                        return owner.review_status();
+                    }
+                    owner.retire_finished_driver();
+                    if owner.review_runtime.driver.is_some() {
+                        return Err(refused(DRIVER_RUNNING));
+                    }
+                    let expected = owner.production_review_digest(token)?;
+                    let cancel = owner
+                        .review_runtime
+                        .register_review_cancellation(token, None);
+                    (expected, cancel)
+                };
+                let sealed =
+                    review_driver::seal_checked_review(host, token, command, expected, &cancel)?;
+                return match sealed {
+                    SealResult::Sealed(sealed) => {
+                        receipt = Some(sealed.receipt);
+                        Ok(lock(host)?.review_status()?)
+                    }
+                    SealResult::Paused(status) => Ok(Some(*status)),
+                };
+            }
             _ => {}
         }
         let mut owner = lock(host)?;
@@ -234,7 +292,10 @@ pub(super) fn execute(
         reply.status = owner.status();
     }
     match result {
-        Ok(status) => reply.review = status,
+        Ok(status) => {
+            reply.review = status;
+            reply.review_receipt = receipt;
+        }
         Err(error) => reply.error = Some(error.refusal()),
     }
     reply
@@ -363,6 +424,13 @@ impl HostCommandOwner {
     }
 
     pub(super) fn join_review_for_shutdown(host: &Mutex<Self>) {
+        let driver = host
+            .lock()
+            .ok()
+            .and_then(|mut owner| owner.review_runtime.driver.as_mut()?.thread.take());
+        if let Some(driver) = driver {
+            let _ = driver.join();
+        }
         let thread = host
             .lock()
             .ok()
@@ -474,8 +542,14 @@ impl HostCommandOwner {
                     .set_review_annotations(snapshot, annotations)?;
             }
             ReviewControl::Resume(token) => self.resume_review(token)?,
+            ReviewControl::Check {
+                token,
+                reviewer_attempt,
+                command,
+            } => self.start_review_driver(token, reviewer_attempt, command)?,
             ReviewControl::Queue { .. }
             | ReviewControl::QueueDefault(_)
+            | ReviewControl::Seal { .. }
             | ReviewControl::Stop(_) => return Err(unavailable()),
         }
         self.review_status()
@@ -958,6 +1032,118 @@ impl HostCommandOwner {
         Ok(())
     }
 
+    /// The sealing variant of the fence: the verified artifact of the current
+    /// job, with every row recorded or a seal still to retry.
+    pub(super) fn review_can_seal(&self, token: &ReviewToken) -> Result<(), HostError> {
+        self.review_authority(token)?;
+        if self.review_runtime.verified.as_ref() != Some(token) {
+            return Err(refused(
+                "The output review artifact has not been verified by this host.",
+            ));
+        }
+        let bundle = self.owner()?.review_source_bundle(&token.project)?;
+        if !bundle.review_job()?.is_some_and(|job| {
+            job.token == *token
+                && matches!(
+                    job.phase,
+                    ReviewPhase::Checking(_) | ReviewPhase::ReadyToSeal { .. }
+                )
+        }) {
+            return Err(refused("The output review generation or version changed."));
+        }
+        Ok(())
+    }
+
+    /// Host authority over a sealed job ends once its receipt is durable.
+    pub(super) fn release_sealed_review(&mut self, token: &ReviewToken) {
+        if self.review_runtime.verified.as_ref() == Some(token) {
+            self.review_runtime.verified = None;
+        }
+        self.release_bound_stills(token);
+        self.review_runtime
+            .active_cancellations
+            .retain(|(active, _)| active != token);
+    }
+
+    /// The digest the production driver binds for the job's reviewer.
+    fn production_review_digest(&self, token: &ReviewToken) -> Result<[u8; 32], HostError> {
+        let bundle = self.owner()?.review_source_bundle(&token.project)?;
+        let job = bundle
+            .review_job()?
+            .filter(|job| &job.token == token)
+            .ok_or_else(|| refused("The output review generation or version changed."))?;
+        let attempt = match &job.phase {
+            ReviewPhase::Checking(checks) | ReviewPhase::ReadyToSeal { checks, .. } => {
+                checks.reviewer_attempt.clone()
+            }
+            _ => None,
+        }
+        .ok_or_else(|| refused("No reviewer is bound to this output review."))?;
+        Ok(review_driver::DriverConfiguration::production(&attempt)
+            .binding(&attempt)
+            .configuration_sha256)
+    }
+
+    fn retire_finished_driver(&mut self) {
+        if self
+            .review_runtime
+            .driver
+            .as_ref()
+            .is_some_and(|driver| driver.thread.as_ref().is_none_or(JoinHandle::is_finished))
+            && let Some(mut driver) = self.review_runtime.driver.take()
+            && let Some(thread) = driver.thread.take()
+        {
+            let _ = thread.join();
+        }
+    }
+
+    fn start_review_driver(
+        &mut self,
+        token: &ReviewToken,
+        reviewer_attempt: &SessionId,
+        command: &SessionId,
+    ) -> Result<(), HostError> {
+        self.retire_finished_driver();
+        if self.review_runtime.driver.is_some() {
+            return Err(refused(DRIVER_RUNNING));
+        }
+        self.review_can_record(token)?;
+        let cancellation = self
+            .review_runtime
+            .register_review_cancellation(token, None);
+        let weak = self.runtime_owner.clone();
+        let thread = {
+            let token = token.clone();
+            let attempt = reviewer_attempt.clone();
+            let command = command.clone();
+            let cancellation = cancellation.clone();
+            thread::Builder::new()
+                .name("output-review-checks".into())
+                .spawn(move || {
+                    let config = review_driver::DriverConfiguration::production(&attempt);
+                    let check =
+                        review_checks::commit_5_check(&config.scan, &config.speech, &cancellation);
+                    // Refusals leave the recorded rows; Status shows the job.
+                    let _ = review_driver::drive_review(
+                        &weak,
+                        &token,
+                        &attempt,
+                        &command,
+                        &config,
+                        &check,
+                        &mut review_driver::AwaitReviewer,
+                        &cancellation,
+                    );
+                })?
+        };
+        self.review_runtime.driver = Some(Driver {
+            token: token.clone(),
+            cancellation,
+            thread: Some(thread),
+        });
+        Ok(())
+    }
+
     /// The one path by which commits 5 to 7 bind a checker and record results.
     pub(super) fn record_review_check(
         &mut self,
@@ -966,7 +1152,9 @@ impl HostCommandOwner {
     ) -> Result<ReviewStatus, HostError> {
         if !matches!(
             update,
-            UpdateReviewJob::BindChecks(_) | UpdateReviewJob::RecordCheck { .. }
+            UpdateReviewJob::BindChecks(_)
+                | UpdateReviewJob::RecordCheck { .. }
+                | UpdateReviewJob::RecordUnknown { .. }
         ) {
             return Err(refused(
                 "Only check bindings and results are recorded here.",

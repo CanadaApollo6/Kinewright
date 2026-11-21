@@ -992,6 +992,9 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
             RecordKind::ReviewEvidence => {
                 admit!(crate::review_job::ReviewEvidence);
             }
+            RecordKind::ReviewReceipt => {
+                admit!(crate::review_job::ReviewReceipt);
+            }
             RecordKind::FeedbackIndex => {
                 admit!(crate::studio_records::FeedbackIndex);
             }
@@ -1614,6 +1617,25 @@ pub(super) fn validate_studio_records(
             }
             if let Some(reference) = &descriptor.review_evidence_ref {
                 let index = load!(ReviewEvidence, reference);
+                let mut profiles = Vec::new();
+                for reference in index.receipts() {
+                    let receipt = load!(crate::review_job::ReviewReceipt, reference);
+                    let artifact = load!(ReviewArtifact, &receipt.key.artifact_ref);
+                    let request = load!(ReviewRequest, &receipt.key.request_ref);
+                    let expectations = load!(
+                        crate::review_job::StoredReviewExpectations,
+                        &request.expectations_ref
+                    );
+                    crate::review_job::validate_version_receipt(
+                        descriptor,
+                        &index,
+                        &receipt,
+                        &artifact,
+                        &request,
+                        &expectations.0,
+                        &mut profiles,
+                    )?;
+                }
                 for reference in index.artifacts() {
                     let artifact = load!(ReviewArtifact, reference);
                     let request = load!(ReviewRequest, &artifact.request_ref);

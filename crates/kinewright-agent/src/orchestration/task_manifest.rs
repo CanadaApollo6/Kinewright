@@ -60,6 +60,7 @@ pub(crate) const REVIEWER: &[&str] = &[
     "publish_result",
     "finish_task",
     "record_editorial_audit",
+    "submit_visual_judgment",
 ];
 pub(crate) fn names(role: Role) -> &'static [&'static str] {
     match role {

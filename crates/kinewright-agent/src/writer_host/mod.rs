@@ -2442,6 +2442,7 @@ impl HostCommandOwner {
                         .editorial_audit(&key)?
                         .map(|audit| (*audit).clone());
                     reply.review_annotations = self.owner()?.review_annotations(&key)?;
+                    reply.review_receipt = self.owner()?.review_receipts(&key)?.into_iter().next();
                 }
                 reply.rulebook_proposal = self
                     .owner()?

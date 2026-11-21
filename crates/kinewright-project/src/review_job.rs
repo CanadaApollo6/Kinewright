@@ -10,6 +10,12 @@ pub(crate) use staging::LiveStageSlot;
 pub use staging::{ReviewStageCharge, ReviewStaging};
 mod check_inputs;
 pub use check_inputs::{PendingReviewCheck, ReviewCheckInputs};
+mod seal;
+pub(crate) use seal::validate_version_receipt;
+pub use seal::{
+    FrozenReviewKey, MAX_REVIEW_FINDING_NOTE, MAX_REVIEW_FINDINGS, ReviewFinding, ReviewOutcome,
+    ReviewReceipt, SealResult, SealedReview, VerifiedReviewArtifact,
+};
 
 use kinewright_core::{
     ExportSettings,
@@ -103,13 +109,23 @@ pub struct ReviewArtifact {
 
 const MAX_VERSION_ARTIFACTS: usize = 16;
 
+/// Version-owned review evidence: every published artifact and, at most once
+/// per coverage profile, the immutable seal receipt.
 #[derive(Default, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ReviewEvidence(Vec<ObjectRef>);
+#[serde(deny_unknown_fields)]
+pub struct ReviewEvidence {
+    artifacts: Vec<ObjectRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    receipts: Vec<ObjectRef>,
+}
 
 impl ReviewEvidence {
     pub fn artifacts(&self) -> impl DoubleEndedIterator<Item = &ObjectRef> {
-        self.0.iter()
+        self.artifacts.iter()
+    }
+
+    pub fn receipts(&self) -> impl DoubleEndedIterator<Item = &ObjectRef> {
+        self.receipts.iter()
     }
 }
 
@@ -153,6 +169,9 @@ impl ReviewChecks {
 pub struct ReportedReviewCheck {
     pub attempt: SessionId,
     pub result: ReviewRowResult,
+    /// Why a row is not Pass, when its checker could say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +192,9 @@ pub enum ReviewPhase {
     Paused {
         checkpoint: ReviewCheckpoint,
         reason: String,
+        /// Why a seal was refused, linked to the version and output time.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        findings: Vec<ReviewFinding>,
     },
     Stopping,
     Stopped,
@@ -210,6 +232,18 @@ pub enum ReviewControl {
     },
     Resume(ReviewToken),
     Stop(ReviewToken),
+    /// Run every check of the published artifact, with `reviewer_attempt`
+    /// as the visual reviewer, then seal under `command`.
+    Check {
+        token: ReviewToken,
+        reviewer_attempt: SessionId,
+        command: SessionId,
+    },
+    /// Seal checked rows again, or return the receipt a lost reply published.
+    Seal {
+        token: ReviewToken,
+        command: SessionId,
+    },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -294,13 +328,19 @@ record!(
 record!(
     ReviewEvidence,
     ReviewEvidence,
-    |v: &ReviewEvidence| v.0.clone(),
+    |v: &ReviewEvidence| v.artifacts.iter().chain(&v.receipts).cloned().collect(),
     |v: &ReviewEvidence, _: &StorageLimits| {
-        if v.0.is_empty() || v.0.len() > MAX_VERSION_ARTIFACTS {
+        if v.artifacts.is_empty() || v.artifacts.len() > MAX_VERSION_ARTIFACTS {
             return Err(BundleError::Capacity("published artifacts per version"));
         }
-        for reference in &v.0 {
+        if v.receipts.len() > seal::MAX_VERSION_RECEIPTS {
+            return Err(BundleError::Capacity("review receipts per version"));
+        }
+        for reference in &v.artifacts {
             kind(reference, RecordKind::ReviewArtifact)?;
+        }
+        for reference in &v.receipts {
+            kind(reference, RecordKind::ReviewReceipt)?;
         }
         Ok(())
     }
@@ -331,9 +371,17 @@ record!(
             ReviewPhase::Queued => v.stage.is_none() && !has_artifact,
             ReviewPhase::Encoding => v.stage.is_some() && !has_artifact,
             ReviewPhase::Checking(_) | ReviewPhase::ReadyToSeal { .. } => has_artifact,
-            ReviewPhase::Paused { checkpoint, reason } => {
+            ReviewPhase::Paused {
+                checkpoint,
+                reason,
+                findings,
+            } => {
                 !reason.is_empty()
                     && reason.len() <= 1024
+                    && ReviewFinding::valid(findings)
+                    && findings
+                        .iter()
+                        .all(|finding| finding.version == v.token.snapshot.version)
                     && has_artifact == matches!(checkpoint, ReviewCheckpoint::Checking(_))
             }
             ReviewPhase::Stopping => true,
@@ -341,6 +389,25 @@ record!(
         };
         if !valid {
             return Err(BundleError::Corrupt("review phase dependencies".into()));
+        }
+        let checks = match &v.phase {
+            ReviewPhase::Checking(checks)
+            | ReviewPhase::ReadyToSeal { checks, .. }
+            | ReviewPhase::Paused {
+                checkpoint: ReviewCheckpoint::Checking(checks),
+                ..
+            } => Some(checks),
+            _ => None,
+        };
+        if checks.is_some_and(|checks| {
+            checks.rows.values().any(|row| {
+                row.reason.as_deref().is_some_and(|reason| {
+                    row.result == ReviewRowResult::Pass
+                        || !crate::editorial::valid_text(reason, seal::MAX_REVIEW_FINDING_NOTE)
+                })
+            })
+        }) {
+            return Err(BundleError::Corrupt("review check reason".into()));
         }
         Ok(())
     }
@@ -396,6 +463,12 @@ pub enum UpdateReviewJob {
         row: RequiredReviewRow,
         result: ReviewRowResult,
     },
+    /// A check that errored: the row is Unknown and keeps the reason.
+    RecordUnknown {
+        binding: ReviewCheckBinding,
+        row: RequiredReviewRow,
+        reason: String,
+    },
 }
 
 impl ProjectBundle {
@@ -448,6 +521,34 @@ impl ProjectBundle {
         annotations: ReviewAnnotations,
     ) -> Result<(), BundleError> {
         self.settle_review_root()?;
+        if self
+            .review_job()?
+            .is_some_and(|job| &job.token.snapshot == snapshot)
+        {
+            return Err(BundleError::Identity(
+                "The output review of this version must finish or stop before its annotations change."
+                    .into(),
+            ));
+        }
+        self.write_review_annotations(snapshot, annotations)
+    }
+
+    /// Test seam: change a frozen version's annotations behind an active job.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn set_review_annotations_unfenced_for_test(
+        &mut self,
+        snapshot: &SnapshotKey,
+        annotations: ReviewAnnotations,
+    ) -> Result<(), BundleError> {
+        self.settle_review_root()?;
+        self.write_review_annotations(snapshot, annotations)
+    }
+
+    fn write_review_annotations(
+        &mut self,
+        snapshot: &SnapshotKey,
+        annotations: ReviewAnnotations,
+    ) -> Result<(), BundleError> {
         let mut versions = self.version_index()?.take();
         let descriptor = versions
             .snapshots
@@ -507,6 +608,11 @@ impl ProjectBundle {
     ) -> Result<ReviewToken, BundleError> {
         let _space = self.store.reserve(0, 0, false)?;
         let current = self.read_snapshot(&frozen.key)?;
+        if self.sealed_profile(&current.descriptor, CoverageProfileId::OutputReviewV1)? {
+            return Err(BundleError::Identity(
+                "This version already has a sealed output review.".into(),
+            ));
+        }
         if current.descriptor.identity != frozen.identity
             || current.descriptor.review_annotations_ref != frozen.review_annotations_ref
             || self.approved_rulebook() != rulebook_ref.as_ref()
@@ -608,7 +714,11 @@ impl ProjectBundle {
                     _ => return Err(invalid()),
                 };
                 let reason = reason.chars().take(256).collect::<String>();
-                job.phase = Paused { checkpoint, reason };
+                job.phase = Paused {
+                    checkpoint,
+                    reason,
+                    findings: Vec::new(),
+                };
             }
             UpdateReviewJob::Retry if job.stage.is_none() => {
                 let Paused { checkpoint, .. } = job.phase else {
@@ -635,7 +745,9 @@ impl ProjectBundle {
                 let Checking(checks) = &mut job.phase else {
                     return Err(invalid());
                 };
+                // The digest covers the attempt, so the next attempt binds afresh.
                 checks.reviewer_attempt = None;
+                checks.configuration_sha256 = None;
             }
             UpdateReviewJob::BindChecks(binding) => {
                 let Checking(checks) = &mut job.phase else {
@@ -643,12 +755,8 @@ impl ProjectBundle {
                 };
                 checks.bind(binding)?;
             }
-            UpdateReviewJob::RecordCheck {
-                binding,
-                row,
-                result,
-            } => {
-                self.record_review_check(&mut job, &binding, row, result)?;
+            UpdateReviewJob::RecordCheck { .. } | UpdateReviewJob::RecordUnknown { .. } => {
+                self.record_review_check(&mut job, update)?;
             }
             _ => return Err(invalid()),
         }
@@ -680,14 +788,30 @@ impl ProjectBundle {
     fn record_review_check(
         &self,
         job: &mut ReviewJob,
-        binding: &ReviewCheckBinding,
-        row: RequiredReviewRow,
-        result: ReviewRowResult,
+        update: UpdateReviewJob,
     ) -> Result<(), BundleError> {
         let invalid = || BundleError::Identity("review transition or check binding".into());
+        let (binding, row, result, reason) = match update {
+            UpdateReviewJob::RecordCheck {
+                binding,
+                row,
+                result,
+            } => (binding, row, result, None),
+            UpdateReviewJob::RecordUnknown {
+                binding,
+                row,
+                reason,
+            } => (binding, row, ReviewRowResult::Unknown, Some(reason)),
+            _ => return Err(invalid()),
+        };
         let ReviewPhase::Checking(checks) = &mut job.phase else {
             return Err(invalid());
         };
+        if reason.as_deref().is_some_and(|reason| {
+            !crate::editorial::valid_text(reason, seal::MAX_REVIEW_FINDING_NOTE)
+        }) {
+            return Err(invalid());
+        }
         let request = self.store.read_record::<ReviewRequest>(&job.request_ref)?;
         if checks.configuration_sha256 != Some(binding.configuration_sha256)
             || checks.reviewer_attempt.as_ref() != Some(&binding.reviewer_attempt)
@@ -703,6 +827,7 @@ impl ProjectBundle {
             ReportedReviewCheck {
                 attempt: binding.reviewer_attempt.clone(),
                 result,
+                reason,
             },
         );
         let coverage = checks
@@ -711,10 +836,15 @@ impl ProjectBundle {
             .map(|(&id, report)| (ReviewRowId::Required(id), report.result))
             .collect();
         if check_review_coverage(request.profile, &coverage).all_required_passed() {
-            let key = encode(&(&job.token, &job.artifact_ref, &checks))?;
+            let key = self.frozen_review_key(
+                &job.token,
+                &job.request_ref,
+                job.artifact_ref.as_ref(),
+                checks,
+            )?;
             job.phase = ReviewPhase::ReadyToSeal {
                 checks: std::mem::take(checks),
-                proposed_key: kinewright_media::sha256_bytes(&key),
+                proposed_key: key.sha256()?,
             };
         }
         Ok(())
@@ -754,7 +884,7 @@ impl ProjectBundle {
             .map(|reference| self.store.read_record::<ReviewEvidence>(reference))
             .transpose()?
             .map_or_else(ReviewEvidence::default, StorageReservation::take);
-        if evidence.0.len() >= MAX_VERSION_ARTIFACTS {
+        if evidence.artifacts.len() >= MAX_VERSION_ARTIFACTS {
             return Err(BundleError::Capacity("published artifacts per version"));
         }
         let media = self.store.admit_blob(staged, media_ref, &[])?;
@@ -766,7 +896,7 @@ impl ProjectBundle {
             media_ref: media.reference.clone(),
             output,
         })?;
-        evidence.0.push(artifact.reference.clone());
+        evidence.artifacts.push(artifact.reference.clone());
         let evidence = self.store.admit_record(&evidence)?;
         descriptor.review_evidence_ref = Some(evidence.reference.clone());
         let versions = self.store.admit_record(&versions)?;
@@ -873,6 +1003,32 @@ impl Ja1EditingSession {
         self.active_bundle_mut()?.update_review_job(token, update)
     }
 
+    pub fn seal_review(
+        &mut self,
+        token: &ReviewToken,
+        command: &SessionId,
+        expected_configuration_sha256: [u8; 32],
+        verified: &VerifiedReviewArtifact,
+    ) -> Result<SealResult, BundleError> {
+        self.active_bundle_mut()?.seal_review(
+            token,
+            command,
+            expected_configuration_sha256,
+            verified,
+        )
+    }
+
+    /// The seal receipts kept on this exact version.
+    pub fn review_receipts(&self, key: &SnapshotKey) -> Result<Vec<ReviewReceipt>, BundleError> {
+        let bundle = self.active_bundle()?;
+        let snapshot = bundle.read_snapshot(key)?;
+        Ok(bundle
+            .review_receipts(&snapshot.descriptor)?
+            .into_iter()
+            .map(|(_, receipt)| receipt.take())
+            .collect())
+    }
+
     pub fn review_annotations(
         &self,
         key: &SnapshotKey,
@@ -921,6 +1077,7 @@ pub struct ReviewPreparationInputs {
 /// verification of the artifact media bytes runs strictly off-lock (L13).
 pub struct PreparedReviewArtifact {
     pub artifact: StorageReservation<ReviewArtifact>,
+    reference: ObjectRef,
     pin: crate::store::StorePin,
 }
 
@@ -982,7 +1139,11 @@ impl ProjectBundle {
         let pin = self
             .store
             .pin(&[reference.clone(), artifact.media_ref.clone()])?;
-        Ok(PreparedReviewArtifact { artifact, pin })
+        Ok(PreparedReviewArtifact {
+            artifact,
+            reference: reference.clone(),
+            pin,
+        })
     }
 
     pub fn open_review_artifact(

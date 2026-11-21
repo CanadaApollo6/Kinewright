@@ -1447,6 +1447,19 @@ impl HostCommandOwner {
         Ok(())
     }
 
+    /// Forget the stills configuration bound for a sealed job.
+    #[cfg(target_os = "linux")]
+    pub(super) fn release_bound_stills(&mut self, token: &ReviewToken) {
+        if self
+            .review_stills
+            .bound_config
+            .as_ref()
+            .is_some_and(|bound| &bound.review_token == token)
+        {
+            self.review_stills.bound_config = None;
+        }
+    }
+
     /// Bind a validated [`C6CheckConfiguration`] on the active review job through
     /// `record_review_check(UpdateReviewJob::BindChecks)` and pin its stills configuration for
     /// `read_review_stills` so host-wide config mutations cannot alter served stills.
@@ -1754,16 +1767,15 @@ impl HostCommandOwner {
         Ok((job, bundle))
     }
 
-    /// Validate a reviewer's visual judgment against the bound configuration, frozen plan, and
-    /// served still ledger, then record `RequiredReviewRow::IndependentVisualReview` exclusively
-    /// through `record_review_check`.
+    /// Test seam: validate a judgment against an explicit configuration and
+    /// record it. Production judgments arrive only through the bound
+    /// Reviewer attempt's own `submit_visual_judgment` tool.
     ///
     /// # Errors
     /// Refuses with a descriptive error (without recording any check row) when the configuration
-    /// fails validation or disagrees with `binding.configuration_sha256`, the judgment omits any
-    /// planned sample point, cites a still ID from another attempt or plan, fails binding checks,
-    /// or the Stop/checking fence rejects recording.
-    #[cfg(target_os = "linux")]
+    /// fails validation or disagrees with `binding.configuration_sha256`, or when
+    /// [`Self::record_bound_visual_judgment`] refuses.
+    #[cfg(all(test, target_os = "linux"))]
     pub fn record_visual_review_judgment(
         &mut self,
         token: &ReviewToken,
@@ -1777,15 +1789,87 @@ impl HostCommandOwner {
         ),
         HostError,
     > {
-        use kinewright_core::output_review::RequiredReviewRow;
-        use kinewright_project::review_job::UpdateReviewJob;
-
         config.validate()?;
         if binding.configuration_sha256 != config.configuration_sha256() {
             return Err(refused(
                 "Visual review configuration does not match the bound configuration digest.",
             ));
         }
+        self.record_bound_visual_judgment(token, binding, &config.stills, judgment)
+    }
+
+    /// The Reviewer's own `submit_visual_judgment`: the caller's attempt must
+    /// be the one bound to the active check, and the stills configuration is
+    /// the one registered with that binding, never a host-wide setting.
+    #[cfg(target_os = "linux")]
+    pub(super) fn submit_visual_judgment(
+        &mut self,
+        task: &TaskRecord,
+        authority: &RuntimeTaskAuthority,
+        arguments: &serde_json::Value,
+    ) -> Result<serde_json::Value, HostError> {
+        if task.brief.role != Role::Reviewer {
+            return Err(scope_refused(
+                "submit_visual_judgment is restricted to Role::Reviewer",
+            ));
+        }
+        let reviewer_attempt = authority.attempt.0.clone();
+        let bytes = serde_json::to_vec(arguments)?;
+        let judgment = parse_visual_judgment(&bytes)
+            .map_err(|error| HostRefusal::new("review_visual_judgment", &error.to_string()))?;
+        let (token, configuration_sha256) = {
+            let (job, _) = self.require_active_reviewer_job(&reviewer_attempt)?;
+            let ReviewPhase::Checking(checks) = &job.phase else {
+                return Err(refused(
+                    "The active output review is not in the checking phase.",
+                ));
+            };
+            (job.token.clone(), checks.configuration_sha256)
+        };
+        let stills = self
+            .review_stills
+            .bound_config
+            .as_ref()
+            .filter(|bound| {
+                bound.review_token == token
+                    && bound.reviewer_attempt == reviewer_attempt
+                    && Some(bound.configuration_sha256) == configuration_sha256
+            })
+            .map(|bound| bound.stills.clone())
+            .ok_or_else(|| refused("No stills configuration is bound to this reviewer attempt."))?;
+        let binding = kinewright_project::review_job::ReviewCheckBinding {
+            configuration_sha256: configuration_sha256
+                .ok_or_else(|| refused("No check configuration digest is bound."))?,
+            reviewer_attempt,
+        };
+        let (validated, _) =
+            self.record_bound_visual_judgment(&token, binding, &stills, &judgment)?;
+        Ok(serde_json::json!({
+            "recorded": true,
+            "result": validated.row_result,
+        }))
+    }
+
+    /// Validate a judgment against the frozen plan of `stills` and the served
+    /// still ledger, then record `RequiredReviewRow::IndependentVisualReview`
+    /// exclusively through `record_review_check`.
+    #[cfg(target_os = "linux")]
+    fn record_bound_visual_judgment(
+        &mut self,
+        token: &ReviewToken,
+        binding: kinewright_project::review_job::ReviewCheckBinding,
+        stills: &ReviewStillsConfig,
+        judgment: &VisualJudgment,
+    ) -> Result<
+        (
+            ValidatedVisualReview,
+            kinewright_project::review_job::ReviewStatus,
+        ),
+        HostError,
+    > {
+        use kinewright_core::output_review::RequiredReviewRow;
+        use kinewright_project::review_job::UpdateReviewJob;
+
         self.review_can_record(token)?;
         let (plan, plan_sha256, artifact_ref, artifact_media_ref) = {
             let bundle = self.owner()?.review_source_bundle(&token.project)?;
@@ -1821,18 +1905,13 @@ impl HostCommandOwner {
                 .read_record::<kinewright_project::review_job::ReviewArtifact>(&artifact_ref)?;
             let plan_input =
                 extract_plan_input_from_snapshot(bundle, token, &expectations.0, &document)?;
-            let plan = plan_review_stills(
-                &expectations.0,
-                &artifact.output,
-                &plan_input,
-                &config.stills,
-            )
-            .map_err(|error| refused(&error.to_string()))?;
+            let plan = plan_review_stills(&expectations.0, &artifact.output, &plan_input, stills)
+                .map_err(|error| refused(&error.to_string()))?;
             let plan_sha256 = plan_digest(&plan)?;
             (plan, plan_sha256, artifact_ref, artifact.media_ref.clone())
         };
 
-        let stills_config_sha256 = hex_digest(&config.stills.sha256());
+        let stills_config_sha256 = hex_digest(&stills.sha256());
         let retired = self.review_stills.retired.make_contiguous();
         let context = VisualReviewContext {
             plan: &plan,

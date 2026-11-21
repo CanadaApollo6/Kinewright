@@ -31,6 +31,10 @@ pub(crate) const CAPABILITIES: &[(&str, &str)] = &[
         "Record cut rationale as Editor or complete retention, hook and story checks as Reviewer, for an exact published version.",
     ),
     (
+        "submit_visual_judgment",
+        "As the bound Reviewer, submit the visual judgment of every still read_review_stills served for the active output review. Each finding cites a served still ID; the host records the independent visual review row from it.",
+    ),
+    (
         "finish_task",
         "Freeze and publish the current revision with one durable completion identity. Retry the original id and payload. Frozen-only work is pending; completion also requires any parent delivery to be observed.",
     ),
@@ -454,6 +458,14 @@ impl TaskMcp {
             .iter()
             .find(|record| record.id == *task)
             .ok_or_else(|| refused("task missing"))?;
+        if name == "submit_visual_judgment" {
+            #[cfg(target_os = "linux")]
+            return host.submit_visual_judgment(record, self.endpoint.authority(), &arguments);
+            #[cfg(not(target_os = "linux"))]
+            return Err(refused(
+                "Output review checks are not available on this platform.",
+            ));
+        }
         if matches!(name, "record_editorial_audit" | "propose_rulebook_revision") {
             return host.editorial_task_tool(
                 state,

@@ -10,10 +10,7 @@
 //! `record_review_check`.
 use std::{fs::File, sync::Arc, sync::Mutex};
 
-use kinewright_core::{
-    ExportCancellation, MediaError,
-    output_review::{RequiredReviewRow, ReviewRowResult},
-};
+use kinewright_core::{ExportCancellation, MediaError, output_review::RequiredReviewRow};
 use kinewright_media::review_scan::{
     RetainedSpeechConfig, ReviewCheckReport, ReviewScanInputs, TechnicalScanConfig,
     check_review_artifact,
@@ -35,10 +32,6 @@ pub(in crate::writer_host) const COMMIT_5_ROWS: [RequiredReviewRow; 4] = [
 /// Digest of commit 5's own checker configuration. The caller combines it
 /// with the other commits' configurations into the one binding it passes in.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "commit 7 builds the binding it passes in")
-)]
 pub(in crate::writer_host) fn review_check_configuration(
     scan: &TechnicalScanConfig,
     speech: &RetainedSpeechConfig,
@@ -53,7 +46,10 @@ pub(in crate::writer_host) fn review_check_configuration(
 /// What the checks decided, beside the row results they recorded.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "commit 7 keeps the reports as evidence")
+    expect(
+        dead_code,
+        reason = "the driver keeps only the recorded rows; tests read the report"
+    )
 )]
 pub(in crate::writer_host) struct ReviewCheckRun {
     /// The report, or why no report could be made (every row then Unknown).
@@ -67,10 +63,6 @@ pub(in crate::writer_host) type CheckReview<'a> =
     dyn Fn(&File, &ReviewScanInputs<'_>) -> Result<ReviewCheckReport, MediaError> + 'a;
 
 /// The production check of commit 5.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "commit 7 starts the checks after publication")
-)]
 pub(in crate::writer_host) fn commit_5_check<'a>(
     scan: &'a TechnicalScanConfig,
     speech: &'a RetainedSpeechConfig,
@@ -85,10 +77,6 @@ pub(in crate::writer_host) fn commit_5_check<'a>(
 /// # Errors
 /// Binding or recording is refused (another binding, a stopped job), or the
 /// check was cancelled. Nothing is recorded after a cancellation.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "commit 7 starts the checks after publication")
-)]
 pub(in crate::writer_host) fn run_technical_review_checks(
     owner: &Mutex<HostCommandOwner>,
     token: &ReviewToken,
@@ -118,12 +106,13 @@ pub(in crate::writer_host) fn run_technical_review_checks(
         .into_iter()
         .filter(|row| required.contains(row))
         .map(|row| {
-            let result = report.as_ref().map_or(ReviewRowResult::Unknown, |report| {
+            let result = report.as_ref().map_err(String::as_str).and_then(|report| {
                 report
                     .rows()
                     .into_iter()
                     .find(|candidate| candidate.row == row)
-                    .map_or(ReviewRowResult::Unknown, |candidate| candidate.result)
+                    .map(|candidate| candidate.result)
+                    .ok_or("The check reported no result for this row.")
             });
             (row, result)
         });
@@ -132,14 +121,19 @@ pub(in crate::writer_host) fn run_technical_review_checks(
         .map_err(|_| refused("Writer host lock is poisoned."))?;
     let mut status = None;
     for (row, result) in rows {
-        status = Some(host.record_review_check(
-            token,
-            UpdateReviewJob::RecordCheck {
+        let update = match result {
+            Ok(result) => UpdateReviewJob::RecordCheck {
                 binding: binding.clone(),
                 row,
                 result,
             },
-        )?);
+            Err(reason) => UpdateReviewJob::RecordUnknown {
+                binding: binding.clone(),
+                row,
+                reason: check_reason(reason),
+            },
+        };
+        status = Some(host.record_review_check(token, update)?);
     }
     Ok(ReviewCheckRun {
         report,
@@ -175,4 +169,21 @@ fn run_check(
         },
     )
     .map_err(|error| error.to_string())
+}
+
+/// A checker's error, bounded to what a check row keeps.
+pub(in crate::writer_host) fn check_reason(reason: &str) -> String {
+    let limit = kinewright_project::review_job::MAX_REVIEW_FINDING_NOTE;
+    let mut bounded = String::new();
+    for character in reason.trim().chars() {
+        if bounded.len() + character.len_utf8() > limit {
+            break;
+        }
+        bounded.push(character);
+    }
+    if bounded.is_empty() {
+        "The check failed without a reason.".into()
+    } else {
+        bounded
+    }
 }
