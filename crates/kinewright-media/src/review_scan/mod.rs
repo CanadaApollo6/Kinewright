@@ -83,6 +83,9 @@ pub struct TechnicalScanConfig {
     pub freeze_ratio: f32,
     /// ...on at least this many moving source frames of one run.
     pub freeze_min_frames: u32,
+    /// ...and lasts at least this long on the output clock, so a freeze
+    /// means the same at 24 and at 60 fps (R7).
+    pub freeze_min_us: u64,
     /// Black: output mean luma at most this...
     pub black_mean_max: f32,
     /// ...and no cell brighter than this...
@@ -113,6 +116,10 @@ pub struct TechnicalScanConfig {
     /// others, or below `gain_floor_db`, is treated as dropped.
     pub gain_drop_db: f32,
     pub gain_floor_db: f32,
+    /// R3: a part's measured gain may differ from the gain the mix sets (or,
+    /// under loudness normalisation, from the parts' shared gain) by this
+    /// many dB; AAC and a fixed export gain stay well inside it.
+    pub gain_tolerance_db: f32,
     /// Click: an output second-difference peak above this multiple of the
     /// predicted peak plus the floor.
     pub click_ratio: f32,
@@ -145,6 +152,7 @@ impl Default for TechnicalScanConfig {
             motion_floor: 0.004,
             freeze_ratio: 0.25,
             freeze_min_frames: 3,
+            freeze_min_us: 150_000,
             black_mean_max: 0.04,
             black_cell_max: 0.08,
             black_source_mean_min: 0.08,
@@ -159,6 +167,7 @@ impl Default for TechnicalScanConfig {
             dropout_min_hops: 2,
             gain_drop_db: 15.0,
             gain_floor_db: -40.0,
+            gain_tolerance_db: 3.0,
             click_ratio: 4.0,
             click_floor: 0.05,
             click_context_hops: 2,
@@ -298,6 +307,12 @@ pub enum FindingKind {
     AudioLong {
         samples: u64,
     },
+    /// The recorded audio start is missing or implausible, so the stream's
+    /// extent cannot be judged.
+    AudioStartUnknown,
+    ExtraVideoStream {
+        streams: u32,
+    },
     SyncUnmeasured {
         signal: SyncSignal,
         measured: u32,
@@ -345,6 +360,13 @@ pub enum FindingKind {
     },
     Click {
         channel: u8,
+    },
+    /// A part's measured level differs from the level the mix sets by more
+    /// than `gain_tolerance_db`.
+    GainChanged {
+        channel: u8,
+        /// Measured minus expected, in tenths of a dB.
+        db_tenths: i32,
     },
     SoundNotCompared {
         reason: String,

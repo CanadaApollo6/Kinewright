@@ -2905,7 +2905,7 @@ impl GainRamp {
 /// AU2 §5.10(f) and A14 forbid. Centre is the exact identity under it either
 /// way.
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-fn pan_channel_ratios(law: PanLaw, pan_percent: i32) -> [f32; 2] {
+pub(crate) fn pan_channel_ratios(law: PanLaw, pan_percent: i32) -> [f32; 2] {
     match law {
         PanLaw::Balance => {
             let pan = pan_percent as f32 / 100.0;

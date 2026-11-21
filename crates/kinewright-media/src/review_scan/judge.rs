@@ -27,6 +27,8 @@ const SYNC_COVERED_SHARE: f64 = 0.8;
 const SYNC_ENVELOPE_STD_DB: f64 = 3.0;
 /// ...and no other lag further than two steps away scores within this.
 const SYNC_DISTINCT: f64 = 0.05;
+/// Static source frames in a row that end a freeze run.
+const FREEZE_STATIC_RESET: usize = 2;
 /// Least compared frame pairs for a video lag.
 const SYNC_MIN_PAIRS: usize = 8;
 
@@ -69,11 +71,20 @@ pub(super) fn judge(
     let output = sound.ok().and_then(|scan| scan.output.as_ref());
     let model = match (sound, output) {
         (Ok(scan), Some(output)) if !output.truncated && !scan.sources.truncated => {
-            Some(Model::new(plan, scan, output, technical))
+            Some(Model::new(
+                plan,
+                scan,
+                output,
+                technical,
+                inputs.settings.loudness_normalization.is_some(),
+            ))
         }
         _ => None,
     };
     let end_us = plan.clock.frame_us(plan.output_frames);
+    let early = output.is_some_and(|audio| {
+        has_expected_audio(plan) && audio_ends_early(inputs, plan, audio, technical, end_us)
+    });
     let mut report = ReviewCheckReport {
         technical_sha256: technical.sha256(),
         speech_sha256: speech.sha256(),
@@ -102,7 +113,15 @@ pub(super) fn judge(
     for (kind, verdict) in sync_findings {
         report.structure.push(kind, verdict, [0, end_us]);
     }
-    loudness(&mut report.loudness, inputs, plan, sound, technical, end_us);
+    loudness(
+        &mut report.loudness,
+        inputs,
+        plan,
+        sound,
+        technical,
+        end_us,
+        early,
+    );
     edit_defects(&mut report.defects, inputs, plan, technical);
     let (excluded, omitted) =
         picture_defects(&mut report.defects, plan, picture, technical, end_us);
@@ -115,6 +134,7 @@ pub(super) fn judge(
         model.as_ref(),
         technical,
         end_us,
+        early,
     );
     retained_speech(
         &mut report.speech,
@@ -193,6 +213,15 @@ fn structure(
                 0,
                 expected_frames,
             );
+            if video.video_streams > 1 {
+                row.push(
+                    FindingKind::ExtraVideoStream {
+                        streams: video.video_streams,
+                    },
+                    Failed,
+                    [0, end_us],
+                );
+            }
             if video.size != expectations.raster {
                 setting(row, "decoded_raster");
             }
@@ -322,14 +351,74 @@ fn samples_us(samples: i64, rate: u32) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
+/// Most priming an encoder plausibly places before output sample zero, in
+/// coded frames (AAC primes 1024 to 2112 samples).
+const PRIMING_MAX_FRAMES: u64 = 4;
+
 /// Priming the encoder placed before output sample zero, from the recorded
 /// stream start (an MP4 edit list starts the stream at minus the priming).
-fn priming_samples(stream: &crate::ReviewOutputStream, rate: u32) -> u64 {
+/// `None` when the start is missing (`AV_NOPTS_VALUE`) or implausible.
+fn priming_samples(stream: &crate::ReviewOutputStream, rate: u32, frame_size: u32) -> Option<u64> {
+    if stream.start_pts == i64::MIN {
+        return None;
+    }
     let (numerator, denominator) = stream.time_base;
-    let samples =
-        i128::from(stream.start_pts.min(0)).abs() * i128::from(numerator) * i128::from(rate)
-            / i128::from(denominator.max(1));
-    u64::try_from(samples).unwrap_or(u64::MAX)
+    let samples = i128::from(stream.start_pts.min(0))
+        .unsigned_abs()
+        .saturating_mul(u128::from(numerator.unsigned_abs()))
+        .saturating_mul(u128::from(rate))
+        / u128::from(denominator.unsigned_abs().max(1));
+    let bound = PRIMING_MAX_FRAMES.saturating_mul(u64::from(frame_size.max(1024)));
+    u64::try_from(samples)
+        .ok()
+        .filter(|samples| *samples <= bound)
+}
+
+/// Output samples the cut spans at `rate`.
+fn sample_extent(end_us: u64, rate: u32) -> i64 {
+    i64::try_from(u128::from(end_us) * u128::from(rate) / 1_000_000).unwrap_or(i64::MAX)
+}
+
+/// How far the decoded audio end may fall from the cut's end: the last
+/// coded frame is whole, the priming shifts it, and an fps change can round
+/// the cut to one output frame.
+fn end_tolerance(
+    audio: &OutputSound,
+    plan: &Plan<'_>,
+    config: &TechnicalScanConfig,
+    priming: u64,
+) -> i64 {
+    let rate = audio.rate;
+    let frame_samples = u64::from(rate) * u64::from(plan.clock.fps().denominator())
+        / u64::from(plan.clock.fps().numerator().max(1));
+    i64::try_from(
+        u64::from(audio.frame_size.max(1))
+            .saturating_add(priming)
+            .saturating_add(frame_samples)
+            .saturating_add(config.audio_pts_tolerance_samples),
+    )
+    .unwrap_or(i64::MAX)
+}
+
+/// R2: the decoded audio stops (or never starts) before the cut ends, so
+/// the sound and loudness checks saw only part of it. A missing start uses
+/// no priming, the stricter end.
+fn audio_ends_early(
+    inputs: &ReviewScanInputs<'_>,
+    plan: &Plan<'_>,
+    audio: &OutputSound,
+    config: &TechnicalScanConfig,
+    end_us: u64,
+) -> bool {
+    let priming = inputs
+        .timing
+        .audio
+        .as_ref()
+        .and_then(|stream| priming_samples(stream, audio.rate, audio.frame_size))
+        .unwrap_or(0);
+    let extent = sample_extent(end_us, audio.rate);
+    let decoded = if audio.first.is_some() { audio.end } else { 0 };
+    extent > 0 && decoded < extent.saturating_sub(end_tolerance(audio, plan, config, priming))
 }
 
 fn audio_timing(
@@ -341,8 +430,7 @@ fn audio_timing(
     end_us: u64,
 ) {
     let rate = audio.rate;
-    let extent =
-        i64::try_from(u128::from(end_us) * u128::from(rate) / 1_000_000).unwrap_or(i64::MAX);
+    let extent = sample_extent(end_us, rate);
     row.cover(
         CoverageUnit::Samples,
         u64::try_from(audio.end.clamp(0, extent)).unwrap_or(0),
@@ -367,7 +455,7 @@ fn audio_timing(
                 FindingKind::AudioGap { samples },
                 Failed,
                 [
-                    samples_us(at - i64::try_from(samples).unwrap_or(0), rate),
+                    samples_us(at.saturating_sub(i64::try_from(samples).unwrap_or(0)), rate),
                     samples_us(at, rate),
                 ],
             ),
@@ -382,7 +470,6 @@ fn audio_timing(
         .event_count
         .saturating_sub(u64::try_from(audio.events.len()).unwrap_or(0));
     let tolerance = config.audio_pts_tolerance_samples;
-    let priming = priming_samples(stream, rate);
     if audio.early_samples > tolerance {
         // Decoded audio before the first picture is never priming: the
         // decoder drops what the edit list marks.
@@ -416,29 +503,23 @@ fn audio_timing(
     if audio.truncated {
         return;
     }
-    // The last coded frame is whole, and an fps change can round the cut to
-    // one output frame.
-    let frame_samples = u64::from(rate) * u64::from(plan.clock.fps().denominator())
-        / u64::from(plan.clock.fps().numerator().max(1));
-    let end_tolerance = i64::try_from(
-        u64::from(audio.frame_size.max(1))
-            .saturating_add(priming)
-            .saturating_add(frame_samples)
-            .saturating_add(tolerance),
-    )
-    .unwrap_or(i64::MAX);
-    if audio.end < extent - end_tolerance {
+    let Some(priming) = priming_samples(stream, rate, audio.frame_size) else {
+        row.push(FindingKind::AudioStartUnknown, Undecided, [0, end_us]);
+        return;
+    };
+    let end_tolerance = end_tolerance(audio, plan, config, priming);
+    if audio.end < extent.saturating_sub(end_tolerance) {
         row.push(
             FindingKind::AudioShort {
-                samples: (extent - audio.end).unsigned_abs(),
+                samples: extent.saturating_sub(audio.end).unsigned_abs(),
             },
             Failed,
             [samples_us(audio.end, rate), end_us],
         );
-    } else if audio.end > extent + end_tolerance {
+    } else if audio.end > extent.saturating_add(end_tolerance) {
         row.push(
             FindingKind::AudioLong {
-                samples: (audio.end - extent).unsigned_abs(),
+                samples: audio.end.saturating_sub(extent).unsigned_abs(),
             },
             Failed,
             [end_us, samples_us(audio.end, rate)],
@@ -453,6 +534,7 @@ fn loudness(
     sound: Result<&SoundScan, &MediaError>,
     config: &TechnicalScanConfig,
     end_us: u64,
+    early: bool,
 ) {
     let expected = has_expected_audio(plan);
     let span = [0, end_us];
@@ -485,6 +567,10 @@ fn loudness(
         row.push(FindingKind::LoudnessUnmeasured, Undecided, span);
         return;
     };
+    // R2: loudness of part of the cut is not the cut's loudness.
+    if early {
+        row.push(FindingKind::LoudnessUnmeasured, Undecided, span);
+    }
     match &inputs.settings.loudness_normalization {
         Some(target) => {
             match measured.integrated_lufs_hundredths {
@@ -676,6 +762,61 @@ fn runs(frames: usize, mut test: impl FnMut(usize) -> bool) -> Vec<Range<u64>> {
     found
 }
 
+/// Freeze: within one part's compared run, the output holds still while
+/// the mapped source moves. A static source frame neither counts nor
+/// breaks the run, but more than `FREEZE_STATIC_RESET` of them in a row end
+/// it (R7): a still source between two moving stretches is not one freeze.
+/// A run counts at least `freeze_min_frames` moving frames; `eligible` is a
+/// compared, non-black output frame. The caller applies `freeze_min_us`.
+fn freeze_runs(
+    frames: &[super::picture::FrameRecord],
+    eligible: impl Fn(usize) -> bool,
+    config: &TechnicalScanConfig,
+) -> Vec<Range<usize>> {
+    let mut found = Vec::new();
+    let mut frozen = 0_u32;
+    let mut still = 0_usize;
+    let mut start: Option<usize> = None;
+    let mut flush = |frozen: &mut u32, start: &mut Option<usize>, end: usize| {
+        if *frozen >= config.freeze_min_frames
+            && let Some(first) = *start
+        {
+            found.push(first..end);
+        }
+        *frozen = 0;
+        *start = None;
+    };
+    for (index, frame) in frames.iter().enumerate() {
+        let (Some(src), Some(out)) = (frame.src_diff, frame.out_diff) else {
+            flush(&mut frozen, &mut start, index);
+            still = 0;
+            continue;
+        };
+        // A black output frame is reported as black, not also as a freeze.
+        if !eligible(index) {
+            flush(&mut frozen, &mut start, index);
+            still = 0;
+            continue;
+        }
+        if src < config.motion_floor {
+            still += 1;
+            if still > FREEZE_STATIC_RESET {
+                flush(&mut frozen, &mut start, index + 1 - still);
+            }
+            continue;
+        }
+        still = 0;
+        if out <= config.freeze_ratio * src {
+            frozen += 1;
+            start.get_or_insert(index);
+        } else {
+            flush(&mut frozen, &mut start, index);
+        }
+    }
+    flush(&mut frozen, &mut start, frames.len());
+    found
+}
+
 #[allow(clippy::too_many_lines, reason = "one rule per defect family")]
 fn picture_defects(
     row: &mut ReviewRowReport,
@@ -736,43 +877,14 @@ fn picture_defects(
         };
         row.push(kind, Failed, span(&range));
     }
-    // Freeze: within one part's compared run, the output holds still while
-    // the mapped source moves. Static source frames neither count nor break
-    // the run.
-    let mut frozen = 0_u32;
-    let mut start: Option<usize> = None;
-    let flush =
-        |row: &mut ReviewRowReport, frozen: &mut u32, start: &mut Option<usize>, end: usize| {
-            if *frozen >= config.freeze_min_frames
-                && let Some(first) = *start
-            {
-                let range = u64::try_from(first).unwrap_or(0)..u64::try_from(end).unwrap_or(0);
-                row.push(FindingKind::Freeze, Failed, span(&range));
-            }
-            *frozen = 0;
-            *start = None;
-        };
-    for (index, frame) in frames.iter().enumerate() {
-        let (Some(src), Some(out)) = (frame.src_diff, frame.out_diff) else {
-            flush(row, &mut frozen, &mut start, index);
-            continue;
-        };
-        // A black output frame is reported as black, not also as a freeze.
-        if !compared(index) || is_black(index) {
-            flush(row, &mut frozen, &mut start, index);
-            continue;
-        }
-        if src < config.motion_floor {
-            continue;
-        }
-        if out <= config.freeze_ratio * src {
-            frozen += 1;
-            start.get_or_insert(index);
-        } else {
-            flush(row, &mut frozen, &mut start, index);
+    let eligible = |index: usize| compared(index) && !is_black(index);
+    for range in freeze_runs(frames, eligible, config) {
+        let range = u64::try_from(range.start).unwrap_or(0)..u64::try_from(range.end).unwrap_or(0);
+        let [from, to] = span(&range);
+        if to.saturating_sub(from) >= config.freeze_min_us {
+            row.push(FindingKind::Freeze, Failed, [from, to]);
         }
     }
-    flush(row, &mut frozen, &mut start, count);
     // Not compared, by reason.
     for (reason_index, reason) in video.reasons.iter().enumerate() {
         let wanted = u16::try_from(reason_index).unwrap_or(u16::MAX);
@@ -855,7 +967,7 @@ struct Model<'s> {
     entries: &'s [SourceHop],
     /// Measured dB gain per part and channel, over its static mix gain.
     gain: Vec<[f64; 2]>,
-    static_db: &'s [f64],
+    static_db: &'s [[f64; 2]],
     /// Hops a muted-free but uncomparable or undecoded part covers.
     blocked: Vec<bool>,
     /// Hops an unmuted part covers.
@@ -866,6 +978,9 @@ struct Model<'s> {
     predicted: [Vec<f32>; 2],
     second: [Vec<f32>; 2],
     output: &'s OutputSound,
+    /// R3: parts whose measured gain is off the expected gain by more than
+    /// `gain_tolerance_db`: (part, channel, measured minus expected dB).
+    gain_changes: Vec<(usize, usize, f64)>,
 }
 
 fn part_hops(plan: &Plan<'_>, part: usize, rate: u32) -> Range<usize> {
@@ -881,6 +996,7 @@ impl<'s> Model<'s> {
         scan: &'s SoundScan,
         output: &'s OutputSound,
         config: &TechnicalScanConfig,
+        normalized: bool,
     ) -> Self {
         let channels = usize::from(output.channels).min(2);
         let hops = output.hops.len();
@@ -939,10 +1055,11 @@ impl<'s> Model<'s> {
             predicted: [vec![0.0; hops], vec![0.0; hops]],
             second: [vec![0.0; hops], vec![0.0; hops]],
             output,
+            gain_changes: Vec::new(),
         };
         model.sum(plan, false);
         model.lag = audio_lag_hops(&model, plan, config);
-        model.measure_gains(plan, config);
+        model.measure_gains(plan, config, normalized);
         model.sum(plan, true);
         model
     }
@@ -954,7 +1071,7 @@ impl<'s> Model<'s> {
     }
 
     fn part_power(&self, part: usize, entry: &SourceHop, channel: usize) -> f64 {
-        power(entry.level.rms[channel]) * 10_f64.powf(self.static_db[part] / 10.0)
+        power(entry.level.rms[channel]) * 10_f64.powf(self.static_db[part][channel] / 10.0)
     }
 
     fn sum(&mut self, plan: &Plan<'_>, measured: bool) {
@@ -985,7 +1102,7 @@ impl<'s> Model<'s> {
                         let gain = self.gain[part][channel];
                         self.predicted[channel][hop] += (unity * 10_f64.powf(gain / 10.0)) as f32;
                         self.second[channel][hop] += (linear(entry.level.second[channel])
-                            * 10_f64.powf((gain + self.static_db[part]) / 20.0))
+                            * 10_f64.powf((gain + self.static_db[part][channel]) / 20.0))
                             as f32;
                     } else {
                         self.unity[channel][hop] += unity as f32;
@@ -1012,7 +1129,12 @@ impl<'s> Model<'s> {
     /// dominates and is loud. A part far quieter than the others (or than
     /// the floor) is treated as dropped, so its hops are judged at the
     /// group's gain.
-    fn measure_gains(&mut self, plan: &Plan<'_>, config: &TechnicalScanConfig) {
+    ///
+    /// R3: the mix fixes every part's level, so an unnormalised export must
+    /// measure 0 dB over it and a normalised one a single gain shared by all
+    /// parts (their median). A part further than `gain_tolerance_db` from
+    /// that is recorded as a gain change, never absorbed.
+    fn measure_gains(&mut self, plan: &Plan<'_>, config: &TechnicalScanConfig, normalized: bool) {
         let mut measured: Vec<[Option<f64>; 2]> = vec![[None; 2]; plan.audio.len()];
         for (part, slot) in measured.iter_mut().enumerate() {
             for (channel, value) in slot.iter_mut().enumerate().take(self.channels) {
@@ -1040,6 +1162,18 @@ impl<'s> Model<'s> {
         for channel in 0..self.channels {
             let mut all: Vec<f64> = measured.iter().filter_map(|gains| gains[channel]).collect();
             let group = median(&mut all);
+            let expected = if normalized {
+                group.unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            for (part, gains) in measured.iter().enumerate() {
+                if let Some(gain) = gains[channel]
+                    && (gain - expected).abs() > f64::from(config.gain_tolerance_db)
+                {
+                    self.gain_changes.push((part, channel, gain - expected));
+                }
+            }
             let floor = f64::from(config.gain_floor_db);
             let fallback = group.filter(|gain| *gain >= floor).unwrap_or(0.0);
             for (part, gains) in measured.iter().enumerate() {
@@ -1207,12 +1341,11 @@ fn audio_lag_hops(model: &Model<'_>, plan: &Plan<'_>, config: &TechnicalScanConf
 /// Video lag of one window in frames, from the output and source frame
 /// difference signatures within compared runs of one part.
 fn video_window_lag(
-    plan: &Plan<'_>,
+    clock: super::plan::Clock,
     picture: &PictureScan,
     window: &Range<u64>,
     config: &TechnicalScanConfig,
 ) -> Option<f64> {
-    let clock = plan.clock;
     let first = usize::try_from(
         clock.first_frame_from(kinewright_core::ExactMicros::integer(window.start)),
     )
@@ -1225,9 +1358,19 @@ fn video_window_lag(
         return None;
     }
     let frames = &picture.frames;
+    // R8: only output frames that show a new source frame carry the
+    // source's motion; a repeat (an fps-converted cut's cadence) carries
+    // none and would make every cadence period look like a rival lag.
     let source = |index: usize| {
         let frame = frames.get(index)?;
         (frame.state == FrameState::Compared).then_some(())?;
+        let repeat = index
+            .checked_sub(1)
+            .and_then(|previous| frames.get(previous))
+            .is_some_and(|previous| {
+                previous.part == frame.part && previous.source_frame == frame.source_frame
+            });
+        (!repeat).then_some(())?;
         frame.src_diff.map(|value| (frame.part, f64::from(value)))
     };
     let motion: Vec<f64> = (first..last)
@@ -1267,8 +1410,8 @@ fn video_window_lag(
 /// Sync (L10): audio and video lags against their sources over windows
 /// spread across the timeline. A signal is measured when at least
 /// `min(sync_min_windows, windows)` windows decide it; otherwise the row is
-/// Unknown. A cut with no mapped audio or no compared picture has no sync to
-/// measure.
+/// Unknown. Only a cut that maps no media picture or no unmuted audio has no
+/// sync to measure.
 fn sync(
     plan: &Plan<'_>,
     picture: Option<&PictureScan>,
@@ -1289,17 +1432,41 @@ fn sync(
             .zip(&model.blocked)
             .any(|(active, blocked)| *active && !blocked)
     });
-    if !has_picture || !has_audio {
-        return (measurement, findings);
-    }
-    let (Some(picture), Some(model)) = (picture, model) else {
-        return (measurement, findings);
-    };
     let windows = windows(plan, config);
     let needed = config
         .sync_min_windows
         .min(u32::try_from(windows.len()).unwrap_or(u32::MAX));
     measurement.windows = u32::try_from(windows.len()).unwrap_or(u32::MAX);
+    // Nothing mapped to measure: no sync to judge. Something mapped that
+    // no frame or hop can compare (effects, processing, truncation) leaves
+    // sync unmeasured, never passed.
+    let mapped_picture = plan
+        .video
+        .iter()
+        .any(|part| part.asset.is_some() && part.excluded.is_none());
+    if !mapped_picture || !has_expected_audio(plan) {
+        return (measurement, findings);
+    }
+    let (Some(picture), Some(model)) =
+        (picture.filter(|_| has_picture), model.filter(|_| has_audio))
+    else {
+        for (signal, measured) in [
+            (SyncSignal::Audio, has_audio),
+            (SyncSignal::Video, has_picture),
+        ] {
+            if !measured {
+                findings.push((
+                    FindingKind::SyncUnmeasured {
+                        signal,
+                        measured: 0,
+                        needed: needed.max(1),
+                    },
+                    Undecided,
+                ));
+            }
+        }
+        return (measurement, findings);
+    };
     #[allow(clippy::cast_precision_loss, reason = "a lag of a few hops")]
     let mut audio: Vec<f64> = windows
         .iter()
@@ -1310,7 +1477,7 @@ fn sync(
     #[allow(clippy::cast_precision_loss, reason = "a lag of a few frames")]
     let mut video: Vec<f64> = windows
         .iter()
-        .filter_map(|window| video_window_lag(plan, picture, window, config))
+        .filter_map(|window| video_window_lag(plan.clock, picture, window, config))
         .map(|lag| lag * frame_us as f64)
         .collect();
     measurement.audio_windows = u32::try_from(audio.len()).unwrap_or(u32::MAX);
@@ -1358,6 +1525,7 @@ fn sound_defects(
     model: Option<&Model<'_>>,
     config: &TechnicalScanConfig,
     end_us: u64,
+    early: bool,
 ) {
     let expected = has_expected_audio(plan);
     let scan = match sound {
@@ -1419,12 +1587,36 @@ fn sound_defects(
             ],
         );
     }
+    for &(part, channel, change) in &model.gain_changes {
+        let segment = plan.audio[part].segment;
+        #[allow(clippy::cast_possible_truncation, reason = "tenths of a dB")]
+        row.push(
+            FindingKind::GainChanged {
+                channel: u8::try_from(channel).unwrap_or(u8::MAX),
+                db_tenths: (change * 10.0).round() as i32,
+            },
+            Failed,
+            [segment.output.start.floor(), segment.output.end.ceil()],
+        );
+    }
     let context = usize::try_from(config.dropout_context_hops).unwrap_or(0);
     let loud = f64::from(config.dropout_loud_dbfs);
     let drop = f64::from(config.dropout_drop_db);
-    let extent = usize::try_from(u128::from(end_us) / u128::from(SCAN_HOP_MICROS))
-        .unwrap_or(usize::MAX)
-        .min(model.hops);
+    // R2: the cut's own extent, not the decoded one; hops the encode does
+    // not reach are never checked.
+    let expected_hops =
+        usize::try_from(u128::from(end_us) / u128::from(SCAN_HOP_MICROS)).unwrap_or(usize::MAX);
+    let extent = expected_hops.min(model.hops);
+    if early {
+        let decoded = hop_us(u64::try_from(model.hops).unwrap_or(0)).min(end_us);
+        row.push(
+            FindingKind::SoundNotCompared {
+                reason: "the encode's audio ends before the cut".into(),
+            },
+            Undecided,
+            [decoded, end_us],
+        );
+    }
     let blocked_near = |source: usize| {
         (source.saturating_sub(context)..=(source + context).min(model.hops.saturating_sub(1)))
             .any(|hop| model.blocked[hop])
@@ -1511,12 +1703,18 @@ fn sound_defects(
             }
         }
     }
-    let checked = (0..extent).filter(|&hop| !model.blocked[hop]).count();
+    let checked = (0..extent)
+        .filter(|&hop| {
+            model
+                .predicted_hop(hop)
+                .is_some_and(|source| !model.blocked[source])
+        })
+        .count();
     row.cover(
         CoverageUnit::Hops,
         u64::try_from(checked).unwrap_or(0),
         0,
-        u64::try_from(extent).unwrap_or(0),
+        u64::try_from(expected_hops).unwrap_or(0),
     );
 }
 
@@ -1577,23 +1775,29 @@ fn retained_speech(
         let rate = model.output.rate;
         let start = first_hop(samples_at(word.output.start, rate), rate);
         let end = first_hop(samples_at(word.output.end, rate).saturating_sub(1), rate) + 1;
-        let onset_end = start + config.onset_us.div_ceil(SCAN_HOP_MICROS).max(1);
-        match compare_word(model, plan, part, start..end, config) {
-            WordCompare::Unmeasurable => {
+        let verdict = match word_levels(model, plan, part, start..end, 0) {
+            Ok(levels) => match judge_levels(&levels, config) {
+                WordCompare::Present => onset(model, plan, part, start, &levels, config),
+                other => other.into(),
+            },
+            Err(other) => other.into(),
+        };
+        match verdict {
+            WordVerdict::Unmeasurable => {
                 row.push(
                     FindingKind::WordUnmeasurable { word_index: index },
                     Undecided,
                     span,
                 );
             }
-            WordCompare::Ambiguous => {
+            WordVerdict::Ambiguous => {
                 row.push(
                     FindingKind::WordAmbiguous { word_index: index },
                     Undecided,
                     span,
                 );
             }
-            WordCompare::Missing => {
+            WordVerdict::Missing => {
                 decided += 1;
                 row.push(
                     FindingKind::WordMissing {
@@ -1604,18 +1808,15 @@ fn retained_speech(
                     span,
                 );
             }
-            WordCompare::Present => {
+            WordVerdict::ClippedStart(onset_span) => {
                 decided += 1;
-                if compare_word(model, plan, part, start..onset_end.min(end), config)
-                    == WordCompare::Missing
-                {
-                    row.push(
-                        FindingKind::WordClippedStart { word_index: index },
-                        Failed,
-                        [span[0], hop_us(onset_end)],
-                    );
-                }
+                row.push(
+                    FindingKind::WordClippedStart { word_index: index },
+                    Failed,
+                    [hop_us(onset_span.start), hop_us(onset_span.end)],
+                );
             }
+            WordVerdict::Present => decided += 1,
         }
     }
     row.cover(CoverageUnit::Words, decided, 0, total);
@@ -1629,59 +1830,122 @@ enum WordCompare {
     Unmeasurable,
 }
 
-/// Compare the output over output hops `hops` with the word's part and the
-/// rest of the kept audio over the same (lagged) source hops.
-///
-/// Rule: the word's own predicted level must reach `word_floor_dbfs`; its
-/// separation `D = 10·log10(all / other)` (capped) must reach
-/// `separation_min_db`; then the word is missing when the output is more
-/// than `D / 2` dB below the prediction, which is halfway between "word
-/// present" (0 dB) and "only the rest present" (−D dB).
-fn compare_word(
+/// A kept word's verdict. Only `Present`, `Missing` and `ClippedStart` are
+/// decided; the row rule is that any undecided word leaves the row Unknown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WordVerdict {
+    Present,
+    Missing,
+    /// Present, but its first `onset_us` (from the acoustic onset) is gone:
+    /// the output hops of that onset.
+    ClippedStart(Range<u64>),
+    Ambiguous,
+    Unmeasurable,
+}
+
+impl From<WordCompare> for WordVerdict {
+    fn from(compare: WordCompare) -> Self {
+        match compare {
+            WordCompare::Present => Self::Present,
+            WordCompare::Missing => Self::Missing,
+            WordCompare::Ambiguous => Self::Ambiguous,
+            WordCompare::Unmeasurable => Self::Unmeasurable,
+        }
+    }
+}
+
+/// One hop of a word: the word's own predicted power, all kept audio's
+/// predicted power and the output's power, summed over the channels.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct HopLevels {
+    own: f64,
+    all: f64,
+    out: f64,
+}
+
+/// The word onset starts at the first hop whose own level is within this
+/// many dB of the word's loudest hop, so word-box padding before the sound
+/// does not count as its onset (R10).
+const ONSET_RISE_DB: f64 = 15.0;
+/// The onset is compared with the output shifted by up to this many hops
+/// either way, so a codec's sub-hop shift does not clip it (R10).
+const ONSET_SHIFT_HOPS: i64 = 1;
+
+/// The per-hop levels of output hops `hops` against the word's part and the
+/// rest of the kept audio over the same (lagged) source hops, the output
+/// read `out_shift` hops later.
+fn word_levels(
     model: &Model<'_>,
     plan: &Plan<'_>,
     part: usize,
     hops: Range<u64>,
-    config: &RetainedSpeechConfig,
-) -> WordCompare {
+    out_shift: i64,
+) -> Result<Vec<HopLevels>, WordCompare> {
     let silent = plan.audio[part].silent_channels;
-    let (mut own, mut all, mut out) = (0.0_f64, 0.0_f64, 0.0_f64);
-    let mut counted = 0_u32;
+    let entries = model.part_entries(part);
+    let mut levels = Vec::new();
     for hop in hops {
-        let Ok(hop) = usize::try_from(hop) else {
-            return WordCompare::Unmeasurable;
-        };
-        let Some(source) = model.predicted_hop(hop) else {
-            return WordCompare::Unmeasurable;
-        };
-        if model.blocked[source] {
-            return WordCompare::Unmeasurable;
-        }
-        let entry = model
-            .part_entries(part)
+        let hop = usize::try_from(hop).map_err(|_| WordCompare::Unmeasurable)?;
+        let source = model
+            .predicted_hop(hop)
+            .filter(|source| !model.blocked[*source])
+            .ok_or(WordCompare::Unmeasurable)?;
+        let shifted = i64::try_from(hop)
+            .ok()
+            .and_then(|hop| hop.checked_add(out_shift))
+            .and_then(|hop| usize::try_from(hop).ok())
+            .filter(|hop| *hop < model.output.hops.len())
+            .ok_or(WordCompare::Unmeasurable)?;
+        let entry = entries
             .binary_search_by_key(&u32::try_from(source).unwrap_or(u32::MAX), |entry| {
                 entry.hop
             })
             .ok()
-            .map(|at| &model.part_entries(part)[at]);
+            .map(|at| &entries[at]);
+        let mut level = HopLevels::default();
         for (channel, &quiet) in silent.iter().enumerate().take(model.channels) {
             if model.channels == 2 && quiet {
                 continue;
             }
             let gain = 10_f64.powf(model.gain[part][channel] / 10.0);
-            own += entry.map_or(0.0, |entry| model.part_power(part, entry, channel) * gain);
-            all += f64::from(model.predicted[channel][source]);
-            out += model.output_power(hop, channel);
+            level.own += entry.map_or(0.0, |entry| model.part_power(part, entry, channel) * gain);
+            level.all += f64::from(model.predicted[channel][source]);
+            level.out += model.output_power(shifted, channel);
         }
-        counted += 1;
+        levels.push(level);
     }
-    if counted == 0 {
+    Ok(levels)
+}
+
+/// Judge a word (or its onset) from its per-hop levels.
+///
+/// Rule: the word's own predicted level must reach `word_floor_dbfs`. Its
+/// separation from the rest of the kept audio is weighted by the word's own
+/// power per hop (R10), so the hops where the word sounds count, not the
+/// pauses inside its box: `OWN = Σ own²`, `ALL = Σ own·all`,
+/// `OUT = Σ own·out`, and `D = 10·log10(ALL / (ALL − OWN))` (capped) must
+/// reach `separation_min_db`. The word is missing when `OUT` is more than
+/// `D / 2` dB below `ALL`, halfway between "word present" (0 dB) and "only
+/// the rest present" (−D dB).
+fn judge_levels(levels: &[HopLevels], config: &RetainedSpeechConfig) -> WordCompare {
+    if levels.is_empty() {
         return WordCompare::Unmeasurable;
     }
-    let count = f64::from(counted);
-    if db(own / count) < f64::from(config.word_floor_dbfs) {
+    #[allow(clippy::cast_precision_loss, reason = "a word is a few hundred hops")]
+    let count = levels.len() as f64;
+    let mean_own = levels.iter().map(|level| level.own).sum::<f64>() / count;
+    if db(mean_own) < f64::from(config.word_floor_dbfs) {
         return WordCompare::Unmeasurable;
     }
+    let (own, all, out) = levels
+        .iter()
+        .fold((0.0, 0.0, 0.0), |(own, all, out), level| {
+            (
+                own + level.own * level.own,
+                all + level.own * level.all,
+                out + level.own * level.out,
+            )
+        });
     let other = (all - own).max(0.0);
     let separation = if other <= 0.0 {
         f64::from(config.separation_cap_db)
@@ -1695,6 +1959,57 @@ fn compare_word(
         WordCompare::Missing
     } else {
         WordCompare::Present
+    }
+}
+
+/// The first `onset_us` of a present word, from its acoustic onset, at
+/// output shifts `-ONSET_SHIFT_HOPS..=ONSET_SHIFT_HOPS`: present when any
+/// shift finds it, clipped when every shift finds it missing, and undecided
+/// otherwise (R3: an onset that cannot be judged leaves the word Unknown).
+fn onset(
+    model: &Model<'_>,
+    plan: &Plan<'_>,
+    part: usize,
+    start: u64,
+    levels: &[HopLevels],
+    config: &RetainedSpeechConfig,
+) -> WordVerdict {
+    let length = config.onset_us.div_ceil(SCAN_HOP_MICROS).max(1);
+    let Some(first) = acoustic_onset(levels) else {
+        return WordVerdict::Unmeasurable;
+    };
+    let from = start + u64::try_from(first).unwrap_or(0);
+    let to = (from + length).min(start + u64::try_from(levels.len()).unwrap_or(0));
+    let verdicts: Vec<WordCompare> = (-ONSET_SHIFT_HOPS..=ONSET_SHIFT_HOPS)
+        .map(
+            |shift| match word_levels(model, plan, part, from..to, shift) {
+                Ok(onset) => judge_levels(&onset, config),
+                Err(other) => other,
+            },
+        )
+        .collect();
+    onset_verdict(&verdicts, from..to)
+}
+
+/// Index of the first hop within `ONSET_RISE_DB` of the loudest own level.
+fn acoustic_onset(levels: &[HopLevels]) -> Option<usize> {
+    let peak = levels.iter().map(|level| level.own).fold(0.0_f64, f64::max);
+    if peak <= 0.0 {
+        return None;
+    }
+    let threshold = peak * 10_f64.powf(-ONSET_RISE_DB / 10.0);
+    levels.iter().position(|level| level.own >= threshold)
+}
+
+fn onset_verdict(verdicts: &[WordCompare], hops: Range<u64>) -> WordVerdict {
+    if verdicts.contains(&WordCompare::Present) {
+        WordVerdict::Present
+    } else if !verdicts.is_empty() && verdicts.iter().all(|v| *v == WordCompare::Missing) {
+        WordVerdict::ClippedStart(hops)
+    } else if verdicts.contains(&WordCompare::Ambiguous) {
+        WordVerdict::Ambiguous
+    } else {
+        WordVerdict::Unmeasurable
     }
 }
 

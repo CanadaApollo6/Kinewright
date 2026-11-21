@@ -99,7 +99,7 @@ pub(super) struct SourceSound {
     /// The entry cap stopped the source decode.
     pub truncated: bool,
     /// Static mix gain in dB (track, buses, master) per part.
-    pub static_db: Vec<f64>,
+    pub static_db: Vec<[f64; 2]>,
 }
 
 pub(super) struct SoundScan {
@@ -340,10 +340,12 @@ fn scan_output(
     Ok(out)
 }
 
-/// Static gain in dB the mix applies to `track`: its fader, its buses'
-/// faders and the master fader. Automation is not static (see
-/// `plan::uncomparable`).
-fn static_db(document: &Document, track: TrackId) -> f64 {
+/// Static gain in dB the mix applies to `track` per output channel: its
+/// fader, its buses' faders, the master fader and the track's pan under the
+/// document's pan law (R11). Automation is not static (see
+/// `plan::uncomparable`). A channel the pan sends nothing to is at the dB
+/// floor.
+fn static_db(document: &Document, track: TrackId, channels: u16) -> [f64; 2] {
     let mix = &document.audio_mix;
     let track_gain = mix
         .tracks
@@ -356,7 +358,22 @@ fn static_db(document: &Document, track: TrackId) -> f64 {
         .filter(|bus| bus.tracks.contains(&track))
         .map(|bus| bus.gain_tenth_db)
         .sum();
-    f64::from(track_gain + buses + mix.master.gain_tenth_db) / 10.0
+    let fader = f64::from(track_gain + buses + mix.master.gain_tenth_db) / 10.0;
+    if channels < 2 {
+        return [fader; 2];
+    }
+    let pan = mix
+        .tracks
+        .iter()
+        .find(|entry| entry.track == track)
+        .map_or(0, |entry| entry.pan_percent);
+    crate::audio::pan_channel_ratios(mix.pan_law, pan).map(|ratio| {
+        if ratio > 0.0 {
+            fader + 20.0 * f64::from(ratio).log10()
+        } else {
+            -100.0
+        }
+    })
 }
 
 fn scan_sources(
@@ -370,7 +387,7 @@ fn scan_sources(
         static_db: plan
             .audio
             .iter()
-            .map(|part| static_db(plan.document(), part.segment.track))
+            .map(|part| static_db(plan.document(), part.segment.track, output.channels))
             .collect(),
         ..SourceSound::default()
     };

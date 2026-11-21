@@ -267,7 +267,7 @@ fn uncomparable(
     let audio_effects = |effects: &[kinewright_core::Effect]| {
         effects
             .iter()
-            .any(|effect| kinewright_core::is_audio_effect(&effect.name))
+            .any(|effect| live(effect) && kinewright_core::is_audio_effect(&effect.name))
     };
     let clip = clip?;
     if clip.speed_percent != 100 {
@@ -297,6 +297,11 @@ fn uncomparable(
     None
 }
 
+/// An effect that can act: statically enabled, or switched by automation.
+fn live(effect: &kinewright_core::Effect) -> bool {
+    effect.enabled || effect.enabled_curve.is_some()
+}
+
 /// Pan law endpoints: a hard-panned track sends nothing to one channel.
 fn silent_channels(pan_percent: i32) -> [bool; 2] {
     [pan_percent >= 100, pan_percent <= -100]
@@ -324,7 +329,9 @@ impl<'a> Plan<'a> {
                         Some(ExclusionReason::Generated)
                     }
                     Some((_, clip))
-                        if !clip.effects.is_empty() || clip.blend_mode != BlendMode::Normal =>
+                        if clip.effects.iter().any(|effect| {
+                            live(effect) && !kinewright_core::is_audio_effect(&effect.name)
+                        }) || clip.blend_mode != BlendMode::Normal =>
                     {
                         Some(ExclusionReason::Effect)
                     }
@@ -390,7 +397,9 @@ impl<'a> Plan<'a> {
                 let muted = !audio_track
                     || mix.is_some_and(|mix| mix.mute)
                     || (soloed && !mix.is_some_and(|mix| mix.solo))
-                    || clip.is_none_or(|clip| !clip.enabled);
+                    // An enable curve switches the clip on somewhere: not
+                    // muted, but uncomparable (R11).
+                    || clip.is_none_or(|clip| !clip.enabled && clip.enabled_curve.is_none());
                 let uncomparable = uncomparable(document, segment.track, clip, mix);
                 let continued = [
                     ends.contains(&key(segment, segment.output.start, segment.source.start)),

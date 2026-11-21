@@ -2034,17 +2034,6 @@ impl VideoDecoder {
         Self::open_scaled_internal(path, fps, max_width, Some(managed), 1, stop, Some(source))
     }
 
-    /// JA-1 S5a C5: a certified source decoded to small RGBA8 pictures, for
-    /// the review checks that compare an encode with its sources.
-    pub(crate) fn open_certified_rgba(
-        path: &Path,
-        fps: Rational,
-        max_width: u32,
-        source: &crate::owned_io::CertifiedSource,
-    ) -> Result<Self, MediaError> {
-        Self::open_scaled_internal(path, fps, Some(max_width), None, 1, None, Some(source))
-    }
-
     fn admit_managed_source(
         path: &Path,
         description: &ColorDescription,
@@ -2336,6 +2325,22 @@ impl VideoDecoder {
     /// converts has, its orientation and proxy bound applied.
     pub(crate) fn frame_size(&self) -> (u32, u32) {
         (self.rotation).display_dimensions(self.scaled_width, self.scaled_height)
+    }
+
+    /// The source's own display size, orientation applied, before any
+    /// scaling: the dimensions an aspect comparison needs (JA-1 S5a R6).
+    pub(crate) fn source_display_size(&self) -> (u32, u32) {
+        (self.rotation).display_dimensions(self.decoder.width(), self.decoder.height())
+    }
+
+    /// After the stream ended, the grid frame of the last decoded frame,
+    /// which the decoder holds to every later window end (JA-1 S5a R4: a
+    /// reader past the source's last frame must not take the hold for it).
+    pub(crate) fn held_at_eof(&self) -> Option<i64> {
+        self.pending
+            .as_ref()
+            .filter(|_| self.eof_sent)
+            .map(|pending| pending.first_grid_frame)
     }
 
     /// The seeks this decoder made (S2c-1: P-seek's `drag_seeks`).

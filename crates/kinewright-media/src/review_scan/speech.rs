@@ -43,6 +43,21 @@ pub(super) struct JoinScan {
     pub failed: Vec<(AssetId, String, u64)>,
 }
 
+/// A segment edge this close to its source's end (one sample at 48 kHz,
+/// rounded up) cuts nothing there: source durations on 29.97 or 59.94 fps
+/// clocks are not exact (R9).
+const UNCUT_SLACK_US: u64 = 21;
+
+/// An edge at its source's first sample, or within `UNCUT_SLACK_US` of
+/// its last, cuts nothing.
+pub(super) fn uncut_edge(source: ExactMicros, duration: Option<ExactMicros>) -> bool {
+    source == ExactMicros::integer(0)
+        || duration.is_some_and(|duration| {
+            duration.floor().abs_diff(source.floor()) <= UNCUT_SLACK_US
+                || duration.ceil().abs_diff(source.ceil()) <= UNCUT_SLACK_US
+        })
+}
+
 /// One audible edge on its source clock.
 struct Edge {
     source: ExactMicros,
@@ -90,8 +105,7 @@ pub(super) fn guard_joins(
             ),
         ];
         for (source, output, continued) in sides {
-            let uncut = source == ExactMicros::integer(0) || Some(source) == duration;
-            if continued || uncut {
+            if continued || uncut_edge(source, duration) {
                 continue;
             }
             scan.expected += 1;
@@ -123,17 +137,18 @@ pub(super) fn guard_joins(
             continue;
         };
         let duration_us = Plan::asset_duration(media).map_or(u64::MAX, ExactMicros::floor);
-        let windows = windows(&asset_edges, config.join_window_us, duration_us);
-        let hops: u64 = windows
-            .iter()
-            .map(|window| (window.end - window.start).div_ceil(10_000))
-            .sum();
+        let asset_words = words.remove(&asset).unwrap_or_default();
+        let windows = with_voice(
+            windows(&asset_edges, config.join_window_us, duration_us),
+            &asset_words,
+            config.join_window_us,
+        );
+        let hops = window_hops(&windows);
         if hops > budget {
             scan.omitted += count;
             continue;
         }
         budget -= hops;
-        let asset_words = words.remove(&asset).unwrap_or_default();
         match profile(inputs, media, &windows, &asset_words, config, cancellation) {
             Ok((dialogue, offsets)) => {
                 for edge in &asset_edges {
@@ -171,8 +186,53 @@ fn windows(edges: &[Edge], reach: u64, duration_us: u64) -> Vec<Range<u64>> {
     merged
 }
 
+/// The 10 ms profile hops the windows hold.
+fn window_hops(windows: &[Range<u64>]) -> u64 {
+    windows
+        .iter()
+        .map(|window| (window.end - window.start).div_ceil(10_000))
+        .sum()
+}
+
+/// R9: the profile needs voice to measure the speaker's level. When no
+/// kept word falls in any edge window (cuts far from speech), the window
+/// of the first kept words of the asset (up to `reach` long) joins them.
+fn with_voice(
+    mut windows: Vec<Range<u64>>,
+    words: &[(u64, u64, &str)],
+    reach: u64,
+) -> Vec<Range<u64>> {
+    let heard = |window: &Range<u64>| {
+        words
+            .iter()
+            .any(|&(start, end, _)| start < window.end && end > window.start)
+    };
+    if windows.iter().any(heard) {
+        return windows;
+    }
+    // The whole first word, and at least `reach`: a word cut by its window
+    // maps outside the profile and flags no voice.
+    let Some(&(start, end, _)) = words.iter().min_by_key(|&&(start, _, _)| start) else {
+        return windows;
+    };
+    windows.push(start..end.max(start.saturating_add(reach.max(1))));
+    windows.sort_by_key(|window| window.start);
+    let mut merged: Vec<Range<u64>> = Vec::with_capacity(windows.len());
+    for window in windows {
+        match merged.last_mut() {
+            Some(last) if window.start <= last.end => last.end = last.end.max(window.end),
+            _ => merged.push(window),
+        }
+    }
+    merged
+}
+
+/// A profile window: its first source sample, its first sample on the
+/// profile clock, and the samples it decoded.
+type Offset = (u64, u64, u64);
+
 /// The source windows decoded into one profile, with each window's first
-/// sample on the profile clock.
+/// sample on the profile clock and the samples it decoded.
 fn profile(
     inputs: &ReviewScanInputs<'_>,
     media: &kinewright_core::MediaAsset,
@@ -180,12 +240,13 @@ fn profile(
     words: &[(u64, u64, &str)],
     config: &RetainedSpeechConfig,
     cancellation: &ExportCancellation,
-) -> Result<(Dialogue, Vec<(u64, u64)>), MediaError> {
+) -> Result<(Dialogue, Vec<Offset>), MediaError> {
     let refuse = |error: &dyn std::fmt::Display| MediaError::Backend(super::reason(&error));
     let rate = config.join_profile_rate;
     let certified = inputs.sources.source(media.id)?;
     let mut builder = ProfileBuilder::new(rate, 1).map_err(|e| refuse(&e))?;
-    // (window start sample, profile start sample) per window.
+    // (window start sample, profile start sample, decoded samples) per
+    // window; a source shorter than its window decodes less (R9).
     let mut offsets = Vec::with_capacity(windows.len());
     let mut position = 0_u64;
     for window in windows {
@@ -193,7 +254,6 @@ fn profile(
         let end = samples_at(ExactMicros::integer(window.end), rate);
         let mut decoder =
             AudioDecoder::open_with_source(&media.path, rate, 1, start, end, Some(&certified))?;
-        offsets.push((start, position));
         let mut taken = 0_u64;
         while let Some(chunk) = decoder.next_chunk()? {
             if cancellation.is_cancelled() {
@@ -210,16 +270,16 @@ fn profile(
                 break;
             }
         }
+        offsets.push((start, position, taken));
         position += taken;
     }
     let to_profile = |at: u64| -> Option<u64> {
         let sample = samples_at(ExactMicros::integer(at), rate);
         let index = offsets
-            .partition_point(|(start, _)| *start <= sample)
+            .partition_point(|(start, _, _)| *start <= sample)
             .checked_sub(1)?;
-        let (start, profile_start) = offsets[index];
-        let window = &windows[index];
-        (at < window.end).then(|| {
+        let (start, profile_start, taken) = offsets[index];
+        (sample < start + taken).then(|| {
             let local = at - start * 1_000_000 / u64::from(rate);
             profile_start * 1_000_000 / u64::from(rate) + local
         })
@@ -263,14 +323,17 @@ fn guard(
     dialogue: &Dialogue,
     rate: u32,
     windows: &[Range<u64>],
-    offsets: &[(u64, u64)],
+    offsets: &[Offset],
     source: ExactMicros,
 ) -> JoinVerdict {
     let at = source.floor();
     let Some(index) = windows.iter().position(|window| window.contains(&at)) else {
         return JoinVerdict::Unmeasured;
     };
-    let (start, profile_start) = offsets[index];
+    let (start, profile_start, taken) = offsets[index];
+    if samples_at(source, rate) > start + taken {
+        return JoinVerdict::Unmeasured;
+    }
     let exact = |sample: u64| ExactMicros::new(u128::from(sample) * 1_000_000, u64::from(rate));
     let mapped = match (exact(start), exact(profile_start)) {
         (Ok(window_start), Ok(profile_at)) => source

@@ -7,7 +7,7 @@ use std::ops::Range;
 
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{
-    AssetId, ColorDescription, ExportCancellation, FrameTexture, MediaAsset, MediaError, TimeCode,
+    AssetId, ColorDescription, ColorTransfer, ExportCancellation, MediaAsset, MediaError, TimeCode,
 };
 
 use super::grid::{self, RgbaScaler, Stats};
@@ -18,12 +18,18 @@ use super::{
 };
 use crate::cache::FrameCache;
 use crate::decode::{VideoDecoder, backend};
+use crate::frame::WorkingFrame;
 
-/// Width source pictures are decoded at; the grid is coarser still.
-const SOURCE_WIDTH: u32 = 64;
+/// Width source pictures are decoded at; the grid is coarser still, each
+/// cell the mean of a 4×4 block at 16:9 (R7).
+const SOURCE_WIDTH: u32 = 128;
 /// Source frames decoded per window.
 const SOURCE_WINDOW_FRAMES: i64 = 32;
 const SOURCE_CACHE_FRAMES: usize = 48;
+/// The decoder holds a stream's last frame to every later window end; a
+/// mapped frame more than this many frames past it lies past the source's
+/// real end and is not compared (R4).
+const SOURCE_HOLD_FRAMES: i64 = 4;
 /// Distinct not-compared reasons kept; later ones share the last slot.
 pub(super) const MAX_NOT_COMPARED_REASONS: usize = 16;
 /// Largest relative aspect difference between a source and the raster that
@@ -88,6 +94,11 @@ pub(super) struct PictureScan {
     pub off_grid: Vec<u64>,
     pub off_grid_count: u64,
     pub reasons: Vec<String>,
+    /// Seeks the source decoders made; a straight run of one part
+    /// continues its windows without one.
+    pub source_seeks: u64,
+    /// Video streams in the container.
+    pub video_streams: u32,
 }
 
 impl PictureScan {
@@ -114,6 +125,15 @@ pub(super) fn scan(
     cancellation: &ExportCancellation,
 ) -> Result<PictureScan, MediaError> {
     let mut input = open_input(artifact, cancellation)?;
+    let video_streams = input
+        .streams()
+        .filter(|stream| {
+            stream.parameters().medium() == ffmpeg::media::Type::Video
+                && !stream
+                    .disposition()
+                    .contains(ffmpeg::format::stream::Disposition::ATTACHED_PIC)
+        })
+        .count();
     let index = inputs.timing.video.index;
     let stream = input
         .stream(index)
@@ -141,6 +161,8 @@ pub(super) fn scan(
             off_grid: Vec::new(),
             off_grid_count: 0,
             reasons: Vec::new(),
+            source_seeks: 0,
+            video_streams: u32::try_from(video_streams).unwrap_or(u32::MAX),
         },
         step: frame_step(time_base, inputs.expectations.output_fps),
         plan,
@@ -321,10 +343,13 @@ impl Picture<'_, '_> {
         if cancellation.is_cancelled() {
             return Err(MediaError::Cancelled);
         }
-        let source = match self
-            .sources
-            .grid(self.inputs, asset, source_frame, self.plan.raster)
-        {
+        let source = match self.sources.grid(
+            self.inputs,
+            asset,
+            source_frame,
+            self.plan.raster,
+            &mut self.scan.source_seeks,
+        ) {
             Ok(source) => source,
             Err(reason) => return Ok(not_compared(&mut self.scan, reason)),
         };
@@ -353,7 +378,7 @@ impl Picture<'_, '_> {
 struct SourceVideo {
     asset: AssetId,
     decoder: VideoDecoder,
-    cache: FrameCache<FrameTexture>,
+    cache: FrameCache<WorkingFrame>,
     window: Option<Range<i64>>,
     used: u64,
 }
@@ -381,6 +406,7 @@ impl Sources {
         asset: &MediaAsset,
         frame: i64,
         raster: (u32, u32),
+        seeks: &mut u64,
     ) -> Result<Vec<f32>, String> {
         if let Some((_, reason)) = self.failed.iter().find(|(id, _)| *id == asset.id) {
             return Err(reason.clone());
@@ -412,24 +438,39 @@ impl Sources {
             .as_ref()
             .is_none_or(|window| !window.contains(&frame))
         {
-            let end = frame.saturating_add(SOURCE_WINDOW_FRAMES);
-            if let Err(error) = source.decoder.decode_window_sequential(
+            // The decoder's window end is inclusive and its continuation
+            // starts one past it, so the next window continues without a
+            // seek.
+            let last = frame.saturating_add(SOURCE_WINDOW_FRAMES - 1);
+            let before = source.decoder.seek_count();
+            let decoded = source.decoder.decode_window_sequential(
                 TimeCode(frame),
-                TimeCode(end),
+                TimeCode(last),
                 &mut source.cache,
-            ) {
+            );
+            *seeks += source.decoder.seek_count().saturating_sub(before);
+            if let Err(error) = decoded {
                 let reason = format!("source decode failed: {}", super::reason(&error));
                 self.open.swap_remove(position);
                 self.failed.push((asset.id, reason.clone()));
                 return Err(reason);
             }
-            source.window = Some(frame..end);
+            source.window = Some(frame..last.saturating_add(1));
+        }
+        // R4: at the end of its stream the decoder holds the last frame to
+        // the window end; a mapping further past it has no source frame.
+        let past_end = source
+            .decoder
+            .held_at_eof()
+            .is_some_and(|held| frame.saturating_sub(held) > SOURCE_HOLD_FRAMES);
+        if past_end {
+            return Err("the source has no frame at the mapped time".to_owned());
         }
         let texture = source
             .cache
             .frame_at_or_before(TimeCode(frame))
             .ok_or_else(|| "the source has no frame at the mapped time".to_owned())?;
-        grid::from_rgba(texture.width, texture.height, &texture.rgba)
+        grid::from_working(texture.width, texture.height, &texture.pixels)
             .ok_or_else(|| "the source frame is empty".to_owned())
     }
 
@@ -442,11 +483,29 @@ impl Sources {
             .sources
             .source(asset.id)
             .map_err(|error| format!("source is not pinned: {}", super::reason(&error)))?;
-        let decoder =
-            VideoDecoder::open_certified_rgba(&asset.path, asset.fps, SOURCE_WIDTH, &certified)
-                .map_err(|error| format!("source does not open: {}", super::reason(&error)))?;
-        if !aspect_matches(decoder.frame_size(), raster) {
-            return Err("the source's aspect differs from the raster".into());
+        // R7: the export's own managed decode (scene-linear working frames
+        // from the asset's colour description), so range, depth and matrix
+        // are handled as the export handles them.
+        if inputs.settings.delivery_color.transfer != ColorTransfer::Bt709 {
+            return Err("the delivery transfer is not modelled".into());
+        }
+        let decoder = VideoDecoder::open_certified(
+            &asset.path,
+            asset.fps,
+            Some(SOURCE_WIDTH),
+            &asset.color_description,
+            crate::render::d65_assumption(&asset.color_description),
+            &certified,
+            None,
+        )
+        .map_err(|error| format!("source does not open: {}", super::reason(&error)))?;
+        // R6: the true source dimensions, not the floored thumbnail's. A
+        // source of another aspect is placed by a fit the check does not
+        // model, so its frames stay not compared (Unknown).
+        if !aspect_matches(decoder.source_display_size(), raster) {
+            return Err(
+                "the source's aspect differs from the raster; its placement is not modelled".into(),
+            );
         }
         Ok(SourceVideo {
             asset: asset.id,

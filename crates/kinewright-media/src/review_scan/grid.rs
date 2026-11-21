@@ -156,6 +156,24 @@ pub(super) fn from_rgba(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<f32>
     }))
 }
 
+/// Luma grid of a scene-linear working frame (RGBA, f16), encoded with
+/// the BT.709 delivery transfer and matrix the export applies, so the
+/// source's Y' and the encode's Y' share one colour path (R7). Each cell
+/// is the mean of its pixels' Y'.
+pub(super) fn from_working(width: u32, height: u32, pixels: &[half::f16]) -> Option<Vec<f32>> {
+    use crate::color_pipeline::encode_bt709;
+    let width = usize::try_from(width).ok()?;
+    let height = usize::try_from(height).ok()?;
+    if width == 0 || height == 0 || pixels.len() < width * height * 4 {
+        return None;
+    }
+    Some(boxed(width, height, |x, y| {
+        let at = (y * width + x) * 4;
+        let code = |channel: usize| encode_bt709(pixels[at + channel].to_f32()).clamp(0.0, 1.0);
+        (0.2126 * code(0) + 0.7152 * code(1) + 0.0722 * code(2)).clamp(0.0, 1.0)
+    }))
+}
+
 /// Converts frames without a luma plane to small RGBA pictures.
 #[derive(Default)]
 pub(super) struct RgbaScaler {
