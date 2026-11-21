@@ -23,7 +23,9 @@ pub(super) mod review_driver;
 
 use super::{
     AttachmentRole, HostCommand, HostCommandOwner, HostError, HostRefusal, HostReply, HostRequest,
-    review_expectations::{ReviewExpectationInput, derive_review_expectations},
+    review_expectations::{
+        ReviewExpectationInput, derive_review_expectations, load_source_transcripts,
+    },
 };
 
 static LIVE_STAGES: Mutex<BTreeSet<SessionId>> = Mutex::new(BTreeSet::new());
@@ -308,7 +310,7 @@ fn queue(
     snapshot: &SnapshotKey,
     delivery: Option<(ExportSettings, u64)>,
 ) -> Result<Option<ReviewStatus>, HostError> {
-    let (project, frozen, rulebook) = {
+    let (project, frozen, rulebook, data_dir) = {
         let mut owner = lock(host)?;
         owner.authorize_review(bearer, request)?;
         owner.reconcile_review_job()?;
@@ -325,6 +327,7 @@ fn queue(
             bundle.project_id().clone(),
             bundle.read_snapshot(snapshot)?,
             owner.owner()?.approved_rulebook_ref()?.cloned(),
+            owner.config.data_dir.clone(),
         )
     };
     let inputs = frozen.open_review_inputs()?;
@@ -356,22 +359,46 @@ fn queue(
         empty = empty_annotations(&frozen.descriptor);
         &empty
     };
+    // Source-clock transcripts come from the media store, bound to the
+    // frozen version's pins. A missing one leaves its speech unchecked.
+    let data_dir = data_dir
+        .map_or_else(kinewright_media::default_data_dir, Ok)
+        .map_err(|error| refused(&error.to_string()))?;
+    let sources = load_source_transcripts(
+        &inputs.document,
+        &inputs.manifest,
+        |content, fps, frames| {
+            kinewright_media::stored_source_transcript(&data_dir, content, fps, frames)
+        },
+    )
+    .map_err(|error| refused(&error.to_string()))?;
+    let transcripts = sources.review();
     let expectations = derive_review_expectations(
         &ReviewExpectationInput {
             document: &inputs.document,
             snapshot: frozen.descriptor.identity,
             input_manifest: &inputs.manifest,
             settings: &settings,
-            transcripts: &[],
+            transcripts: &transcripts,
         },
         annotations,
     )
     .map_err(|error| refused(&error.to_string()))?;
+    drop(transcripts);
     drop(inputs);
     let mut owner = lock(host)?;
     owner.authorize_review(bearer, request)?;
     if owner.owner()?.project_id()? != project {
         return Err(refused("The project changed during review preparation."));
+    }
+    if owner
+        .owner()?
+        .review_bundle()?
+        .read_snapshot(snapshot)?
+        .descriptor
+        != frozen.descriptor
+    {
+        return Err(refused("The version changed during review preparation."));
     }
     owner.owner_mut()?.queue_review(
         &frozen.descriptor,

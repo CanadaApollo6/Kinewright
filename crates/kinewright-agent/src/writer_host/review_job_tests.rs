@@ -1571,6 +1571,10 @@ fn s5_review_stop_case(case: S5StopCase) {
     let temp = kinewright_media::test_support::TempDirectory::new("review-stop-case");
     s5_review_seed(temp.root());
     let (host, client) = s5_review_host(temp.root());
+    // An earlier version whose annotations may change while the review of
+    // `key` is active: the review's own version refuses that write.
+    let other = matches!(case, S5StopCase::Unsettled | S5StopCase::HooksPending)
+        .then(|| s5_review_version(&host));
     let key = s5_review_version(&host);
     let shared = host.owner.upgrade().unwrap();
     let checked = || {
@@ -1628,7 +1632,7 @@ fn s5_review_stop_case(case: S5StopCase) {
                 );
             }
             S5StopCase::Unsettled => {
-                s5_review_uncertain_annotation(&mut owner, &key);
+                s5_review_uncertain_annotation(&mut owner, other.as_ref().unwrap());
                 assert!(
                     owner
                         .owner()
@@ -1666,7 +1670,7 @@ fn s5_review_stop_case(case: S5StopCase) {
                 );
             }
             S5StopCase::HooksPending => {
-                s5_review_uncertain_annotation(&mut owner, &key);
+                s5_review_uncertain_annotation(&mut owner, other.as_ref().unwrap());
                 s5_review_pending_publication(&mut owner, &project);
             }
             S5StopCase::SwitchUnknown => {

@@ -267,8 +267,11 @@ pub use timeline::{
 };
 mod data_dir;
 pub use data_dir::{data_subdirectory, default_data_dir};
+pub use transcript::{StoredSourceTranscript, stored_source_transcript};
 #[cfg(any(test, feature = "test-util"))]
-pub use transcript::{TranscriptInferenceHold, provision_voice_model};
+pub use transcript::{
+    TranscriptInferenceHold, provision_voice_model, test_store_source_transcript,
+};
 pub use verify::{DELIVERY_REFERENCE_DENOMINATOR, EBU_R103_TOLERANCE_CODES_8BIT, NativePlaneFrame};
 
 /// Initialize the linked `FFmpeg` libraries once for the current process.

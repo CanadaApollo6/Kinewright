@@ -1353,3 +1353,91 @@ fn output_review_fix1_video_hold_keeps_one_source_frame_at_mixed_rates() {
         times(TimeCode(3)..TimeCode(27), settings.fps).unwrap()
     );
 }
+
+fn stored_transcript(stream: u32, end_micros: u64) -> kinewright_media::StoredSourceTranscript {
+    kinewright_media::StoredSourceTranscript {
+        audio_stream: stream,
+        recogniser_key: "fixture".into(),
+        words: vec![
+            word("hello", 100_000, 400_000),
+            word("there", 500_000, end_micros),
+        ],
+    }
+}
+
+fn loaded_speech(
+    document: &Document,
+    read: impl Fn(
+        &str,
+        Rational,
+        TimeCode,
+    ) -> Result<Option<kinewright_media::StoredSourceTranscript>, MediaError>,
+) -> ReviewExpectations {
+    let manifest = manifest(document);
+    let sources = load_source_transcripts(document, &manifest, read).unwrap();
+    derive(document, &manifest, &sources.review(), &annotations()).unwrap()
+}
+
+/// The store's transcript binds only to its source content, the selected
+/// audio stream and the source clock. Anything else is left out, so the
+/// speech stays undetermined instead of the review being refused.
+#[test]
+fn output_review_stored_transcripts_bind_to_source_stream_and_clock() {
+    let document = speech_document();
+    let content = document.media_pool[0]
+        .source_fingerprint
+        .content_sha256
+        .clone()
+        .unwrap();
+    let kept = loaded_speech(&document, |sha, _, _| {
+        Ok((sha == content).then(|| stored_transcript(1, 800_000)))
+    });
+    assert!(kept.kept_words.is_determined(), "TRANSCRIPT_KEPT_BINDS");
+    assert_eq!(kept.kept_words.known().count(), 2);
+    assert_eq!(kept.transcripts.len(), 1);
+    assert_eq!(kept.transcripts[0].audio_stream, 1);
+
+    let missing = loaded_speech(&document, |_, _, _| Ok(None));
+    assert!(
+        !missing.kept_words.is_determined(),
+        "TRANSCRIPT_MISSING_NOT_CHECKED"
+    );
+    assert!(!missing.uncovered_speech_segments.is_empty());
+
+    let other_stream = loaded_speech(&document, |_, _, _| Ok(Some(stored_transcript(2, 800_000))));
+    assert!(
+        !other_stream.kept_words.is_determined(),
+        "TRANSCRIPT_STREAM_REFUSED"
+    );
+    assert!(other_stream.transcripts.is_empty());
+
+    let past_end = loaded_speech(&document, |_, _, _| {
+        Ok(Some(stored_transcript(1, 3_600_000_000)))
+    });
+    assert!(
+        !past_end.kept_words.is_determined(),
+        "TRANSCRIPT_TIMING_REFUSED"
+    );
+    assert!(past_end.transcripts.is_empty());
+
+    let failed = loaded_speech(&document, |_, _, _| Err(MediaError::Cancelled));
+    assert!(
+        !failed.kept_words.is_determined(),
+        "TRANSCRIPT_STORE_FAILURE_NOT_CHECKED"
+    );
+}
+
+/// No audible source: nothing to transcribe, and silence is proven.
+#[test]
+fn output_review_stored_transcripts_absent_audio_proves_no_speech() {
+    let document = doc(
+        vec![asset(1, MediaKind::Video)],
+        vec![track(1, vec![clip(1, 1, 0, 0, 30)])],
+    );
+    let expectations = loaded_speech(&document, |_, _, _| Ok(None));
+    assert!(
+        expectations.kept_words.is_determined(),
+        "NO_AUDIO_DETERMINED"
+    );
+    assert_eq!(expectations.kept_words.known().count(), 0);
+}

@@ -24,8 +24,7 @@ impl<F: FnMut(&ReviewToken) -> Result<(), String>>
     }
 }
 
-/// A solid background under one plain title (not a caption: captions need a
-/// transcript to compare against, which the production queue does not pass).
+/// A solid background under one plain title.
 #[cfg(target_os = "linux")]
 fn c7_title_doc(text: &str) -> Document {
     use kinewright_core::{
@@ -88,7 +87,16 @@ struct C7Job {
 
 #[cfg(target_os = "linux")]
 fn c7_job(doc: Document) -> C7Job {
-    let mut f = Fixture::with_inputs(false, doc, "project.kinewright", s5_c6_admit_embedded_font);
+    c7_job_on(Fixture::with_inputs(
+        false,
+        doc,
+        "project.kinewright",
+        s5_c6_admit_embedded_font,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn c7_job_on(mut f: Fixture) -> C7Job {
     let (_, parent, director) = c4_director(&f);
     let (attempt, _, reviewer) = s5_child(&f, &director, &parent, Role::Reviewer);
     holder(&mut f);
@@ -443,4 +451,228 @@ fn ja1_s5a_c7_stop_fences_late_rows_and_annotate_is_refused() {
         "C7_NO_ROWS_AFTER_STOP"
     );
     assert!(c7_receipts(&job).is_empty(), "C7_NO_RECEIPT_AFTER_STOP");
+}
+
+/// Which stored transcript a talking-head witness has.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum C7Transcript {
+    Kept,
+    Missing,
+    OtherStream,
+}
+
+/// A plain talking head: the generated source cut whole, captioned "So
+/// today" over its first two words, with its source-clock transcript stored
+/// (or not) in the host's media store before the review is queued.
+#[cfg(target_os = "linux")]
+fn c7_talking_head_job(transcript: C7Transcript) -> (C7Job, String) {
+    use kinewright_core::{CaptionPreset, Rational, TimeCode, Track, TrackId, TrackKind};
+    use kinewright_media::test_support::talking_head;
+    let doc = Document {
+        fps: Rational::new(talking_head::FPS, 1).unwrap(),
+        resolution: (
+            u32::try_from(talking_head::WIDTH).unwrap(),
+            u32::try_from(talking_head::HEIGHT).unwrap(),
+        ),
+        duration: TimeCode(45),
+        tracks: vec![
+            Track {
+                id: TrackId(1),
+                name: Some("Speaker".into()),
+                kind: TrackKind::Video,
+                sync_lock: false,
+                clips: vec![],
+            },
+            Track {
+                id: TrackId(2),
+                name: Some("Captions".into()),
+                kind: TrackKind::Video,
+                sync_lock: false,
+                clips: vec![s5_c6_title_clip(
+                    1,
+                    0,
+                    45,
+                    CaptionPreset::Clean.title("So today"),
+                    vec![],
+                )],
+            },
+        ],
+        ..Document::default()
+    };
+    doc.validate().unwrap();
+    let mut f = Fixture::with_inputs(false, doc, "project.kinewright", s5_c6_admit_embedded_font);
+    let path = f.temp.path("talking_head.mp4");
+    talking_head::write(&path);
+    let name = {
+        let shared = f.host.owner.upgrade().unwrap();
+        let mut host = shared.lock().unwrap();
+        let (asset, _) = host.owner_mut().unwrap().import_owned_media(&path).unwrap();
+        let frames = i64::try_from(talking_head::FRAMES).unwrap();
+        assert_eq!(asset.duration, TimeCode(frames), "C7_TALKING_HEAD_FRAMES");
+        host.core()
+            .request(kinewright_core::Command::Do(
+                kinewright_core::Operation::AddClip {
+                    track: TrackId(1),
+                    asset: asset.id,
+                    at: TimeCode::ZERO,
+                    source: TimeCode::ZERO..TimeCode(frames),
+                },
+            ))
+            .unwrap();
+        let manifest = host
+            .owner()
+            .unwrap()
+            .store()
+            .unwrap()
+            .read_input_manifest(host.owner().unwrap().current_inputs_ref())
+            .unwrap();
+        let selected = manifest
+            .entries
+            .iter()
+            .find(|entry| entry.matches_media_asset(&asset))
+            .and_then(|entry| entry.media_interpretation().ok())
+            .and_then(|interpretation| interpretation.audio)
+            .expect("C7_TALKING_HEAD_AUDIO")
+            .index;
+        let data_dir = host.config.data_dir.clone().expect("C7_PRIVATE_DATA_DIR");
+        let words: Vec<_> = talking_head::WORDS
+            .iter()
+            .map(|&(text, start, end)| kinewright_core::dialogue::Word {
+                text: text.into(),
+                start_micros: start,
+                end_micros: end,
+            })
+            .collect();
+        let stream = match transcript {
+            C7Transcript::Kept => Some(selected),
+            C7Transcript::Missing => None,
+            C7Transcript::OtherStream => Some(selected + 1),
+        };
+        if let Some(stream) = stream {
+            kinewright_media::test_store_source_transcript(
+                &data_dir,
+                asset.source_fingerprint.content_sha256.as_deref().unwrap(),
+                asset.fps,
+                asset.duration,
+                stream,
+                &words,
+            )
+            .unwrap();
+        }
+        asset.name
+    };
+    ok(
+        f.editor
+            .request(HostCommand::Save {
+                snapshot: host_snapshot_for_test(&f.host),
+            })
+            .unwrap(),
+        "C7_SAVE_TALKING_HEAD",
+    );
+    {
+        let shared = f.host.owner.upgrade().unwrap();
+        let mut host = shared.lock().unwrap();
+        let owner = host.owner_mut().unwrap();
+        let mut candidate = owner
+            .fork_durable_branch(
+                "talking-head",
+                kinewright_project::editing_session::DurableBranchRole::RunCandidate,
+            )
+            .unwrap();
+        owner.persist_durable_branch(&mut candidate).unwrap();
+        f.brief.inputs = owner.current_inputs_ref().clone();
+        f.brief.scope.base = owner.candidate_binding(candidate.branch_id()).unwrap();
+    }
+    (c7_job_on(f), name)
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn ja1_s5a_c7_talking_head_with_its_transcript_seals_delivered() {
+    use kinewright_core::output_review::SealedReviewOutcome;
+    use kinewright_project::review_job::SealResult;
+    let (job, _) = c7_talking_head_job(C7Transcript::Kept);
+    let mut reviewer = C7Reviewer(|_: &ReviewToken| {
+        c7_judge(&job.reviewer);
+        Ok(())
+    });
+    let cancel = kinewright_core::ExportCancellation::default();
+    let result = c7_drive(&job, &c7_real_check, &mut reviewer, &cancel).expect("C7_DRIVER_SEALS");
+    let SealResult::Sealed(sealed) = result else {
+        panic!("C7_TALKING_HEAD_SEALED: {result:?}");
+    };
+    assert_eq!(
+        sealed.receipt.outcome,
+        SealedReviewOutcome::Delivered,
+        "C7_TALKING_HEAD_DELIVERED: {:?}",
+        sealed.receipt.outcome
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn c7_assert_speech_unchecked(transcript: C7Transcript, label: &str) {
+    use kinewright_core::output_review::{RequiredReviewRow, ReviewRowResult};
+    use kinewright_project::review_job::SealResult;
+    let (job, name) = c7_talking_head_job(transcript);
+    let mut reviewer = C7Reviewer(|_: &ReviewToken| {
+        c7_judge(&job.reviewer);
+        Ok(())
+    });
+    let cancel = kinewright_core::ExportCancellation::default();
+    let result = c7_drive(&job, &c7_real_check, &mut reviewer, &cancel).expect("C7_DRIVER_RUNS");
+    let SealResult::Paused(status) = result else {
+        panic!("{label}_PAUSED: {result:?}");
+    };
+    let expected = format!("Transcribe \"{name}\" to check its speech.");
+    let ReviewPhase::Paused {
+        findings,
+        checkpoint: kinewright_project::review_job::ReviewCheckpoint::Checking(checks),
+        ..
+    } = &status.phase
+    else {
+        panic!("{label}_PAUSED_PHASE: {:?}", status.phase);
+    };
+    assert!(
+        findings.iter().any(
+            |finding| finding.row == Some(RequiredReviewRow::RetainedSpeechChecks)
+                && finding.note == expected
+        ),
+        "{label}_NAMES_THE_SOURCE: {findings:?}"
+    );
+    let row = checks
+        .rows
+        .get(&RequiredReviewRow::RetainedSpeechChecks)
+        .expect("C7_SPEECH_ROW_RECORDED");
+    assert_eq!(row.result, ReviewRowResult::Unknown, "{label}_ROW_UNKNOWN");
+    assert_eq!(
+        row.reason.as_deref(),
+        Some(expected.as_str()),
+        "{label}_ROW_REASON"
+    );
+    assert!(c7_receipts(&job).is_empty(), "{label}_NOT_SEALED");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn ja1_s5a_c7_talking_head_without_a_transcript_pauses_speech_unknown() {
+    c7_assert_speech_unchecked(C7Transcript::Missing, "C7_MISSING_TRANSCRIPT");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn ja1_s5a_c7_a_transcript_of_another_stream_is_refused() {
+    c7_assert_speech_unchecked(C7Transcript::OtherStream, "C7_OTHER_STREAM");
 }

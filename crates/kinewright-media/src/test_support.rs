@@ -508,6 +508,174 @@ pub fn wav_f32(samples: &[f32], rate: u32, channels: u16) -> Vec<u8> {
     bytes
 }
 
+/// A generated talking head: a moving head whose mouth follows a voiced
+/// speech envelope, the default look of the review-scan calibration source.
+/// Every technical and retained-speech check can decide it.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    reason = "synthetic signals of a few seconds"
+)]
+pub mod talking_head {
+    use std::path::Path;
+
+    pub const WIDTH: usize = 128;
+    pub const HEIGHT: usize = 72;
+    pub const FPS: u32 = 30;
+    pub const FRAMES: u64 = 180;
+    const RATE: u32 = 48_000;
+    /// Spoken words in source microseconds.
+    pub const WORDS: [(&str, u64, u64); 8] = [
+        ("so", 300_000, 600_000),
+        ("today", 900_000, 1_300_000),
+        ("we", 1_500_000, 1_750_000),
+        ("talk", 2_200_000, 2_700_000),
+        ("about", 3_300_000, 3_600_000),
+        ("cuts", 3_900_000, 4_300_000),
+        ("and", 4_500_000, 4_800_000),
+        ("joins", 5_300_000, 5_700_000),
+    ];
+
+    fn noise(seed: u64) -> f32 {
+        let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03;
+        x ^= x >> 29;
+        x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        x ^= x >> 32;
+        (x % 20_001) as f32 / 10_000.0 - 1.0
+    }
+
+    fn envelope(t: f64) -> f64 {
+        for (index, &(_, start, end)) in WORDS.iter().enumerate() {
+            let (start, end) = (start as f64 / 1e6, end as f64 / 1e6);
+            if t >= start && t < end {
+                let length = end - start;
+                let syllables = (length / 0.12).round().max(1.0);
+                let syllable = length / syllables;
+                let phase = ((t - start) % syllable) / syllable;
+                let accent = 0.65 + 0.35 * ((index as f64) * 1.7 + (t - start) * 9.0).sin().abs();
+                return (std::f64::consts::PI * phase).sin().powf(0.7) * accent;
+            }
+        }
+        0.0
+    }
+
+    fn voice(n: usize) -> [f32; 2] {
+        let t = n as f64 / f64::from(RATE);
+        let f0 = 130.0 * (1.0 + 0.03 * (2.0 * std::f64::consts::PI * 5.0 * t).sin());
+        let carrier: f64 = (1..=8)
+            .map(|k| (2.0 * std::f64::consts::PI * f64::from(k) * f0 * t).sin() / f64::from(k))
+            .sum();
+        let mut value = 0.12 * envelope(t) * carrier;
+        for &(_, start, _) in &WORDS {
+            let first = (start * u64::from(RATE) / 1_000_000) as usize;
+            if n >= first && n < first + 200 {
+                value += 0.35 * f64::from(noise(n as u64 * 7 + 3));
+            }
+        }
+        let room = |channel: u64| 0.0015 * noise(n as u64 * 2 + channel + 11);
+        [value as f32 + room(0), value as f32 + room(1)]
+    }
+
+    fn heads() -> Vec<f64> {
+        let mut position = 0.0_f64;
+        let mut velocity = 0.0_f64;
+        (0..FRAMES)
+            .map(|frame| {
+                velocity = 0.8 * velocity + 1.6 * f64::from(noise(frame * 13 + 5));
+                position = (position + velocity).clamp(-28.0, 28.0);
+                position
+            })
+            .collect()
+    }
+
+    fn luma(frame: u64, heads: &[f64]) -> Vec<u8> {
+        let t = frame as f64 / f64::from(FPS);
+        let mouth = (2.0 + 22.0 * envelope(t + 0.5 / f64::from(FPS))).round() as usize;
+        let center = (64.0 + heads[frame as usize]).round() as i64;
+        let mut plane = Vec::with_capacity(WIDTH * HEIGHT);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let mut value = 60.0 + ((x * 7 + y * 13) % 40) as f64;
+                let dx = x as i64 - center;
+                if (-22..22).contains(&dx) && (10..64).contains(&y) {
+                    value = 150.0 + ((x * 3 + y * 5) % 24) as f64;
+                    if (-14..14).contains(&dx) && y >= 44 && y < 44 + mouth.min(18) {
+                        value = 36.0;
+                    }
+                }
+                plane.push(value.round().clamp(16.0, 235.0) as u8);
+            }
+        }
+        plane
+    }
+
+    /// Encode the talking head (H.264 picture, AAC stereo voice) to `path`.
+    ///
+    /// # Panics
+    /// Panics when the scratch files cannot be written or the encoder fails.
+    pub fn write(path: &Path) {
+        let heads = heads();
+        let mut picture = Vec::new();
+        for frame in 0..FRAMES {
+            picture.extend_from_slice(&luma(frame, &heads));
+            picture.extend(std::iter::repeat_n(128_u8, WIDTH * HEIGHT / 2));
+        }
+        let samples = (FRAMES * u64::from(RATE) / u64::from(FPS)) as usize;
+        let pcm: Vec<f32> = (0..samples).flat_map(voice).collect();
+        let video = path.with_extension("yuv");
+        let audio = path.with_extension("wav");
+        std::fs::write(&video, picture).expect("raw picture");
+        std::fs::write(&audio, super::wav_f32(&pcm, RATE, 2)).expect("raw audio");
+        let size = format!("{WIDTH}x{HEIGHT}");
+        let rate = FPS.to_string();
+        let video_arg = video.to_string_lossy().into_owned();
+        let audio_arg = audio.to_string_lossy().into_owned();
+        super::run_ffmpeg(
+            &[
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p",
+                "-s",
+                &size,
+                "-r",
+                &rate,
+                "-i",
+                &video_arg,
+                "-i",
+                &audio_arg,
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "10",
+                "-pix_fmt",
+                "yuv420p",
+                "-x264-params",
+                "colorprim=bt709:transfer=bt709:colormatrix=bt709",
+                "-color_range",
+                "tv",
+                "-movflags",
+                "+faststart",
+            ],
+            path,
+        );
+        let _ = std::fs::remove_file(video);
+        let _ = std::fs::remove_file(audio);
+    }
+}
+
 #[cfg(test)]
 mod unique_stem_tests {
     use super::unique_stem;

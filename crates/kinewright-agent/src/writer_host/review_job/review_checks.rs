@@ -8,9 +8,12 @@
 //! row this commit decides is recorded, even when the check could not run;
 //! an error makes the row Unknown. Results reach the job only through
 //! `record_review_check`.
-use std::{fs::File, sync::Arc, sync::Mutex};
+use std::{collections::BTreeSet, fmt::Write as _, fs::File, sync::Arc, sync::Mutex};
 
-use kinewright_core::{ExportCancellation, MediaError, output_review::RequiredReviewRow};
+use kinewright_core::{
+    ExportCancellation, MediaError,
+    output_review::{RequiredReviewRow, ReviewExpectations},
+};
 use kinewright_media::review_scan::{
     RetainedSpeechConfig, ReviewCheckReport, ReviewScanInputs, TechnicalScanConfig,
     check_review_artifact,
@@ -93,9 +96,9 @@ pub(in crate::writer_host) fn run_technical_review_checks(
             .prepare_review_check(token)?
     };
     let required = pending.required_rows();
-    let report = match pending.open() {
+    let (report, untranscribed) = match pending.open() {
         Ok(inputs) => run_check(inputs, check),
-        Err(error) => Err(error.to_string()),
+        Err(error) => (Err(error.to_string()), None),
     };
     if let Err(reason) = &report
         && reason == &MediaError::Cancelled.to_string()
@@ -106,6 +109,14 @@ pub(in crate::writer_host) fn run_technical_review_checks(
         .into_iter()
         .filter(|row| required.contains(row))
         .map(|row| {
+            // Speech without a bound transcript is not checked (L2), whatever
+            // the scan concluded from the words it had.
+            if row == RequiredReviewRow::RetainedSpeechChecks
+                && report.is_ok()
+                && let Some(reason) = &untranscribed
+            {
+                return (row, Err(reason.as_str()));
+            }
             let result = report.as_ref().map_err(String::as_str).and_then(|report| {
                 report
                     .rows()
@@ -142,11 +153,12 @@ pub(in crate::writer_host) fn run_technical_review_checks(
 }
 
 /// Run the check on opened inputs. Any failure becomes the reason every row
-/// is Unknown; cancellation is passed through by its message.
+/// is Unknown; cancellation is passed through by its message. Beside the
+/// report, name the sources whose kept speech no transcript covers.
 fn run_check(
     inputs: kinewright_project::review_job::ReviewCheckInputs,
     check: &CheckReview<'_>,
-) -> Result<ReviewCheckReport, String> {
+) -> (Result<ReviewCheckReport, String>, Option<String>) {
     let kinewright_project::review_job::ReviewCheckInputs {
         artifact,
         media,
@@ -155,20 +167,65 @@ fn run_check(
         context,
     } = inputs;
     let context = Arc::new(context);
-    let sources = context
+    let untranscribed = untranscribed_sources(&expectations.0, &context.document);
+    let report = context
         .playback_inputs()
-        .map_err(|error| error.to_string())?;
-    check(
-        &media,
-        &ReviewScanInputs {
-            timing: &artifact.output,
-            expectations: &expectations.0,
-            document: &context.document,
-            settings: &request.settings,
-            sources: sources.as_ref(),
-        },
-    )
-    .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())
+        .and_then(|sources| {
+            check(
+                &media,
+                &ReviewScanInputs {
+                    timing: &artifact.output,
+                    expectations: &expectations.0,
+                    document: &context.document,
+                    settings: &request.settings,
+                    sources: sources.as_ref(),
+                },
+            )
+            .map_err(|error| error.to_string())
+        });
+    (report, untranscribed)
+}
+
+/// Which sources need transcribing before their kept speech can be checked.
+fn untranscribed_sources(
+    expectations: &ReviewExpectations,
+    document: &kinewright_core::Document,
+) -> Option<String> {
+    let assets: BTreeSet<_> = expectations
+        .uncovered_speech_segments
+        .iter()
+        .filter_map(|id| {
+            expectations
+                .segments
+                .iter()
+                .find(|segment| segment.id == *id)
+                .map(|segment| segment.asset)
+        })
+        .collect();
+    if assets.is_empty() && expectations.kept_words.is_determined() {
+        return None;
+    }
+    let names = assets.iter().fold(String::new(), |mut names, asset| {
+        if !names.is_empty() {
+            names.push_str(", ");
+        }
+        match document.asset(*asset) {
+            Some(source) => {
+                let _ = write!(names, "\"{}\"", source.name);
+            }
+            None => {
+                let _ = write!(names, "asset {asset}");
+            }
+        }
+        names
+    });
+    // The seal keeps the first 64 characters of a note: lead with the source.
+    Some(match assets.len() {
+        0 => "Speech not checked: a source needs transcribing.".into(),
+        1 => format!("Transcribe {names} to check its speech."),
+        _ => format!("Transcribe {names} to check their speech."),
+    })
 }
 
 /// A checker's error, bounded to what a check row keeps.

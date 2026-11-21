@@ -22,8 +22,8 @@ use crate::{
     sha256::sha256_file,
 };
 
-// Zero-start decode retains codec preroll; older word results must be recomputed.
-const CACHE_VERSION: u32 = 6;
+// Version 7 records the audio stream each transcript was recognised from.
+const CACHE_VERSION: u32 = 7;
 use crate::recognizer::{self, ENGLISH_MODEL, Identity, Recognition};
 #[cfg(any(test, feature = "test-util"))]
 type InferenceGate = Arc<std::sync::Mutex<Option<(Sender<()>, crossbeam_channel::Receiver<()>)>>>;
@@ -584,6 +584,12 @@ impl TranscriptWorker {
         }
         #[cfg(any(test, feature = "test-util"))]
         self.hold_before_inference(asset, cancellation, job.source.as_ref())?;
+        // The recogniser decodes the stream playback and export select.
+        let audio_stream = if let Some(source) = job.source.as_ref() {
+            source.audio_stream()?
+        } else {
+            crate::sound_profile::audio_stream(&asset.path)?
+        };
         let model = job.model;
         let model_root = recognizer::provision(
             model,
@@ -643,6 +649,7 @@ impl TranscriptWorker {
             identity: recognized.identity,
             source_fps: asset.fps,
             source_frames: asset.duration,
+            audio_stream,
             language: language.map(str::to_owned),
             recognition: recognized.recognition,
         });
@@ -913,6 +920,8 @@ struct StoredTranscript {
     identity: Identity,
     source_fps: Rational,
     source_frames: TimeCode,
+    /// Index of the audio stream the words were recognised from.
+    audio_stream: u32,
     language: Option<String>,
     recognition: Recognition,
 }
@@ -1019,6 +1028,83 @@ impl TranscriptStore {
         )
     }
 }
+/// A completed source-clock transcript, read from the store without recognition.
+#[derive(Debug, PartialEq, Eq)]
+pub struct StoredSourceTranscript {
+    /// Index of the audio stream the words were recognised from.
+    pub audio_stream: u32,
+    pub recogniser_key: String,
+    /// Words in source microseconds, covering the whole source.
+    pub words: Vec<kinewright_core::dialogue::Word>,
+}
+
+/// Read the default-recipe transcript stored for this source content and clock.
+/// A store entry exists only for a completed recognition of the whole source.
+/// # Errors
+/// Returns data-directory or cache IO errors. A miss is `Ok(None)`.
+pub fn stored_source_transcript(
+    data_dir: &Path,
+    content_sha256: &str,
+    fps: Rational,
+    frames: TimeCode,
+) -> Result<Option<StoredSourceTranscript>, MediaError> {
+    let store = TranscriptStore::new(cache_root(data_dir, "transcripts", CACHE_VERSION)?);
+    let identity = Identity::english();
+    Ok(store
+        .load(content_sha256, &identity, fps, frames, None)?
+        .map(|stored| StoredSourceTranscript {
+            audio_stream: stored.audio_stream,
+            recogniser_key: stored.identity.cache_key(),
+            words: stored
+                .recognition
+                .words
+                .into_iter()
+                .map(|word| kinewright_core::dialogue::Word {
+                    text: word.text,
+                    start_micros: word.start_us,
+                    end_micros: word.end_us,
+                })
+                .collect(),
+        }))
+}
+
+/// Store a completed default-recipe transcript without running a model.
+/// # Errors
+/// Returns data-directory or cache IO errors.
+#[cfg(any(test, feature = "test-util"))]
+pub fn test_store_source_transcript(
+    data_dir: &Path,
+    content_sha256: &str,
+    fps: Rational,
+    frames: TimeCode,
+    audio_stream: u32,
+    words: &[kinewright_core::dialogue::Word],
+) -> Result<(), MediaError> {
+    let store = TranscriptStore::new(cache_root(data_dir, "transcripts", CACHE_VERSION)?);
+    store.save(
+        &StoredTranscript {
+            content_sha256: content_sha256.into(),
+            identity: Identity::english(),
+            source_fps: fps,
+            source_frames: frames,
+            audio_stream,
+            language: None,
+            recognition: Recognition {
+                timing_source: recognizer::TimingSource::DecoderTokenEstimates,
+                words: words
+                    .iter()
+                    .map(|word| recognizer::Word {
+                        text: word.text.clone(),
+                        start_us: word.start_micros,
+                        end_us: word.end_micros,
+                    })
+                    .collect(),
+            },
+        },
+        &ExportCancellation::default(),
+    )
+}
+
 /// Explicit preparation uses the same pinned weights and installer as asset recognition.
 /// # Errors
 /// Returns typed provisioning, verification or cancellation errors as media errors.
@@ -1083,6 +1169,8 @@ pub(crate) fn transcribe_voice_wav(
             identity: result.identity,
             source_fps: fps,
             source_frames: frames,
+            // A voice note is a single-stream WAV.
+            audio_stream: 0,
             language: Some("en".into()),
             recognition: result.recognition,
         }
@@ -1153,6 +1241,7 @@ mod tests {
             identity: Identity::english(),
             source_fps: job.asset.fps,
             source_frames: job.asset.duration,
+            audio_stream: 0,
             language: None,
             recognition: Recognition {
                 timing_source: recognizer::TimingSource::DecoderTokenEstimates,
@@ -1366,6 +1455,7 @@ mod tests {
             identity: Identity::english(),
             source_fps: Rational::new(24, 1).unwrap(),
             source_frames: TimeCode(240),
+            audio_stream: 0,
             language: Some("en".into()),
             recognition: Recognition {
                 timing_source: recognizer::TimingSource::DecoderTokenEstimates,
@@ -1872,6 +1962,7 @@ mod measurement_tests {
                     identity: Identity::english(),
                     source_fps: job.asset.fps,
                     source_frames: job.asset.duration,
+                    audio_stream: 0,
                     language: None,
                     recognition: Recognition {
                         timing_source: recognizer::TimingSource::DecoderTokenEstimates,

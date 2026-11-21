@@ -2,6 +2,9 @@
 //! Run derivation outside the writer lock.
 mod overlays;
 mod timing;
+mod transcripts;
+
+pub use transcripts::{SourceTranscripts, load_source_transcripts};
 
 use kinewright_core::dialogue::Word;
 use kinewright_core::output_review::{
