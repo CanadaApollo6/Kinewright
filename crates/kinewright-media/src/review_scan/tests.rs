@@ -1730,6 +1730,54 @@ fn ja1_s5a_fix2_uncomparable_sync_is_unknown() {
     assert!(!disabled.report.structure.has(sync_unmeasured));
 }
 
+/// R1 (GLM): a live grade on every video clip excludes every picture part
+/// from comparison; the video lag is then unmeasured, never passed.
+#[test]
+fn ja1_s5a_fix2_graded_picture_leaves_sync_unmeasured() {
+    let sources = Sources::new("ja1-s5-fix2-graded", Look::default());
+    let cut = standard_cut();
+    let encoded = encode_review(&sources, "review", &cut, Seed::Clean, PLAIN);
+    let report = check_doc(
+        &sources,
+        &cut,
+        &encoded,
+        &TechnicalScanConfig::default(),
+        &RetainedSpeechConfig::default(),
+        |document, _| {
+            let mut id = 10;
+            for track in &mut document.tracks {
+                if track.kind != kinewright_core::TrackKind::Video {
+                    continue;
+                }
+                for clip in &mut track.clips {
+                    id += 1;
+                    clip.effects.push(effect(id, "brightness", true));
+                }
+            }
+        },
+        |_| {},
+    )
+    .report;
+    assert!(
+        report.structure.has(|kind| matches!(
+            kind,
+            FindingKind::SyncUnmeasured {
+                signal: SyncSignal::Video,
+                measured: 0,
+                ..
+            }
+        )),
+        "{:?}",
+        report.structure.findings
+    );
+    assert_eq!(
+        report.structure.result,
+        ReviewRowResult::Unknown,
+        "{:?}",
+        report.structure.findings
+    );
+}
+
 /// R2: audio that ends early is never a clean sound scan or a measured
 /// loudness of the cut.
 #[test]

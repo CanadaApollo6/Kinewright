@@ -1438,12 +1438,11 @@ fn sync(
         .min(u32::try_from(windows.len()).unwrap_or(u32::MAX));
     measurement.windows = u32::try_from(windows.len()).unwrap_or(u32::MAX);
     // Nothing mapped to measure: no sync to judge. Something mapped that
-    // no frame or hop can compare (effects, processing, truncation) leaves
-    // sync unmeasured, never passed.
-    let mapped_picture = plan
-        .video
-        .iter()
-        .any(|part| part.asset.is_some() && part.excluded.is_none());
+    // no frame or hop can compare (effects, blends, processing, truncation)
+    // leaves sync unmeasured, never passed: a media part is mapped whatever
+    // its exclusion. Expected audio is likewise any unmuted part, processed
+    // or not.
+    let mapped_picture = plan.video.iter().any(|part| part.asset.is_some());
     if !mapped_picture || !has_expected_audio(plan) {
         return (measurement, findings);
     }
