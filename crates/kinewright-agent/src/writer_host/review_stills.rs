@@ -13,10 +13,10 @@ use kinewright_core::{
     output_review::{OverlayPixels, ReviewExpectations, ReviewLane, ReviewRowResult, ReviewSpan},
 };
 use kinewright_media::{
-    DecodedReviewStill, MAX_REVIEW_STILLS, OmittedReferenceOverlay, PlannedReviewStill,
-    ReviewOutputTiming, ReviewReadSeek, ReviewStillKind, ReviewStillPlan, ReviewStillPlanInput,
-    ReviewStillReason, ReviewStillsConfig, UncoveredStillRegion, decode_review_stills_page,
-    plan_review_stills, sha256_bytes,
+    DecodedReviewStill, MAX_REVIEW_STILLS, OmittedReferenceOverlay, OverlayVerificationConfig,
+    PlannedReviewStill, ReviewOutputTiming, ReviewReadSeek, ReviewStillKind, ReviewStillPlan,
+    ReviewStillPlanInput, ReviewStillReason, ReviewStillsConfig, UncoveredStillRegion,
+    decode_review_stills_page, plan_review_stills, sha256_bytes,
 };
 use kinewright_project::{
     bundle::{BundleError, ProjectBundle},
@@ -24,8 +24,8 @@ use kinewright_project::{
     editorial::{AuditDisposition, AuditKind, EditorialAudit},
     owned_inputs::{InputLeaseRequest, OwnedInputManifest, OwnedInputRef},
     review_job::{
-        PreparedReviewArtifact, ReviewJob, ReviewPhase, ReviewRequest, ReviewToken,
-        StoredReviewExpectations,
+        PreparedReviewArtifact, ReviewCheckBinding, ReviewJob, ReviewPhase, ReviewRequest,
+        ReviewToken, StoredReviewExpectations,
     },
     storage_budget::StorageReservation,
     store::ProjectStore,
@@ -63,8 +63,76 @@ fn scope_refused(message: &str) -> HostError {
     HostRefusal::new("task_scope", message).into()
 }
 
-/// Cryptographic identity binding one served still to its plan digest, PTS, PNG bytes, artifact,
-/// review token, and reviewer attempt.
+/// Stable SHA-256 digest of the overlay-verification and reviewer-stills configurations combined.
+/// Callers combine this with C5's check configuration digest into a single `ReviewCheckBinding`
+/// before calling `BindChecks`; neither C6 runner binds checks on its own.
+#[must_use]
+pub fn overlay_and_stills_check_configuration(
+    overlay: &OverlayVerificationConfig,
+    stills: &ReviewStillsConfig,
+) -> [u8; 32] {
+    let mut hasher = kinewright_hash::Sha256::new();
+    hasher.update(b"kinewright-overlay-and-stills-check-config-v1\0");
+    hasher.update(&overlay.sha256());
+    hasher.update(&stills.sha256());
+    hasher.finalize()
+}
+
+/// Combine another review suite's configuration digest (for example C5) with C6's digest into one
+/// canonical `ReviewCheckBinding::configuration_sha256`.
+#[must_use]
+pub fn combined_review_check_configuration(
+    other_checks_sha256: &[u8; 32],
+    c6_sha256: &[u8; 32],
+) -> [u8; 32] {
+    let mut hasher = kinewright_hash::Sha256::new();
+    hasher.update(b"kinewright-combined-review-check-config-v1\0");
+    hasher.update(other_checks_sha256);
+    hasher.update(c6_sha256);
+    hasher.finalize()
+}
+
+/// Validated C6 review-check configuration bound into `ReviewCheckBinding::configuration_sha256`.
+/// When C5 and C6 run together under a combined driver, `other_checks_sha256` carries C5's
+/// configuration digest so both runners and the stills read path verify against the exact bound
+/// digest.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct C6CheckConfiguration {
+    pub overlay: OverlayVerificationConfig,
+    pub stills: ReviewStillsConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other_checks_sha256: Option<[u8; 32]>,
+}
+
+impl C6CheckConfiguration {
+    /// Validate both overlay and stills configurations before binding or execution.
+    ///
+    /// # Errors
+    /// Refuses when any threshold or cap is `NaN`, infinite, zero, or outside permitted bounds.
+    pub fn validate(&self) -> Result<(), HostError> {
+        self.overlay
+            .validate()
+            .map_err(|error| refused(&error.to_string()))?;
+        self.stills
+            .validate()
+            .map_err(|error| refused(&error.to_string()))?;
+        Ok(())
+    }
+
+    /// Canonical SHA-256 digest matching `ReviewCheckBinding::configuration_sha256`.
+    #[must_use]
+    pub fn configuration_sha256(&self) -> [u8; 32] {
+        let c6 = overlay_and_stills_check_configuration(&self.overlay, &self.stills);
+        match self.other_checks_sha256 {
+            None => c6,
+            Some(other) => combined_review_check_configuration(&other, &c6),
+        }
+    }
+}
+
+/// Cryptographic identity binding one served still to its plan digest, stills configuration
+/// digest, PTS, PNG bytes, artifact, review token, and reviewer attempt.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ReviewStillId(pub String);
@@ -82,6 +150,7 @@ impl ReviewStillId {
         artifact_media_ref: &ObjectRef,
         reviewer_attempt: &SessionId,
         plan_sha256: &str,
+        stills_config_sha256: &str,
         sample_index: u32,
         frame_index: u64,
         pts: i64,
@@ -90,12 +159,13 @@ impl ReviewStillId {
         png_byte_length: u64,
     ) -> Result<Self, HostError> {
         let bytes = serde_json::to_vec(&(
-            "review_still_v2",
+            "review_still_v3",
             review_token,
             artifact_ref,
             artifact_media_ref,
             reviewer_attempt,
             plan_sha256,
+            stills_config_sha256,
             sample_index,
             frame_index,
             pts,
@@ -123,6 +193,7 @@ pub struct ServedReviewStill {
     pub png_sha256: String,
     pub png_byte_length: u64,
     pub plan_sha256: String,
+    pub stills_config_sha256: String,
     pub artifact_ref: ObjectRef,
     pub artifact_media_ref: ObjectRef,
     pub review_token: ReviewToken,
@@ -257,13 +328,24 @@ struct ActiveStillBinding {
     artifact_media_ref: ObjectRef,
     reviewer_attempt: SessionId,
     plan_sha256: String,
+    stills_config_sha256: String,
 }
 
-/// Bounded per-host ledger of served reviewer stills, per-attempt page budget, and recently
-/// retired attempts (so stale still IDs from prior attempts are explicitly rejected).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BoundStillsConfiguration {
+    review_token: ReviewToken,
+    reviewer_attempt: SessionId,
+    configuration_sha256: [u8; 32],
+    stills: ReviewStillsConfig,
+}
+
+/// Bounded per-host ledger of served reviewer stills, bound stills configuration, per-attempt
+/// page budget, and recently retired attempts (so stale still IDs from prior attempts are
+/// explicitly rejected).
 #[derive(Default)]
 pub(super) struct ServedReviewStills {
     config: ReviewStillsConfig,
+    bound_config: Option<BoundStillsConfiguration>,
     active: Option<ActiveStillBinding>,
     pages_admitted: usize,
     served: BTreeMap<ReviewStillId, ServedReviewStill>,
@@ -323,6 +405,7 @@ pub fn parse_visual_judgment(bytes: &[u8]) -> Result<VisualJudgment, VisualJudgm
 pub struct VisualReviewContext<'a> {
     pub plan: &'a ReviewStillPlan,
     pub plan_sha256: &'a str,
+    pub stills_config_sha256: &'a str,
     pub token: &'a ReviewToken,
     pub artifact_ref: &'a ObjectRef,
     pub artifact_media_ref: &'a ObjectRef,
@@ -493,9 +576,10 @@ fn lookup_and_verify_still<'a>(
         || &still.artifact_ref != context.artifact_ref
         || &still.artifact_media_ref != context.artifact_media_ref
         || still.plan_sha256 != context.plan_sha256
+        || still.stills_config_sha256 != context.stills_config_sha256
     {
         return Err(VisualJudgmentError::ArtifactOrTokenMismatch(format!(
-            "still {} is bound to a different review token, artifact, or still plan",
+            "still {} is bound to a different review token, artifact, plan, or stills configuration",
             id.as_str()
         )));
     }
@@ -1030,12 +1114,13 @@ fn plan_digest(plan: &ReviewStillPlan) -> Result<String, HostError> {
 
 fn cursor_binding_tag(binding: &ActiveStillBinding) -> Result<String, HostError> {
     let digest = sha256_bytes(&serde_json::to_vec(&(
-        "review_still_cursor_v1",
+        "review_still_cursor_v2",
         &binding.review_token,
         &binding.artifact_ref,
         &binding.artifact_media_ref,
         &binding.reviewer_attempt,
         &binding.plan_sha256,
+        &binding.stills_config_sha256,
     ))?);
     Ok(digest[..32].to_owned())
 }
@@ -1214,6 +1299,7 @@ fn encode_served_still(
         &binding.artifact_media_ref,
         &binding.reviewer_attempt,
         &binding.plan_sha256,
+        &binding.stills_config_sha256,
         still.sample_index,
         still.frame_index,
         still.pts,
@@ -1234,6 +1320,7 @@ fn encode_served_still(
         png_sha256,
         png_byte_length,
         plan_sha256: binding.plan_sha256.clone(),
+        stills_config_sha256: binding.stills_config_sha256.clone(),
         artifact_ref: binding.artifact_ref.clone(),
         artifact_media_ref: binding.artifact_media_ref.clone(),
         review_token: binding.review_token.clone(),
@@ -1296,7 +1383,13 @@ fn encode_bounded_png(
 }
 
 impl HostCommandOwner {
-    /// Configure the validated reviewer-stills limits enforced by `read_review_stills`.
+    /// Configure the validated host-wide fallback reviewer-stills limits.
+    ///
+    /// When an active review job binds a [`C6CheckConfiguration`] via
+    /// [`Self::bind_c6_review_checks`] or [`Self::register_bound_c6_configuration`],
+    /// `read_review_stills` ignores this host-wide setting and enforces the bound configuration;
+    /// when no explicit bound configuration is registered, `read_review_stills` refuses any
+    /// host-wide setting whose digest disagrees with the job's bound `configuration_sha256`.
     ///
     /// # Errors
     /// Refuses invalid or out-of-range configuration limits.
@@ -1311,6 +1404,86 @@ impl HostCommandOwner {
         Ok(())
     }
 
+    /// Register the validated [`C6CheckConfiguration`] matching an already-bound `ReviewCheckBinding`
+    /// (for example when a combined C5+C6 driver binds one shared digest) so `read_review_stills`
+    /// enforces the exact bound stills configuration rather than any host-wide setting.
+    ///
+    /// # Errors
+    /// Refuses when validation fails, the digest disagrees with `binding.configuration_sha256`,
+    /// or the active checking job does not match `token` and `binding`.
+    pub fn register_bound_c6_configuration(
+        &mut self,
+        token: &ReviewToken,
+        binding: &ReviewCheckBinding,
+        config: &C6CheckConfiguration,
+    ) -> Result<(), HostError> {
+        config.validate()?;
+        if config.configuration_sha256() != binding.configuration_sha256 {
+            return Err(refused(
+                "Review stills configuration does not match the bound check configuration digest.",
+            ));
+        }
+        let bundle = self.owner()?.review_source_bundle(&token.project)?;
+        let job = bundle
+            .review_job()?
+            .filter(|job| &job.token == token)
+            .ok_or_else(|| refused("The output review generation or version changed."))?;
+        let ReviewPhase::Checking(checks) = &job.phase else {
+            return Err(refused("The output review is not in the checking phase."));
+        };
+        if checks.configuration_sha256 != Some(binding.configuration_sha256)
+            || checks.reviewer_attempt.as_ref() != Some(&binding.reviewer_attempt)
+        {
+            return Err(refused(
+                "Review stills configuration binding does not match the active review check binding.",
+            ));
+        }
+        self.review_stills.bound_config = Some(BoundStillsConfiguration {
+            review_token: token.clone(),
+            reviewer_attempt: binding.reviewer_attempt.clone(),
+            configuration_sha256: binding.configuration_sha256,
+            stills: config.stills.clone(),
+        });
+        Ok(())
+    }
+
+    /// Bind a validated [`C6CheckConfiguration`] on the active review job through
+    /// `record_review_check(UpdateReviewJob::BindChecks)` and pin its stills configuration for
+    /// `read_review_stills` so host-wide config mutations cannot alter served stills.
+    ///
+    /// # Errors
+    /// Refuses when validation, checking authority, Stop fence, or durable binding fails.
+    #[cfg(target_os = "linux")]
+    pub fn bind_c6_review_checks(
+        &mut self,
+        token: &ReviewToken,
+        reviewer_attempt: SessionId,
+        config: &C6CheckConfiguration,
+    ) -> Result<
+        (
+            ReviewCheckBinding,
+            kinewright_project::review_job::ReviewStatus,
+        ),
+        HostError,
+    > {
+        use kinewright_project::review_job::UpdateReviewJob;
+
+        config.validate()?;
+        let binding = ReviewCheckBinding {
+            configuration_sha256: config.configuration_sha256(),
+            reviewer_attempt,
+        };
+        let status =
+            self.record_review_check(token, UpdateReviewJob::BindChecks(binding.clone()))?;
+        self.review_stills.bound_config = Some(BoundStillsConfiguration {
+            review_token: token.clone(),
+            reviewer_attempt: binding.reviewer_attempt.clone(),
+            configuration_sha256: binding.configuration_sha256,
+            stills: config.stills.clone(),
+        });
+        Ok((binding, status))
+    }
+
     #[cfg(all(test, target_os = "linux"))]
     pub(super) fn set_review_stills_render_hook(
         &mut self,
@@ -1320,7 +1493,9 @@ impl HostCommandOwner {
     }
 
     /// Prepare a Reviewer-only `read_review_stills` page under the host lock without hashing any
-    /// media bytes. Enforces per-attempt page budgets before releasing the lock.
+    /// media bytes. Resolves the stills configuration strictly from the active check binding
+    /// (ignoring or refusing mismatched host-wide settings) and enforces per-attempt page budgets
+    /// before releasing the lock.
     pub(super) fn prepare_review_stills_read(
         &mut self,
         task: &TaskRecord,
@@ -1333,13 +1508,10 @@ impl HostCommandOwner {
             ));
         }
         let reviewer_attempt = authority.attempt.0.clone();
-        let config = self.review_stills.config.clone();
-        config
-            .validate()
-            .map_err(|error| refused(&error.to_string()))?;
 
         let (
             job_token,
+            config,
             binding,
             binding_tag,
             total_samples,
@@ -1357,6 +1529,41 @@ impl HostCommandOwner {
             pinned_images,
         ) = {
             let (job, bundle) = self.require_active_reviewer_job(&reviewer_attempt)?;
+            let ReviewPhase::Checking(checks) = &job.phase else {
+                return Err(refused(
+                    "The active output review is not in the checking phase.",
+                ));
+            };
+            let Some(bound_digest) = checks.configuration_sha256 else {
+                return Err(refused(
+                    "No check configuration digest is bound to the active review.",
+                ));
+            };
+            let config = if let Some(bound) =
+                self.review_stills.bound_config.as_ref().filter(|bound| {
+                    bound.review_token == job.token
+                        && bound.reviewer_attempt == reviewer_attempt
+                        && bound.configuration_sha256 == bound_digest
+                }) {
+                bound.stills.clone()
+            } else {
+                let candidate = C6CheckConfiguration {
+                    overlay: OverlayVerificationConfig::default(),
+                    stills: self.review_stills.config.clone(),
+                    other_checks_sha256: None,
+                };
+                if candidate.configuration_sha256() != bound_digest {
+                    return Err(refused(
+                        "Review stills configuration does not match the bound check configuration digest.",
+                    ));
+                }
+                candidate.stills
+            };
+            config
+                .validate()
+                .map_err(|error| refused(&error.to_string()))?;
+            let stills_config_sha256 = hex_digest(&config.sha256());
+
             let snapshot = bundle.read_snapshot(&job.token.snapshot)?;
             if snapshot.descriptor.checkpoint_ref != task.brief.scope.base.checkpoint {
                 return Err(scope_refused(
@@ -1397,6 +1604,7 @@ impl HostCommandOwner {
                 artifact_media_ref: artifact.artifact.media_ref.clone(),
                 reviewer_attempt,
                 plan_sha256,
+                stills_config_sha256,
             };
             let binding_tag = cursor_binding_tag(&binding)?;
             let start = match request.cursor.as_deref() {
@@ -1419,6 +1627,7 @@ impl HostCommandOwner {
             let artifact_timing = artifact.artifact.output.clone();
             (
                 job.token.clone(),
+                config,
                 binding,
                 binding_tag,
                 u32::try_from(plan.samples.len()).unwrap_or(u32::MAX),
@@ -1623,10 +1832,12 @@ impl HostCommandOwner {
             (plan, plan_sha256, artifact_ref, artifact.media_ref.clone())
         };
 
+        let stills_config_sha256 = hex_digest(&config.stills.sha256());
         let retired = self.review_stills.retired.make_contiguous();
         let context = VisualReviewContext {
             plan: &plan,
             plan_sha256: &plan_sha256,
+            stills_config_sha256: &stills_config_sha256,
             token,
             artifact_ref: &artifact_ref,
             artifact_media_ref: &artifact_media_ref,

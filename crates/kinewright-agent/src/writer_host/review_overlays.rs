@@ -7,9 +7,7 @@
 use std::sync::{Arc, Mutex};
 
 use kinewright_core::{ExportCancellation, MediaError, output_review::RequiredReviewRow};
-use kinewright_media::{
-    OverlayVerificationConfig, OverlayVerificationReport, ReviewOutputTiming, ReviewStillsConfig,
-};
+use kinewright_media::{OverlayVerificationConfig, OverlayVerificationReport, ReviewOutputTiming};
 use kinewright_project::{
     bundle_records::ObjectRef,
     review_job::{
@@ -19,79 +17,15 @@ use kinewright_project::{
     storage_budget::StorageReservation,
     studio_store::FrozenContextRequest,
 };
-use serde::{Deserialize, Serialize};
 
+pub use super::review_stills::{
+    C6CheckConfiguration, combined_review_check_configuration,
+    overlay_and_stills_check_configuration,
+};
 use super::{HostCommandOwner, HostError, HostRefusal};
 
 fn refused(message: &str) -> HostError {
     HostRefusal::new("review_overlays", message).into()
-}
-
-/// Stable SHA-256 digest of the overlay-verification and reviewer-stills configurations combined.
-/// Callers combine this with C5's check configuration digest into a single `ReviewCheckBinding`
-/// before calling `BindChecks`; neither C6 runner binds checks on its own.
-#[must_use]
-pub fn overlay_and_stills_check_configuration(
-    overlay: &OverlayVerificationConfig,
-    stills: &ReviewStillsConfig,
-) -> [u8; 32] {
-    let mut hasher = kinewright_hash::Sha256::new();
-    hasher.update(b"kinewright-overlay-and-stills-check-config-v1\0");
-    hasher.update(&overlay.sha256());
-    hasher.update(&stills.sha256());
-    hasher.finalize()
-}
-
-/// Combine another review suite's configuration digest (for example C5) with C6's digest into one
-/// canonical `ReviewCheckBinding::configuration_sha256`.
-#[must_use]
-pub fn combined_review_check_configuration(
-    other_checks_sha256: &[u8; 32],
-    c6_sha256: &[u8; 32],
-) -> [u8; 32] {
-    let mut hasher = kinewright_hash::Sha256::new();
-    hasher.update(b"kinewright-combined-review-check-config-v1\0");
-    hasher.update(other_checks_sha256);
-    hasher.update(c6_sha256);
-    hasher.finalize()
-}
-
-/// Validated C6 review-check configuration bound into `ReviewCheckBinding::configuration_sha256`.
-/// When C5 and C6 run together under a combined driver, `other_checks_sha256` carries C5's
-/// configuration digest so both runners verify against the exact bound digest.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct C6CheckConfiguration {
-    pub overlay: OverlayVerificationConfig,
-    pub stills: ReviewStillsConfig,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub other_checks_sha256: Option<[u8; 32]>,
-}
-
-impl C6CheckConfiguration {
-    /// Validate both overlay and stills configurations before binding or execution.
-    ///
-    /// # Errors
-    /// Refuses when any threshold or cap is `NaN`, infinite, zero, or outside permitted bounds.
-    pub fn validate(&self) -> Result<(), HostError> {
-        self.overlay
-            .validate()
-            .map_err(|error| refused(&error.to_string()))?;
-        self.stills
-            .validate()
-            .map_err(|error| refused(&error.to_string()))?;
-        Ok(())
-    }
-
-    /// Canonical SHA-256 digest matching `ReviewCheckBinding::configuration_sha256`.
-    #[must_use]
-    pub fn configuration_sha256(&self) -> [u8; 32] {
-        let c6 = overlay_and_stills_check_configuration(&self.overlay, &self.stills);
-        match self.other_checks_sha256 {
-            None => c6,
-            Some(other) => combined_review_check_configuration(&other, &c6),
-        }
-    }
 }
 
 /// Frozen overlay verification inputs prepared under the host lock without hashing any media

@@ -1374,11 +1374,15 @@ fn s5_c6_fix1_config_binding_and_validation_enforced() {
         configuration_sha256: config.configuration_sha256(),
         reviewer_attempt: attempt.attempt.0,
     };
-    shared
-        .lock()
-        .unwrap()
-        .record_review_check(&token, UpdateReviewJob::BindChecks(binding.clone()))
-        .expect("S5_C6_FIX1_BIND_COMBINED");
+    {
+        let mut owner = shared.lock().unwrap();
+        owner
+            .record_review_check(&token, UpdateReviewJob::BindChecks(binding.clone()))
+            .expect("S5_C6_FIX1_BIND_COMBINED");
+        owner
+            .register_bound_c6_configuration(&token, &binding, &config)
+            .expect("S5_C6_FIX2_REGISTER_COMBINED_BOUND_CONFIG");
+    }
 
     // 3. Mismatched overlay config refused on run_overlay_verification.
     let mut wrong_overlay = config.clone();
@@ -1469,19 +1473,11 @@ fn s5_c6_fix1_off_lock_artifact_verification_and_stop_cancellation() {
         },
         ..C6CheckConfiguration::default()
     };
-    let binding = ReviewCheckBinding {
-        configuration_sha256: config.configuration_sha256(),
-        reviewer_attempt: attempt.attempt.0,
-    };
-    {
-        let mut owner = shared.lock().unwrap();
-        owner
-            .set_review_stills_config(config.stills.clone())
-            .unwrap();
-        owner
-            .record_review_check(&token, UpdateReviewJob::BindChecks(binding.clone()))
-            .unwrap();
-    }
+    let (binding, _) = shared
+        .lock()
+        .unwrap()
+        .bind_c6_review_checks(&token, attempt.attempt.0, &config)
+        .unwrap();
 
     // Part A: Prove host writer lock is NOT held while overlay artifact verification & decode run.
     let entered_overlay = Arc::new(Barrier::new(2));
@@ -1592,21 +1588,11 @@ fn s5_c6_fix1_off_lock_artifact_verification_and_stop_cancellation() {
         },
         ..C6CheckConfiguration::default()
     };
-    {
-        let mut owner = shared2.lock().unwrap();
-        owner
-            .set_review_stills_config(budget_cfg.stills.clone())
-            .unwrap();
-        owner
-            .record_review_check(
-                &token2,
-                UpdateReviewJob::BindChecks(ReviewCheckBinding {
-                    configuration_sha256: budget_cfg.configuration_sha256(),
-                    reviewer_attempt: attempt2.attempt.0,
-                }),
-            )
-            .unwrap();
-    }
+    shared2
+        .lock()
+        .unwrap()
+        .bind_c6_review_checks(&token2, attempt2.attempt.0, &budget_cfg)
+        .unwrap();
     assert_eq!(
         reviewer2
             .wire("read_review_stills", serde_json::json!({ "page_size": 1 }))
@@ -2433,12 +2419,12 @@ fn s5_c6_live_reviewer_identifies_decoded_only_discrepancy() {
                         .iter()
                         .find(|a| a.identity.task == reviewer_task.id)
                 {
-                    let b = ReviewCheckBinding {
-                        configuration_sha256: config.configuration_sha256(),
-                        reviewer_attempt: attempt.identity.attempt.0.clone(),
-                    };
-                    owner
-                        .record_review_check(&token, UpdateReviewJob::BindChecks(b.clone()))
+                    let (b, _) = owner
+                        .bind_c6_review_checks(
+                            &token,
+                            attempt.identity.attempt.0.clone(),
+                            &config,
+                        )
                         .expect("S5_C6_LIVE_BIND_REVIEWER");
                     bound_binding = Some(b);
                 }
@@ -2513,4 +2499,130 @@ fn s5_c6_live_reviewer_identifies_decoded_only_discrepancy() {
         validated.blocking_findings >= 1,
         "S5_C6_LIVE_REVIEWER_BLOCKING_FINDING"
     );
+}
+
+/// Fix round 2 (Opus Q5) witness: `read_review_stills` must use the bound stills configuration,
+/// not the host-wide setting.
+/// 1. When no bound `C6CheckConfiguration` is registered and host-wide `set_review_stills_config`
+///    differs from the active `ReviewCheckBinding::configuration_sha256` (e.g., 64 px vs 960 px),
+///    `read_review_stills` is explicitly refused.
+/// 2. When a `C6CheckConfiguration` is registered for the active binding, mutating the host-wide
+///    stills config (64 px, 1 page) is completely ignored: served stills use the bound 960 px /
+///    16-page configuration, and their IDs bind the exact `stills_config_sha256`.
+#[test]
+#[cfg(target_os = "linux")]
+fn s5_c6_fix2_stills_read_uses_bound_config_not_host_wide() {
+    use super::super::review_stills::{
+        C6CheckConfiguration, VisualJudgment, VisualVerdict,
+    };
+    use kinewright_core::output_review::ReviewRowResult;
+    use kinewright_media::ReviewStillsConfig;
+
+    let doc = s5_c6_clean_overlay_doc();
+    let mut f = Fixture::with_inputs(false, doc, "project.kinewright", s5_c6_admit_embedded_font);
+    let (_, parent, director) = c4_director(&f);
+    let (attempt, _, reviewer) = s5_child(&f, &director, &parent, Role::Reviewer);
+    holder(&mut f);
+    let key = s5_c6_publish_version(&f, None, vec![]);
+    let token = s5_c6_start_and_finish_encode(&f, &key);
+    let shared = f.host.owner.upgrade().unwrap();
+
+    // Active binding commits to default 960 px / 16-page stills config.
+    let bound_cfg = C6CheckConfiguration::default();
+    let binding = ReviewCheckBinding {
+        configuration_sha256: bound_cfg.configuration_sha256(),
+        reviewer_attempt: attempt.attempt.0,
+    };
+    // Host-wide stills config is set to an incompatible tiny 64 px / 1-page config.
+    let rogue_host_cfg = ReviewStillsConfig {
+        max_long_edge: 64,
+        max_pages_per_attempt: 1,
+        ..ReviewStillsConfig::default()
+    };
+    {
+        let mut owner = shared.lock().unwrap();
+        owner
+            .set_review_stills_config(rogue_host_cfg.clone())
+            .expect("S5_C6_FIX2_SET_ROGUE_HOST_STILLS_CONFIG");
+        owner
+            .record_review_check(&token, UpdateReviewJob::BindChecks(binding.clone()))
+            .expect("S5_C6_FIX2_BIND_960_CONFIG");
+    }
+
+    // 1. Without registering the bound C6CheckConfiguration, the mismatched host-wide 64 px config
+    //    MUST be refused by `read_review_stills` (cannot serve 64 px stills under a 960 px binding).
+    let refused_read = reviewer.wire("read_review_stills", serde_json::json!({ "page_size": 2 }));
+    assert_eq!(
+        refused_read.is_error,
+        Some(true),
+        "S5_C6_FIX2_MISMATCHED_HOST_STILLS_CONFIG_REFUSED: {refused_read:?}"
+    );
+    assert!(
+        format!("{refused_read:?}").contains("does not match the bound check configuration digest"),
+        "S5_C6_FIX2_MISMATCHED_HOST_STILLS_CONFIG_REASON: {refused_read:?}"
+    );
+
+    // 2. Registering a mismatched C6CheckConfiguration is also refused.
+    let wrong_c6 = C6CheckConfiguration {
+        stills: rogue_host_cfg.clone(),
+        ..C6CheckConfiguration::default()
+    };
+    assert!(
+        shared
+            .lock()
+            .unwrap()
+            .register_bound_c6_configuration(&token, &binding, &wrong_c6)
+            .is_err(),
+        "S5_C6_FIX2_REGISTER_WRONG_BOUND_CONFIG_REFUSED"
+    );
+
+    // 3. Register the exact bound 960 px config, then keep/re-set the rogue 64 px / 1-page
+    //    host-wide config. `read_review_stills` MUST ignore the host-wide setting and serve
+    //    full 480x270 stills across multiple pages using the bound config.
+    {
+        let mut owner = shared.lock().unwrap();
+        owner
+            .register_bound_c6_configuration(&token, &binding, &bound_cfg)
+            .expect("S5_C6_FIX2_REGISTER_BOUND_CONFIG");
+        owner
+            .set_review_stills_config(rogue_host_cfg)
+            .expect("S5_C6_FIX2_MUTATE_HOST_CONFIG_AFTER_BIND");
+    }
+    let (stills, _, pages) = s5_c6_read_all_stills(&reviewer, 2);
+    assert!(
+        pages >= 2,
+        "S5_C6_FIX2_HOST_1PAGE_LIMIT_IGNORED: pages={pages}"
+    );
+    assert!(
+        stills.iter().all(|s| s.width == 480 && s.height == 270),
+        "S5_C6_FIX2_HOST_64PX_LIMIT_IGNORED: {:?}",
+        stills.iter().map(|s| (s.width, s.height)).collect::<Vec<_>>()
+    );
+    let expected_stills_hex = {
+        use std::fmt::Write as _;
+        let mut s = String::with_capacity(64);
+        for b in bound_cfg.stills.sha256() {
+            let _ = write!(&mut s, "{b:02x}");
+        }
+        s
+    };
+    assert!(
+        stills
+            .iter()
+            .all(|s| s.stills_config_sha256 == expected_stills_hex),
+        "S5_C6_FIX2_STILLS_CONFIG_DIGEST_BOUND"
+    );
+
+    // 4. Judgment passes cleanly against the bound 960 px config.
+    let judgment = VisualJudgment {
+        verdict: VisualVerdict::Pass,
+        reviewed_still_ids: stills.iter().map(|s| s.still_id.clone()).collect(),
+        findings: vec![],
+    };
+    let (validated, _) = shared
+        .lock()
+        .unwrap()
+        .record_visual_review_judgment(&token, binding, &bound_cfg, &judgment)
+        .expect("S5_C6_FIX2_BOUND_JUDGMENT_PASSES");
+    assert_eq!(validated.row_result, ReviewRowResult::Pass);
 }
