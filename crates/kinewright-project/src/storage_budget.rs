@@ -107,6 +107,9 @@ pub struct StorageUsage {
     pub copy_bytes: u64,
     pub reserved_bytes: u64,
     pub reserved_copy_bytes: u64,
+    /// Subset of `reserved_copy_bytes` charged to the live review stage. Its
+    /// bytes never become owned media.
+    pub reserved_stage_bytes: u64,
     pub decoded_bytes: u64,
     /// Subset of `decoded_bytes` retained by cursors, format probing, and codecs.
     pub decoder_bytes: u64,
@@ -140,6 +143,7 @@ pub struct StorageReservation<T = ()> {
     decoder: u64,
 
     copy: bool,
+    review_stage: bool,
     active: bool,
 }
 impl StorageReservation {
@@ -171,6 +175,8 @@ impl StorageReservation {
     pub(crate) fn absorb_copy_growth(&mut self, mut extension: Self) -> Result<(), BundleError> {
         if !self.active
             || !extension.active
+            || self.review_stage
+            || extension.review_stage
             || !self.copy
             || !extension.copy
             || self.decoded != 0
@@ -340,13 +346,13 @@ impl StorageReservation {
         if codec_total > limits.decoder_bytes {
             return Err(BundleError::Capacity("decoder bytes"));
         }
-        // Copy reservations are bounded by the copy overlap below, as sealed
-        // copies are excluded from physical bytes here.
+        // The review stage charge is bounded by the copy overlap below; its
+        // bytes never become owned media.
         if !copy
             && state
                 .physical_bytes
                 .checked_sub(state.copy_bytes)
-                .and_then(|v| v.checked_add(reserved.checked_sub(state.reserved_copy_bytes)?))
+                .and_then(|v| v.checked_add(reserved.checked_sub(state.reserved_stage_bytes)?))
                 .is_none_or(|v| {
                     v > limits
                         .owned_bytes
@@ -388,8 +394,28 @@ impl StorageReservation {
             decoder: codec_charge,
 
             copy,
+            review_stage: false,
             active: true,
         })
+    }
+
+    /// Mark this copy charge as the live review stage's.
+    pub(crate) fn charge_review_stage(&mut self) -> Result<(), BundleError> {
+        if !self.active || !self.copy || self.review_stage {
+            return Err(BundleError::Capacity(
+                "review stage charge is not a live copy",
+            ));
+        }
+        let mut state = self
+            .usage
+            .lock()
+            .map_err(|_| BundleError::Capacity("accounting poisoned"))?;
+        state.reserved_stage_bytes = state
+            .reserved_stage_bytes
+            .checked_add(self.bytes)
+            .ok_or(BundleError::Capacity("review stage reserve overflow"))?;
+        self.review_stage = true;
+        Ok(())
     }
 
     #[cfg(any(test, feature = "test-util"))]
@@ -411,6 +437,7 @@ impl StorageReservation {
             decoder: self.decoder,
 
             copy: self.copy,
+            review_stage: self.review_stage,
             active: self.active,
         };
         self.active = false;
@@ -450,10 +477,15 @@ impl StorageReservation {
             .decoded_bytes
             .checked_sub(self.decoded)
             .ok_or(BundleError::Capacity("decode underflow"))?;
+        let stage = state
+            .reserved_stage_bytes
+            .checked_sub(if self.review_stage { self.bytes } else { 0 })
+            .ok_or(BundleError::Capacity("review stage reservation underflow"))?;
         state.physical_bytes = physical;
         state.reserved_bytes = reserved;
         state.copy_bytes = copies;
         state.reserved_copy_bytes = reserved_copies;
+        state.reserved_stage_bytes = stage;
         state.decoded_bytes = decoded;
         state.peak_physical_bytes = state.peak_physical_bytes.max(physical);
         self.active = false;
@@ -516,6 +548,7 @@ impl<T> StorageReservation<T> {
             decoder: self.decoder,
 
             copy: self.copy,
+            review_stage: self.review_stage,
             active: self.active,
         };
         self.active = false;
@@ -541,18 +574,22 @@ impl<T> Drop for StorageReservation<T> {
             return;
         }
         if let Ok(mut state) = self.usage.lock() {
-            if let (Some(bytes), Some(decoded), Some(decoder), Some(copies)) = (
+            if let (Some(bytes), Some(decoded), Some(decoder), Some(copies), Some(stage)) = (
                 state.reserved_bytes.checked_sub(self.bytes),
                 state.decoded_bytes.checked_sub(self.decoded),
                 state.decoder_bytes.checked_sub(self.decoder),
                 state
                     .reserved_copy_bytes
                     .checked_sub(if self.copy { self.bytes } else { 0 }),
+                state
+                    .reserved_stage_bytes
+                    .checked_sub(if self.review_stage { self.bytes } else { 0 }),
             ) {
                 state.reserved_bytes = bytes;
                 state.decoded_bytes = decoded;
                 state.decoder_bytes = decoder;
                 state.reserved_copy_bytes = copies;
+                state.reserved_stage_bytes = stage;
             } else {
                 state.damaged_accounting = true;
             }

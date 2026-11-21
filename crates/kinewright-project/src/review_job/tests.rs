@@ -437,23 +437,9 @@ fn s5_review_store_filling_keeps_terminal_writes_and_publication() {
         };
         bundle.restrict_limits_probe(limits).unwrap();
         bundle.store.free_space_probe(Some(STAGE + room)).unwrap();
-        let ordinary = bundle.store.admit_blob(
-            &mut &b"ordinary"[..],
-            &ObjectRef {
-                sha256: kinewright_media::sha256_bytes(b"ordinary"),
-                byte_length: 8,
-                record_kind: RecordKind::OwnedEvidence,
-            },
-            &[],
-        );
         if !matches!(ending, StagedEnding::Publish) {
-            assert!(
-                matches!(ordinary, Err(BundleError::Capacity("disk reserve"))),
-                "REVIEW_ORDINARY_WRITE_AT_CEILING {ending:?}: {:?}",
-                ordinary.map(|_| ())
-            );
+            assert_ordinary_at_ceiling(&mut bundle, ending);
         }
-        drop(ordinary);
         let phase = match ending {
             StagedEnding::Stop => bundle.update_review_job(&token, UpdateReviewJob::Stop),
             StagedEnding::Pause => {
@@ -502,25 +488,60 @@ fn s5_review_store_filling_keeps_terminal_writes_and_publication() {
             "{ending:?}: {phase:?}"
         );
         assert!(!bundle.store.run_limit_reached(), "REVIEW_RUN_LIMIT_UNSET");
-        charge.finish_writing();
-        bundle.store.sweep_review_staging(&stage).unwrap();
         drop(staging);
-        drop(charge);
-        bundle.store.set_run_budget(false);
-        let retire = if matches!(phase, ReviewPhase::Stopping) {
-            UpdateReviewJob::RetireStopped
-        } else {
-            UpdateReviewJob::RetireStage
-        };
-        bundle
-            .update_review_job(&token, retire)
-            .unwrap_or_else(|error| panic!("REVIEW_STAGED_RETIREMENT {ending:?}: {error}"));
-        assert_eq!(bundle.store.usage().unwrap().reserved_copy_bytes, 0);
-        assert!(
-            bundle.store.reserve(64 << 10, 0, false).is_ok(),
-            "REVIEW_RELEASED_CHARGE_FREES_ORDINARY_SPACE {ending:?}"
-        );
+        retire_staged(&mut bundle, &token, &stage, charge, &phase, ending);
     }
+}
+
+fn assert_ordinary_at_ceiling(bundle: &mut ProjectBundle, ending: StagedEnding) {
+    let ordinary = bundle.store.admit_blob(
+        &mut &b"ordinary"[..],
+        &ObjectRef {
+            sha256: kinewright_media::sha256_bytes(b"ordinary"),
+            byte_length: 8,
+            record_kind: RecordKind::OwnedEvidence,
+        },
+        &[],
+    );
+    assert!(
+        matches!(ordinary, Err(BundleError::Capacity("disk reserve"))),
+        "REVIEW_ORDINARY_WRITE_AT_CEILING {ending:?}: {:?}",
+        ordinary.map(|_| ())
+    );
+}
+
+/// Sweep, release the charge and retire; the released charge frees ordinary
+/// space again.
+fn retire_staged(
+    bundle: &mut ProjectBundle,
+    token: &ReviewToken,
+    stage: &ReviewStage,
+    charge: ReviewStageCharge,
+    phase: &ReviewPhase,
+    ending: StagedEnding,
+) {
+    charge.finish_writing();
+    bundle.store.sweep_review_staging(stage).unwrap();
+    drop(charge);
+    bundle.store.set_run_budget(false);
+    let retire = if matches!(phase, ReviewPhase::Stopping) {
+        UpdateReviewJob::RetireStopped
+    } else {
+        UpdateReviewJob::RetireStage
+    };
+    bundle
+        .update_review_job(token, retire)
+        .unwrap_or_else(|error| panic!("REVIEW_STAGED_RETIREMENT {ending:?}: {error}"));
+    let usage = bundle.store.usage().unwrap();
+    assert_eq!(
+        (usage.reserved_copy_bytes, usage.reserved_stage_bytes),
+        (0, 0),
+        "REVIEW_STAGE_CHARGE_RELEASED {ending:?}"
+    );
+    assert!(
+        bundle.store.reserve(64 << 10, 0, false).is_ok(),
+        "REVIEW_RELEASED_CHARGE_FREES_ORDINARY_SPACE {ending:?}"
+    );
 }
 
 #[test]

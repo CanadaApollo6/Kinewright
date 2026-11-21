@@ -152,7 +152,8 @@ impl ProjectStore {
         &self,
         stage: &ReviewStage,
     ) -> Result<ReviewStageCharge, BundleError> {
-        let reservation = self.reserve_copy(stage.byte_limit)?;
+        let mut reservation = self.reserve_copy(stage.byte_limit)?;
+        reservation.charge_review_stage()?;
         let slot = &self.review_stage_slot().0;
         let mut live = slot
             .lock()
