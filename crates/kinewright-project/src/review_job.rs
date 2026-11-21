@@ -8,6 +8,8 @@ mod staging;
 pub(crate) use staging::LiveStageSlot;
 #[cfg(target_os = "linux")]
 pub use staging::{ReviewStageCharge, ReviewStaging};
+mod check_inputs;
+pub use check_inputs::ReviewCheckInputs;
 
 use kinewright_core::{
     ExportSettings,
