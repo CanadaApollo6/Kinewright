@@ -76,6 +76,8 @@ pub(crate) struct EditorialDetails {
     pub audit: Option<EditorialAudit>,
     pub proposal: Option<(ObjectRef, RulebookProposal)>,
     pub annotations: Option<kinewright_project::review_job::ReviewAnnotationFields>,
+    /// The selected version's seal receipt.
+    pub receipt: Option<kinewright_project::review_job::ReviewReceipt>,
 }
 
 pub(crate) enum Action {
@@ -1010,6 +1012,7 @@ impl Ja1Attachment {
                 audit: reply.editorial_audit,
                 proposal: reply.rulebook_proposal,
                 annotations: reply.review_annotations,
+                receipt: reply.review_receipt,
             });
         }
         let audit = version
@@ -1030,6 +1033,10 @@ impl Ja1Attachment {
                 .map(|key| self.owner.review_annotations(key))
                 .transpose()?
                 .flatten(),
+            receipt: version
+                .map(|key| self.owner.review_receipts(key))
+                .transpose()?
+                .and_then(|receipts| receipts.into_iter().next()),
         })
     }
 

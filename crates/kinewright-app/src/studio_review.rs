@@ -1,4 +1,5 @@
 use eframe::egui;
+use kinewright_core::output_review::{DeliveryException, EligibilityReason, SealedReviewOutcome};
 use kinewright_project::{
     review_job::{ReviewAnnotationFields, ReviewControl, ReviewPhase, ReviewStatus},
     studio_records::SnapshotKey,
@@ -66,8 +67,14 @@ impl OutputReview {
                 "{label} · {}",
                 status.token.snapshot.version.as_str()
             ));
-            if let ReviewPhase::Paused { reason, .. } = &status.phase {
+            if let ReviewPhase::Paused {
+                reason, findings, ..
+            } = &status.phase
+            {
                 ui.label(reason);
+                for finding in findings {
+                    ui.label(format!("· {}", finding.note));
+                }
             }
             ui.horizontal(|ui| {
                 if !status.stop_pending
@@ -84,6 +91,8 @@ impl OutputReview {
                 }
             });
         }
+
+        show_receipt(ui, details, version);
 
         if let Some(version) = version {
             if self
@@ -142,4 +151,115 @@ fn json_array<T: serde::Serialize>(value: Option<&Vec<T>>) -> String {
     value
         .and_then(|value| serde_json::to_string(value).ok())
         .unwrap_or_else(|| "[]".into())
+}
+
+/// The seal label of the selected version only, with what was not checked.
+fn show_receipt(
+    ui: &mut egui::Ui,
+    details: Option<&crate::ja1_attachment::EditorialDetails>,
+    version: Option<&SnapshotKey>,
+) {
+    let receipt = details.and_then(|details| details.receipt.as_ref());
+    if let Some((label, not_checked)) =
+        receipt.and_then(|receipt| receipt_lines(&receipt.key.snapshot, &receipt.outcome, version))
+    {
+        ui.strong(label);
+        if !not_checked.is_empty() {
+            ui.label("Not checked:");
+            for line in not_checked {
+                ui.label(format!("· {line}"));
+            }
+        }
+    }
+}
+
+/// The label and the elements not checked, when the receipt is the selected
+/// version's own.
+fn receipt_lines(
+    sealed: &SnapshotKey,
+    outcome: &SealedReviewOutcome,
+    selected: Option<&SnapshotKey>,
+) -> Option<(&'static str, Vec<String>)> {
+    if selected != Some(sealed) {
+        return None;
+    }
+    Some(match outcome {
+        SealedReviewOutcome::Delivered => ("Delivered", Vec::new()),
+        SealedReviewOutcome::ReviewedFactsNotChecked { exceptions } => (
+            "Reviewed, facts not checked",
+            exceptions.iter().map(describe).collect(),
+        ),
+    })
+}
+
+fn describe(exception: &DeliveryException) -> String {
+    match exception {
+        DeliveryException::Element { element, reason } => {
+            let reason = match reason {
+                EligibilityReason::UnknownText(_) => "its text could not be read",
+                EligibilityReason::EmptyText => "it has no text",
+                EligibilityReason::CaptionSpeechNotDetermined => "its speech was not determined",
+                EligibilityReason::CaptionWordsDisagree => "its words differ from the speech",
+                EligibilityReason::CaptionWordClipped => "a caption word is clipped",
+                EligibilityReason::SourcedText => "it is sourced",
+                EligibilityReason::NumericCharacter => "it contains a number",
+                EligibilityReason::NumericTextUncomparable => "its numbers could not be compared",
+                EligibilityReason::CaptionTextUncomparable => "its text could not be compared",
+            };
+            format!("Clip {}: {reason}", element.0)
+        }
+        DeliveryException::OverlayInventoryNotDetermined(kind) => {
+            format!("The {kind:?} overlays could not be listed")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kinewright_project::bundle_records::{HeadId, ObjectRef, ProjectId, RecordKind};
+    use kinewright_project::studio_records::VersionId;
+
+    fn key() -> SnapshotKey {
+        SnapshotKey {
+            project: ProjectId::fresh().unwrap(),
+            version: VersionId::fresh().unwrap(),
+            head: HeadId::fresh().unwrap(),
+            document_hash: "0".repeat(64),
+            input_manifest_ref: ObjectRef {
+                sha256: "0".repeat(64),
+                byte_length: 1,
+                record_kind: RecordKind::InputManifest,
+            },
+        }
+    }
+
+    #[test]
+    fn ja1_s5a_c7_studio_label_only_for_the_selected_version() {
+        let sealed = key();
+        let other = key();
+        let facts = SealedReviewOutcome::ReviewedFactsNotChecked {
+            exceptions: vec![DeliveryException::Element {
+                element: kinewright_core::ClipId(2),
+                reason: EligibilityReason::NumericCharacter,
+            }],
+        };
+        assert_eq!(
+            receipt_lines(&sealed, &facts, Some(&sealed)),
+            Some((
+                "Reviewed, facts not checked",
+                vec!["Clip 2: it contains a number".to_owned()]
+            ))
+        );
+        assert_eq!(
+            receipt_lines(&sealed, &SealedReviewOutcome::Delivered, Some(&sealed)),
+            Some(("Delivered", Vec::new()))
+        );
+        assert_eq!(
+            receipt_lines(&sealed, &facts, Some(&other)),
+            None,
+            "C7_OTHER_VERSION"
+        );
+        assert_eq!(receipt_lines(&sealed, &facts, None), None, "C7_NO_VERSION");
+    }
 }
