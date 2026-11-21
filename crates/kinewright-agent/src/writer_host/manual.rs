@@ -46,6 +46,7 @@ pub(super) fn connector_command(command: &HostCommand) -> bool {
             | HostCommand::ListVersions
             | HostCommand::ReadEditorial { .. }
             | HostCommand::DecideRulebook { .. }
+            | HostCommand::Review(_)
             | HostCommand::ReadSnapshot { .. }
             | HostCommand::LeaseSnapshot { .. }
             | HostCommand::LeaseCurrentEdit { .. }

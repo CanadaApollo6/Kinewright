@@ -47,7 +47,8 @@ use crate::{
 mod owned;
 pub(crate) use owned::export_owned_document;
 pub use owned::{
-    OwnedExport, OwnedExportCleanup, OwnedExportCommitGate, OwnedExportError, OwnedExportTarget,
+    OwnedExport, OwnedExportCleanup, OwnedExportCommitGate, OwnedExportError, OwnedExportReceipt,
+    OwnedExportTarget,
 };
 
 enum ExportSource<'a> {

@@ -175,6 +175,7 @@ impl Door {
             | HostCommand::ListVersions
             | HostCommand::ReadEditorial { .. }
             | HostCommand::DecideRulebook { .. }
+            | HostCommand::Review(_)
             | HostCommand::ReadSnapshot { .. }
             | HostCommand::ReadFeedback { .. }
             | HostCommand::ResolveFeedback { .. }

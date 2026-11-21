@@ -383,14 +383,16 @@ fn s5_owned_export_keeps_pinned_decodes_and_matches_ordinary_export() {
             return;
         }
         Ok("owned") => {
-            export_owned_document(
+            let OwnedExport::Clean(_receipt) = export_owned_document(
                 &Arc::new(fixture.inputs()),
                 target(&out),
                 &settings,
                 &progress,
                 gpu,
             )
-            .unwrap();
+            .unwrap() else {
+                panic!("expected clean staging");
+            };
             assert_eq!(crate::verify::presented_frame_count(&out).unwrap(), 18);
             return;
         }
@@ -404,9 +406,12 @@ fn s5_owned_export_keeps_pinned_decodes_and_matches_ordinary_export() {
     let assert_pinned = |case| {
         let before_av = fixture.av_reads.acquires.load(Relaxed);
         let before_still = fixture.still_reads.acquires.load(Relaxed);
-        let receipt =
+        let OwnedExport::Clean(receipt) =
             export_owned_document(&inputs, target(&out), &settings, &progress, gpu.clone())
-                .unwrap_or_else(|error| panic!("{case}: {error}"));
+                .unwrap_or_else(|error| panic!("{case}: {error}"))
+        else {
+            panic!("{case}: expected clean staging");
+        };
         assert_eq!(receipt.report, clean_report, "{case}: normalization");
         assert!(
             fixture.av_reads.acquires.load(Relaxed) >= before_av + 4,
@@ -799,7 +804,12 @@ fn s5_owned_export_install_serializes_with_cancellation_and_revocation() {
     let gpu = fallback_gpu().context();
     let out = fixture.dir.path("stage.mp4");
     let wait = Duration::from_secs(10);
-    for (stop_first, revoke) in [(true, false), (true, true), (false, false)] {
+    for (stop_first, revoke, repeat) in [
+        (true, false, false),
+        (true, true, false),
+        (false, false, false),
+        (false, false, true),
+    ] {
         let settings = fixture.settings();
         let origin = MediaSourceOrigin::new_project();
         let revoked = Arc::new(AtomicBool::new(false));
@@ -831,7 +841,19 @@ fn s5_owned_export_install_serializes_with_cancellation_and_revocation() {
             if !stop_first {
                 hold();
             }
-            install()
+            let result = install();
+            assert_eq!(
+                out.exists(),
+                !stop_first,
+                "installation must run inside the gate"
+            );
+            if repeat {
+                assert!(matches!(
+                    install(),
+                    Err(MediaError::Backend(reason)) if reason.contains("invoked more than once")
+                ));
+            }
+            result
         };
         let result = thread::scope(|scope| {
             let worker = scope.spawn(|| {
@@ -885,7 +907,14 @@ fn s5_owned_export_install_serializes_with_cancellation_and_revocation() {
             assert_eq!(media_refusal(result), Some(expected));
             assert!(!out.exists());
         } else {
-            let receipt = result.unwrap();
+            let receipt = if repeat {
+                let Err(OwnedExportError::RepeatedCommit(outcome)) = result else {
+                    panic!("repeated callback cannot report success even if the gate returns Ok");
+                };
+                *outcome
+            } else {
+                result.unwrap()
+            };
             assert!(settings.cancellation.is_cancelled());
             assert!(out.is_file());
             fs::remove_file(&out).unwrap();
@@ -939,8 +968,9 @@ fn s5_owned_export_returns_unremoved_staging_with_its_charge() {
         );
         assert_eq!(ledger.live.load(Relaxed), STAGING_BYTES);
         let mut cleanup = if install {
-            let mut receipt = result.unwrap();
-            let cleanup = receipt.cleanup.take().unwrap();
+            let OwnedExport::Cleanup { receipt, cleanup } = result.unwrap() else {
+                panic!("installed export must return the cleanup obligation");
+            };
             fs::remove_file(&out).unwrap();
             drop(receipt);
             cleanup

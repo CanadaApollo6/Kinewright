@@ -350,6 +350,8 @@ pub fn verify_projection_payloads(
         || left.version_index_ref != right.version_index_ref
         || left.approved_rulebook_ref != right.approved_rulebook_ref
         || left.pending_rulebook_ref != right.pending_rulebook_ref
+        || left.active_review_ref != right.active_review_ref
+        || left.stopped_review != right.stopped_review
         || left.feedback_index_ref != right.feedback_index_ref
         || left.run_index_ref != right.run_index_ref
         || left.claim_index_ref != right.claim_index_ref

@@ -481,6 +481,24 @@ pub(super) fn validate(
             RecordKind::RulebookProposal => {
                 control!(crate::editorial::RulebookProposal);
             }
+            RecordKind::ReviewAnnotations => {
+                control!(crate::review_job::StoredReviewAnnotations);
+            }
+            RecordKind::ReviewExpectations => {
+                control!(crate::review_job::StoredReviewExpectations);
+            }
+            RecordKind::ReviewRequest => {
+                control!(crate::review_job::ReviewRequest);
+            }
+            RecordKind::ReviewJob => {
+                control!(crate::review_job::ReviewJob);
+            }
+            RecordKind::ReviewArtifact => {
+                control!(crate::review_job::ReviewArtifact);
+            }
+            RecordKind::ReviewEvidence => {
+                control!(crate::review_job::ReviewEvidence);
+            }
             RecordKind::FeedbackIndex => {
                 control!(crate::studio_records::FeedbackIndex);
             }

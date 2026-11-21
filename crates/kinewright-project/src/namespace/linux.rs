@@ -1530,3 +1530,10 @@ pub(super) fn seal_existing(
     )?;
     Ok(())
 }
+
+impl ProjectNamespace {
+    pub(crate) fn review_staging_parent(&self, create: bool) -> Result<File, BundleError> {
+        self.verify()?;
+        directory(self, Path::new("studio/review-staging"), create)
+    }
+}

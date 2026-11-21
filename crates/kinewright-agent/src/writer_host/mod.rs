@@ -41,6 +41,8 @@ mod completion_fixture;
 pub use completion_fixture::CompletionFixture;
 mod editorial;
 mod provider_usage;
+#[cfg(target_os = "linux")]
+mod review_job;
 mod settled_release;
 mod task_completion;
 pub(crate) mod task_context;
@@ -720,6 +722,11 @@ impl Drop for WriterHost {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             owner.fence_shutdown();
+            drop(owner);
+            #[cfg(target_os = "linux")]
+            if let Some(owner) = self.owner.upgrade() {
+                HostCommandOwner::join_review_for_shutdown(&owner);
+            }
         }
         #[cfg(target_os = "linux")]
         self.runtime.stop();
@@ -946,10 +953,18 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
             state.runtime.observe_status_request();
         }
         #[cfg(target_os = "linux")]
-        let reply = provider_readiness::execute(&state.owner, &bearer, request);
+        let reply = if let HostCommand::Review(control) = &request.command {
+            review_job::execute(&state.owner, &bearer, &request, control)
+        } else {
+            provider_readiness::execute(&state.owner, &bearer, request)
+        };
         #[cfg(not(target_os = "linux"))]
         let reply = run_inputs::execute(&state.owner, &bearer, request);
         if shutting_down && reply.error.is_none() {
+            // The fenced encode worker exits before the router drops the owner
+            // and its project lock.
+            #[cfg(target_os = "linux")]
+            HostCommandOwner::join_review_for_shutdown(&state.owner);
             #[cfg(target_os = "linux")]
             state.runtime.request_stop();
             state.stop.notify_one();
@@ -1666,6 +1681,8 @@ pub struct HostCommandOwner {
         Vec<u8>,
         kinewright_project::storage_budget::StorageReservation,
     )>,
+    #[cfg(target_os = "linux")]
+    review_runtime: review_job::ReviewRuntime,
     voice_jobs: BTreeMap<kinewright_project::studio_records::NoteId, voice::Job>,
     prepared_owned_media: Option<kinewright_project::owned_inputs::PreparedOwnedMedia>,
     confirmed_switch: Option<switch::SwitchConfirmation>,
@@ -1863,6 +1880,8 @@ impl HostCommandOwner {
             foreground_owner: None,
             pending_read_pin: None,
             voice_payload: None,
+            #[cfg(target_os = "linux")]
+            review_runtime: review_job::ReviewRuntime::default(),
             voice_jobs: BTreeMap::new(),
             prepared_owned_media: None,
             pending_switch: None,
@@ -1898,6 +1917,10 @@ impl HostCommandOwner {
         // This is a bootstrap snapshot, not the C9 continuous manual stream.
         if let Some(initial_snapshot) = bootstrap_snapshot {
             host.install_verified(initial_snapshot)?;
+        }
+        #[cfg(target_os = "linux")]
+        if host.owner.is_some() {
+            let _ = host.reconcile_review_job();
         }
         Ok(host)
     }
@@ -2026,6 +2049,7 @@ impl HostCommandOwner {
         {
             self.recovery_only = true;
             self.revoke_native_owner(None);
+            self.review_runtime.cancel_for_shutdown();
         }
     }
     /// Errors stay typed in the reply; source retention loss is latched for the whole context.
@@ -2328,6 +2352,9 @@ impl HostCommandOwner {
             self.dispatches += 1;
         }
         match command {
+            HostCommand::Review(_) => {
+                return Err(BundleError::DurabilityUnsupported.into());
+            }
             HostCommand::ReconcileTaskReceipt { .. }
             | HostCommand::IssueMetadataIssuer { .. }
             | HostCommand::DispatchOrchestration { .. }
@@ -2407,6 +2434,7 @@ impl HostCommandOwner {
                         .owner()?
                         .editorial_audit(&key)?
                         .map(|audit| (*audit).clone());
+                    reply.review_annotations = self.owner()?.review_annotations(&key)?;
                 }
                 reply.rulebook_proposal = self
                     .owner()?
@@ -2867,6 +2895,12 @@ impl HostCommandOwner {
                 let Some(Choice::Release(path)) = self.choice.take() else {
                     return Err(BundleError::HistoryChanged.into());
                 };
+                // A finished review worker retires first, so its stage is
+                // swept while this process still holds the copy's lock.
+                #[cfg(target_os = "linux")]
+                if !self.settlement_owned_elsewhere() {
+                    let _ = self.retire_review_worker();
+                }
                 self.owner_mut()?.release_completed_capture(&path)?;
                 self.message =
                     "Completed capture owner released. Originating source retention is unchanged."

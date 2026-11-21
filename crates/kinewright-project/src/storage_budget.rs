@@ -107,6 +107,12 @@ pub struct StorageUsage {
     pub copy_bytes: u64,
     pub reserved_bytes: u64,
     pub reserved_copy_bytes: u64,
+    /// Subset of `reserved_copy_bytes` charged to the live review stage. Its
+    /// bytes never become owned media.
+    pub reserved_stage_bytes: u64,
+    /// Bumped by every review stage charge. A stage credit counts only
+    /// against the charge it was read with.
+    pub stage_generation: u64,
     pub decoded_bytes: u64,
     /// Subset of `decoded_bytes` retained by cursors, format probing, and codecs.
     pub decoder_bytes: u64,
@@ -125,6 +131,58 @@ pub struct StorageUsage {
     pub unsettled: bool,
 }
 
+/// Free disk bytes, and the part of them that is a live review stage's credit.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FreeSpace {
+    bytes: u64,
+    stage_credit: u64,
+    stage_generation: u64,
+}
+
+impl From<u64> for FreeSpace {
+    fn from(bytes: u64) -> Self {
+        Self {
+            bytes,
+            stage_credit: 0,
+            stage_generation: 0,
+        }
+    }
+}
+
+impl FreeSpace {
+    pub(crate) const fn crediting_stage(
+        free: u64,
+        stage_credit: u64,
+        stage_generation: u64,
+    ) -> Self {
+        Self {
+            bytes: free.saturating_add(stage_credit),
+            stage_credit,
+            stage_generation,
+        }
+    }
+
+    pub(crate) fn less(self, bytes: u64) -> Option<Self> {
+        Some(Self {
+            bytes: self.bytes.checked_sub(bytes)?,
+            ..self
+        })
+    }
+
+    /// Read under the ledger lock: a stage credit counts only while the stage
+    /// charge it was read with is still reserved, so it never outlives that
+    /// charge or offsets a later stage's.
+    fn under(self, state: &StorageUsage) -> u64 {
+        let honoured = if self.stage_generation == state.stage_generation {
+            self.stage_credit.min(state.reserved_stage_bytes)
+        } else {
+            0
+        };
+        self.bytes
+            .saturating_sub(self.stage_credit.saturating_sub(honoured))
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ReservationKind {
     Record,
@@ -140,6 +198,7 @@ pub struct StorageReservation<T = ()> {
     decoder: u64,
 
     copy: bool,
+    review_stage: bool,
     active: bool,
 }
 impl StorageReservation {
@@ -149,7 +208,7 @@ impl StorageReservation {
         &self,
         target_bytes: u64,
         limits: &StorageLimits,
-        free: u64,
+        free: impl Into<FreeSpace>,
     ) -> Result<Self, BundleError> {
         if !self.active || !self.copy || self.decoded != 0 {
             return Err(BundleError::Capacity(
@@ -171,6 +230,8 @@ impl StorageReservation {
     pub(crate) fn absorb_copy_growth(&mut self, mut extension: Self) -> Result<(), BundleError> {
         if !self.active
             || !extension.active
+            || self.review_stage
+            || extension.review_stage
             || !self.copy
             || !extension.copy
             || self.decoded != 0
@@ -216,7 +277,7 @@ impl StorageReservation {
         decoded: u64,
 
         copy: bool,
-        free: u64,
+        free: impl Into<FreeSpace>,
     ) -> Result<Self, BundleError> {
         Self::reserve_for_retained_read(usage, limits, bytes, decoded, copy, free, false)
     }
@@ -231,7 +292,7 @@ impl StorageReservation {
         decoded: u64,
 
         copy: bool,
-        free: u64,
+        free: impl Into<FreeSpace>,
         cleanup_only: bool,
     ) -> Result<Self, BundleError> {
         Self::reserve_kind(
@@ -249,7 +310,7 @@ impl StorageReservation {
         usage: &Arc<Mutex<StorageUsage>>,
         limits: &StorageLimits,
         decoded: u64,
-        free: u64,
+        free: impl Into<FreeSpace>,
     ) -> Result<Self, BundleError> {
         Self::reserve_kind(
             usage,
@@ -274,7 +335,7 @@ impl StorageReservation {
         decoded: u64,
 
         copy: bool,
-        free: u64,
+        free: impl Into<FreeSpace>,
         cleanup_only: bool,
         kind: ReservationKind,
     ) -> Result<Self, BundleError> {
@@ -321,7 +382,7 @@ impl StorageReservation {
                 .ok_or(BundleError::Capacity(
                     "decoder subset exceeds decoded bytes",
                 ))?;
-        if matches!(kind, ReservationKind::Record) && reserved > free {
+        if matches!(kind, ReservationKind::Record) && reserved > free.into().under(&state) {
             return Err(BundleError::Capacity("disk reserve"));
         }
         if physical > allowance {
@@ -340,11 +401,13 @@ impl StorageReservation {
         if codec_total > limits.decoder_bytes {
             return Err(BundleError::Capacity("decoder bytes"));
         }
+        // The review stage charge is bounded by the copy overlap below; its
+        // bytes never become owned media.
         if !copy
             && state
                 .physical_bytes
                 .checked_sub(state.copy_bytes)
-                .and_then(|v| v.checked_add(reserved))
+                .and_then(|v| v.checked_add(reserved.checked_sub(state.reserved_stage_bytes)?))
                 .is_none_or(|v| {
                     v > limits
                         .owned_bytes
@@ -386,8 +449,34 @@ impl StorageReservation {
             decoder: codec_charge,
 
             copy,
+            review_stage: false,
             active: true,
         })
+    }
+
+    /// Mark this copy charge as the live review stage's.
+    #[cfg(target_os = "linux")]
+    /// Returns the charge's generation, which its stage credit carries.
+    pub(crate) fn charge_review_stage(&mut self) -> Result<u64, BundleError> {
+        if !self.active || !self.copy || self.review_stage {
+            return Err(BundleError::Capacity(
+                "review stage charge is not a live copy",
+            ));
+        }
+        let mut state = self
+            .usage
+            .lock()
+            .map_err(|_| BundleError::Capacity("accounting poisoned"))?;
+        state.reserved_stage_bytes = state
+            .reserved_stage_bytes
+            .checked_add(self.bytes)
+            .ok_or(BundleError::Capacity("review stage reserve overflow"))?;
+        state.stage_generation = state
+            .stage_generation
+            .checked_add(1)
+            .ok_or(BundleError::Capacity("review stage generation overflow"))?;
+        self.review_stage = true;
+        Ok(state.stage_generation)
     }
 
     #[cfg(any(test, feature = "test-util"))]
@@ -409,6 +498,7 @@ impl StorageReservation {
             decoder: self.decoder,
 
             copy: self.copy,
+            review_stage: self.review_stage,
             active: self.active,
         };
         self.active = false;
@@ -448,10 +538,15 @@ impl StorageReservation {
             .decoded_bytes
             .checked_sub(self.decoded)
             .ok_or(BundleError::Capacity("decode underflow"))?;
+        let stage_charge = state
+            .reserved_stage_bytes
+            .checked_sub(if self.review_stage { self.bytes } else { 0 })
+            .ok_or(BundleError::Capacity("review stage reservation underflow"))?;
         state.physical_bytes = physical;
         state.reserved_bytes = reserved;
         state.copy_bytes = copies;
         state.reserved_copy_bytes = reserved_copies;
+        state.reserved_stage_bytes = stage_charge;
         state.decoded_bytes = decoded;
         state.peak_physical_bytes = state.peak_physical_bytes.max(physical);
         self.active = false;
@@ -514,6 +609,7 @@ impl<T> StorageReservation<T> {
             decoder: self.decoder,
 
             copy: self.copy,
+            review_stage: self.review_stage,
             active: self.active,
         };
         self.active = false;
@@ -539,18 +635,22 @@ impl<T> Drop for StorageReservation<T> {
             return;
         }
         if let Ok(mut state) = self.usage.lock() {
-            if let (Some(bytes), Some(decoded), Some(decoder), Some(copies)) = (
+            if let (Some(bytes), Some(decoded), Some(decoder), Some(copies), Some(stage)) = (
                 state.reserved_bytes.checked_sub(self.bytes),
                 state.decoded_bytes.checked_sub(self.decoded),
                 state.decoder_bytes.checked_sub(self.decoder),
                 state
                     .reserved_copy_bytes
                     .checked_sub(if self.copy { self.bytes } else { 0 }),
+                state
+                    .reserved_stage_bytes
+                    .checked_sub(if self.review_stage { self.bytes } else { 0 }),
             ) {
                 state.reserved_bytes = bytes;
                 state.decoded_bytes = decoded;
                 state.decoder_bytes = decoder;
                 state.reserved_copy_bytes = copies;
+                state.reserved_stage_bytes = stage;
             } else {
                 state.damaged_accounting = true;
             }
@@ -696,5 +796,59 @@ mod tests {
         assert_eq!((state.physical_bytes, state.metadata_bytes), (70, 70));
         assert_eq!((state.reserved_bytes, state.decoded_bytes), (0, 0));
         assert!(!state.unsettled && !state.damaged_accounting);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn s5_review_stage_credit_never_outlives_its_charge() {
+        let limits = StorageLimits::default();
+        let usage = Arc::new(Mutex::new(StorageUsage::default()));
+        let mut stage = StorageReservation::reserve(&usage, &limits, 100, 0, true, 100).unwrap();
+        let generation = stage.charge_review_stage().unwrap();
+        // Read off-lock while the stage charge is live: 10 raw free, 100 credit.
+        let free = FreeSpace::crediting_stage(10, 100, generation);
+        let live = StorageReservation::reserve(&usage, &limits, 10, 0, false, free)
+            .expect("R1_CREDIT_HONOURED_WHILE_CHARGED");
+        drop(live);
+        drop(stage);
+        assert!(
+            matches!(
+                StorageReservation::reserve(&usage, &limits, 50, 0, false, free),
+                Err(BundleError::Capacity("disk reserve"))
+            ),
+            "R1_STALE_CREDIT_REFUSED"
+        );
+        let exact = StorageReservation::reserve(&usage, &limits, 10, 0, false, free)
+            .expect("R1_RAW_FREE_STILL_ADMITS");
+        drop(exact);
+        assert_eq!(usage.lock().unwrap().reserved_bytes, 0);
+    }
+
+    /// A credit read against stage 1's charge never offsets stage 2's, even
+    /// when stage 2 charges as much as stage 1 did.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn s5_review_stage_credit_is_bound_to_its_charge() {
+        let limits = StorageLimits::default();
+        let usage = Arc::new(Mutex::new(StorageUsage::default()));
+        let mut first = StorageReservation::reserve(&usage, &limits, 100, 0, true, 100).unwrap();
+        let generation = first.charge_review_stage().unwrap();
+        // Read off-lock with stage 1 finished: 110 raw free, 100 credit.
+        let free = FreeSpace::crediting_stage(110, 100, generation);
+        drop(first);
+        let mut second = StorageReservation::reserve(&usage, &limits, 100, 0, true, 110).unwrap();
+        assert_ne!(second.charge_review_stage().unwrap(), generation);
+        // Honest room past stage 2's charge: 110 - 100 = 10.
+        assert!(
+            matches!(
+                StorageReservation::reserve(&usage, &limits, 50, 0, false, free),
+                Err(BundleError::Capacity("disk reserve"))
+            ),
+            "T2_STALE_CREDIT_NEVER_OFFSETS_ANOTHER_STAGE"
+        );
+        let honest = StorageReservation::reserve(&usage, &limits, 10, 0, false, free)
+            .expect("T2_RAW_FREE_STILL_ADMITS");
+        drop((honest, second));
+        assert_eq!(usage.lock().unwrap().reserved_bytes, 0);
     }
 }

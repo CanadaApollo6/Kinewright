@@ -83,6 +83,8 @@ impl HostCommandOwner {
             audit_ref: None,
             rulebook_ref: None,
             editorial_rationale_ref: None,
+            review_annotations_ref: None,
+            review_evidence_ref: None,
             parent_version: None,
             run_provenance: None,
         })

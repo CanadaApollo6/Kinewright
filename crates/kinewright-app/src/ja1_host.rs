@@ -867,6 +867,7 @@ impl HostAttachment {
             Action::DismissManualNotice
             | Action::StudioVersions
             | Action::StudioEditorial(_)
+            | Action::StudioReview(_)
             | Action::StudioRulebook { .. }
             | Action::StudioManualPlayback(_)
             | Action::StudioSelect(_)

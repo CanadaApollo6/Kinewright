@@ -28,6 +28,7 @@ mod release;
 pub use manual::{ManualAuthority, ManualHistoryCommit, ManualRecoveryEndpoint};
 mod recovery;
 mod retained_work;
+mod review;
 pub use retained_work::{
     RetainedTaskDiscovery, RetainedTaskWork, RetainedWorkFailure, RetainedWorkKind,
 };
@@ -1307,6 +1308,14 @@ impl Ja1EditingSession {
     pub fn has_prepared_selection(&self) -> bool {
         self.prepared.is_some()
     }
+    /// A recovery or branch switch published a root whose outcome only its
+    /// own retry settles.
+    #[must_use]
+    pub fn switch_publication_unresolved(&self) -> bool {
+        self.prepared
+            .as_ref()
+            .is_some_and(crate::bundle_switch::PreparedProjectSelection::publication_started)
+    }
     #[must_use]
     pub fn preliminary_save_pending(&self) -> bool {
         self.recovery_save_pending
@@ -1430,6 +1439,11 @@ impl Ja1EditingSession {
             || !self.is_capture_destination(path)
         {
             return Err(BundleError::Identity("only a proven completed capture copy may be released; rescue sources remain retained".into()));
+        }
+        // Releasing unlocks the copy; a review stage this process still owns
+        // there could then never be swept by another opener.
+        if bundle.review_job()?.is_some_and(|job| job.stage.is_some()) {
+            return Err(BundleError::Identity("an output review on this copy is still encoding or retiring; stop it and wait before releasing the copy".into()));
         }
         self.retained_destinations.remove(index);
         Ok(())

@@ -961,6 +961,8 @@ impl ProjectBundle {
                 .clone();
             root.branch_index_ref = index.reference.clone();
             root.pending_rulebook_ref = None;
+            root.active_review_ref = None;
+            root.stopped_review = None;
             drop(index);
             root.input_manifest_ref = branches[&self.manual_branch_id].input_manifest_ref.clone();
             target.root = Some(root);
@@ -1476,6 +1478,8 @@ pub(crate) fn rescue_copy(
             if let Some(root) = &mut target.root {
                 root.branch_index_ref = index.reference.clone();
                 root.pending_rulebook_ref = None;
+                root.active_review_ref = None;
+                root.stopped_review = None;
             }
             target.branches = branches;
             if record

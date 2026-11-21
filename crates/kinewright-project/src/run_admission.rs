@@ -204,17 +204,34 @@ impl ProjectStore {
                 .clone(),
         ))
     }
+    /// A run's ordinary ceiling binds run writes, never a project publication
+    /// or a review revocation and retirement under its own headroom.
+    pub(crate) fn run_ordinary_applies(&self) -> bool {
+        self.run_budget_active()
+            && !self.is_project_publication()
+            && !crate::review_job::using_terminal_budget(self)
+    }
     pub(crate) fn admission_limits(&self) -> StorageLimits {
-        if self.run_budget_active() && !self.is_project_publication() {
+        let mut limits = if self.run_ordinary_applies() {
             ordinary(self.limits())
         } else {
             self.limits().clone()
+        };
+        if self.protect_review_budget() {
+            limits.objects = limits
+                .objects
+                .saturating_sub(crate::review_job::OBJECT_HEADROOM);
+            limits.metadata_bytes = limits
+                .metadata_bytes
+                .saturating_sub(crate::review_job::METADATA_HEADROOM);
         }
+        limits
     }
     pub(crate) fn run_error(&self, error: BundleError) -> BundleError {
         if self.run_budget_active()
             && !self.is_person_publication()
             && !self.is_cleanup_publication()
+            && !crate::review_job::using_terminal_budget(self)
             && matches!(error, BundleError::Capacity(_))
         {
             self.note_run_limit();
@@ -224,7 +241,7 @@ impl ProjectStore {
         }
     }
     pub(crate) fn admit_run_write(&self) -> Result<(), BundleError> {
-        if self.run_budget_active() && !self.is_project_publication() && self.has_run_limit() {
+        if self.run_ordinary_applies() && self.has_run_limit() {
             return Err(BundleError::RunLimit);
         }
         Ok(())

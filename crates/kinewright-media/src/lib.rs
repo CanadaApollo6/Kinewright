@@ -50,7 +50,9 @@ mod timeline;
 mod title;
 mod transcript;
 // JA-1 S3 C5
+mod review_output;
 mod verify;
+pub use review_output::{ReviewOutputStream, ReviewOutputTiming, inspect_review_output};
 pub mod voice_note;
 mod worker;
 
@@ -211,7 +213,8 @@ pub use engine::{AgentLaneHold, PreviewDecodeHold};
 pub use engine::{FfmpegMediaEngine, SessionMedia};
 pub use export::{
     NORMALIZATION_MAXIMUM_GAIN_HUNDREDTHS, NORMALIZATION_MINIMUM_GAIN_HUNDREDTHS, OwnedExport,
-    OwnedExportCleanup, OwnedExportCommitGate, OwnedExportError, OwnedExportTarget,
+    OwnedExportCleanup, OwnedExportCommitGate, OwnedExportError, OwnedExportReceipt,
+    OwnedExportTarget,
 };
 pub use kinewright_core::{
     LutAvailabilityKind, LutAvailabilityStatus, MediaAvailabilityKind, MediaAvailabilityStatus,
