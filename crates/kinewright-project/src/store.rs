@@ -120,6 +120,11 @@ struct StoreInner {
     cold_media_probe: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     ledger: Mutex<Ledger>,
     usage: Arc<Mutex<StorageUsage>>,
+    #[cfg(target_os = "linux")]
+    review_stage: crate::review_job::LiveStageSlot,
+    // Simulated free space: (capacity, physical bytes when it was set).
+    #[cfg(any(test, feature = "test-util"))]
+    free_probe: Mutex<Option<(u64, u64)>>,
     limits: StorageLimits,
     root_bytes: Mutex<u64>,
     inventory_bytes: Mutex<u64>,
@@ -220,7 +225,7 @@ impl RetainedReadAdmission {
                 "originating source is closing".into(),
             ));
         }
-        let free = store.with_namespace(|n| n.available_bytes())?;
+        let free = store.free_bytes()?;
         overlap.reserve_copy_growth(encoded_bytes, store.limits(), free)
     }
     pub(crate) fn reserve_snapshot_scratch(
@@ -731,6 +736,10 @@ impl ProjectStore {
                     metadata_bytes: control_bytes,
                     ..StorageUsage::default()
                 })),
+                #[cfg(target_os = "linux")]
+                review_stage: crate::review_job::LiveStageSlot::default(),
+                #[cfg(any(test, feature = "test-util"))]
+                free_probe: Mutex::new(None),
                 root_bytes: Mutex::new(root_bytes),
                 inventory_bytes: Mutex::new(inventory_bytes),
                 limits,
@@ -850,6 +859,48 @@ impl ProjectStore {
     }
     pub fn resolved_root(&self) -> Result<std::path::PathBuf, BundleError> {
         self.with_namespace(|n| Ok(n.identity().resolved_root.clone()))
+    }
+    /// Free disk bytes, crediting bytes a live review stage already wrote under
+    /// its own charge so they are not counted on both sides of the check.
+    fn free_bytes(&self) -> Result<u64, BundleError> {
+        let free = self.with_namespace(|n| n.available_bytes())?;
+        #[cfg(any(test, feature = "test-util"))]
+        let free = self.simulated_free(free)?;
+        #[cfg(target_os = "linux")]
+        let free = free.saturating_add(self.inner.review_stage.credit());
+        Ok(free)
+    }
+    /// Replace free disk space with `capacity`, less the physical bytes sealed
+    /// since and the bytes a live review stage holds on disk.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn free_space_probe(&self, capacity: Option<u64>) -> Result<(), BundleError> {
+        let base = self.usage()?.physical_bytes;
+        *self
+            .inner
+            .free_probe
+            .lock()
+            .map_err(|_| BundleError::Capacity("free probe poisoned"))? =
+            capacity.map(|capacity| (capacity, base));
+        Ok(())
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    fn simulated_free(&self, free: u64) -> Result<u64, BundleError> {
+        let Some((capacity, base)) = *self
+            .inner
+            .free_probe
+            .lock()
+            .map_err(|_| BundleError::Capacity("free probe poisoned"))?
+        else {
+            return Ok(free);
+        };
+        let written = self.usage()?.physical_bytes.saturating_sub(base);
+        #[cfg(target_os = "linux")]
+        let written = written.saturating_add(self.inner.review_stage.on_disk());
+        Ok(capacity.saturating_sub(written))
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn review_stage_slot(&self) -> &crate::review_job::LiveStageSlot {
+        &self.inner.review_stage
     }
     pub fn reserve_copy(&self, bytes: u64) -> Result<StorageReservation, BundleError> {
         self.reserve(bytes, 0, true)
@@ -1034,7 +1085,7 @@ impl ProjectStore {
         {
             return Err(BundleError::Identity("originating source is closed".into()));
         }
-        let mut free = self.with_namespace(|n| n.available_bytes())?;
+        let mut free = self.free_bytes()?;
         if self.protect_review_budget() {
             free = free
                 .checked_sub(crate::review_job::DISK_HEADROOM)
@@ -1102,7 +1153,7 @@ impl ProjectStore {
         self.closure_at(
             &dependencies,
             reference.record_kind != RecordKind::RootCheckpoint,
-            1 + if self.run_budget_active() && !self.is_project_publication() {
+            1 + if self.run_ordinary_applies() {
                 crate::run_admission::GRAPH_LEVELS
             } else {
                 0
@@ -2742,7 +2793,7 @@ impl ProjectStore {
         if !T::KIND.supported() {
             return Err(BundleError::Unsupported("inactive record kind".into()));
         }
-        let limit = if self.run_budget_active() && !self.is_project_publication() {
+        let limit = if self.run_ordinary_applies() {
             self.limits()
                 .decoded_record_bytes
                 .min(crate::run_admission::RECORD_BYTES)
@@ -2767,10 +2818,7 @@ impl ProjectStore {
         // History is charged by the immutable owner creation descriptor. All
         // other run records retain the independent terminal record limit;
         // SpecialistBase is only a fixed-size binding to its owner checkpoint.
-        if self.run_budget_active()
-            && !self.is_project_publication()
-            && decoded > crate::run_admission::DECODED_BYTES
-        {
+        if self.run_ordinary_applies() && decoded > crate::run_admission::DECODED_BYTES {
             self.note_run_limit();
             return Err(BundleError::RunLimit);
         }
@@ -4133,7 +4181,7 @@ impl ProjectStore {
                 "originating source is closing".into(),
             ));
         }
-        let free = self.with_namespace(|n| n.available_bytes())?;
+        let free = self.free_bytes()?;
         StorageReservation::reserve_for_retained_read(
             &self.inner.usage,
             &if cleanup_only || crate::run_admission::is_reading(self.admission_key()) {
@@ -4153,6 +4201,7 @@ impl ProjectStore {
             if self.run_budget_active()
                 && !self.is_person_publication()
                 && !self.is_cleanup_publication()
+                && !crate::review_job::using_terminal_budget(self)
                 && matches!(error, BundleError::Capacity(_))
             {
                 BundleError::RunLimit

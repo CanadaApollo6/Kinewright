@@ -340,11 +340,13 @@ impl StorageReservation {
         if codec_total > limits.decoder_bytes {
             return Err(BundleError::Capacity("decoder bytes"));
         }
+        // Copy reservations are bounded by the copy overlap below, as sealed
+        // copies are excluded from physical bytes here.
         if !copy
             && state
                 .physical_bytes
                 .checked_sub(state.copy_bytes)
-                .and_then(|v| v.checked_add(reserved))
+                .and_then(|v| v.checked_add(reserved.checked_sub(state.reserved_copy_bytes)?))
                 .is_none_or(|v| {
                     v > limits
                         .owned_bytes

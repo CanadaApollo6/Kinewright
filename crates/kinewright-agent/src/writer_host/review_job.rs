@@ -11,10 +11,9 @@ use kinewright_project::{
     bundle::BundleError,
     bundle_records::{ObjectRef, RecordKind, SessionId},
     review_job::{
-        ReviewControl, ReviewJob, ReviewPhase, ReviewRequest, ReviewStage, ReviewStaging,
-        ReviewStatus, ReviewToken, UpdateReviewJob, empty_annotations,
+        ReviewControl, ReviewJob, ReviewPhase, ReviewRequest, ReviewStage, ReviewStageCharge,
+        ReviewStaging, ReviewStatus, ReviewToken, UpdateReviewJob, empty_annotations,
     },
-    storage_budget::StorageReservation,
     studio_records::SnapshotKey,
     studio_store::FrozenContextRequest,
 };
@@ -52,7 +51,9 @@ impl Drop for LiveStage {
 #[derive(Default)]
 pub(super) struct ReviewRuntime {
     worker: Option<Worker>,
-    pending_stop: Option<ReviewStatus>,
+    // At most one per project: a Save As leaves the source's Stop with the source.
+    pending_stop: Vec<ReviewStatus>,
+    // The artifact this host published or verified; check results bind only to it.
     verified: Option<ReviewToken>,
     #[cfg(test)]
     probe: Option<Arc<dyn Fn(ReviewPoint) + Send + Sync>>,
@@ -73,7 +74,7 @@ pub(super) enum ReviewPoint {
 struct EncodeWork {
     context: FrozenContextRequest,
     staging: Arc<ReviewStaging>,
-    charge: Arc<StorageReservation>,
+    charge: Arc<ReviewStageCharge>,
     working: Arc<kinewright_media::owned_io::CursorReservation>,
     settings: ExportSettings,
     byte_limit: u64,
@@ -92,12 +93,26 @@ struct Worker {
     cleanup: Option<OwnedExportCleanup>,
     // Keep the directory descriptor alive through the receipt's last cleanup retry.
     _staging: Arc<ReviewStaging>,
-    charge: Option<Arc<StorageReservation>>,
+    // Released with the worker, after its stage is swept.
+    _charge: Arc<ReviewStageCharge>,
 }
 
+// The runtime drops before the editing session, so the worker is joined while
+// the project lock is still held.
 impl Drop for ReviewRuntime {
     fn drop(&mut self) {
         self.cancel_for_shutdown();
+        let Some(worker) = &mut self.worker else {
+            return;
+        };
+        if let Some(thread) = worker.thread.take()
+            && thread.thread().id() != thread::current().id()
+        {
+            worker.cleanup = thread.join().unwrap_or(None);
+        }
+        if let Some(cleanup) = &mut worker.cleanup {
+            let _ = cleanup.retry();
+        }
     }
 }
 
@@ -106,6 +121,21 @@ impl ReviewRuntime {
         if let Some(worker) = &self.worker {
             worker.cancellation.cancel();
         }
+    }
+
+    fn pending_for(
+        &self,
+        project: &kinewright_project::bundle_records::ProjectId,
+    ) -> Option<&ReviewStatus> {
+        self.pending_stop
+            .iter()
+            .find(|status| &status.token.project == project)
+    }
+
+    fn fenced(&self, token: &ReviewToken) -> bool {
+        self.pending_stop
+            .iter()
+            .any(|status| &status.token == token)
     }
 }
 
@@ -321,9 +351,13 @@ impl HostCommandOwner {
         }
         if let Err(error) = self.reconcile_review_job() {
             if matches!(control, ReviewControl::Status)
-                && self.review_runtime.pending_stop.is_some()
+                && let Some(pending) = self
+                    .owner()?
+                    .project_id()
+                    .ok()
+                    .and_then(|project| self.review_runtime.pending_for(&project))
             {
-                return Ok(self.review_runtime.pending_stop.clone());
+                return Ok(Some(pending.clone()));
             }
             return Err(error);
         }
@@ -357,61 +391,132 @@ impl HostCommandOwner {
     }
 
     fn stop_review_job(&mut self, token: &ReviewToken) -> Result<Option<ReviewStatus>, HostError> {
-        if let Some(pending) = &self.review_runtime.pending_stop {
-            if &pending.token != token {
+        if self
+            .review_runtime
+            .pending_for(&token.project)
+            .is_some_and(|pending| &pending.token != token)
+        {
+            let _ = self.persist_pending_stops();
+            if self.review_runtime.pending_for(&token.project).is_some() {
                 return Err(refused("A different output review is still stopping."));
             }
-        } else {
-            let Some(mut status) = self
-                .review_status()?
-                .filter(|status| &status.token == token)
-            else {
-                return Err(refused("The output review generation or version changed."));
-            };
-            if status.phase == ReviewPhase::Stopped {
-                return Ok(Some(status));
-            }
-            status.stop_pending = true;
-            self.review_runtime.pending_stop = Some(status);
         }
-        if self.persist_review_stop().is_err() {
-            return Ok(self.review_runtime.pending_stop.clone());
+        if self.review_runtime.pending_for(&token.project).is_none() {
+            // Arm the fence before any read that capacity or an unsettled root
+            // can refuse; such a read only leaves the phase unknown.
+            let phase = match self.owner_mut().map_err(drop).and_then(|session| {
+                session
+                    .review_source_bundle_mut(&token.project)
+                    .and_then(kinewright_project::bundle::ProjectBundle::review_status_for_stop)
+                    .map_err(drop)
+            }) {
+                Ok(Some(status)) if &status.token == token => {
+                    if status.phase == ReviewPhase::Stopped {
+                        return Ok(Some(status));
+                    }
+                    status.phase
+                }
+                Ok(_) => return Err(refused("The output review generation or version changed.")),
+                Err(()) => ReviewPhase::Stopping,
+            };
+            self.review_runtime.pending_stop.push(ReviewStatus {
+                token: token.clone(),
+                phase,
+                stop_pending: true,
+            });
+        }
+        let index = self
+            .review_runtime
+            .pending_stop
+            .iter()
+            .position(|status| &status.token == token)
+            .ok_or_else(unavailable)?;
+        let pending = self.review_runtime.pending_stop.remove(index);
+        match self.persist_review_stop(&pending.token) {
+            Ok(true) => {}
+            Ok(false) => return Err(refused("The output review generation or version changed.")),
+            Err(_) => {
+                // The reply is a copy; the fence stays armed.
+                let reply = pending.clone();
+                self.review_runtime.pending_stop.push(pending);
+                return Ok(Some(reply));
+            }
         }
         // The durable Stopping phase already fences every writer. A cleanup error
         // leaves it in that phase for the next retry or reopen.
         let _ = self.reconcile_review_job();
-        self.review_status()
+        let status = self
+            .owner_mut()?
+            .review_source_bundle_mut(&token.project)
+            .and_then(kinewright_project::bundle::ProjectBundle::review_status_for_stop);
+        Ok(Some(match status {
+            Ok(Some(status)) if &status.token == token => status,
+            _ => ReviewStatus {
+                token: pending.token,
+                phase: ReviewPhase::Stopping,
+                stop_pending: false,
+            },
+        }))
     }
 
-    fn persist_review_stop(&mut self) -> Result<(), HostError> {
-        let Some(token) = self
-            .review_runtime
-            .pending_stop
-            .as_ref()
-            .map(|status| status.token.clone())
-        else {
-            return Ok(());
-        };
+    /// `Ok(true)`: Stopping is durable. `Ok(false)`: no fence is needed, as the
+    /// job is definitely not current or its source writer is gone.
+    fn persist_review_stop(&mut self, token: &ReviewToken) -> Result<bool, HostError> {
         if self.hooks.pending.is_some() {
             return Err(BundleError::Unsettled.into());
         }
-        let bundle = self.owner_mut()?.review_source_bundle_mut(&token.project)?;
-        bundle.update_review_job(&token, UpdateReviewJob::Stop)?;
-        self.review_runtime.pending_stop = None;
+        let session = self.owner_mut()?;
+        if session.review_source_bundle(&token.project).is_err() {
+            // Without its source writer, no install or publication can reach the job.
+            return Ok(false);
+        }
+        let bundle = session.review_source_bundle_mut(&token.project)?;
+        if let Err(error) = bundle.update_review_job(token, UpdateReviewJob::Stop) {
+            if bundle
+                .review_status()
+                .is_ok_and(|status| status.is_none_or(|status| &status.token != token))
+            {
+                return Ok(false);
+            }
+            return Err(error.into());
+        }
         if let Some(worker) = &self.review_runtime.worker
-            && worker.token == token
+            && &worker.token == token
         {
             worker.cancellation.cancel();
         }
-        Ok(())
+        Ok(true)
+    }
+
+    /// The active project's failure is returned; another project's pending Stop
+    /// stays armed without blocking this one.
+    fn persist_pending_stops(&mut self) -> Result<(), HostError> {
+        let active = self.owner()?.project_id().ok();
+        let mut result = Ok(());
+        for pending in std::mem::take(&mut self.review_runtime.pending_stop) {
+            match self.persist_review_stop(&pending.token) {
+                Ok(_) => {}
+                Err(error) => {
+                    if active.as_ref() == Some(&pending.token.project) {
+                        result = Err(error);
+                    }
+                    self.review_runtime.pending_stop.push(pending);
+                }
+            }
+        }
+        result
     }
 
     pub(super) fn reconcile_review_job(&mut self) -> Result<(), HostError> {
         if self.hooks.pending.is_some() {
             return Err(BundleError::Unsettled.into());
         }
-        self.persist_review_stop()?;
-        self.retire_review_worker()?;
+        // A finished worker is swept and its charge released even while a Stop
+        // waits for space to persist.
+        let retired = self.retire_review_worker();
+        let stopped = self.persist_pending_stops();
+        retired?;
+        stopped?;
         if self
             .owner()?
             .review_bundle()?
@@ -437,18 +542,28 @@ impl HostCommandOwner {
         {
             return Ok(());
         }
+        // An attempt bound before this host owned the job belongs to a process
+        // that is gone; it never accepts a result here.
+        let unbind = matches!(&job.phase, ReviewPhase::Checking(checks) if checks.reviewer_attempt.is_some())
+            && self.review_runtime.verified.as_ref() != Some(&token);
         if let Some(stage) = &job.stage {
             prove_retired(stage)?;
             bundle.store().sweep_review_staging(stage)?;
         }
         let update = match job.phase {
-            ReviewPhase::Encoding => UpdateReviewJob::RecoverEncoding,
-            ReviewPhase::Stopping => UpdateReviewJob::RetireStopped,
-            _ if job.stage.is_some() => UpdateReviewJob::RetireStage,
-            _ => return Ok(()),
+            ReviewPhase::Encoding => Some(UpdateReviewJob::RecoverEncoding),
+            ReviewPhase::Stopping => Some(UpdateReviewJob::RetireStopped),
+            _ if job.stage.is_some() => Some(UpdateReviewJob::RetireStage),
+            _ => None,
         };
         drop(job);
-        self.owner_mut()?.update_review_job(&token, update)?;
+        if unbind {
+            self.owner_mut()?
+                .update_review_job(&token, UpdateReviewJob::UnbindChecks)?;
+        }
+        if let Some(update) = update {
+            self.owner_mut()?.update_review_job(&token, update)?;
+        }
         Ok(())
     }
 
@@ -490,25 +605,52 @@ impl HostCommandOwner {
         }
         let token = worker.token.clone();
         let stage = worker.stage.clone();
-        let bundle = self.owner_mut()?.review_source_bundle_mut(&token.project)?;
-        bundle.settle_review_root()?;
-        bundle.store().sweep_review_staging(&stage)?;
-        if let Some(cleanup) = &mut self
+        // The thread has exited. Its stage needs no reservation to sweep, and the
+        // next open of a gone source bundle sweeps it after proving this retirement.
+        let source = self.owner()?.review_source_bundle(&token.project).is_ok();
+        if source {
+            let bundle = self.owner_mut()?.review_source_bundle_mut(&token.project)?;
+            bundle.store().sweep_review_staging(&stage)?;
+        }
+        if let Some(cleanup) = self
             .review_runtime
             .worker
             .as_mut()
-            .expect("worker retained")
-            .cleanup
+            .and_then(|worker| worker.cleanup.as_mut())
         {
-            cleanup.retry()?;
+            let retried = cleanup.retry();
+            if source {
+                retried?;
+            }
         }
-        self.review_runtime
-            .worker
-            .as_mut()
-            .expect("worker retained")
-            .charge
-            .take();
+        // Releases the staging charge with the worker.
+        self.review_runtime.worker = None;
+        if !source {
+            self.review_runtime
+                .pending_stop
+                .retain(|pending| pending.token != token);
+            return Ok(());
+        }
+        if let Some(index) = self
+            .review_runtime
+            .pending_stop
+            .iter()
+            .position(|pending| pending.token == token)
+        {
+            let pending = self.review_runtime.pending_stop.remove(index);
+            if let Err(error) = self.persist_review_stop(&token) {
+                self.review_runtime.pending_stop.push(pending);
+                // Another project's Stop stays armed without blocking this one.
+                let active = self.owner()?.project_id().ok();
+                return if active.as_ref() == Some(&token.project) {
+                    Err(error)
+                } else {
+                    Ok(())
+                };
+            }
+        }
         let bundle = self.owner_mut()?.review_source_bundle_mut(&token.project)?;
+        bundle.settle_review_root()?;
         if let Some(job) = bundle.review_job()?
             && job.token == token
         {
@@ -517,14 +659,14 @@ impl HostCommandOwner {
                     "Encoding ended before a durable artifact was published.".into(),
                 ),
                 ReviewPhase::Stopping => UpdateReviewJob::RetireStopped,
-                _ => UpdateReviewJob::RetireStage,
+                _ if job.stage.is_some() => UpdateReviewJob::RetireStage,
+                _ => return Ok(()),
             };
             bundle.update_review_job(&token, update)?;
             if matches!(job.phase, ReviewPhase::Encoding) {
                 bundle.update_review_job(&token, UpdateReviewJob::RetireStage)?;
             }
         }
-        self.review_runtime.worker = None;
         Ok(())
     }
 
@@ -585,9 +727,9 @@ impl HostCommandOwner {
         context: FrozenContextRequest,
     ) -> Result<(), HostError> {
         let bundle = self.owner()?.review_bundle()?;
-        let charge = Arc::new(bundle.store().reserve_copy(stage.byte_limit)?);
+        let charge = Arc::new(bundle.store().reserve_review_stage(&stage)?);
         let working = bundle.store().reserve_review_working();
-        let staging = Arc::new(bundle.store().create_review_staging(&stage)?);
+        let staging = Arc::new(bundle.store().create_review_staging(&stage, &charge)?);
         let live = LiveStage::register(stage.id.clone())?;
         let weak = self.runtime_owner.clone();
         let cancellation = settings.cancellation.clone();
@@ -631,24 +773,25 @@ impl HostCommandOwner {
             thread: Some(thread),
             cleanup: None,
             _staging: staging,
-            charge: Some(charge),
+            _charge: charge,
         });
         Ok(())
     }
 
-    fn review_can_complete(&self, token: &ReviewToken) -> Result<(), HostError> {
+    fn review_authority(&self, token: &ReviewToken) -> Result<(), HostError> {
         if self.lifecycle.stopping()
             || self.recovery_only
             || self.hooks.pending.is_some()
             || !self.retention_proven
-            || self
-                .review_runtime
-                .pending_stop
-                .as_ref()
-                .is_some_and(|status| &status.token == token)
+            || self.review_runtime.fenced(token)
         {
             return Err(refused("Output review authority was revoked."));
         }
+        Ok(())
+    }
+
+    fn review_can_complete(&self, token: &ReviewToken) -> Result<(), HostError> {
+        self.review_authority(token)?;
         let bundle = self.owner()?.review_source_bundle(&token.project)?;
         if !bundle
             .review_job()?
@@ -657,6 +800,50 @@ impl HostCommandOwner {
             return Err(refused("The output review generation or version changed."));
         }
         Ok(())
+    }
+
+    /// The checking variant of the fence: the artifact this host published or
+    /// verified, in a durable checking phase, with no Stop pending.
+    fn review_can_record(&self, token: &ReviewToken) -> Result<(), HostError> {
+        self.review_authority(token)?;
+        if self.review_runtime.verified.as_ref() != Some(token) {
+            return Err(refused(
+                "The output review artifact has not been verified by this host.",
+            ));
+        }
+        let bundle = self.owner()?.review_source_bundle(&token.project)?;
+        if !bundle
+            .review_job()?
+            .is_some_and(|job| job.token == *token && matches!(job.phase, ReviewPhase::Checking(_)))
+        {
+            return Err(refused("The output review generation or version changed."));
+        }
+        Ok(())
+    }
+
+    /// The one path by which commits 5 to 7 bind a checker and record results.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the checks of commits 5 and 6 call this seam")
+    )]
+    pub(super) fn record_review_check(
+        &mut self,
+        token: &ReviewToken,
+        update: UpdateReviewJob,
+    ) -> Result<ReviewStatus, HostError> {
+        if !matches!(
+            update,
+            UpdateReviewJob::BindChecks(_) | UpdateReviewJob::RecordCheck { .. }
+        ) {
+            return Err(refused(
+                "Only check bindings and results are recorded here.",
+            ));
+        }
+        self.review_can_record(token)?;
+        Ok(self
+            .owner_mut()?
+            .review_source_bundle_mut(&token.project)?
+            .update_review_job(token, update)?)
     }
 }
 
@@ -697,7 +884,9 @@ fn encode_review(
             probe(ReviewPoint::AfterInstall);
             Ok(())
         };
-        let charge = work.charge;
+        // The staging callback keeps its own owner of the charge; the worker
+        // still marks the end of writing below.
+        let charge = Arc::clone(&work.charge);
         let reserve_staging =
             move |_| Ok(Arc::clone(&charge) as kinewright_media::owned_io::LifetimeGuard);
         let outcome = engine.export_owned_document(
@@ -712,6 +901,8 @@ fn encode_review(
             &work.settings,
             &progress,
         );
+        // The writer has returned; no further staging byte can land.
+        work.charge.finish_writing();
         let receipt = match outcome {
             Ok(OwnedExport::Clean(receipt)) => receipt,
             Ok(OwnedExport::Cleanup { receipt, cleanup }) => {
@@ -784,6 +975,7 @@ fn encode_review(
             }
             #[cfg(not(test))]
             publish()?;
+            owner.review_runtime.verified = Some(token.clone());
         }
         #[cfg(test)]
         probe(ReviewPoint::AfterPublication);
@@ -820,7 +1012,7 @@ fn current_stage(byte_limit: u64) -> Result<ReviewStage, HostError> {
     })
 }
 
-fn process_start(pid: u32) -> io::Result<Option<u64>> {
+pub(super) fn process_start(pid: u32) -> io::Result<Option<u64>> {
     let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
         Ok(stat) => stat,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -833,7 +1025,7 @@ fn process_start(pid: u32) -> io::Result<Option<u64>> {
         .ok_or_else(|| io::Error::other("process birth could not be read"))
 }
 
-fn prove_retired(stage: &ReviewStage) -> Result<(), HostError> {
+pub(super) fn prove_retired(stage: &ReviewStage) -> Result<(), HostError> {
     if stage.boot != crate::guardian::boot_id()?
         || process_start(stage.pid)? != Some(stage.process_start)
     {

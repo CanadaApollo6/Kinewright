@@ -5,7 +5,9 @@ use std::{cell::Cell, collections::BTreeMap};
 #[cfg(target_os = "linux")]
 mod staging;
 #[cfg(target_os = "linux")]
-pub use staging::ReviewStaging;
+pub(crate) use staging::LiveStageSlot;
+#[cfg(target_os = "linux")]
+pub use staging::{ReviewStageCharge, ReviewStaging};
 
 use kinewright_core::{
     ExportSettings,
@@ -403,6 +405,13 @@ impl ProjectBundle {
             .transpose()
     }
 
+    /// Read the status with the revocation headroom, settling first.
+    pub fn review_status_for_stop(&mut self) -> Result<Option<ReviewStatus>, BundleError> {
+        let _budget = TerminalBudget::enter(&self.store);
+        self.settle_review_root()?;
+        self.review_status()
+    }
+
     pub fn review_status(&self) -> Result<Option<ReviewStatus>, BundleError> {
         if let Some(job) = self.review_job()? {
             return Ok(Some(ReviewStatus {
@@ -798,9 +807,9 @@ impl ProjectBundle {
     ) -> Result<(), BundleError> {
         self.pending_metadata = Some(pending);
         let result = BundleCommit::publish_maintenance(self);
-        if !self.unsettled {
-            self.pending_metadata = None;
-        }
+        // An uncertain outcome is settled from the disk root. The abandoned
+        // update must never ride on a later publication.
+        self.pending_metadata = None;
         result.map(|_| ())
     }
 }

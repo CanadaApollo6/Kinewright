@@ -963,6 +963,10 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
         #[cfg(not(target_os = "linux"))]
         let reply = run_inputs::execute(&state.owner, &bearer, request);
         if shutting_down && reply.error.is_none() {
+            // The fenced encode worker exits before the router drops the owner
+            // and its project lock.
+            #[cfg(target_os = "linux")]
+            HostCommandOwner::join_review_for_shutdown(&state.owner);
             #[cfg(target_os = "linux")]
             state.runtime.request_stop();
             state.stop.notify_one();
