@@ -409,33 +409,7 @@ fn s5_review_store_filling_keeps_terminal_writes_and_publication() {
         std::fs::write(staging.destination(), &bytes).unwrap();
         staging.open_output().unwrap().sync_all().unwrap();
 
-        let usage = bundle.store.usage().unwrap();
-        let mut limits = StorageLimits {
-            owned_bytes: usage.owned_bytes + (16 << 20),
-            // Over the review headroom and under the staged charge. Ordinary
-            // publication needs room for a full decoded record.
-            metadata_bytes: if matches!(ending, StagedEnding::Publish) {
-                StorageLimits::default().metadata_bytes
-            } else {
-                100 << 20
-            },
-            ..StorageLimits::default()
-        };
-        assert!(
-            matches!(ending, StagedEnding::Publish)
-                || usage.physical_bytes + STAGE > limits.owned_bytes + limits.metadata_bytes,
-            "the charge would overflow the owned-media allowance"
-        );
-        let room = if matches!(ending, StagedEnding::Publish) {
-            // Ordinary room after the disk headroom: 8 MiB for a 4 MiB artifact.
-            40 << 20
-        } else {
-            // Objects and disk at the reduced ceiling; 2 MiB is under the
-            // staged bytes, so counting them twice leaves no room at all.
-            limits.objects = usage.objects + OBJECT_HEADROOM;
-            2 << 20
-        };
-        bundle.restrict_limits_probe(limits).unwrap();
+        let room = fill_to_ceiling(&mut bundle, ending, STAGE);
         bundle.store.free_space_probe(Some(STAGE + room)).unwrap();
         if !matches!(ending, StagedEnding::Publish) {
             assert_ordinary_at_ceiling(&mut bundle, ending);
@@ -491,6 +465,39 @@ fn s5_review_store_filling_keeps_terminal_writes_and_publication() {
         drop(staging);
         retire_staged(&mut bundle, &token, &stage, charge, &phase, ending);
     }
+}
+
+/// Limits at the reduced ceiling for the run's ordinary writes. Returns the
+/// disk room left past the stage charge.
+fn fill_to_ceiling(bundle: &mut ProjectBundle, ending: StagedEnding, stage: u64) -> u64 {
+    let usage = bundle.store.usage().unwrap();
+    let mut limits = StorageLimits {
+        owned_bytes: usage.owned_bytes + (16 << 20),
+        // Over the review headroom and under the staged charge. Ordinary
+        // publication needs room for a full decoded record.
+        metadata_bytes: if matches!(ending, StagedEnding::Publish) {
+            StorageLimits::default().metadata_bytes
+        } else {
+            100 << 20
+        },
+        ..StorageLimits::default()
+    };
+    assert!(
+        matches!(ending, StagedEnding::Publish)
+            || usage.physical_bytes + stage > limits.owned_bytes + limits.metadata_bytes,
+        "the charge would overflow the owned-media allowance"
+    );
+    let room = if matches!(ending, StagedEnding::Publish) {
+        // Ordinary room after the disk headroom: 8 MiB for a 4 MiB artifact.
+        40 << 20
+    } else {
+        // Objects and disk at the reduced ceiling; 2 MiB is under the
+        // staged bytes, so counting them twice leaves no room at all.
+        limits.objects = usage.objects + OBJECT_HEADROOM;
+        2 << 20
+    };
+    bundle.restrict_limits_probe(limits).unwrap();
+    room
 }
 
 fn assert_ordinary_at_ceiling(bundle: &mut ProjectBundle, ending: StagedEnding) {

@@ -400,6 +400,7 @@ impl StorageReservation {
     }
 
     /// Mark this copy charge as the live review stage's.
+    #[cfg(target_os = "linux")]
     pub(crate) fn charge_review_stage(&mut self) -> Result<(), BundleError> {
         if !self.active || !self.copy || self.review_stage {
             return Err(BundleError::Capacity(
@@ -477,7 +478,7 @@ impl StorageReservation {
             .decoded_bytes
             .checked_sub(self.decoded)
             .ok_or(BundleError::Capacity("decode underflow"))?;
-        let stage = state
+        let stage_charge = state
             .reserved_stage_bytes
             .checked_sub(if self.review_stage { self.bytes } else { 0 })
             .ok_or(BundleError::Capacity("review stage reservation underflow"))?;
@@ -485,7 +486,7 @@ impl StorageReservation {
         state.reserved_bytes = reserved;
         state.copy_bytes = copies;
         state.reserved_copy_bytes = reserved_copies;
-        state.reserved_stage_bytes = stage;
+        state.reserved_stage_bytes = stage_charge;
         state.decoded_bytes = decoded;
         state.peak_physical_bytes = state.peak_physical_bytes.max(physical);
         self.active = false;
