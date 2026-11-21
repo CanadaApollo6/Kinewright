@@ -724,3 +724,126 @@ fn s5_review_sweep_refuses_an_unexpected_stage_entry() {
         "REVIEW_SWEEP_KEEPS_FOREIGN_ENTRY"
     );
 }
+
+/// JA-1 S5a C5 rework (Neon F19): a checking job with its published artifact.
+fn s5c5_checking(
+    bundle: &mut ProjectBundle,
+    temp: &kinewright_media::test_support::TempDirectory,
+) -> ReviewStatus {
+    let descriptor = version(bundle);
+    let queued = queue(bundle, &descriptor, (64, 64));
+    let encoding = bundle
+        .update_review_job(
+            &queued,
+            UpdateReviewJob::BeginEncoding(ReviewStage {
+                id: SessionId::fresh().unwrap(),
+                boot: "00000000-0000-0000-0000-000000000000".into(),
+                pid: 1,
+                process_start: 1,
+                byte_limit: 1 << 20,
+            }),
+        )
+        .unwrap();
+    let bytes = b"s5c5 review check artifact";
+    let path = temp.path("s5c5-artifact");
+    std::fs::write(&path, bytes).unwrap();
+    let object = ObjectRef {
+        sha256: kinewright_media::sha256_bytes(bytes),
+        byte_length: bytes.len() as u64,
+        record_kind: RecordKind::OwnedMedia,
+    };
+    bundle
+        .publish_review_artifact(
+            &encoding.token,
+            &mut std::fs::File::open(path).unwrap(),
+            &object,
+            fixture_timing(),
+        )
+        .unwrap()
+}
+
+#[test]
+fn ja1_s5a_check_inputs_bind_every_record_to_the_token() {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "s5c5-check-binding");
+    let core = Core::for_test(Document::default()).unwrap();
+    let mut bundle = ProjectBundle::activate(
+        &temp.path("project.kinewright"),
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
+    let inputs = bundle.empty_inputs().unwrap();
+    bundle.save(&core, &inputs.reference).unwrap();
+    let status = s5c5_checking(&mut bundle, &temp);
+    assert!(matches!(status.phase, ReviewPhase::Checking(_)));
+    let token = status.token.clone();
+
+    // The current token opens verified bytes and the pinned inputs.
+    let opened = bundle.prepare_review_check(&token).unwrap().open().unwrap();
+    assert_eq!(opened.artifact.generation, token.generation);
+    assert_eq!(opened.context.snapshot.descriptor.key, token.snapshot);
+    drop(opened);
+
+    // A token of another generation or job is refused under the lock.
+    let mut stale = token.clone();
+    stale.generation += 1;
+    let refused = bundle.prepare_review_check(&stale).err().unwrap();
+    assert!(
+        refused.to_string().contains("token is not current"),
+        "{refused}"
+    );
+    let mut other = token.clone();
+    other.job = SessionId::fresh().unwrap();
+    let refused = bundle.prepare_review_check(&other).err().unwrap();
+    assert!(
+        refused.to_string().contains("token is not current"),
+        "{refused}"
+    );
+
+    // Every record must name the token, whatever the job record says.
+    let job = bundle.review_job().unwrap().unwrap();
+    let artifact = bundle
+        .store
+        .read_record::<ReviewArtifact>(job.artifact_ref.as_ref().unwrap())
+        .unwrap();
+    let request = bundle
+        .store
+        .read_record::<ReviewRequest>(&job.request_ref)
+        .unwrap();
+    check_inputs::check_review_check_binding(&token, &job, &artifact, &request).unwrap();
+    let other_version = version(&mut bundle).key;
+    let refused_as = |artifact: &ReviewArtifact, request: &ReviewRequest, wanted: &str| {
+        let refusal = check_inputs::check_review_check_binding(&token, &job, artifact, request)
+            .err()
+            .map_or_else(|| "accepted".to_owned(), |error| error.to_string());
+        assert!(
+            refusal.contains(wanted),
+            "REVIEW_C5_REFUSED {wanted}: {refusal}"
+        );
+    };
+    let mut changed = (*artifact).clone();
+    changed.job = SessionId::fresh().unwrap();
+    refused_as(&changed, &request, "artifact belongs to another job");
+    let mut changed = (*artifact).clone();
+    changed.generation += 1;
+    refused_as(&changed, &request, "artifact belongs to another generation");
+    let mut changed = (*artifact).clone();
+    changed.snapshot = other_version.clone();
+    refused_as(&changed, &request, "artifact belongs to another version");
+    let mut changed = (*artifact).clone();
+    changed.request_ref = request.expectations_ref.clone();
+    refused_as(&changed, &request, "artifact belongs to another request");
+    let mut changed = (*request).clone();
+    changed.snapshot = other_version;
+    refused_as(&artifact, &changed, "request belongs to another version");
+    let mut stopped = (*job).clone();
+    stopped.phase = ReviewPhase::Stopping;
+    let refused = check_inputs::check_review_check_binding(&token, &stopped, &artifact, &request)
+        .err()
+        .unwrap();
+    assert!(
+        refused.to_string().contains("job is not checking"),
+        "{refused}"
+    );
+}
