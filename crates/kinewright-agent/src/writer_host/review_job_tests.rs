@@ -1129,11 +1129,11 @@ fn s5_review_check_attempt_survives_status_and_dies_with_its_process() {
             "REVIEW_PENDING_STOP_FENCES_RESULTS: {fenced}"
         );
     }
-    // The Stop never persisted: the job reopens in Checking with the attempt
-    // of a process that is gone.
+    // The Stop never persisted, and shutdown cannot persist it either: the
+    // job reopens in Checking with the attempt of a process that is gone.
     drop(shared);
     drop(client);
-    drop(host);
+    kinewright_project::io_observer::fail_once("review_stop_before_admission", || drop(host));
     let (host, client) = s5_review_host(temp.root());
     assert_eq!(
         s5_review_attempt(&host),
