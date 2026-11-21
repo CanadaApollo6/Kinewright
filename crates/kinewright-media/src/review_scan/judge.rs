@@ -1,124 +1,150 @@
-//! Pure judgement of a decoded summary against the frozen expectations.
+//! Decision rules. Pure: the decoded per-frame and per-hop statistics, the
+//! plan and the frozen settings in; four row reports out.
 use std::ops::Range;
 
-use kinewright_core::output_review::{
-    RequiredReviewRow, ReviewExpectations, ReviewLane, ReviewRowResult, ReviewSegment, ReviewSpan,
-    SegmentSampling,
-};
-use kinewright_core::{DeliveryTagSource, QaSeverity, Rational};
+use kinewright_core::output_review::RequiredReviewRow;
+use kinewright_core::{DeliveryTagSource, MediaError, QaSeverity};
 
-use super::decode::{AudioSummary, ScanSummary, TimingEvent, VideoSummary};
+use super::picture::{FrameState, PictureScan};
+use super::plan::{FrameCursor, Plan, samples_at};
+use super::sound::{OutputSound, SoundScan, SourceHop, TimingEvent, first_hop, linear};
+use super::speech::{JoinScan, JoinVerdict};
 use super::{
-    FindingKind, FindingVerdict, ReviewRowReport, ReviewScanInputs, SCAN_HOP_MICROS,
-    TechnicalReviewReport, TechnicalScanConfig,
+    CoverageUnit, ExcludedSpan, ExclusionReason, FindingKind, FindingVerdict, MAX_EXCLUDED_SPANS,
+    MAX_SYNC_WINDOWS, RetainedSpeechConfig, ReviewCheckReport, ReviewRowReport, ReviewScanInputs,
+    SCAN_HOP_MICROS, ScanPass, SyncMeasurement, SyncSignal, TechnicalScanConfig,
 };
 
 use FindingVerdict::{Failed, Undecided};
 
-/// Only the structure row ran; the other two are unrun.
-pub(crate) fn unrun(config: &TechnicalScanConfig) -> TechnicalReviewReport {
-    let mut loudness = ReviewRowReport::new(RequiredReviewRow::LoudnessAndPeak);
-    loudness.result = ReviewRowResult::Unrun;
-    let mut defects = ReviewRowReport::new(RequiredReviewRow::TechnicalDefectScan);
-    defects.result = ReviewRowResult::Unrun;
-    TechnicalReviewReport {
-        configuration_sha256: config.sha256(),
-        structure: ReviewRowReport::new(RequiredReviewRow::StructureAndAvIntegrity),
-        loudness,
-        defects,
-        decoded_frames: 0,
-        decoded_audio_samples: 0,
-        measured: None,
+/// Level floor so digital zero does not dominate dB arithmetic.
+const FLOOR_DB: f64 = -100.0;
+/// A part dominates a hop when it holds this share of the predicted power.
+const DOMINANT_SHARE: f64 = 0.9;
+/// Sync: a window is measurable when this share of its hops is predicted...
+const SYNC_COVERED_SHARE: f64 = 0.8;
+/// ...its predicted envelope varies by at least this many dB...
+const SYNC_ENVELOPE_STD_DB: f64 = 3.0;
+/// ...and no other lag further than two steps away scores within this.
+const SYNC_DISTINCT: f64 = 0.05;
+/// Least compared frame pairs for a video lag.
+const SYNC_MIN_PAIRS: usize = 8;
+
+fn db(power: f64) -> f64 {
+    if power <= 0.0 {
+        FLOOR_DB
+    } else {
+        (10.0 * power.log10()).max(FLOOR_DB)
     }
 }
 
-/// Output clock helpers on the expected frame grid.
-pub(crate) struct Clock {
-    fps: Rational,
+fn power(cdb: i16) -> f64 {
+    let amplitude = linear(cdb);
+    amplitude * amplitude
 }
 
-impl Clock {
-    pub(crate) fn new(fps: Rational) -> Self {
-        Self { fps }
+fn median(values: &mut [f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
     }
-
-    /// Start of output frame `index`, in microseconds.
-    pub(crate) fn frame_us(&self, index: u64) -> u64 {
-        let value = u128::from(index) * 1_000_000 * u128::from(self.fps.denominator())
-            / u128::from(self.fps.numerator().max(1));
-        u64::try_from(value).unwrap_or(u64::MAX)
-    }
-
-    /// The frame presented at `us`.
-    pub(crate) fn frame_at(&self, us: u64) -> u64 {
-        let value = u128::from(us) * u128::from(self.fps.numerator())
-            / (1_000_000 * u128::from(self.fps.denominator().max(1)));
-        u64::try_from(value).unwrap_or(u64::MAX)
-    }
+    values.sort_by(f64::total_cmp);
+    Some(values[values.len() / 2])
 }
 
-fn span_us(span: &ReviewSpan) -> Range<u64> {
-    span.start.floor()..span.end.ceil()
+fn hop_us(hop: u64) -> u64 {
+    hop.saturating_mul(SCAN_HOP_MICROS)
 }
 
-fn overlap(a: &Range<u64>, b: &Range<u64>) -> u64 {
-    a.end.min(b.end).saturating_sub(a.start.max(b.start))
-}
-
-fn inside(point: u64, spans: &[Range<u64>]) -> bool {
-    spans.iter().any(|span| span.contains(&point))
-}
-
-pub(crate) fn has_audio_segments(expectations: &ReviewExpectations) -> bool {
-    expectations
-        .segments
-        .iter()
-        .any(|segment| segment.id.lane == ReviewLane::Audio)
-}
-
-pub(crate) fn judge(
-    summary: &ScanSummary,
+pub(super) fn judge(
     inputs: &ReviewScanInputs<'_>,
-    config: &TechnicalScanConfig,
-) -> TechnicalReviewReport {
-    let mut report = unrun(config);
-    report.loudness.result = ReviewRowResult::Pass;
-    report.defects.result = ReviewRowResult::Pass;
-    report.decoded_frames = u64::try_from(summary.video.frames.len()).unwrap_or(u64::MAX);
-    report.decoded_audio_samples = summary
-        .audio
-        .as_ref()
-        .map_or(0, |audio| audio.decoded_samples);
-    report.measured = summary
-        .audio
-        .as_ref()
-        .and_then(|audio| audio.loudness.as_ref().ok().copied());
-    let clock = Clock::new(inputs.expectations.output_fps);
-    structure(&mut report.structure, summary, inputs, config, &clock);
-    loudness(&mut report.loudness, summary, inputs.expectations, config);
-    let regions = Regions::new(inputs.expectations);
-    picture_defects(
-        &mut report.defects,
-        &summary.video,
-        &regions,
-        config,
-        &clock,
+    plan: &Plan<'_>,
+    picture: &Result<PictureScan, MediaError>,
+    sound: &Result<SoundScan, MediaError>,
+    joins: &Result<JoinScan, MediaError>,
+    technical: &TechnicalScanConfig,
+    speech: &RetainedSpeechConfig,
+) -> ReviewCheckReport {
+    let picture = picture.as_ref();
+    let sound = sound.as_ref();
+    let output = sound.ok().and_then(|scan| scan.output.as_ref());
+    let model = match (sound, output) {
+        (Ok(scan), Some(output)) if !output.truncated && !scan.sources.truncated => {
+            Some(Model::new(plan, scan, output, technical))
+        }
+        _ => None,
+    };
+    let end_us = plan.clock.frame_us(plan.output_frames);
+    let mut report = ReviewCheckReport {
+        technical_sha256: technical.sha256(),
+        speech_sha256: speech.sha256(),
+        structure: ReviewRowReport::new(RequiredReviewRow::StructureAndAvIntegrity),
+        loudness: ReviewRowReport::new(RequiredReviewRow::LoudnessAndPeak),
+        defects: ReviewRowReport::new(RequiredReviewRow::TechnicalDefectScan),
+        speech: ReviewRowReport::new(RequiredReviewRow::RetainedSpeechChecks),
+        excluded: Vec::new(),
+        excluded_omitted: 0,
+        decoded_frames: picture.map_or(0, |scan| u64::try_from(scan.frames.len()).unwrap_or(0)),
+        decoded_audio_samples: output.map_or(0, |output| output.decoded_samples),
+        measured: output.and_then(|output| output.loudness.as_ref().ok().copied()),
+        sync: SyncMeasurement::default(),
+    };
+    structure(
+        &mut report.structure,
+        inputs,
+        plan,
+        picture,
+        sound,
+        technical,
+        end_us,
     );
-    if let Some(audio) = &summary.audio {
-        audio_defects(&mut report.defects, audio, &regions, config);
+    let (sync, sync_findings) = sync(plan, picture.ok(), model.as_ref(), technical);
+    report.sync = sync;
+    for (kind, verdict) in sync_findings {
+        report.structure.push(kind, verdict, [0, end_us]);
     }
+    loudness(&mut report.loudness, inputs, plan, sound, technical, end_us);
+    edit_defects(&mut report.defects, inputs, plan, technical);
+    let (excluded, omitted) =
+        picture_defects(&mut report.defects, plan, picture, technical, end_us);
+    report.excluded = excluded;
+    report.excluded_omitted = omitted;
+    sound_defects(
+        &mut report.defects,
+        plan,
+        sound,
+        model.as_ref(),
+        technical,
+        end_us,
+    );
+    retained_speech(
+        &mut report.speech,
+        inputs,
+        plan,
+        sound,
+        model.as_ref(),
+        speech,
+    );
+    joins_row(&mut report.speech, joins);
     report
 }
 
+fn has_expected_audio(plan: &Plan<'_>) -> bool {
+    plan.audio.iter().any(|part| !part.muted)
+}
+
+#[allow(clippy::too_many_lines, reason = "one rule per container property")]
 fn structure(
     row: &mut ReviewRowReport,
-    summary: &ScanSummary,
     inputs: &ReviewScanInputs<'_>,
+    plan: &Plan<'_>,
+    picture: Result<&PictureScan, &MediaError>,
+    sound: Result<&SoundScan, &MediaError>,
     config: &TechnicalScanConfig,
-    clock: &Clock,
+    end_us: u64,
 ) {
     let expectations = inputs.expectations;
     let settings = inputs.settings;
+    let timing = inputs.timing;
     // The owned-input manifest, not the working file system, proves media
     // presence; every other document error stands.
     for issue in kinewright_core::qa_document(inputs.document).issues {
@@ -126,7 +152,7 @@ fn structure(
             row.push(FindingKind::DocumentQa { code: issue.code }, Failed, [0, 0]);
         }
     }
-    let mut setting = |code: &str| {
+    let setting = |row: &mut ReviewRowReport, code: &str| {
         row.push(
             FindingKind::DeliverySettings { code: code.into() },
             Failed,
@@ -134,120 +160,161 @@ fn structure(
         );
     };
     if settings.fps != expectations.output_fps {
-        setting("fps");
+        setting(row, "fps");
     }
     if settings.resolution != expectations.raster {
-        setting("resolution");
+        setting(row, "resolution");
     }
     if !settings.resolution.0.is_multiple_of(2) || !settings.resolution.1.is_multiple_of(2) {
-        setting("odd_raster");
+        setting(row, "odd_raster");
     }
     if let Some(mismatch) = kinewright_core::delivery_color_mismatch(&settings.delivery_color) {
-        setting(&format!("delivery_color_{}", mismatch.field));
+        setting(row, &format!("delivery_color_{}", mismatch.field));
     }
-    let video = &summary.video;
-    let end_us = clock.frame_us(u64::try_from(expectations.output_frames.0).unwrap_or(0));
-    if (video.width, video.height) != expectations.raster {
-        row.push(
-            FindingKind::DeliverySettings {
-                code: "decoded_raster".into(),
+    if timing.decoder_version != ffmpeg_next::codec::version() {
+        row.push(FindingKind::TimingRecordChanged, Undecided, [0, end_us]);
+    }
+    let clock = plan.clock;
+    let expected_frames = plan.output_frames;
+    match picture {
+        Err(error) => row.push(
+            FindingKind::Unreadable {
+                pass: ScanPass::Picture,
+                reason: super::reason(error),
             },
-            Failed,
+            Undecided,
             [0, end_us],
-        );
-    }
-    match &video.color {
-        Some(observed) => {
-            let check = kinewright_core::delivery_tag_check(
-                &settings.delivery_color,
-                observed,
-                DeliveryTagSource::ProbedOutputFile,
+        ),
+        Ok(video) => {
+            let decoded = u64::try_from(video.frames.len()).unwrap_or(u64::MAX);
+            row.cover(
+                CoverageUnit::Frames,
+                decoded.min(expected_frames),
+                0,
+                expected_frames,
             );
-            for mismatch in check.mismatches {
+            if video.size != expectations.raster {
+                setting(row, "decoded_raster");
+            }
+            if let Some(observed) = &video.color {
+                let check = kinewright_core::delivery_tag_check(
+                    &settings.delivery_color,
+                    observed,
+                    DeliveryTagSource::ProbedOutputFile,
+                );
+                for mismatch in check.mismatches {
+                    row.push(
+                        FindingKind::DeliveryTag {
+                            field: mismatch.field,
+                        },
+                        Failed,
+                        [0, end_us],
+                    );
+                }
+            }
+            if video.time_base != timing.video.time_base
+                || video.decoder != timing.video.decoder
+                || video.first_pts != Some(timing.video_first_pts)
+                || (!video.truncated && decoded != timing.video_frames)
+            {
+                row.push(FindingKind::TimingRecordChanged, Undecided, [0, end_us]);
+            }
+            if video.truncated {
                 row.push(
-                    FindingKind::DeliveryTag {
-                        field: mismatch.field,
+                    FindingKind::ScanTruncated {
+                        pass: ScanPass::Picture,
+                    },
+                    Undecided,
+                    [clock.frame_us(decoded), end_us],
+                );
+            }
+            match super::reader::frame_step(video.time_base, expectations.output_fps) {
+                Some(step)
+                    if timing
+                        .video_pts_step
+                        .is_none_or(|recorded| recorded == step) => {}
+                _ => row.push(FindingKind::VideoFrameGrid, Failed, [0, end_us]),
+            }
+            if video.first_pts != Some(0) {
+                row.push(
+                    FindingKind::VideoPts { frame: 0 },
+                    Failed,
+                    [0, clock.frame_us(1)],
+                );
+            }
+            for &frame in &video.off_grid {
+                row.push(
+                    FindingKind::VideoPts { frame },
+                    Failed,
+                    [clock.frame_us(frame), clock.frame_us(frame + 1)],
+                );
+            }
+            row.omitted += video
+                .off_grid_count
+                .saturating_sub(u64::try_from(video.off_grid.len()).unwrap_or(0));
+            if !video.truncated && decoded != expected_frames {
+                row.push(
+                    FindingKind::FrameCount {
+                        expected: expected_frames,
+                        decoded,
                     },
                     Failed,
-                    [0, end_us],
+                    [
+                        clock.frame_us(decoded.min(expected_frames)),
+                        clock.frame_us(decoded.max(expected_frames)),
+                    ],
                 );
             }
         }
-        None => row.push(
-            FindingKind::FrameCount {
-                expected: u64::try_from(expectations.output_frames.0).unwrap_or(0),
-                decoded: 0,
+    }
+    let expected_audio = has_expected_audio(plan);
+    let scan = match sound {
+        Err(error) => {
+            row.push(
+                FindingKind::Unreadable {
+                    pass: ScanPass::Sound,
+                    reason: super::reason(error),
+                },
+                Undecided,
+                [0, end_us],
+            );
+            return;
+        }
+        Ok(scan) => scan,
+    };
+    let recorded = u32::from(timing.audio.is_some());
+    if scan.streams > recorded {
+        row.push(
+            FindingKind::ExtraAudioStream {
+                streams: scan.streams,
             },
             Failed,
             [0, end_us],
-        ),
+        );
     }
-    if video.too_long {
-        row.push(FindingKind::TooLong, Undecided, [0, end_us]);
-        return;
-    }
-    video_timing(row, video, inputs, clock, end_us);
-    match &summary.audio {
-        Some(audio) => audio_timing(row, audio, config, end_us),
-        None if has_audio_segments(expectations) => {
+    let Some(audio) = &scan.output else {
+        if expected_audio {
             row.push(FindingKind::AudioStreamMissing, Failed, [0, end_us]);
         }
-        None => {}
-    }
-    sync(row, summary, expectations, config, clock);
-}
-
-fn video_timing(
-    row: &mut ReviewRowReport,
-    video: &VideoSummary,
-    inputs: &ReviewScanInputs<'_>,
-    clock: &Clock,
-    end_us: u64,
-) {
-    let timing = inputs.timing;
-    let decoded = u64::try_from(video.frames.len()).unwrap_or(u64::MAX);
-    if video.time_base != timing.video.time_base
-        || video.first_pts != Some(timing.video_first_pts)
-        || decoded != timing.video_frames
-    {
-        row.push(FindingKind::TimingRecordChanged, Undecided, [0, end_us]);
-    }
-    let Some(step) = super::decode::frame_step(video.time_base, inputs.expectations.output_fps)
-    else {
-        row.push(FindingKind::VideoFrameGrid, Failed, [0, end_us]);
         return;
     };
-    if timing
-        .video_pts_step
-        .is_some_and(|recorded| recorded != step)
+    let Some(stream) = &timing.audio else {
+        return;
+    };
+    if audio.time_base != stream.time_base || audio.decoder != stream.decoder {
+        row.push(FindingKind::TimingRecordChanged, Undecided, [0, end_us]);
+    }
+    let silent = config.silent_dbfs;
+    if !expected_audio
+        && audio.hops.iter().any(|hop| {
+            hop.rms
+                .iter()
+                .any(|&level| db(power(level)) > f64::from(silent))
+        })
     {
-        row.push(FindingKind::VideoFrameGrid, Failed, [0, end_us]);
+        row.push(FindingKind::UnexpectedAudio, Failed, [0, end_us]);
     }
-    if video.first_pts != Some(0) {
-        row.push(
-            FindingKind::VideoPts { frame: 0 },
-            Failed,
-            [0, clock.frame_us(1)],
-        );
-    }
-    for &frame in &video.off_grid {
-        row.push(
-            FindingKind::VideoPts { frame },
-            Failed,
-            [clock.frame_us(frame), clock.frame_us(frame + 1)],
-        );
-    }
-    let expected = u64::try_from(inputs.expectations.output_frames.0).unwrap_or(0);
-    if decoded != expected {
-        row.push(
-            FindingKind::FrameCount { expected, decoded },
-            Failed,
-            [
-                clock.frame_us(decoded.min(expected)),
-                clock.frame_us(decoded.max(expected)),
-            ],
-        );
-    }
+    audio_timing(row, audio, stream, plan, config, end_us);
 }
 
 fn samples_us(samples: i64, rate: u32) -> u64 {
@@ -255,15 +322,44 @@ fn samples_us(samples: i64, rate: u32) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
+/// Priming the encoder placed before output sample zero, from the recorded
+/// stream start (an MP4 edit list starts the stream at minus the priming).
+fn priming_samples(stream: &crate::ReviewOutputStream, rate: u32) -> u64 {
+    let (numerator, denominator) = stream.time_base;
+    let samples =
+        i128::from(stream.start_pts.min(0)).abs() * i128::from(numerator) * i128::from(rate)
+            / i128::from(denominator.max(1));
+    u64::try_from(samples).unwrap_or(u64::MAX)
+}
+
 fn audio_timing(
     row: &mut ReviewRowReport,
-    audio: &AudioSummary,
+    audio: &OutputSound,
+    stream: &crate::ReviewOutputStream,
+    plan: &Plan<'_>,
     config: &TechnicalScanConfig,
     end_us: u64,
 ) {
-    if audio.too_long {
-        row.push(FindingKind::TooLong, Undecided, [0, end_us]);
-        return;
+    let rate = audio.rate;
+    let extent =
+        i64::try_from(u128::from(end_us) * u128::from(rate) / 1_000_000).unwrap_or(i64::MAX);
+    row.cover(
+        CoverageUnit::Samples,
+        u64::try_from(audio.end.clamp(0, extent)).unwrap_or(0),
+        0,
+        u64::try_from(extent).unwrap_or(0),
+    );
+    if audio.truncated {
+        row.push(
+            FindingKind::ScanTruncated {
+                pass: ScanPass::Sound,
+            },
+            Undecided,
+            [samples_us(audio.end, rate), end_us],
+        );
+    }
+    if audio.missing_pts {
+        row.push(FindingKind::AudioPtsMissing, Failed, [0, end_us]);
     }
     for event in &audio.events {
         match *event {
@@ -271,20 +367,33 @@ fn audio_timing(
                 FindingKind::AudioGap { samples },
                 Failed,
                 [
-                    samples_us(at - i64::try_from(samples).unwrap_or(0), audio.rate),
-                    samples_us(at, audio.rate),
+                    samples_us(at - i64::try_from(samples).unwrap_or(0), rate),
+                    samples_us(at, rate),
                 ],
             ),
             TimingEvent::Overlap { at, samples } => row.push(
                 FindingKind::AudioOverlap { samples },
                 Failed,
-                [samples_us(at, audio.rate), samples_us(at, audio.rate)],
+                [samples_us(at, rate), samples_us(at, rate)],
             ),
         }
     }
-    let tolerance = i64::try_from(config.audio_extent_tolerance_samples).unwrap_or(i64::MAX);
-    let extent =
-        i64::try_from(u128::from(end_us) * u128::from(audio.rate) / 1_000_000).unwrap_or(i64::MAX);
+    row.omitted += audio
+        .event_count
+        .saturating_sub(u64::try_from(audio.events.len()).unwrap_or(0));
+    let tolerance = config.audio_pts_tolerance_samples;
+    let priming = priming_samples(stream, rate);
+    if audio.early_samples > tolerance {
+        // Decoded audio before the first picture is never priming: the
+        // decoder drops what the edit list marks.
+        row.push(
+            FindingKind::AudioEarly {
+                samples: audio.early_samples,
+            },
+            Failed,
+            [0, 0],
+        );
+    }
     let Some(first) = audio.first else {
         row.push(
             FindingKind::AudioShort {
@@ -295,480 +404,1351 @@ fn audio_timing(
         );
         return;
     };
-    if first > tolerance {
+    if first > i64::try_from(tolerance).unwrap_or(i64::MAX) {
         row.push(
             FindingKind::AudioStartLate {
                 samples: first.unsigned_abs(),
             },
             Failed,
-            [0, samples_us(first, audio.rate)],
+            [0, samples_us(first, rate)],
         );
     }
-    if audio.end < extent - tolerance {
+    if audio.truncated {
+        return;
+    }
+    // The last coded frame is whole, and an fps change can round the cut to
+    // one output frame.
+    let frame_samples = u64::from(rate) * u64::from(plan.clock.fps().denominator())
+        / u64::from(plan.clock.fps().numerator().max(1));
+    let end_tolerance = i64::try_from(
+        u64::from(audio.frame_size.max(1))
+            .saturating_add(priming)
+            .saturating_add(frame_samples)
+            .saturating_add(tolerance),
+    )
+    .unwrap_or(i64::MAX);
+    if audio.end < extent - end_tolerance {
         row.push(
             FindingKind::AudioShort {
                 samples: (extent - audio.end).unsigned_abs(),
             },
             Failed,
-            [samples_us(audio.end, audio.rate), end_us],
+            [samples_us(audio.end, rate), end_us],
         );
-    } else if audio.end > extent + tolerance {
+    } else if audio.end > extent + end_tolerance {
         row.push(
             FindingKind::AudioLong {
                 samples: (audio.end - extent).unsigned_abs(),
             },
             Failed,
-            [end_us, samples_us(audio.end, audio.rate)],
+            [end_us, samples_us(audio.end, rate)],
         );
-    }
-}
-
-/// Floor for level comparisons so digital zero does not dominate rises.
-const LEVEL_FLOOR_CDB: i16 = -10_000;
-
-fn level(audio: &AudioSummary, hop: usize) -> i16 {
-    audio
-        .hops
-        .get(hop)
-        .map_or(LEVEL_FLOOR_CDB, |stat| stat.rms_cdb.max(LEVEL_FLOOR_CDB))
-}
-
-/// Largest 10 ms rise over the preceding 50 ms near `at_us`.
-fn audio_onset(audio: &AudioSummary, at_us: u64, config: &TechnicalScanConfig) -> Option<u64> {
-    let first = usize::try_from(at_us.saturating_sub(config.sync_search_us) / SCAN_HOP_MICROS)
-        .unwrap_or(usize::MAX);
-    let last = usize::try_from((at_us + config.sync_search_us) / SCAN_HOP_MICROS)
-        .unwrap_or(usize::MAX)
-        .min(audio.hops.len().saturating_sub(1));
-    let mut best: Option<(i32, usize)> = None;
-    for hop in first.max(1)..=last {
-        let before = (hop.saturating_sub(5)..hop)
-            .map(|index| level(audio, index))
-            .max()
-            .unwrap_or(LEVEL_FLOOR_CDB);
-        let rise = i32::from(level(audio, hop)) - i32::from(before);
-        if rise >= i32::from(config.sync_onset_rise_cdb) && best.is_none_or(|(old, _)| rise > old) {
-            best = Some((rise, hop));
-        }
-    }
-    best.map(|(_, hop)| u64::try_from(hop).unwrap_or(u64::MAX) * SCAN_HOP_MICROS)
-}
-
-/// Largest frame-to-frame mean luma step near `at_us`.
-fn visual_event(
-    video: &VideoSummary,
-    at_us: u64,
-    config: &TechnicalScanConfig,
-    clock: &Clock,
-) -> Option<u64> {
-    let first = clock
-        .frame_at(at_us.saturating_sub(config.sync_search_us))
-        .max(1);
-    let last = clock.frame_at(at_us + config.sync_search_us).min(
-        u64::try_from(video.frames.len())
-            .unwrap_or(0)
-            .saturating_sub(1),
-    );
-    let mut best: Option<(u8, u64)> = None;
-    for frame in first..=last {
-        let index = usize::try_from(frame).unwrap_or(usize::MAX);
-        let step = video.frames[index]
-            .mean
-            .abs_diff(video.frames[index - 1].mean);
-        if step >= config.sync_visual_step && best.is_none_or(|(old, _)| step > old) {
-            best = Some((step, frame));
-        }
-    }
-    best.map(|(_, frame)| clock.frame_us(frame))
-}
-
-fn sync(
-    row: &mut ReviewRowReport,
-    summary: &ScanSummary,
-    expectations: &ReviewExpectations,
-    config: &TechnicalScanConfig,
-    clock: &Clock,
-) {
-    if !expectations.av_landmarks.is_determined() {
-        row.push(FindingKind::LandmarksNotDetermined, Undecided, [0, 0]);
-    }
-    for (index, landmark) in expectations.av_landmarks.known().enumerate() {
-        let landmark_id = u32::try_from(index).unwrap_or(u32::MAX);
-        let audio_at = landmark.audio_at.floor();
-        let video_at = landmark.video_at.floor();
-        let span = [audio_at.min(video_at), audio_at.max(video_at)];
-        let onset = summary
-            .audio
-            .as_ref()
-            .and_then(|audio| audio_onset(audio, audio_at, config));
-        let event = visual_event(&summary.video, video_at, config, clock);
-        let (Some(onset), Some(event)) = (onset, event) else {
-            row.push(
-                FindingKind::SyncEventUndetected {
-                    landmark: landmark_id,
-                },
-                Undecided,
-                span,
-            );
-            continue;
-        };
-        let measured = i128::from(onset) - i128::from(event);
-        let expected = i128::from(audio_at) - i128::from(video_at);
-        let error = u64::try_from((measured - expected).unsigned_abs()).unwrap_or(u64::MAX);
-        let allowed = landmark
-            .uncertainty
-            .ceil()
-            .saturating_add(SCAN_HOP_MICROS)
-            .saturating_add(clock.frame_us(1));
-        if error > allowed {
-            row.push(
-                FindingKind::SyncOffset {
-                    landmark: landmark_id,
-                    error_us: error,
-                    allowed_us: allowed,
-                },
-                Failed,
-                span,
-            );
-        }
     }
 }
 
 fn loudness(
     row: &mut ReviewRowReport,
-    summary: &ScanSummary,
-    expectations: &ReviewExpectations,
+    inputs: &ReviewScanInputs<'_>,
+    plan: &Plan<'_>,
+    sound: Result<&SoundScan, &MediaError>,
     config: &TechnicalScanConfig,
+    end_us: u64,
 ) {
-    let audible = has_audio_segments(expectations);
-    let Some(audio) = &summary.audio else {
-        if audible {
-            row.push(FindingKind::LoudnessUnmeasured, Undecided, [0, 0]);
+    let expected = has_expected_audio(plan);
+    let span = [0, end_us];
+    let Ok(Some(audio)) = sound.map(|decoded| decoded.output.as_ref()) else {
+        // No scan, or no audio stream where audio is expected.
+        if sound.is_err() || expected {
+            row.push(FindingKind::LoudnessUnmeasured, Undecided, span);
         }
         return;
     };
+    let extent =
+        u64::try_from(u128::from(end_us) * u128::from(audio.rate) / 1_000_000).unwrap_or(u64::MAX);
+    row.cover(
+        CoverageUnit::Samples,
+        u64::try_from(audio.end.max(0)).unwrap_or(0).min(extent),
+        0,
+        extent,
+    );
+    if audio.truncated {
+        row.push(
+            FindingKind::ScanTruncated {
+                pass: ScanPass::Sound,
+            },
+            Undecided,
+            span,
+        );
+        return;
+    }
     let Ok(measured) = &audio.loudness else {
-        row.push(FindingKind::LoudnessUnmeasured, Undecided, [0, 0]);
+        row.push(FindingKind::LoudnessUnmeasured, Undecided, span);
         return;
     };
-    match measured.integrated_lufs_hundredths {
-        Some(lufs) => {
-            if (lufs - config.integrated_lufs_hundredths).abs() > config.tolerance_lu_hundredths {
+    match &inputs.settings.loudness_normalization {
+        Some(target) => {
+            match measured.integrated_lufs_hundredths {
+                Some(lufs)
+                    if (lufs - target.integrated_lufs_hundredths).abs()
+                        > target.tolerance_lu_hundredths =>
+                {
+                    row.push(
+                        FindingKind::IntegratedLoudness {
+                            lufs_hundredths: lufs,
+                            target_hundredths: target.integrated_lufs_hundredths,
+                        },
+                        Failed,
+                        span,
+                    );
+                }
+                None if expected => row.push(FindingKind::LoudnessUnmeasured, Undecided, span),
+                Some(_) | None => {}
+            }
+            peak(
+                row,
+                measured,
+                target.true_peak_ceiling_dbtp_hundredths,
+                span,
+            );
+            if let (Some(max), Some(range)) = (
+                target.loudness_range_max_lu_hundredths,
+                measured.loudness_range_lu_hundredths,
+            ) && range > max
+            {
                 row.push(
-                    FindingKind::IntegratedLoudness {
-                        lufs_hundredths: lufs,
+                    FindingKind::LoudnessRange {
+                        lu_hundredths: range,
+                        max_hundredths: max,
                     },
                     Failed,
-                    [0, 0],
+                    span,
                 );
             }
         }
-        None if audible => row.push(FindingKind::LoudnessUnmeasured, Undecided, [0, 0]),
-        None => {}
+        // Not normalised: integrated loudness is recorded in `measured`
+        // only; the peak still must not clip.
+        None => peak(
+            row,
+            measured,
+            config.unnormalized_true_peak_ceiling_dbtp_hundredths,
+            span,
+        ),
     }
+}
+
+fn peak(
+    row: &mut ReviewRowReport,
+    measured: &kinewright_core::AudioLoudness,
+    ceiling: i32,
+    span: [u64; 2],
+) {
     if let Some(peak) = measured.true_peak_dbtp_hundredths
-        && peak > config.true_peak_ceiling_dbtp_hundredths
+        && peak > ceiling
     {
         row.push(
             FindingKind::TruePeak {
                 dbtp_hundredths: peak,
+                ceiling_hundredths: ceiling,
             },
             Failed,
+            span,
+        );
+    }
+}
+
+/// Edit-level defects, exact from the plan: flash frames between two longer
+/// runs of one source, frames no video segment covers, and kept words whose
+/// audio is muted or missing.
+fn edit_defects(
+    row: &mut ReviewRowReport,
+    inputs: &ReviewScanInputs<'_>,
+    plan: &Plan<'_>,
+    config: &TechnicalScanConfig,
+) {
+    let flash = u64::from(config.flash_max_frames);
+    let clock = plan.clock;
+    let mut cursor = FrameCursor::new(plan);
+    // Runs of the topmost asset: (asset, first frame, length).
+    let mut runs: Vec<(Option<kinewright_core::AssetId>, u64, u64)> = Vec::new();
+    let mut hole: Option<u64> = None;
+    let check_flash = |runs: &[(Option<kinewright_core::AssetId>, u64, u64)],
+                       row: &mut ReviewRowReport| {
+        // The middle of the last three runs.
+        let [before, middle, after] = runs else {
+            return;
+        };
+        if middle.0.is_some()
+            && before.0.is_some()
+            && before.0 == after.0
+            && middle.0 != before.0
+            && middle.2 <= flash
+            && before.2 > flash
+            && after.2 > flash
+        {
+            row.push(
+                FindingKind::EditFlash { frames: middle.2 },
+                Failed,
+                [
+                    clock.frame_us(middle.1),
+                    clock.frame_us(middle.1 + middle.2),
+                ],
+            );
+        }
+    };
+    let determined = plan.output_frames == 0 || plan.pictured(0).is_some();
+    if !determined {
+        row.push(
+            FindingKind::TimelineUndetermined,
+            Undecided,
+            [0, clock.frame_us(plan.output_frames)],
+        );
+    }
+    for frame in 0..plan.output_frames {
+        cursor.advance(frame);
+        // A hole is a frame no document clip draws, read from the frozen
+        // document rather than from the mapped media segments.
+        let empty = plan.pictured(frame) == Some(false);
+        match (empty, hole) {
+            (true, None) => hole = Some(frame),
+            (false, Some(start)) => {
+                row.push(
+                    FindingKind::TimelineHole,
+                    Failed,
+                    [clock.frame_us(start), clock.frame_us(frame)],
+                );
+                hole = None;
+            }
+            _ => {}
+        }
+        let top = plan.top_asset(&cursor);
+        match runs.last_mut() {
+            Some(last) if last.0 == top => last.2 += 1,
+            _ => {
+                if runs.len() == 3 {
+                    check_flash(&runs, row);
+                    runs.remove(0);
+                }
+                runs.push((top, frame, 1));
+            }
+        }
+    }
+    if runs.len() == 3 {
+        check_flash(&runs, row);
+    }
+    if let Some(start) = hole {
+        row.push(
+            FindingKind::TimelineHole,
+            Failed,
+            [clock.frame_us(start), clock.frame_us(plan.output_frames)],
+        );
+    }
+    for word in inputs.expectations.kept_words.known() {
+        let silent = plan
+            .audio_part(&word.segment)
+            .is_none_or(|part| plan.audio[part].muted);
+        if silent {
+            row.push(
+                FindingKind::SilenceOverSpeech {
+                    word_index: word.word_index,
+                },
+                Failed,
+                [word.output.start.floor(), word.output.end.ceil()],
+            );
+        }
+    }
+}
+
+/// Runs of consecutive frames satisfying a predicate, as frame ranges.
+fn runs(frames: usize, mut test: impl FnMut(usize) -> bool) -> Vec<Range<u64>> {
+    let mut found = Vec::new();
+    let mut start = None;
+    for index in 0..=frames {
+        let hit = index < frames && test(index);
+        match (hit, start) {
+            (true, None) => start = Some(index),
+            (false, Some(first)) => {
+                found.push(u64::try_from(first).unwrap_or(0)..u64::try_from(index).unwrap_or(0));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+#[allow(clippy::too_many_lines, reason = "one rule per defect family")]
+fn picture_defects(
+    row: &mut ReviewRowReport,
+    plan: &Plan<'_>,
+    picture: Result<&PictureScan, &MediaError>,
+    config: &TechnicalScanConfig,
+    end_us: u64,
+) -> (Vec<ExcludedSpan>, u64) {
+    let clock = plan.clock;
+    let span = |range: &Range<u64>| [clock.frame_us(range.start), clock.frame_us(range.end)];
+    let video = match picture {
+        Err(error) => {
+            row.push(
+                FindingKind::Unreadable {
+                    pass: ScanPass::Picture,
+                    reason: super::reason(error),
+                },
+                Undecided,
+                [0, end_us],
+            );
+            return (Vec::new(), 0);
+        }
+        Ok(video) => video,
+    };
+    let frames = &video.frames;
+    let count = frames.len();
+    let compared = |index: usize| frames[index].state == FrameState::Compared;
+    let is_black = |index: usize| {
+        let frame = &frames[index];
+        compared(index)
+            && frame.out.mean <= config.black_mean_max
+            && frame.out.max <= config.black_cell_max
+            && (frame.src.mean > config.black_source_mean_min
+                || frame.src.max > config.black_source_cell_min)
+    };
+    let textured = |std: f32| std >= 4.0 * config.texture_min;
+    let flat = |std: f32| std < config.texture_min;
+    let mismatched = |index: usize| {
+        let frame = &frames[index];
+        compared(index)
+            && !is_black(index)
+            && (frame.mad > config.mismatch_difference_max
+                || frame
+                    .corr
+                    .is_some_and(|corr| corr < config.mismatch_correlation_min)
+                || (textured(frame.out.std) && flat(frame.src.std))
+                || (flat(frame.out.std) && textured(frame.src.std)))
+    };
+    for range in runs(count, is_black) {
+        row.push(FindingKind::Black, Failed, span(&range));
+    }
+    // F3: a short mismatch is a flash wherever it falls, cuts included.
+    for range in runs(count, mismatched) {
+        let kind = if range.end - range.start <= u64::from(config.flash_max_frames) {
+            FindingKind::Flash
+        } else {
+            FindingKind::PictureMismatch
+        };
+        row.push(kind, Failed, span(&range));
+    }
+    // Freeze: within one part's compared run, the output holds still while
+    // the mapped source moves. Static source frames neither count nor break
+    // the run.
+    let mut frozen = 0_u32;
+    let mut start: Option<usize> = None;
+    let flush =
+        |row: &mut ReviewRowReport, frozen: &mut u32, start: &mut Option<usize>, end: usize| {
+            if *frozen >= config.freeze_min_frames
+                && let Some(first) = *start
+            {
+                let range = u64::try_from(first).unwrap_or(0)..u64::try_from(end).unwrap_or(0);
+                row.push(FindingKind::Freeze, Failed, span(&range));
+            }
+            *frozen = 0;
+            *start = None;
+        };
+    for (index, frame) in frames.iter().enumerate() {
+        let (Some(src), Some(out)) = (frame.src_diff, frame.out_diff) else {
+            flush(row, &mut frozen, &mut start, index);
+            continue;
+        };
+        // A black output frame is reported as black, not also as a freeze.
+        if !compared(index) || is_black(index) {
+            flush(row, &mut frozen, &mut start, index);
+            continue;
+        }
+        if src < config.motion_floor {
+            continue;
+        }
+        if out <= config.freeze_ratio * src {
+            frozen += 1;
+            start.get_or_insert(index);
+        } else {
+            flush(row, &mut frozen, &mut start, index);
+        }
+    }
+    flush(row, &mut frozen, &mut start, count);
+    // Not compared, by reason.
+    for (reason_index, reason) in video.reasons.iter().enumerate() {
+        let wanted = u16::try_from(reason_index).unwrap_or(u16::MAX);
+        for range in runs(count, |index| {
+            frames[index].state == FrameState::NotCompared(wanted)
+        }) {
+            row.push(
+                FindingKind::PictureNotCompared {
+                    reason: reason.clone(),
+                },
+                Undecided,
+                span(&range),
+            );
+        }
+    }
+    let checked = frames
+        .iter()
+        .filter(|frame| matches!(frame.state, FrameState::Compared | FrameState::Empty))
+        .count();
+    let delegated = frames
+        .iter()
+        .filter(|frame| matches!(frame.state, FrameState::Excluded(_)))
+        .count();
+    let checked = u64::try_from(checked).unwrap_or(0);
+    let delegated = u64::try_from(delegated).unwrap_or(0);
+    let decoded = u64::try_from(count).unwrap_or(0);
+    row.cover(CoverageUnit::Frames, checked, delegated, plan.output_frames);
+    if video.truncated {
+        row.push(
+            FindingKind::ScanTruncated {
+                pass: ScanPass::Picture,
+            },
+            Undecided,
+            [clock.frame_us(decoded), end_us],
+        );
+    } else if decoded < plan.output_frames {
+        row.push(
+            FindingKind::PictureNotCompared {
+                reason: "frames missing from the encode".into(),
+            },
+            Undecided,
+            [clock.frame_us(decoded), end_us],
+        );
+    }
+    // Spans the overlay check owns, merged per reason.
+    let mut excluded = Vec::new();
+    let mut omitted = 0_u64;
+    for reason in [
+        ExclusionReason::Composited,
+        ExclusionReason::Effect,
+        ExclusionReason::Transition,
+        ExclusionReason::OverlayUnresolved,
+        ExclusionReason::OverlayCovered,
+        ExclusionReason::Generated,
+    ] {
+        for range in runs(count, |index| {
+            frames[index].state == FrameState::Excluded(reason)
+        }) {
+            if excluded.len() < MAX_EXCLUDED_SPANS {
+                excluded.push(ExcludedSpan {
+                    reason,
+                    output_us: span(&range),
+                });
+            } else {
+                omitted += 1;
+            }
+        }
+    }
+    (excluded, omitted)
+}
+
+/// The mapped sources' predicted output levels on the hop clock, with each
+/// part's gain measured from the encode where that part dominates.
+struct Model<'s> {
+    channels: usize,
+    hops: usize,
+    /// Output hops lag the source by this many hops.
+    lag: i64,
+    parts: Vec<Option<Range<usize>>>,
+    entries: &'s [SourceHop],
+    /// Measured dB gain per part and channel, over its static mix gain.
+    gain: Vec<[f64; 2]>,
+    static_db: &'s [f64],
+    /// Hops a muted-free but uncomparable or undecoded part covers.
+    blocked: Vec<bool>,
+    /// Hops an unmuted part covers.
+    active: Vec<bool>,
+    /// Hops at a non-continued edge of an unmuted part, ±1.
+    edges: Vec<bool>,
+    unity: [Vec<f32>; 2],
+    predicted: [Vec<f32>; 2],
+    second: [Vec<f32>; 2],
+    output: &'s OutputSound,
+}
+
+fn part_hops(plan: &Plan<'_>, part: usize, rate: u32) -> Range<usize> {
+    let segment = plan.audio[part].segment;
+    let start = first_hop(samples_at(segment.output.start, rate), rate);
+    let end = first_hop(samples_at(segment.output.end, rate).saturating_sub(1), rate) + 1;
+    usize::try_from(start).unwrap_or(usize::MAX)..usize::try_from(end).unwrap_or(usize::MAX)
+}
+
+impl<'s> Model<'s> {
+    fn new(
+        plan: &Plan<'_>,
+        scan: &'s SoundScan,
+        output: &'s OutputSound,
+        config: &TechnicalScanConfig,
+    ) -> Self {
+        let channels = usize::from(output.channels).min(2);
+        let hops = output.hops.len();
+        let entries = scan.sources.hops.as_slice();
+        let mut parts: Vec<Option<Range<usize>>> = vec![None; plan.audio.len()];
+        let mut index = 0;
+        while index < entries.len() {
+            let part = usize::try_from(entries[index].part).unwrap_or(usize::MAX);
+            let start = index;
+            while index < entries.len() && entries[index].part == entries[start].part {
+                index += 1;
+            }
+            if let Some(slot) = parts.get_mut(part) {
+                *slot = Some(start..index);
+            }
+        }
+        let mut blocked = vec![false; hops];
+        let mut active = vec![false; hops];
+        let mut edges = vec![false; hops];
+        let mark = |flags: &mut Vec<bool>, range: Range<usize>| {
+            for flag in flags.iter_mut().take(range.end).skip(range.start) {
+                *flag = true;
+            }
+        };
+        let failed: Vec<usize> = scan.sources.failed.iter().map(|(part, _)| *part).collect();
+        for (part, audio) in plan.audio.iter().enumerate() {
+            if audio.muted {
+                continue;
+            }
+            let range = part_hops(plan, part, output.rate);
+            mark(&mut active, range.clone());
+            if audio.uncomparable.is_some() || failed.contains(&part) {
+                mark(&mut blocked, range.clone());
+            }
+            for (side, at) in [range.start, range.end.saturating_sub(1)]
+                .into_iter()
+                .enumerate()
+            {
+                if !audio.continued[side] {
+                    mark(&mut edges, at.saturating_sub(1)..at + 2);
+                }
+            }
+        }
+        let mut model = Self {
+            channels,
+            hops,
+            lag: 0,
+            parts,
+            entries,
+            gain: vec![[0.0; 2]; plan.audio.len()],
+            static_db: &scan.sources.static_db,
+            blocked,
+            active,
+            edges,
+            unity: [vec![0.0; hops], vec![0.0; hops]],
+            predicted: [vec![0.0; hops], vec![0.0; hops]],
+            second: [vec![0.0; hops], vec![0.0; hops]],
+            output,
+        };
+        model.sum(plan, false);
+        model.lag = audio_lag_hops(&model, plan, config);
+        model.measure_gains(plan, config);
+        model.sum(plan, true);
+        model
+    }
+
+    fn part_entries(&self, part: usize) -> &'s [SourceHop] {
+        self.parts[part]
+            .as_ref()
+            .map_or(&[][..], |range| &self.entries[range.clone()])
+    }
+
+    fn part_power(&self, part: usize, entry: &SourceHop, channel: usize) -> f64 {
+        power(entry.level.rms[channel]) * 10_f64.powf(self.static_db[part] / 10.0)
+    }
+
+    fn sum(&mut self, plan: &Plan<'_>, measured: bool) {
+        // The unity sum stays for the sync pass; only the buffers this pass
+        // fills are cleared.
+        for channel in 0..2 {
+            if measured {
+                self.predicted[channel].fill(0.0);
+                self.second[channel].fill(0.0);
+            } else {
+                self.unity[channel].fill(0.0);
+            }
+        }
+        for part in 0..plan.audio.len() {
+            let silent = plan.audio[part].silent_channels;
+            for entry in self.part_entries(part) {
+                let hop = usize::try_from(entry.hop).unwrap_or(usize::MAX);
+                if hop >= self.hops {
+                    continue;
+                }
+                for (channel, &quiet) in silent.iter().enumerate().take(self.channels) {
+                    if self.channels == 2 && quiet {
+                        continue;
+                    }
+                    let unity = self.part_power(part, entry, channel);
+                    #[allow(clippy::cast_possible_truncation, reason = "levels in f32")]
+                    if measured {
+                        let gain = self.gain[part][channel];
+                        self.predicted[channel][hop] += (unity * 10_f64.powf(gain / 10.0)) as f32;
+                        self.second[channel][hop] += (linear(entry.level.second[channel])
+                            * 10_f64.powf((gain + self.static_db[part]) / 20.0))
+                            as f32;
+                    } else {
+                        self.unity[channel][hop] += unity as f32;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Output hop `hop` shows predicted hop `hop - lag`.
+    fn predicted_hop(&self, hop: usize) -> Option<usize> {
+        let at = i64::try_from(hop).ok()? - self.lag;
+        usize::try_from(at).ok().filter(|at| *at < self.hops)
+    }
+
+    fn output_power(&self, hop: usize, channel: usize) -> f64 {
+        self.output
+            .hops
+            .get(hop)
+            .map_or(0.0, |level| power(level.rms[channel]))
+    }
+
+    /// Each part's gain over its static mix gain, measured where it
+    /// dominates and is loud. A part far quieter than the others (or than
+    /// the floor) is treated as dropped, so its hops are judged at the
+    /// group's gain.
+    fn measure_gains(&mut self, plan: &Plan<'_>, config: &TechnicalScanConfig) {
+        let mut measured: Vec<[Option<f64>; 2]> = vec![[None; 2]; plan.audio.len()];
+        for (part, slot) in measured.iter_mut().enumerate() {
+            for (channel, value) in slot.iter_mut().enumerate().take(self.channels) {
+                let mut differences = Vec::new();
+                for entry in self.part_entries(part) {
+                    let source = usize::try_from(entry.hop).unwrap_or(usize::MAX);
+                    if source >= self.hops || self.blocked[source] {
+                        continue;
+                    }
+                    let own = self.part_power(part, entry, channel);
+                    let total = f64::from(self.unity[channel][source]);
+                    if own < DOMINANT_SHARE * total || db(own) < f64::from(config.dropout_loud_dbfs)
+                    {
+                        continue;
+                    }
+                    let Ok(lagged) = usize::try_from(i64::try_from(source).unwrap_or(0) + self.lag)
+                    else {
+                        continue;
+                    };
+                    differences.push(db(self.output_power(lagged, channel)) - db(own));
+                }
+                *value = median(&mut differences);
+            }
+        }
+        for channel in 0..self.channels {
+            let mut all: Vec<f64> = measured.iter().filter_map(|gains| gains[channel]).collect();
+            let group = median(&mut all);
+            let floor = f64::from(config.gain_floor_db);
+            let fallback = group.filter(|gain| *gain >= floor).unwrap_or(0.0);
+            for (part, gains) in measured.iter().enumerate() {
+                let limit = floor.max(group.unwrap_or(0.0) - f64::from(config.gain_drop_db));
+                self.gain[part][channel] = match gains[channel] {
+                    Some(gain) if gain >= limit => gain,
+                    _ => fallback,
+                };
+            }
+        }
+    }
+}
+
+/// Correlate two equally long envelopes over lags `-radius..=radius`; the
+/// best lag and its refined offset when it is a distinct peak above `min`.
+fn best_lag(
+    pairs: impl Fn(i64) -> Vec<(f64, f64)>,
+    radius: i64,
+    min_pairs: usize,
+    peak_min: f64,
+) -> Option<f64> {
+    let score = |lag: i64| -> Option<f64> {
+        let pairs = pairs(lag);
+        if pairs.len() < min_pairs {
+            return None;
+        }
+        #[allow(clippy::cast_precision_loss, reason = "window lengths are small")]
+        let count = pairs.len() as f64;
+        let (mean_a, mean_b) = pairs
+            .iter()
+            .fold((0.0, 0.0), |(a, b), (x, y)| (a + x / count, b + y / count));
+        let (mut covariance, mut var_a, mut var_b) = (0.0, 0.0, 0.0);
+        for (x, y) in &pairs {
+            covariance += (x - mean_a) * (y - mean_b);
+            var_a += (x - mean_a).powi(2);
+            var_b += (y - mean_b).powi(2);
+        }
+        (var_a > 0.0 && var_b > 0.0).then(|| covariance / (var_a * var_b).sqrt())
+    };
+    let scores: Vec<(i64, Option<f64>)> = (-radius..=radius).map(|lag| (lag, score(lag))).collect();
+    let (best, peak) = scores
+        .iter()
+        .filter_map(|(lag, value)| value.map(|value| (*lag, value)))
+        .max_by(|a, b| a.1.total_cmp(&b.1))?;
+    if peak < peak_min {
+        return None;
+    }
+    // A rival is another local maximum, not a neighbour on the slope of
+    // the best peak: smooth envelopes have broad peaks.
+    let value = |index: usize| scores.get(index).and_then(|(_, value)| *value);
+    let rival = (0..scores.len()).any(|index| {
+        let Some(candidate) = value(index) else {
+            return false;
+        };
+        let left = index.checked_sub(1).and_then(value);
+        let right = value(index + 1);
+        (scores[index].0 - best).abs() > 2
+            && left.is_none_or(|left| candidate >= left)
+            && right.is_none_or(|right| candidate >= right)
+            && candidate >= peak - SYNC_DISTINCT
+    });
+    if rival {
+        return None;
+    }
+    let at = |lag: i64| {
+        scores
+            .iter()
+            .find(|(candidate, _)| *candidate == lag)
+            .and_then(|(_, value)| *value)
+    };
+    #[allow(clippy::cast_precision_loss, reason = "small lags")]
+    let refined = match (at(best - 1), at(best + 1)) {
+        (Some(left), Some(right)) => {
+            let curve = left - 2.0 * peak + right;
+            if curve < 0.0 {
+                best as f64 + 0.5 * (left - right) / curve
+            } else {
+                best as f64
+            }
+        }
+        _ => best as f64,
+    };
+    Some(refined)
+}
+
+fn windows(plan: &Plan<'_>, config: &TechnicalScanConfig) -> Vec<Range<u64>> {
+    let duration = plan.clock.frame_us(plan.output_frames);
+    let window = config.sync_window_us.max(1);
+    let count = usize::try_from(duration / window)
+        .unwrap_or(usize::MAX)
+        .clamp(1, MAX_SYNC_WINDOWS);
+    let count_u = u64::try_from(count).unwrap_or(1);
+    (0..count_u)
+        .map(|index| {
+            let start = duration * index / count_u;
+            start..(start + window).min(duration)
+        })
+        .collect()
+}
+
+/// Audio lag of one window in hops, from the output and predicted dB
+/// envelopes.
+fn audio_window_lag(
+    model: &Model<'_>,
+    window: &Range<u64>,
+    config: &TechnicalScanConfig,
+) -> Option<f64> {
+    let first = usize::try_from(window.start / SCAN_HOP_MICROS).ok()?;
+    let last = usize::try_from(window.end / SCAN_HOP_MICROS)
+        .ok()?
+        .min(model.hops);
+    if last <= first {
+        return None;
+    }
+    let envelope = |values: &dyn Fn(usize) -> f64, hop: usize| {
+        db((0..model.channels)
+            .map(|channel| values(channel * model.hops + hop))
+            .sum())
+    };
+    let predicted = |index: usize| {
+        let (channel, hop) = (index / model.hops, index % model.hops);
+        f64::from(model.unity[channel][hop])
+    };
+    let output = |index: usize| {
+        let (channel, hop) = (index / model.hops, index % model.hops);
+        model.output_power(hop, channel)
+    };
+    let covered = (first..last)
+        .filter(|&hop| model.active[hop] && !model.blocked[hop])
+        .count();
+    #[allow(clippy::cast_precision_loss, reason = "window lengths are small")]
+    if (covered as f64) < SYNC_COVERED_SHARE * (last - first) as f64 {
+        return None;
+    }
+    let source: Vec<f64> = (first..last).map(|hop| envelope(&predicted, hop)).collect();
+    let mean = source.iter().sum::<f64>() / f64::from(u32::try_from(source.len()).ok()?);
+    let std = (source.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+        / f64::from(u32::try_from(source.len()).ok()?))
+    .sqrt();
+    if std < SYNC_ENVELOPE_STD_DB {
+        return None;
+    }
+    let radius = i64::try_from(config.sync_search_us / SCAN_HOP_MICROS).ok()?;
+    let pairs = |lag: i64| -> Vec<(f64, f64)> {
+        (first..last)
+            .filter_map(|hop| {
+                let shifted = usize::try_from(i64::try_from(hop).ok()? + lag).ok()?;
+                (shifted < model.hops).then(|| (envelope(&output, shifted), source[hop - first]))
+            })
+            .collect()
+    };
+    let min_pairs = (last - first) / 2;
+    best_lag(pairs, radius, min_pairs, f64::from(config.sync_peak_min))
+}
+
+fn audio_lag_hops(model: &Model<'_>, plan: &Plan<'_>, config: &TechnicalScanConfig) -> i64 {
+    let mut lags: Vec<f64> = windows(plan, config)
+        .iter()
+        .filter_map(|window| audio_window_lag(model, window, config))
+        .collect();
+    #[allow(clippy::cast_possible_truncation, reason = "a lag of a few hops")]
+    median(&mut lags).map_or(0, |lag| lag.round() as i64)
+}
+
+/// Video lag of one window in frames, from the output and source frame
+/// difference signatures within compared runs of one part.
+fn video_window_lag(
+    plan: &Plan<'_>,
+    picture: &PictureScan,
+    window: &Range<u64>,
+    config: &TechnicalScanConfig,
+) -> Option<f64> {
+    let clock = plan.clock;
+    let first = usize::try_from(
+        clock.first_frame_from(kinewright_core::ExactMicros::integer(window.start)),
+    )
+    .ok()?;
+    let last =
+        usize::try_from(clock.first_frame_from(kinewright_core::ExactMicros::integer(window.end)))
+            .ok()?
+            .min(picture.frames.len());
+    if last <= first + SYNC_MIN_PAIRS {
+        return None;
+    }
+    let frames = &picture.frames;
+    let source = |index: usize| {
+        let frame = frames.get(index)?;
+        (frame.state == FrameState::Compared).then_some(())?;
+        frame.src_diff.map(|value| (frame.part, f64::from(value)))
+    };
+    let motion: Vec<f64> = (first..last)
+        .filter_map(|index| source(index).map(|(_, v)| v))
+        .collect();
+    if motion.len() < SYNC_MIN_PAIRS {
+        return None;
+    }
+    let mean = motion.iter().sum::<f64>() / f64::from(u32::try_from(motion.len()).ok()?);
+    let std = (motion.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+        / f64::from(u32::try_from(motion.len()).ok()?))
+    .sqrt();
+    if std < f64::from(config.sync_motion_std_min) {
+        return None;
+    }
+    let frame_us = clock.frame_us(1).max(1);
+    let radius = i64::try_from(config.sync_search_us / frame_us).ok()?.max(1);
+    let pairs = |lag: i64| -> Vec<(f64, f64)> {
+        (first..last)
+            .filter_map(|index| {
+                let (part, src) = source(index)?;
+                let shifted = usize::try_from(i64::try_from(index).ok()? + lag).ok()?;
+                let out = frames.get(shifted)?;
+                (out.part == part && out.state == FrameState::Compared).then_some(())?;
+                Some((f64::from(out.out_diff?), src))
+            })
+            .collect()
+    };
+    best_lag(
+        pairs,
+        radius,
+        SYNC_MIN_PAIRS,
+        f64::from(config.sync_peak_min),
+    )
+}
+
+/// Sync (L10): audio and video lags against their sources over windows
+/// spread across the timeline. A signal is measured when at least
+/// `min(sync_min_windows, windows)` windows decide it; otherwise the row is
+/// Unknown. A cut with no mapped audio or no compared picture has no sync to
+/// measure.
+fn sync(
+    plan: &Plan<'_>,
+    picture: Option<&PictureScan>,
+    model: Option<&Model<'_>>,
+    config: &TechnicalScanConfig,
+) -> (SyncMeasurement, Vec<(FindingKind, FindingVerdict)>) {
+    let mut measurement = SyncMeasurement::default();
+    let mut findings = Vec::new();
+    let has_picture = picture.is_some_and(|scan| {
+        scan.frames
+            .iter()
+            .any(|frame| frame.state == FrameState::Compared)
+    });
+    let has_audio = model.is_some_and(|model| {
+        model
+            .active
+            .iter()
+            .zip(&model.blocked)
+            .any(|(active, blocked)| *active && !blocked)
+    });
+    if !has_picture || !has_audio {
+        return (measurement, findings);
+    }
+    let (Some(picture), Some(model)) = (picture, model) else {
+        return (measurement, findings);
+    };
+    let windows = windows(plan, config);
+    let needed = config
+        .sync_min_windows
+        .min(u32::try_from(windows.len()).unwrap_or(u32::MAX));
+    measurement.windows = u32::try_from(windows.len()).unwrap_or(u32::MAX);
+    #[allow(clippy::cast_precision_loss, reason = "a lag of a few hops")]
+    let mut audio: Vec<f64> = windows
+        .iter()
+        .filter_map(|window| audio_window_lag(model, window, config))
+        .map(|lag| lag * SCAN_HOP_MICROS as f64)
+        .collect();
+    let frame_us = plan.clock.frame_us(1);
+    #[allow(clippy::cast_precision_loss, reason = "a lag of a few frames")]
+    let mut video: Vec<f64> = windows
+        .iter()
+        .filter_map(|window| video_window_lag(plan, picture, window, config))
+        .map(|lag| lag * frame_us as f64)
+        .collect();
+    measurement.audio_windows = u32::try_from(audio.len()).unwrap_or(u32::MAX);
+    measurement.video_windows = u32::try_from(video.len()).unwrap_or(u32::MAX);
+    #[allow(clippy::cast_possible_truncation, reason = "microsecond lags")]
+    {
+        measurement.audio_lag_us = median(&mut audio).map(|lag| lag.round() as i64);
+        measurement.video_lag_us = median(&mut video).map(|lag| lag.round() as i64);
+    }
+    for (signal, measured) in [
+        (SyncSignal::Audio, measurement.audio_windows),
+        (SyncSignal::Video, measurement.video_windows),
+    ] {
+        if measured < needed {
+            findings.push((
+                FindingKind::SyncUnmeasured {
+                    signal,
+                    measured,
+                    needed,
+                },
+                Undecided,
+            ));
+        }
+    }
+    if let (Some(audio), Some(video)) = (measurement.audio_lag_us, measurement.video_lag_us) {
+        let error = audio - video;
+        if error.unsigned_abs() > config.sync_allowed_us {
+            findings.push((
+                FindingKind::SyncOffset {
+                    error_us: error,
+                    allowed_us: config.sync_allowed_us,
+                },
+                Failed,
+            ));
+        }
+    }
+    (measurement, findings)
+}
+
+#[allow(clippy::too_many_lines, reason = "one rule per sound defect family")]
+fn sound_defects(
+    row: &mut ReviewRowReport,
+    plan: &Plan<'_>,
+    sound: Result<&SoundScan, &MediaError>,
+    model: Option<&Model<'_>>,
+    config: &TechnicalScanConfig,
+    end_us: u64,
+) {
+    let expected = has_expected_audio(plan);
+    let scan = match sound {
+        Err(error) => {
+            row.push(
+                FindingKind::Unreadable {
+                    pass: ScanPass::Sound,
+                    reason: super::reason(error),
+                },
+                Undecided,
+                [0, end_us],
+            );
+            return;
+        }
+        Ok(scan) => scan,
+    };
+    let Some(output) = &scan.output else {
+        // F2: no audio to compare is never a clean sound scan.
+        if expected {
+            row.push(
+                FindingKind::SoundNotCompared {
+                    reason: "the encode has no audio stream".into(),
+                },
+                Undecided,
+                [0, end_us],
+            );
+        }
+        return;
+    };
+    if output.truncated || scan.sources.truncated {
+        row.push(
+            FindingKind::ScanTruncated {
+                pass: ScanPass::Sound,
+            },
+            Undecided,
+            [
+                hop_us(u64::try_from(output.hops.len()).unwrap_or(0)),
+                end_us,
+            ],
+        );
+        return;
+    }
+    let Some(model) = model else {
+        return;
+    };
+    for (part, audio) in plan.audio.iter().enumerate() {
+        let failed = scan.sources.failed.iter().find(|(index, _)| *index == part);
+        let reason = match (audio.muted, audio.uncomparable, failed) {
+            (false, Some(reason), _) => reason.to_owned(),
+            (false, None, Some((_, reason))) => reason.clone(),
+            (true, _, _) | (false, None, None) => continue,
+        };
+        row.push(
+            FindingKind::SoundNotCompared { reason },
+            Undecided,
+            [
+                audio.segment.output.start.floor(),
+                audio.segment.output.end.ceil(),
+            ],
+        );
+    }
+    let context = usize::try_from(config.dropout_context_hops).unwrap_or(0);
+    let loud = f64::from(config.dropout_loud_dbfs);
+    let drop = f64::from(config.dropout_drop_db);
+    let extent = usize::try_from(u128::from(end_us) / u128::from(SCAN_HOP_MICROS))
+        .unwrap_or(usize::MAX)
+        .min(model.hops);
+    let blocked_near = |source: usize| {
+        (source.saturating_sub(context)..=(source + context).min(model.hops.saturating_sub(1)))
+            .any(|hop| model.blocked[hop])
+    };
+    for channel in 0..model.channels {
+        let predicted_db = |source: usize| db(f64::from(model.predicted[channel][source]));
+        // Dropout: the output far below the source over loud source context.
+        let dropped = |hop: usize| {
+            let Some(source) = model.predicted_hop(hop) else {
+                return false;
+            };
+            if blocked_near(source) {
+                return false;
+            }
+            let quietest = (source.saturating_sub(context)
+                ..=(source + context).min(model.hops.saturating_sub(1)))
+                .map(predicted_db)
+                .fold(f64::INFINITY, f64::min);
+            quietest >= loud && db(model.output_power(hop, channel)) <= predicted_db(source) - drop
+        };
+        for range in runs(extent, dropped) {
+            if range.end - range.start >= u64::from(config.dropout_min_hops) {
+                row.push(
+                    FindingKind::Dropout {
+                        channel: u8::try_from(channel).unwrap_or(u8::MAX),
+                    },
+                    Failed,
+                    [hop_us(range.start), hop_us(range.end)],
+                );
+            }
+        }
+        // Click: an output transient the source does not have, away from
+        // the cut's own edges.
+        let click = |hop: usize| {
+            let Some(source) = model.predicted_hop(hop) else {
+                return false;
+            };
+            if model.edges[source] || blocked_near(source) || !model.active[source] {
+                return false;
+            }
+            let out = output
+                .hops
+                .get(hop)
+                .map_or(0.0, |level| linear(level.second[channel]));
+            // The codec smears a source transient over its frame: the source
+            // peak counts within `click_context_hops` either side.
+            let reach = usize::try_from(config.click_context_hops).unwrap_or(0);
+            let predicted = model.second[channel]
+                [source.saturating_sub(reach)..(source + reach + 1).min(model.hops)]
+                .iter()
+                .fold(0.0_f32, |peak, value| peak.max(*value));
+            out > f64::from(config.click_ratio) * f64::from(predicted)
+                + f64::from(config.click_floor)
+        };
+        for range in runs(extent, click) {
+            row.push(
+                FindingKind::Click {
+                    channel: u8::try_from(channel).unwrap_or(u8::MAX),
+                },
+                Failed,
+                [hop_us(range.start), hop_us(range.end)],
+            );
+        }
+        // Sound where every kept part is muted or absent.
+        let silent = f64::from(config.silent_dbfs);
+        let unexpected = |hop: usize| {
+            let Some(source) = model.predicted_hop(hop) else {
+                return false;
+            };
+            let near = (source.saturating_sub(context)
+                ..=(source + context).min(model.hops.saturating_sub(1)))
+                .any(|index| model.active[index]);
+            !near && db(model.output_power(hop, channel)) > silent
+        };
+        if expected {
+            for range in runs(extent, unexpected) {
+                if range.end - range.start >= u64::from(config.dropout_min_hops) {
+                    row.push(
+                        FindingKind::UnexpectedAudio,
+                        Failed,
+                        [hop_us(range.start), hop_us(range.end)],
+                    );
+                }
+            }
+        }
+    }
+    let checked = (0..extent).filter(|&hop| !model.blocked[hop]).count();
+    row.cover(
+        CoverageUnit::Hops,
+        u64::try_from(checked).unwrap_or(0),
+        0,
+        u64::try_from(extent).unwrap_or(0),
+    );
+}
+
+/// L11: each kept word's output audio against its source audio over the
+/// same span, after the measured gain.
+fn retained_speech(
+    row: &mut ReviewRowReport,
+    inputs: &ReviewScanInputs<'_>,
+    plan: &Plan<'_>,
+    sound: Result<&SoundScan, &MediaError>,
+    model: Option<&Model<'_>>,
+    config: &RetainedSpeechConfig,
+) {
+    let expectations = inputs.expectations;
+    if !expectations.kept_words.is_determined() {
+        row.push(FindingKind::SpeechNotDetermined, Undecided, [0, 0]);
+    }
+    for segment in &expectations.uncovered_speech_segments {
+        let span = expectations
+            .segments
+            .iter()
+            .find(|candidate| candidate.id == *segment)
+            .map_or([0, 0], |candidate| {
+                [candidate.output.start.floor(), candidate.output.end.ceil()]
+            });
+        row.push(FindingKind::SpeechNotCovered, Undecided, span);
+    }
+    let words: Vec<_> = expectations.kept_words.known().collect();
+    let total = u64::try_from(words.len()).unwrap_or(u64::MAX);
+    let mut decided = 0_u64;
+    let failed_parts: Vec<usize> = sound
+        .ok()
+        .map(|scan| scan.sources.failed.iter().map(|(part, _)| *part).collect())
+        .unwrap_or_default();
+    for word in words {
+        let span = [word.output.start.floor(), word.output.end.ceil()];
+        let index = word.word_index;
+        let Some(part) = plan.audio_part(&word.segment) else {
+            row.push(FindingKind::WordMuted { word_index: index }, Failed, span);
+            decided += 1;
+            continue;
+        };
+        if plan.audio[part].muted {
+            row.push(FindingKind::WordMuted { word_index: index }, Failed, span);
+            decided += 1;
+            continue;
+        }
+        let Some(model) = model
+            .filter(|_| plan.audio[part].uncomparable.is_none() && !failed_parts.contains(&part))
+        else {
+            row.push(
+                FindingKind::WordUnmeasurable { word_index: index },
+                Undecided,
+                span,
+            );
+            continue;
+        };
+        let rate = model.output.rate;
+        let start = first_hop(samples_at(word.output.start, rate), rate);
+        let end = first_hop(samples_at(word.output.end, rate).saturating_sub(1), rate) + 1;
+        let onset_end = start + config.onset_us.div_ceil(SCAN_HOP_MICROS).max(1);
+        match compare_word(model, plan, part, start..end, config) {
+            WordCompare::Unmeasurable => {
+                row.push(
+                    FindingKind::WordUnmeasurable { word_index: index },
+                    Undecided,
+                    span,
+                );
+            }
+            WordCompare::Ambiguous => {
+                row.push(
+                    FindingKind::WordAmbiguous { word_index: index },
+                    Undecided,
+                    span,
+                );
+            }
+            WordCompare::Missing => {
+                decided += 1;
+                row.push(
+                    FindingKind::WordMissing {
+                        word_index: index,
+                        text: word.text.clone(),
+                    },
+                    Failed,
+                    span,
+                );
+            }
+            WordCompare::Present => {
+                decided += 1;
+                if compare_word(model, plan, part, start..onset_end.min(end), config)
+                    == WordCompare::Missing
+                {
+                    row.push(
+                        FindingKind::WordClippedStart { word_index: index },
+                        Failed,
+                        [span[0], hop_us(onset_end)],
+                    );
+                }
+            }
+        }
+    }
+    row.cover(CoverageUnit::Words, decided, 0, total);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WordCompare {
+    Present,
+    Missing,
+    Ambiguous,
+    Unmeasurable,
+}
+
+/// Compare the output over output hops `hops` with the word's part and the
+/// rest of the kept audio over the same (lagged) source hops.
+///
+/// Rule: the word's own predicted level must reach `word_floor_dbfs`; its
+/// separation `D = 10·log10(all / other)` (capped) must reach
+/// `separation_min_db`; then the word is missing when the output is more
+/// than `D / 2` dB below the prediction, which is halfway between "word
+/// present" (0 dB) and "only the rest present" (−D dB).
+fn compare_word(
+    model: &Model<'_>,
+    plan: &Plan<'_>,
+    part: usize,
+    hops: Range<u64>,
+    config: &RetainedSpeechConfig,
+) -> WordCompare {
+    let silent = plan.audio[part].silent_channels;
+    let (mut own, mut all, mut out) = (0.0_f64, 0.0_f64, 0.0_f64);
+    let mut counted = 0_u32;
+    for hop in hops {
+        let Ok(hop) = usize::try_from(hop) else {
+            return WordCompare::Unmeasurable;
+        };
+        let Some(source) = model.predicted_hop(hop) else {
+            return WordCompare::Unmeasurable;
+        };
+        if model.blocked[source] {
+            return WordCompare::Unmeasurable;
+        }
+        let entry = model
+            .part_entries(part)
+            .binary_search_by_key(&u32::try_from(source).unwrap_or(u32::MAX), |entry| {
+                entry.hop
+            })
+            .ok()
+            .map(|at| &model.part_entries(part)[at]);
+        for (channel, &quiet) in silent.iter().enumerate().take(model.channels) {
+            if model.channels == 2 && quiet {
+                continue;
+            }
+            let gain = 10_f64.powf(model.gain[part][channel] / 10.0);
+            own += entry.map_or(0.0, |entry| model.part_power(part, entry, channel) * gain);
+            all += f64::from(model.predicted[channel][source]);
+            out += model.output_power(hop, channel);
+        }
+        counted += 1;
+    }
+    if counted == 0 {
+        return WordCompare::Unmeasurable;
+    }
+    let count = f64::from(counted);
+    if db(own / count) < f64::from(config.word_floor_dbfs) {
+        return WordCompare::Unmeasurable;
+    }
+    let other = (all - own).max(0.0);
+    let separation = if other <= 0.0 {
+        f64::from(config.separation_cap_db)
+    } else {
+        (10.0 * (all / other).log10()).min(f64::from(config.separation_cap_db))
+    };
+    if separation < f64::from(config.separation_min_db) {
+        return WordCompare::Ambiguous;
+    }
+    if db(out) - db(all) < -separation / 2.0 {
+        WordCompare::Missing
+    } else {
+        WordCompare::Present
+    }
+}
+
+fn joins_row(row: &mut ReviewRowReport, joins: &Result<JoinScan, MediaError>) {
+    let scan = match joins {
+        Err(error) => {
+            row.push(
+                FindingKind::Unreadable {
+                    pass: ScanPass::Joins,
+                    reason: super::reason(error),
+                },
+                Undecided,
+                [0, 0],
+            );
+            return;
+        }
+        Ok(scan) => scan,
+    };
+    let mut checked = 0_u64;
+    for join in &scan.joins {
+        let at = [join.output_us, join.output_us];
+        match &join.verdict {
+            JoinVerdict::Clean => checked += 1,
+            JoinVerdict::InSound(issue) => {
+                checked += 1;
+                row.push(
+                    FindingKind::JoinInSound {
+                        issue: issue.clone(),
+                    },
+                    Failed,
+                    at,
+                );
+            }
+            JoinVerdict::Unmeasured => row.push(FindingKind::JoinUnmeasured, Undecided, at),
+        }
+    }
+    for (asset, reason, _) in &scan.failed {
+        row.push(
+            FindingKind::ProfileUnavailable {
+                asset: *asset,
+                reason: reason.clone(),
+            },
+            Undecided,
             [0, 0],
         );
     }
-}
-
-/// Authored structure the defect scan judges against.
-struct Regions {
-    /// Output spans of video segments that sample a moving source.
-    moving_video: Vec<Range<u64>>,
-    /// Intended pauses, authored cards and their visible runs.
-    authored: Vec<Range<u64>>,
-    /// Video segment and overlay run edges: intended cuts.
-    picture_edges: Vec<u64>,
-    audio_segments: Vec<Range<u64>>,
-    /// Audio segment edges, where only the join audit decides.
-    audio_edges: Vec<u64>,
-    intended_pauses: Vec<Range<u64>>,
-    speech: Vec<Range<u64>>,
-    speech_determined: bool,
-}
-
-impl Regions {
-    fn new(expectations: &ReviewExpectations) -> Self {
-        let lane = |lane: ReviewLane| {
-            expectations
-                .segments
-                .iter()
-                .filter(move |segment| segment.id.lane == lane)
-        };
-        let moving =
-            |segment: &&ReviewSegment| matches!(segment.sampling, SegmentSampling::Video { .. });
-        let intended_pauses: Vec<_> = expectations.intended_pauses.known().map(span_us).collect();
-        let overlays = &expectations.overlays;
-        let mut authored = intended_pauses.clone();
-        let mut picture_edges = Vec::new();
-        for segment in lane(ReviewLane::Video) {
-            let span = span_us(&segment.output);
-            picture_edges.extend([span.start, span.end]);
-        }
-        for overlay in overlays
-            .captions
-            .known()
-            .chain(overlays.titles.known())
-            .chain(overlays.cards.known())
-        {
-            for run in &overlay.visible {
-                let span = span_us(&run.output);
-                picture_edges.extend([span.start, span.end]);
-            }
-        }
-        for card in overlays.cards.known() {
-            authored.push(span_us(&card.cue));
-            authored.extend(card.visible.iter().map(|run| span_us(&run.output)));
-        }
-        let mut audio_edges = Vec::new();
-        let audio_segments: Vec<_> = lane(ReviewLane::Audio)
-            .map(|segment| {
-                let span = span_us(&segment.output);
-                audio_edges.extend([span.start, span.end]);
-                span
-            })
-            .collect();
-        Self {
-            moving_video: lane(ReviewLane::Video)
-                .filter(moving)
-                .map(|segment| span_us(&segment.output))
-                .collect(),
-            authored,
-            picture_edges,
-            audio_segments,
-            audio_edges,
-            intended_pauses,
-            speech: expectations.speech_windows.known().map(span_us).collect(),
-            speech_determined: expectations.speech_windows.is_determined(),
-        }
-    }
-
-    /// The picture at `us` should be live moving source, so black, freeze
-    /// and flash there are defects.
-    fn judges_picture(&self, us: u64) -> bool {
-        inside(us, &self.moving_video) && !inside(us, &self.authored)
-    }
-
-    fn near_picture_edge(&self, frame: u64, clock: &Clock) -> bool {
-        self.picture_edges
-            .iter()
-            .any(|&edge| clock.frame_at(edge).abs_diff(frame) <= 1)
-    }
-
-    /// The whole hop sits in kept audio away from joins and intended pauses.
-    fn judges_audio(&self, hop: Range<u64>, tolerance: u64) -> bool {
-        self.audio_segments
-            .iter()
-            .any(|span| span.start <= hop.start && hop.end <= span.end)
-            && !self
-                .intended_pauses
-                .iter()
-                .any(|pause| overlap(pause, &hop) > 0)
-            && !self
-                .audio_edges
-                .iter()
-                .any(|&edge| edge + tolerance > hop.start && edge < hop.end + tolerance)
-    }
-}
-
-fn picture_defects(
-    row: &mut ReviewRowReport,
-    video: &VideoSummary,
-    regions: &Regions,
-    config: &TechnicalScanConfig,
-    clock: &Clock,
-) {
-    let frames = &video.frames;
-    let count = u64::try_from(frames.len()).unwrap_or(u64::MAX);
-    let judged = |frame: u64| regions.judges_picture(clock.frame_us(frame));
-    let frame_stat = |frame: u64| frames[usize::try_from(frame).unwrap_or(usize::MAX)];
-    // Black and freeze: runs of judged frames.
-    let mut dark_from: Option<u64> = None;
-    let mut frozen_from: Option<u64> = None;
-    for frame in 0..=count {
-        let live = frame < count && judged(frame);
-        let is_black = live && {
-            let measured = frame_stat(frame);
-            measured.mean <= config.black_mean_max && measured.max_cell <= config.black_cell_max
-        };
-        match (dark_from, is_black) {
-            (None, true) => dark_from = Some(frame),
-            (Some(first), false) => {
-                if frame - first >= u64::from(config.black_min_frames) {
-                    row.push(
-                        FindingKind::Black,
-                        Failed,
-                        [clock.frame_us(first), clock.frame_us(frame)],
-                    );
-                }
-                dark_from = None;
-            }
-            _ => {}
-        }
-        // A repeat continues a freeze only when both frames are judged.
-        let repeat = live
-            && frame > 0
-            && judged(frame - 1)
-            && frame_stat(frame).difference <= config.freeze_max_difference;
-        match (frozen_from, repeat) {
-            (None, true) => frozen_from = Some(frame - 1),
-            (Some(first), false) => {
-                if clock.frame_us(frame) - clock.frame_us(first) >= config.freeze_min_us {
-                    row.push(
-                        FindingKind::Freeze,
-                        Failed,
-                        [clock.frame_us(first), clock.frame_us(frame)],
-                    );
-                }
-                frozen_from = None;
-            }
-            _ => {}
-        }
-    }
-    // Flash: a large step away and back within a few frames.
-    let mut frame = 1;
-    while frame < count {
-        let before = frame_stat(frame - 1).mean;
-        if frame_stat(frame).mean.abs_diff(before) < config.flash_step || !judged(frame) {
-            frame += 1;
-            continue;
-        }
-        let returned = (1..=u64::from(config.flash_max_frames))
-            .map(|offset| frame + offset)
-            .take_while(|&later| later < count)
-            .find(|&later| frame_stat(later).mean.abs_diff(before) <= config.flash_return);
-        match returned {
-            Some(back_at) => {
-                let authored_cut = regions.near_picture_edge(frame, clock)
-                    && regions.near_picture_edge(back_at, clock);
-                if !authored_cut {
-                    row.push(
-                        FindingKind::Flash,
-                        Failed,
-                        [clock.frame_us(frame), clock.frame_us(back_at)],
-                    );
-                }
-                frame = back_at + 1;
-            }
-            None => frame += 1,
-        }
-    }
-}
-
-fn audio_defects(
-    row: &mut ReviewRowReport,
-    audio: &AudioSummary,
-    regions: &Regions,
-    config: &TechnicalScanConfig,
-) {
-    let hop_range = |hop: usize| {
-        let start = u64::try_from(hop).unwrap_or(u64::MAX) * SCAN_HOP_MICROS;
-        start..start + SCAN_HOP_MICROS
-    };
-    let judged = |hop: usize| regions.judges_audio(hop_range(hop), config.join_tolerance_us);
-    for (hop, stat) in audio.hops.iter().enumerate() {
-        if stat.click && judged(hop) {
-            let span = hop_range(hop);
-            row.push(FindingKind::Click, Failed, [span.start, span.end]);
-        }
-    }
-    let silent = |hop: usize| {
-        audio
-            .hops
-            .get(hop)
-            .is_some_and(|stat| stat.rms_cdb <= config.silence_rms_cdb)
-    };
-    let mut hop = 0;
-    while hop < audio.hops.len() {
-        if !silent(hop) {
-            hop += 1;
-            continue;
-        }
-        let start = hop;
-        while hop < audio.hops.len() && silent(hop) {
-            hop += 1;
-        }
-        let run = hop_range(start).start..hop_range(hop).start;
-        let length = run.end - run.start;
-        if length <= config.dropout_max_us {
-            let loud = |index: Option<usize>| {
-                index.is_some_and(|index| {
-                    index < audio.hops.len()
-                        && i32::from(level(audio, index))
-                            >= i32::from(config.silence_rms_cdb)
-                                + i32::from(config.dropout_contrast_cdb)
-                })
-            };
-            // A hole inside kept speech; outside known speech it is a pause
-            // unless the speech inventory is incomplete.
-            if loud(start.checked_sub(1)) && loud(Some(hop)) && (start..hop).all(judged) {
-                if regions
-                    .speech
-                    .iter()
-                    .any(|speech| overlap(speech, &run) == length)
-                {
-                    row.push(FindingKind::Dropout, Failed, [run.start, run.end]);
-                } else if !regions.speech_determined {
-                    row.push(FindingKind::Dropout, Undecided, [run.start, run.end]);
-                }
-            }
-        }
-        if length >= config.silence_gap_min_us {
-            silence_gap(row, &run, regions, config);
-        }
-    }
-}
-
-fn silence_gap(
-    row: &mut ReviewRowReport,
-    run: &Range<u64>,
-    regions: &Regions,
-    config: &TechnicalScanConfig,
-) {
-    let kept = regions
-        .audio_segments
-        .iter()
-        .map(|segment| overlap(segment, run))
-        .sum::<u64>();
-    let paused = regions
-        .intended_pauses
-        .iter()
-        .map(|pause| overlap(pause, run))
-        .sum::<u64>();
-    let unpaused_speech = regions
-        .speech
-        .iter()
-        .map(|speech| {
-            let shared = speech.start.max(run.start)..speech.end.min(run.end);
-            if shared.start >= shared.end {
-                return 0;
-            }
-            let length = shared.end - shared.start;
-            let paused = regions
-                .intended_pauses
-                .iter()
-                .map(|pause| overlap(pause, &shared))
-                .sum::<u64>();
-            length.saturating_sub(paused)
-        })
-        .sum::<u64>();
-    if unpaused_speech >= config.silence_over_speech_min_us {
-        row.push(FindingKind::SilenceOverSpeech, Failed, [run.start, run.end]);
-    } else if !regions.speech_determined
-        && kept.saturating_sub(paused) >= config.silence_over_speech_min_us
-    {
+    if scan.omitted > 0 {
         row.push(
-            FindingKind::SilenceWithUndeterminedSpeech,
+            FindingKind::JoinsOmitted {
+                count: scan.omitted,
+            },
             Undecided,
-            [run.start, run.end],
+            [0, 0],
         );
     }
+    row.cover(CoverageUnit::Joins, checked, 0, scan.expected);
 }

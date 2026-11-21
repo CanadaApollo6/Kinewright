@@ -2034,6 +2034,17 @@ impl VideoDecoder {
         Self::open_scaled_internal(path, fps, max_width, Some(managed), 1, stop, Some(source))
     }
 
+    /// JA-1 S5a C5: a certified source decoded to small RGBA8 pictures, for
+    /// the review checks that compare an encode with its sources.
+    pub(crate) fn open_certified_rgba(
+        path: &Path,
+        fps: Rational,
+        max_width: u32,
+        source: &crate::owned_io::CertifiedSource,
+    ) -> Result<Self, MediaError> {
+        Self::open_scaled_internal(path, fps, Some(max_width), None, 1, None, Some(source))
+    }
+
     fn admit_managed_source(
         path: &Path,
         description: &ColorDescription,
