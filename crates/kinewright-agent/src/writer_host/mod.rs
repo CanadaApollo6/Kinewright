@@ -26,6 +26,8 @@ pub mod receipt_reconciliation;
 mod recovery;
 mod resolve;
 pub mod review_expectations;
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) mod review_live_grant;
 #[cfg(target_os = "linux")]
 pub mod review_overlays;
 pub mod review_stills;

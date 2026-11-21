@@ -1997,30 +1997,521 @@ fn s5_c6_fix1_cross_version_clock_mapping_and_uncovered_downgrades_to_unknown() 
 
 #[test]
 #[cfg(target_os = "linux")]
-#[ignore = "on demand: live reviewer vision model witness; requires KINEWRIGHT_LIVE_REVIEWER_GRANT=1 and explicit operator authorization"]
+fn s5_c6_fix1_live_reviewer_grant_gate_refuses_without_lead_grant() {
+    use super::super::review_live_grant::{
+        REVIEW_LIVE_WITNESS_NAME, ReviewLiveGrant, consume_from_account_home, consume_from_dir,
+        open_private_dir_for_test,
+    };
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = kinewright_media::test_support::TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "s5-c6-grant",
+    );
+    let fake_guardian = temp.path("kinewright-job-guardian");
+    std::fs::write(&fake_guardian, b"guardian-binary-bytes").unwrap();
+    let guardian_sha = kinewright_media::sha256_file(&fake_guardian).unwrap();
+
+    // 1. Account-home gate refuses cleanly without a lead grant file.
+    let err = consume_from_account_home(&fake_guardian)
+        .expect_err("S5_C6_FIX1_ACCOUNT_HOME_REFUSES_WITHOUT_GRANT");
+    assert!(
+        err.to_string().contains("S5_C6_NO_LEAD_GRANT"),
+        "S5_C6_FIX1_REFUSAL_CODE: {err}"
+    );
+
+    // 2. Private directory grant consumption: valid once, refuses replay, shared run_identity,
+    // expiry, wrong guardian hash, and non-private permissions.
+    let grants_dir = temp.path("grants");
+    std::fs::create_dir(&grants_dir).unwrap();
+    std::fs::set_permissions(&grants_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let dir_fd = open_private_dir_for_test(&grants_dir).unwrap();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let write_grant = |id: &str, grant: &ReviewLiveGrant, mode: u32| {
+        let p = grants_dir.join(format!("{id}.json"));
+        std::fs::write(&p, serde_json::to_vec(grant).unwrap()).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let valid = ReviewLiveGrant {
+        version: 1,
+        id: "grant-ok-1".into(),
+        witness: REVIEW_LIVE_WITNESS_NAME.into(),
+        provider: "codex".into(),
+        model: "gpt-6.1-sol".into(),
+        options: vec![],
+        wall_millis: 120_000,
+        tokens_per_task: 50_000,
+        run_identity: "0123456789abcdef0123456789abcdef".into(),
+        expires_at_unix_seconds: now + 300,
+        guardian_sha256: guardian_sha.clone(),
+    };
+    write_grant("grant-ok-1", &valid, 0o600);
+    let consumed =
+        consume_from_dir(&dir_fd, "grant-ok-1", &guardian_sha).expect("S5_C6_FIX1_GRANT_ONCE");
+    assert_eq!(consumed, valid);
+
+    // Replay of same id is refused.
+    assert!(
+        consume_from_dir(&dir_fd, "grant-ok-1", &guardian_sha)
+            .expect_err("S5_C6_FIX1_REPLAY_REFUSED")
+            .to_string()
+            .contains("already consumed")
+    );
+
+    // Different id reusing same run_identity is refused.
+    let mut dup_run = valid.clone();
+    dup_run.id = "grant-dup-run".into();
+    write_grant("grant-dup-run", &dup_run, 0o600);
+    assert!(
+        consume_from_dir(&dir_fd, "grant-dup-run", &guardian_sha)
+            .expect_err("S5_C6_FIX1_DUP_RUN_ID_REFUSED")
+            .to_string()
+            .contains("already consumed")
+    );
+
+    // Expired grant is refused.
+    let mut expired = valid.clone();
+    expired.id = "grant-expired".into();
+    expired.run_identity = "fedcba9876543210fedcba9876543210".into();
+    expired.expires_at_unix_seconds = now.saturating_sub(10);
+    write_grant("grant-expired", &expired, 0o600);
+    assert!(
+        consume_from_dir(&dir_fd, "grant-expired", &guardian_sha)
+            .expect_err("S5_C6_FIX1_EXPIRED_REFUSED")
+            .to_string()
+            .contains("expired")
+    );
+
+    // Wrong guardian digest is refused.
+    let mut wrong_g = valid.clone();
+    wrong_g.id = "grant-wrong-guardian".into();
+    wrong_g.run_identity = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
+    wrong_g.guardian_sha256 = "0".repeat(64);
+    write_grant("grant-wrong-guardian", &wrong_g, 0o600);
+    assert!(
+        consume_from_dir(&dir_fd, "grant-wrong-guardian", &guardian_sha)
+            .expect_err("S5_C6_FIX1_GUARDIAN_MISMATCH_REFUSED")
+            .to_string()
+            .contains("guardian SHA-256 differs")
+    );
+
+    // World-readable grant file is refused.
+    let mut world = valid;
+    world.id = "grant-world".into();
+    world.run_identity = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into();
+    write_grant("grant-world", &world, 0o644);
+    assert!(
+        consume_from_dir(&dir_fd, "grant-world", &guardian_sha)
+            .expect_err("S5_C6_FIX1_WORLD_READABLE_REFUSED")
+            .to_string()
+            .contains("private owned regular file")
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn s5_c6_extract_json_object(raw: &[u8]) -> &[u8] {
+    let text = std::str::from_utf8(raw).unwrap_or("");
+    if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}'))
+        && start < end
+    {
+        return text[start..=end].as_bytes();
+    }
+    raw
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "on-demand: live reviewer vision model witness; requires a lead-owned one-use private grant file in ~/.local/share/kinewright-eval/grants/"]
 fn s5_c6_live_reviewer_identifies_decoded_only_discrepancy() {
-    use super::super::review_stills::parse_visual_judgment;
+    use super::super::review_live_grant::consume_from_account_home;
+    use super::super::review_overlays::C6CheckConfiguration;
+    use super::super::review_stills::{VisualVerdict, parse_visual_judgment};
     use kinewright_core::output_review::ReviewRowResult;
 
-    assert_eq!(
-        std::env::var("KINEWRIGHT_LIVE_REVIEWER_GRANT").as_deref(),
-        Ok("1"),
-        "Live reviewer witness requires explicit operator grant (KINEWRIGHT_LIVE_REVIEWER_GRANT=1)"
+    // 1. Refuse before starting any provider unless a valid one-use lead grant file is consumed.
+    let exe = std::env::current_exe().expect("current_exe");
+    let exe_dir = exe.parent().expect("exe parent");
+    let bin_dir = if exe_dir.file_name().is_some_and(|n| n == "deps") {
+        exe_dir.parent().expect("target dir")
+    } else {
+        exe_dir
+    };
+    let guardian = bin_dir.join("kinewright-job-guardian");
+    let grant = consume_from_account_home(&guardian).expect("S5_C6_NO_LEAD_GRANT");
+
+    // 2. Encode a real decoded-only discrepancy MP4 ("WRONG TEXT") while the frozen project and
+    // expectations expect "Step 1".
+    let step1_doc = s5_c6_make_step_doc("Step 1");
+    let wrong_doc = s5_c6_make_step_doc("WRONG TEXT");
+    let mut f_wrong = Fixture::with_inputs(
+        false,
+        wrong_doc,
+        "project.kinewright",
+        s5_c6_admit_embedded_font,
     );
-    let judgment_path = std::env::var("KINEWRIGHT_LIVE_REVIEWER_JUDGMENT_FILE")
-        .expect("set KINEWRIGHT_LIVE_REVIEWER_JUDGMENT_FILE to the live reviewer JSON output");
-    let raw = std::fs::read(&judgment_path).expect("read live reviewer judgment file");
-    let judgment = parse_visual_judgment(&raw).expect("parse live reviewer judgment JSON");
+    holder(&mut f_wrong);
+    let key_wrong = s5_c6_publish_version(&f_wrong, None, vec![]);
+    let token_wrong = s5_c6_start_and_finish_encode(&f_wrong, &key_wrong);
+    let (mut wrong_file, wrong_media_ref, wrong_timing) = {
+        let shared = f_wrong.host.owner.upgrade().unwrap();
+        let owner = shared.lock().unwrap();
+        let bundle = owner
+            .owner()
+            .unwrap()
+            .review_source_bundle(&token_wrong.project)
+            .unwrap();
+        let (artifact, file) = bundle.open_review_artifact(&token_wrong).unwrap();
+        (file, artifact.media_ref.clone(), artifact.output.clone())
+    };
+    drop(f_wrong);
+
+    // 3. Create the frozen "Step 1" project on disk and configure the native Reviewer selection
+    // strictly from the consumed lead grant.
+    let temp = kinewright_media::test_support::TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "s5-c6-live-reviewer",
+    );
+    let settings_dir = temp.path("scheduler");
+    std::fs::create_dir_all(&settings_dir).unwrap();
+    let selection = grant.selection();
+    write_director_setting(Some(&settings_dir), &selection).expect("S5_C6_LIVE_WRITE_DIRECTOR");
+    write_specialist_setting(
+        Some(&settings_dir),
+        &SpecialistChoice::Specific(selection),
+    )
+    .expect("S5_C6_LIVE_WRITE_SPECIALIST");
+
+    let bundle_path = temp.path("live-review.kinewright");
+    {
+        let core = Core::for_test(step1_doc).unwrap();
+        let mut bundle = ProjectBundle::activate(
+            &bundle_path,
+            BundleWriteAdmission::new_document(),
+            core.history_pool(),
+        )
+        .unwrap();
+        let inputs_ref = s5_c6_admit_embedded_font(&mut bundle);
+        bundle.save(&core, &inputs_ref).unwrap();
+    }
+
+    let host = WriterHost::start_inner(
+        HostConfig {
+            data_dir: Some(temp.path("voice-data")),
+            scheduler_settings: Some(settings_dir),
+            project: "S5 C6 live reviewer witness".into(),
+            path: Some(bundle_path),
+            roots: SessionRoots {
+                read: vec![temp.root().into()],
+                write: vec![temp.root().into()],
+            },
+            origin: HostOrigin::Headless,
+        },
+        HostAuth::generate().unwrap(),
+        None,
+        studio_runtime::RuntimePorts {
+            guardian: guardian.clone(),
+            checks: Arc::new(crate::codex_qualification::InstalledNativeChecks { guardian }),
+            ceiling: std::num::NonZeroU64::new(grant.tokens_per_task),
+            fixture_claim: Some(temp.path("machine")),
+            fixture_autostart: true,
+            ..Default::default()
+        },
+    )
+    .expect("S5_C6_LIVE_HOST_START");
+    wait_runtime_recovery(&host);
+
+    // 4. Publish the frozen "Step 1" snapshot, queue a ReviewJob, and publish the tampered
+    // "WRONG TEXT" MP4 as its review artifact (creating a genuine decoded-only discrepancy).
+    let shared = host.owner.upgrade().unwrap();
+    let client = host.client();
+    let config = C6CheckConfiguration::default();
+    let (snapshot_key, checkpoint_head, token) = {
+        let mut owner_guard = shared.lock().unwrap();
+        let owner = owner_guard.owner_mut().unwrap();
+        let (checkpoint_ref, checkpoint) = owner.manual_checkpoint().unwrap();
+        let issuer = owner.reuse_metadata_issuer_for("live-s5-c6").unwrap();
+        let envelope = owner
+            .metadata_envelope(CommandId {
+                sequence: owner.metadata_issuer_sequence(&issuer).unwrap(),
+                issuer,
+            })
+            .unwrap();
+        let update = MetadataUpdate {
+            expected_root_generation: owner.metadata_generation().unwrap(),
+            change: MetadataChange::PublishSnapshot(PublishSnapshot {
+                version: VersionId::fresh().unwrap(),
+                expected_head: checkpoint.head_id.clone(),
+                checkpoint_ref,
+                parent_version: None,
+                run_provenance: None,
+                revision_refs: vec![],
+            }),
+        };
+        let kinewright_project::receipts::ReceiptLookup::Committed(receipt) = owner
+            .metadata_command(
+                &envelope,
+                kinewright_project::studio_records::MetadataScope::Snapshot,
+                &update,
+            )
+            .unwrap()
+        else {
+            panic!("S5_C6_LIVE_SNAPSHOT_COMMITTED");
+        };
+        let ReceiptResult::Metadata {
+            result: MetadataResult::Snapshot(key),
+        } = receipt.result
+        else {
+            panic!("S5_C6_LIVE_SNAPSHOT_KEY");
+        };
+        let frozen = owner.read_snapshot(&key).unwrap();
+        let inputs = frozen.open_review_inputs().unwrap();
+        let settings = kinewright_core::DeliveryProfile::SourceMaster.export_settings(
+            &inputs.document,
+            kinewright_core::DeliveryEncodeDepth::Eight,
+            kinewright_core::ExportCancellation::default(),
+        );
+        let empty = kinewright_project::review_job::empty_annotations(&frozen.descriptor);
+        let expectations = super::super::review_expectations::derive_review_expectations(
+            &super::super::review_expectations::ReviewExpectationInput {
+                document: &inputs.document,
+                snapshot: frozen.descriptor.identity,
+                input_manifest: &inputs.manifest,
+                settings: &settings,
+                transcripts: &[],
+            },
+            &empty,
+        )
+        .unwrap();
+        drop(inputs);
+        let token = owner
+            .queue_review(&frozen.descriptor, None, settings, 64 << 20, expectations)
+            .unwrap();
+        let stage = kinewright_project::review_job::ReviewStage {
+            id: kinewright_project::bundle_records::SessionId::fresh().unwrap(),
+            boot: crate::guardian::boot_id().unwrap(),
+            pid: std::process::id(),
+            process_start: super::super::review_job::process_start(std::process::id())
+                .unwrap()
+                .unwrap(),
+            byte_limit: 64 << 20,
+        };
+        owner
+            .update_review_job(&token, UpdateReviewJob::BeginEncoding(stage))
+            .unwrap();
+        let bundle = owner.review_source_bundle_mut(&token.project).unwrap();
+        bundle
+            .publish_review_artifact(&token, &mut wrong_file, &wrong_media_ref, wrong_timing)
+            .unwrap();
+        owner_guard.review_fixture_mark_verified(token.clone());
+        (key, checkpoint.head_id, token)
+    };
+
+    // 5. Launch a real ReviseCut run through the production native runtime asking the Director to
+    // delegate independent visual review to one Role::Reviewer specialist over loopback MCP.
+    let prompt_text = concat!(
+        "Assign one Role::Reviewer specialist to visually inspect the active output review artifact. ",
+        "Instruct the Reviewer to call read_review_stills repeatedly (following next_cursor until null) ",
+        "to inspect EVERY DecodedOutput PNG and OverlayReference PNG, compare the rendered caption text ",
+        "against the OverlayReference PNG, and call finish_task whose explanation is ONLY a single ",
+        "VisualJudgment JSON object: ",
+        "{\"verdict\":\"findings\"|\"pass\",\"reviewed_still_ids\":[...],",
+        "\"findings\":[{\"still_id\":\"...\",\"severity\":\"blocking\"|\"advisory\",\"summary\":\"...\"}]}. ",
+        "Any text mismatch between DecodedOutput and OverlayReference must be flagged as blocking."
+    );
+    let run_id: RunId = {
+        use kinewright_project::studio_records::{
+            CommentId, FeedbackAnchor, FeedbackRevision, FrameRate, Orientation, ReviseResult,
+        };
+        let (text_ref, empty_ref) = {
+            let mut locked = shared.lock().unwrap();
+            let owner = locked.owner_mut().unwrap();
+            let t = owner.admit_host_grant(prompt_text.as_bytes()).unwrap();
+            let e = owner.admit_host_grant(b"[]").unwrap();
+            (t, e)
+        };
+        let issue = |client: &HostClient| {
+            client
+                .request(HostCommand::IssueMetadataIssuer { issuer: None })
+                .unwrap()
+                .metadata_issuer
+                .unwrap()
+        };
+        let issued = issue(&client);
+        let saved = client
+            .request(HostCommand::Metadata {
+                envelope: issued.envelope,
+                update: MetadataUpdate {
+                    expected_root_generation: issued.root_generation,
+                    change: MetadataChange::SaveFeedback(FeedbackRevision {
+                        comment_id: CommentId::fresh().unwrap(),
+                        revision: 1,
+                        predecessor: None,
+                        anchor: FeedbackAnchor {
+                            snapshot: snapshot_key,
+                            frame: 0,
+                            fps: FrameRate {
+                                numerator: 24,
+                                denominator: 1,
+                            },
+                            raster_size: [480, 270],
+                            orientation: Orientation::Upright,
+                            target: None,
+                            source_ref: None,
+                            script_beat_id: None,
+                        },
+                        original_text_ref: text_ref.clone(),
+                        strokes_ref: empty_ref,
+                        frame_proof_ref: text_ref,
+                        voice_ref: None,
+                        transcript_revision: None,
+                    }),
+                },
+            })
+            .unwrap()
+            .metadata
+            .unwrap();
+        let ReceiptResult::Metadata {
+            result: MetadataResult::Feedback(rev_ref),
+        } = saved.result
+        else {
+            panic!("S5_C6_LIVE_SAVE_FEEDBACK");
+        };
+        let issued = issue(&client);
+        let batch = FeedbackBatchId::fresh().unwrap();
+        let request = ReviseRequest {
+            command_id: issued.envelope.id.clone(),
+            batch_id: batch.clone(),
+            expected_candidate_head: checkpoint_head,
+        };
+        client
+            .request(HostCommand::Metadata {
+                envelope: issued.envelope,
+                update: MetadataUpdate {
+                    expected_root_generation: issued.root_generation,
+                    change: MetadataChange::SubmitBatch {
+                        batch: FeedbackBatch {
+                            batch_id: batch,
+                            revision_refs: vec![rev_ref],
+                        },
+                        request: request.clone(),
+                    },
+                },
+            })
+            .unwrap();
+        let revised = client
+            .request(HostCommand::ReviseCut { request })
+            .unwrap()
+            .revise_result
+            .unwrap();
+        let ReviseResult::Accepted { run_id, .. } = revised else {
+            panic!("S5_C6_LIVE_REVISE_CUT: {revised:?}");
+        };
+        serde_json::from_value(serde_json::to_value(run_id).unwrap()).unwrap()
+    };
+
+    let run_deadline = Instant::now() + Duration::from_millis(grant.wall_millis);
+    let mut bound_binding: Option<ReviewCheckBinding> = None;
+    let (result_ref, binding) = loop {
+        host.runtime.update();
+        let mut terminal_result = None;
+        {
+            let mut owner = shared.lock().unwrap();
+            if let Some(proj) = owner
+                .owner()
+                .unwrap()
+                .orchestration_projection(&run_id)
+                .unwrap()
+            {
+                if bound_binding.is_none()
+                    && let Some(reviewer_task) =
+                        proj.tasks.iter().find(|t| t.brief.role == Role::Reviewer)
+                    && let Some(attempt) = proj
+                        .attempts
+                        .iter()
+                        .find(|a| a.identity.task == reviewer_task.id)
+                {
+                    let b = ReviewCheckBinding {
+                        configuration_sha256: config.configuration_sha256(),
+                        reviewer_attempt: attempt.identity.attempt.0.clone(),
+                    };
+                    owner
+                        .record_review_check(&token, UpdateReviewJob::BindChecks(b.clone()))
+                        .expect("S5_C6_LIVE_BIND_REVIEWER");
+                    bound_binding = Some(b);
+                }
+                if let Some(reviewer_task) =
+                    proj.tasks.iter().find(|t| t.brief.role == Role::Reviewer)
+                    && let TaskState::Terminal(reference) = &reviewer_task.state
+                {
+                    terminal_result = Some(reference.clone());
+                }
+            }
+        }
+        if let Some(reference) = terminal_result {
+            break (
+                reference,
+                bound_binding.expect("S5_C6_LIVE_REVIEWER_BOUND"),
+            );
+        }
+        assert!(
+            Instant::now() < run_deadline,
+            "S5_C6_LIVE_REVIEWER_WALL_DEADLINE"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+
+    // 6. Parse the live Reviewer's VisualJudgment from its published TaskResult explanation,
+    // validate against the served still ledger, and record through record_review_check.
+    let explanation_bytes = {
+        let owner = shared.lock().unwrap();
+        let task_result = owner
+            .read_task_reference(&result_ref)
+            .expect("S5_C6_LIVE_READ_TASK_RESULT");
+        let explanation_ref: kinewright_project::bundle_records::ObjectRef =
+            serde_json::from_value(task_result["explanation"].clone())
+                .expect("S5_C6_LIVE_EXPLANATION_REF");
+        owner
+            .owner()
+            .unwrap()
+            .review_bundle()
+            .unwrap()
+            .store()
+            .read_evidence(&explanation_ref)
+            .expect("S5_C6_LIVE_READ_EXPLANATION")
+    };
+    let json_slice = s5_c6_extract_json_object(&explanation_bytes);
+    let judgment = parse_visual_judgment(json_slice).expect("S5_C6_LIVE_PARSE_VISUAL_JUDGMENT");
     assert_eq!(
         judgment.verdict,
-        super::super::review_stills::VisualVerdict::Findings,
-        "live reviewer must flag the decoded-only discrepancy"
+        VisualVerdict::Findings,
+        "S5_C6_LIVE_REVIEWER_MUST_FLAG_DISCREPANCY"
     );
     assert!(
         judgment.findings.iter().any(|finding| {
-            finding.severity == super::super::review_stills::VisualFindingSeverity::Blocking
+            finding.severity == super::super::review_stills::VisualFindingSeverity::Blocking && {
+                let lower = finding.summary.to_ascii_lowercase();
+                lower.contains("wrong text") || (lower.contains("wrong") && lower.contains("step 1"))
+            }
         }),
-        "live reviewer finding must be blocking (ReviewRowResult::{:?})",
-        ReviewRowResult::Failed
+        "S5_C6_LIVE_REVIEWER_MUST_NAME_DECODED_ONLY_DISCREPANCY: {:?}",
+        judgment.findings
+    );
+    let (validated, _) = shared
+        .lock()
+        .unwrap()
+        .record_visual_review_judgment(&token, binding, &config, &judgment)
+        .expect("S5_C6_LIVE_RECORD_VISUAL_JUDGMENT");
+    assert_eq!(
+        validated.row_result,
+        ReviewRowResult::Failed,
+        "S5_C6_LIVE_REVIEWER_RECORDS_FAILED"
+    );
+    assert!(
+        validated.blocking_findings >= 1,
+        "S5_C6_LIVE_REVIEWER_BLOCKING_FINDING"
     );
 }
