@@ -51,6 +51,7 @@ mod title;
 mod transcript;
 // JA-1 S3 C5
 mod review_output;
+pub mod review_scan;
 mod verify;
 pub use review_output::{ReviewOutputStream, ReviewOutputTiming, inspect_review_output};
 pub mod voice_note;

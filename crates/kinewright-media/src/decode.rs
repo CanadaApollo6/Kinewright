@@ -2327,6 +2327,22 @@ impl VideoDecoder {
         (self.rotation).display_dimensions(self.scaled_width, self.scaled_height)
     }
 
+    /// The source's own display size, orientation applied, before any
+    /// scaling: the dimensions an aspect comparison needs (JA-1 S5a R6).
+    pub(crate) fn source_display_size(&self) -> (u32, u32) {
+        (self.rotation).display_dimensions(self.decoder.width(), self.decoder.height())
+    }
+
+    /// After the stream ended, the grid frame of the last decoded frame,
+    /// which the decoder holds to every later window end (JA-1 S5a R4: a
+    /// reader past the source's last frame must not take the hold for it).
+    pub(crate) fn held_at_eof(&self) -> Option<i64> {
+        self.pending
+            .as_ref()
+            .filter(|_| self.eof_sent)
+            .map(|pending| pending.first_grid_frame)
+    }
+
     /// The seeks this decoder made (S2c-1: P-seek's `drag_seeks`).
     pub(crate) fn seek_count(&self) -> u64 {
         self.seek_count
