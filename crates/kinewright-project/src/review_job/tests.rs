@@ -60,6 +60,15 @@ fn queue(
     descriptor: &SnapshotDescriptor,
     raster: (u32, u32),
 ) -> ReviewToken {
+    queue_limited(bundle, descriptor, raster, 1 << 20)
+}
+
+fn queue_limited(
+    bundle: &mut ProjectBundle,
+    descriptor: &SnapshotDescriptor,
+    raster: (u32, u32),
+    byte_limit: u64,
+) -> ReviewToken {
     let snapshot = bundle.read_snapshot(&descriptor.key).unwrap();
     let inputs = snapshot.open_review_inputs().unwrap();
     let mut settings = DeliveryProfile::SourceMaster.export_settings(
@@ -93,8 +102,25 @@ fn queue(
         },
     };
     bundle
-        .queue_review(descriptor, None, settings, 1 << 20, expectations)
+        .queue_review(descriptor, None, settings, byte_limit, expectations)
         .unwrap()
+}
+
+fn fixture_timing() -> kinewright_media::ReviewOutputTiming {
+    kinewright_media::ReviewOutputTiming {
+        decoder_version: 1,
+        video: kinewright_media::ReviewOutputStream {
+            index: 0,
+            decoder: "fixture".into(),
+            time_base: (1, 30),
+            start_pts: 0,
+            duration_pts: 1,
+        },
+        audio: None,
+        video_first_pts: 0,
+        video_pts_step: None,
+        video_frames: 1,
+    }
 }
 
 fn publish_fixture_evidence(
@@ -261,4 +287,314 @@ fn s5_review_collection_keeps_version_evidence_and_releases_retired_execution() 
             .verify(reference)
             .expect("REVIEW_KEPT_EVIDENCE_RETAINED");
     }
+}
+
+fn saved_bundle(
+    temp: &kinewright_media::test_support::TempDirectory,
+) -> (Core, ProjectBundle, ObjectRef) {
+    let core = Core::for_test(Document::default()).unwrap();
+    let mut bundle = ProjectBundle::activate(
+        &temp.path("project.kinewright"),
+        BundleWriteAdmission::new_document(),
+        core.history_pool(),
+    )
+    .unwrap();
+    let inputs = bundle.empty_inputs().unwrap().reference.clone();
+    bundle.save(&core, &inputs).unwrap();
+    (core, bundle, inputs)
+}
+
+// Bytes a compressing filesystem cannot shrink.
+fn incompressible(length: usize) -> Vec<u8> {
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut bytes = Vec::with_capacity(length + 8);
+    while bytes.len() < length {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        bytes.extend_from_slice(&state.to_le_bytes());
+    }
+    bytes.truncate(length);
+    bytes
+}
+
+/// Keep `bytes` as the published review artifact of an earlier version.
+fn retain_owned_media(
+    bundle: &mut ProjectBundle,
+    temp: &kinewright_media::test_support::TempDirectory,
+    bytes: &[u8],
+) {
+    let descriptor = version(bundle);
+    let queued = queue_limited(bundle, &descriptor, (64, 64), bytes.len() as u64);
+    let encoding = bundle
+        .update_review_job(
+            &queued,
+            UpdateReviewJob::BeginEncoding(ReviewStage {
+                id: SessionId::fresh().unwrap(),
+                boot: "00000000-0000-0000-0000-000000000000".into(),
+                pid: 1,
+                process_start: 1,
+                byte_limit: bytes.len() as u64,
+            }),
+        )
+        .unwrap();
+    let path = temp.path("owned-media");
+    std::fs::write(&path, bytes).unwrap();
+    let media = ObjectRef {
+        sha256: kinewright_media::sha256_bytes(bytes),
+        byte_length: bytes.len() as u64,
+        record_kind: RecordKind::OwnedMedia,
+    };
+    bundle
+        .publish_review_artifact(
+            &encoding.token,
+            &mut std::fs::File::open(&path).unwrap(),
+            &media,
+            fixture_timing(),
+        )
+        .unwrap();
+    std::fs::remove_file(path).unwrap();
+    bundle
+        .update_review_job(&encoding.token, UpdateReviewJob::Stop)
+        .unwrap();
+    bundle
+        .update_review_job(&encoding.token, UpdateReviewJob::RetireStopped)
+        .unwrap();
+}
+
+#[derive(Clone, Copy, Debug)]
+enum StagedEnding {
+    Stop,
+    Pause,
+    RunStop,
+    Publish,
+}
+
+/// A project with 112 MiB of owned media runs a 128 MiB stage that holds 4 MiB
+/// on a disk with little more room than the charge. The charge would overflow
+/// the owned-media allowance. Ordinary writes reach their reduced ceiling;
+/// terminal writes and publication are refused only for real lack of space.
+#[test]
+fn s5_review_store_filling_keeps_terminal_writes_and_publication() {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    const OWNED_MEDIA: usize = 112 << 20;
+    const STAGE: u64 = 128 << 20;
+    const STAGED: usize = 4 << 20;
+    let owned_media = incompressible(OWNED_MEDIA);
+    for ending in [
+        StagedEnding::Stop,
+        StagedEnding::Pause,
+        StagedEnding::RunStop,
+        StagedEnding::Publish,
+    ] {
+        let temp = TempDirectory::new_in(&workspace_target_dir(), "review-filling");
+        let (_core, mut bundle, _) = saved_bundle(&temp);
+        retain_owned_media(&mut bundle, &temp, &owned_media);
+        let descriptor = version(&mut bundle);
+        let token = queue_limited(&mut bundle, &descriptor, (64, 64), STAGE);
+        let stage = ReviewStage {
+            id: SessionId::fresh().unwrap(),
+            boot: "00000000-0000-0000-0000-000000000000".into(),
+            pid: 1,
+            process_start: 1,
+            byte_limit: STAGE,
+        };
+        let token = bundle
+            .update_review_job(&token, UpdateReviewJob::BeginEncoding(stage.clone()))
+            .unwrap()
+            .token;
+        let charge = bundle.store.reserve_review_stage(&stage).unwrap();
+        let staging = bundle.store.create_review_staging(&stage, &charge).unwrap();
+        let bytes = incompressible(STAGED);
+        std::fs::write(staging.destination(), &bytes).unwrap();
+        staging.open_output().unwrap().sync_all().unwrap();
+
+        let usage = bundle.store.usage().unwrap();
+        let mut limits = StorageLimits {
+            owned_bytes: usage.owned_bytes + (16 << 20),
+            // Over the review headroom and under the staged charge. Ordinary
+            // publication needs room for a full decoded record.
+            metadata_bytes: if matches!(ending, StagedEnding::Publish) {
+                StorageLimits::default().metadata_bytes
+            } else {
+                100 << 20
+            },
+            ..StorageLimits::default()
+        };
+        assert!(
+            matches!(ending, StagedEnding::Publish)
+                || usage.physical_bytes + STAGE > limits.owned_bytes + limits.metadata_bytes,
+            "the charge would overflow the owned-media allowance"
+        );
+        let room = if matches!(ending, StagedEnding::Publish) {
+            // Ordinary room after the disk headroom: 8 MiB for a 4 MiB artifact.
+            40 << 20
+        } else {
+            // Objects and disk at the reduced ceiling; 2 MiB is under the
+            // staged bytes, so counting them twice leaves no room at all.
+            limits.objects = usage.objects + OBJECT_HEADROOM;
+            2 << 20
+        };
+        bundle.restrict_limits_probe(limits).unwrap();
+        bundle.store.free_space_probe(Some(STAGE + room)).unwrap();
+        let ordinary = bundle.store.admit_blob(
+            &mut &b"ordinary"[..],
+            &ObjectRef {
+                sha256: kinewright_media::sha256_bytes(b"ordinary"),
+                byte_length: 8,
+                record_kind: RecordKind::OwnedEvidence,
+            },
+            &[],
+        );
+        if !matches!(ending, StagedEnding::Publish) {
+            assert!(
+                matches!(ordinary, Err(BundleError::Capacity("disk reserve"))),
+                "REVIEW_ORDINARY_WRITE_AT_CEILING {ending:?}: {:?}",
+                ordinary.map(|_| ())
+            );
+        }
+        drop(ordinary);
+        let phase = match ending {
+            StagedEnding::Stop => bundle.update_review_job(&token, UpdateReviewJob::Stop),
+            StagedEnding::Pause => {
+                bundle.update_review_job(&token, UpdateReviewJob::Pause("full".into()))
+            }
+            StagedEnding::RunStop => {
+                bundle.store.set_run_budget(true);
+                // A real lack of space stays a capacity refusal for the review.
+                bundle.store.free_space_probe(Some(STAGE)).unwrap();
+                let full = bundle.update_review_job(&token, UpdateReviewJob::Stop);
+                assert!(
+                    matches!(full, Err(BundleError::Capacity(_))),
+                    "REVIEW_TERMINAL_CAPACITY_IS_NOT_A_RUN_LIMIT: {full:?}"
+                );
+                assert!(!bundle.store.run_limit_reached(), "REVIEW_RUN_LIMIT_UNSET");
+                bundle.settle_review_root().unwrap();
+                bundle.store.free_space_probe(Some(STAGE + room)).unwrap();
+                bundle.update_review_job(&token, UpdateReviewJob::Stop)
+            }
+            StagedEnding::Publish => {
+                charge.finish_writing();
+                let media = ObjectRef {
+                    sha256: kinewright_media::sha256_bytes(&bytes),
+                    byte_length: bytes.len() as u64,
+                    record_kind: RecordKind::OwnedMedia,
+                };
+                bundle.publish_review_artifact(
+                    &token,
+                    &mut staging.open_output().unwrap(),
+                    &media,
+                    fixture_timing(),
+                )
+            }
+        }
+        .unwrap_or_else(|error| panic!("REVIEW_STAGED_TERMINAL_WRITE {ending:?}: {error}"))
+        .phase;
+        assert!(
+            matches!(
+                (ending, &phase),
+                (
+                    StagedEnding::Stop | StagedEnding::RunStop,
+                    ReviewPhase::Stopping
+                ) | (StagedEnding::Pause, ReviewPhase::Paused { .. })
+                    | (StagedEnding::Publish, ReviewPhase::Checking(_))
+            ),
+            "{ending:?}: {phase:?}"
+        );
+        assert!(!bundle.store.run_limit_reached(), "REVIEW_RUN_LIMIT_UNSET");
+        charge.finish_writing();
+        bundle.store.sweep_review_staging(&stage).unwrap();
+        drop(staging);
+        drop(charge);
+        bundle.store.set_run_budget(false);
+        let retire = if matches!(phase, ReviewPhase::Stopping) {
+            UpdateReviewJob::RetireStopped
+        } else {
+            UpdateReviewJob::RetireStage
+        };
+        bundle
+            .update_review_job(&token, retire)
+            .unwrap_or_else(|error| panic!("REVIEW_STAGED_RETIREMENT {ending:?}: {error}"));
+        assert_eq!(bundle.store.usage().unwrap().reserved_copy_bytes, 0);
+        assert!(
+            bundle.store.reserve(64 << 10, 0, false).is_ok(),
+            "REVIEW_RELEASED_CHARGE_FREES_ORDINARY_SPACE {ending:?}"
+        );
+    }
+}
+
+#[test]
+fn s5_review_uncertain_publication_never_rides_on_a_later_save() {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "review-uncertain");
+    let (core, mut bundle, inputs) = saved_bundle(&temp);
+    let descriptor = version(&mut bundle);
+    let token = queue(&mut bundle, &descriptor, (64, 64));
+    let uncertain = crate::io_observer::fail_once("root_rename_io", || {
+        bundle.update_review_job(&token, UpdateReviewJob::Stop)
+    });
+    assert!(
+        matches!(uncertain, Err(BundleError::DurabilityUnknown)),
+        "{uncertain:?}"
+    );
+    bundle.reconcile().unwrap();
+    assert_eq!(
+        bundle.review_job().unwrap().unwrap().phase,
+        ReviewPhase::Queued,
+        "the root was never renamed"
+    );
+    assert!(
+        core.request(kinewright_core::Command::Do(
+            kinewright_core::Operation::AddMarker {
+                marker: kinewright_core::Marker {
+                    id: kinewright_core::MarkerId(7),
+                    position: TimeCode(1),
+                    label: "after uncertainty".into(),
+                    color_token: 0,
+                },
+            }
+        ))
+        .is_ok()
+    );
+    bundle.save(&core, &inputs).unwrap();
+    assert_eq!(
+        bundle.review_job().unwrap().unwrap().phase,
+        ReviewPhase::Queued,
+        "REVIEW_ABANDONED_UPDATE_NEVER_RIDES_ON_SAVE"
+    );
+    let stopped = bundle
+        .update_review_job(&token, UpdateReviewJob::Stop)
+        .expect("REVIEW_METADATA_COMMANDS_NOT_WEDGED");
+    assert_eq!(stopped.phase, ReviewPhase::Stopping);
+}
+
+/// A sweep never deletes an entry it did not create; it refuses instead.
+#[test]
+fn s5_review_sweep_refuses_an_unexpected_stage_entry() {
+    let temp = kinewright_media::test_support::TempDirectory::new("review-sweep-foreign");
+    let (_core, bundle, _) = saved_bundle(&temp);
+    let stage = ReviewStage {
+        id: SessionId::fresh().unwrap(),
+        boot: "00000000-0000-0000-0000-000000000000".into(),
+        pid: 1,
+        process_start: 1,
+        byte_limit: 1 << 20,
+    };
+    let charge = bundle.store.reserve_review_stage(&stage).unwrap();
+    let staging = bundle.store.create_review_staging(&stage, &charge).unwrap();
+    let foreign = staging.destination().with_file_name("notes.txt");
+    std::fs::write(&foreign, b"kept").unwrap();
+    let refused = bundle
+        .store
+        .sweep_review_staging(&stage)
+        .expect_err("REVIEW_SWEEP_REFUSES_FOREIGN_ENTRY");
+    assert!(
+        matches!(&refused, BundleError::Identity(message) if message == "unexpected review stage entry"),
+        "REVIEW_SWEEP_REFUSES_FOREIGN_ENTRY: {refused:?}"
+    );
+    assert_eq!(
+        std::fs::read(&foreign).unwrap(),
+        b"kept",
+        "REVIEW_SWEEP_KEEPS_FOREIGN_ENTRY"
+    );
 }
