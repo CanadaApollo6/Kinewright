@@ -1,0 +1,22 @@
+[package]
+name = "kinewright-desktop-notify"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The org.freedesktop.Notifications client for seal notifications (Linux only)."
+
+# JA-1 S6 C4 fix 1: the only crate besides kinewright-media-supervisor that may
+# depend on zbus (scripts/ms2_client_boundary.py). It holds the notification
+# bus calls and nothing else; it never talks to the systemd manager.
+[features]
+# A private dbus-daemon with a fake notification daemon, for other crates'
+# tests. Enable it from dev-dependencies only.
+test-bus = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus.workspace = true
+
+[lints]
+workspace = true

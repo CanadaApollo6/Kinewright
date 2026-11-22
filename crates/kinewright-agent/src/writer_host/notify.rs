@@ -3,56 +3,38 @@
 //! The host hands each fresh seal to [`Notifier::notify`] under its lock;
 //! nothing here takes that lock or blocks it. One short-lived sender thread
 //! at a time drains a small queue and calls `org.freedesktop.Notifications`
-//! on the session bus. With a GUI attached, the notification carries a
+//! on the session bus, through `kinewright-desktop-notify`, which holds the
+//! bus calls. With a GUI attached, the notification carries a
 //! default action, and a listener thread waits for this host's own
 //! notification IDs: a click puts a one-shot selection in host status, which
 //! the GUI acknowledges by nonce. The listener's wait is the bus's message
 //! stream; shutdown ends it by closing the connection.
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, VecDeque},
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
 };
 
 use kinewright_core::output_review::SealedReviewOutcome;
+use kinewright_desktop_notify::{DEFAULT_ACTION, DaemonName, Sent, Signal, Signals};
 use kinewright_project::{review_job::delivery::seal_notice_text, studio_records::SnapshotKey};
-use zbus::{
-    MatchRule,
-    blocking::{Connection, MessageIterator, Proxy, connection::Builder},
-    message::Type,
-    names::OwnedUniqueName,
-    zvariant::Value,
-};
 
 use super::protocol::NotificationSelect;
 
-const DESTINATION: &str = "org.freedesktop.Notifications";
-const PATH: &str = "/org/freedesktop/Notifications";
-const INTERFACE: &str = "org.freedesktop.Notifications";
 /// The notification's title and application name.
 const TITLE: &str = "Kinewright";
-/// The freedesktop key of a notification's default action (a click).
-const DEFAULT_ACTION: &str = "default";
+/// The label a daemon may show for the click action.
+const SHOW: &str = "Show";
 /// Seals waiting while one send is in flight; the oldest is dropped beyond it.
 pub(super) const MAX_QUEUED: usize = 4;
 /// This host's notifications that a click may still select.
 const MAX_OUTSTANDING: usize = 16;
-const MAX_SIGNALS_QUEUED: usize = 16;
-const METHOD_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_ERROR: usize = 240;
 
-/// How the notifier reaches a bus. Production opens the person's session
-/// bus; tests inject a private one.
-pub(super) type Connect = Arc<dyn Fn() -> zbus::Result<Connection> + Send + Sync>;
-
-/// The person's session bus.
-pub(super) fn session_bus() -> Connect {
-    Arc::new(|| Builder::session()?.method_timeout(METHOD_TIMEOUT).build())
-}
+pub(super) use kinewright_desktop_notify::{Connect, session_bus};
 
 /// What one seal says, and the version a click selects when a GUI is
 /// attached. The text carries the version's label and nothing else of the
@@ -92,19 +74,19 @@ impl SealNotice {
 
 #[derive(Clone)]
 struct Bus {
-    connection: Connection,
+    connection: kinewright_desktop_notify::Bus,
     actions: bool,
 }
 
 struct Listener {
     thread: JoinHandle<()>,
     // Closing it ends the listener's wait.
-    connection: Connection,
+    connection: kinewright_desktop_notify::Bus,
 }
 
 /// A notification this host sent that a click may select.
 struct Outstanding {
-    daemon: OwnedUniqueName,
+    daemon: DaemonName,
     target: Target,
 }
 
@@ -161,7 +143,7 @@ fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn bounded(error: &zbus::Error) -> String {
+fn bounded(error: &kinewright_desktop_notify::Error) -> String {
     error.to_string().chars().take(MAX_ERROR).collect()
 }
 
@@ -326,57 +308,21 @@ impl NotifierStop {
             (shared.bus.take(), shared.listener.take())
         };
         if let Some(bus) = bus {
-            let _ = bus.connection.close();
+            bus.connection.close();
         }
         if let Some(listener) = listener {
-            let _ = listener.connection.close();
+            listener.connection.close();
             let _ = listener.thread.join();
         }
     }
 }
 
-fn open(connect: &Connect) -> zbus::Result<Bus> {
+fn open(connect: &Connect) -> Result<Bus, kinewright_desktop_notify::Error> {
     let connection = connect()?;
-    let capabilities: Vec<String> = Proxy::new(&connection, DESTINATION, PATH, INTERFACE)?
-        .call("GetCapabilities", &())
-        .unwrap_or_default();
     Ok(Bus {
+        actions: connection.actions(),
         connection,
-        actions: capabilities
-            .iter()
-            .any(|capability| capability == "actions"),
     })
-}
-
-fn signals(connection: &Connection) -> zbus::Result<MessageIterator> {
-    let rule = MatchRule::builder()
-        .msg_type(Type::Signal)
-        .interface(INTERFACE)?
-        .path(PATH)?
-        .build();
-    MessageIterator::for_match_rule(rule, connection, Some(MAX_SIGNALS_QUEUED))
-}
-
-/// Send `Notify`, returning the notification's ID and the daemon's unique
-/// name, which every later signal about it must come from.
-fn send(bus: &Bus, body: &str, actionable: bool) -> zbus::Result<(u32, OwnedUniqueName)> {
-    let actions: Vec<&str> = if actionable {
-        vec![DEFAULT_ACTION, "Show"]
-    } else {
-        Vec::new()
-    };
-    let hints: HashMap<&str, Value<'_>> = HashMap::new();
-    let reply = Proxy::new(&bus.connection, DESTINATION, PATH, INTERFACE)?.call_method(
-        "Notify",
-        &(TITLE, 0_u32, "", TITLE, body, actions, hints, -1_i32),
-    )?;
-    let id: u32 = reply.body().deserialize()?;
-    let daemon = reply
-        .header()
-        .sender()
-        .map(|name| OwnedUniqueName::from(name.to_owned()))
-        .ok_or_else(|| zbus::Error::Failure("The notification reply named no sender.".into()))?;
-    Ok((id, daemon))
 }
 
 /// The sender thread: send every queued seal, in order, then exit.
@@ -414,8 +360,11 @@ fn send_queued(shared: &Arc<Mutex<Shared>>, connect: &Connect) {
         };
         let actionable =
             notice.select.is_some() && attached && bus.actions && ensure_listener(shared, &bus);
-        match send(&bus, &notice.body, actionable) {
-            Ok((id, daemon)) => {
+        match bus
+            .connection
+            .notify(TITLE, &notice.body, actionable.then_some(SHOW))
+        {
+            Ok(Sent { id, daemon }) => {
                 let mut state = lock(shared);
                 state.error = None;
                 state.in_flight = false;
@@ -452,7 +401,7 @@ fn ensure_listener(shared: &Arc<Mutex<Shared>>, bus: &Bus) -> bool {
         }
     }
     // The match rule is in place before `Notify` is sent.
-    let iterator = match signals(&bus.connection) {
+    let iterator = match bus.connection.signals() {
         Ok(iterator) => iterator,
         Err(error) => {
             lock(shared).error = Some(bounded(&error));
@@ -488,26 +437,21 @@ fn ensure_listener(shared: &Arc<Mutex<Shared>>, bus: &Bus) -> bool {
 /// into one selection. It ends when the stream ends (the connection
 /// closed), when the host stops, or when no notification of this host can
 /// still be clicked and no send is in flight.
-fn listen(iterator: MessageIterator, shared: &Arc<Mutex<Shared>>) {
-    for message in iterator {
-        let Ok(message) = message else {
+fn listen(signals: Signals, shared: &Arc<Mutex<Shared>>) {
+    for received in signals {
+        let Ok(received) = received else {
             break;
         };
-        let header = message.header();
-        let member = header.member().map(|member| member.as_str().to_owned());
-        let sender = header.sender().map(zbus::names::UniqueName::to_owned);
         let mut state = lock(shared);
         let ours = |state: &Shared, id: u32| {
-            state.outstanding.get(&id).is_some_and(|outstanding| {
-                sender
-                    .as_ref()
-                    .is_some_and(|sender| *sender == *outstanding.daemon)
-            })
+            state
+                .outstanding
+                .get(&id)
+                .is_some_and(|outstanding| received.sender.as_ref() == Some(&outstanding.daemon))
         };
-        match member.as_deref() {
-            Some("ActionInvoked") => {
-                if let Ok((id, action)) = message.body().deserialize::<(u32, String)>()
-                    && action == DEFAULT_ACTION
+        match received.signal {
+            Signal::Action { id, ref action } => {
+                if action == DEFAULT_ACTION
                     && ours(&state, id)
                     && let Some(clicked) = state.outstanding.remove(&id)
                 {
@@ -520,14 +464,12 @@ fn listen(iterator: MessageIterator, shared: &Arc<Mutex<Shared>>) {
                     });
                 }
             }
-            Some("NotificationClosed") => {
-                if let Ok((id, _reason)) = message.body().deserialize::<(u32, u32)>()
-                    && ours(&state, id)
-                {
+            Signal::Closed { id } => {
+                if ours(&state, id) {
                     state.outstanding.remove(&id);
                 }
             }
-            _ => {}
+            Signal::Other => {}
         }
         if state.cancelled || (!state.sending && state.outstanding.is_empty()) {
             state.listening = false;
@@ -538,6 +480,6 @@ fn listen(iterator: MessageIterator, shared: &Arc<Mutex<Shared>>) {
 }
 
 #[cfg(test)]
-pub(super) mod test_bus;
+pub(super) use kinewright_desktop_notify::test_bus;
 #[cfg(test)]
 mod tests;

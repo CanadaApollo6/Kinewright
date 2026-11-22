@@ -2312,6 +2312,7 @@ dependencies = [
  "getrandom 0.3.4",
  "image",
  "kinewright-core",
+ "kinewright-desktop-notify",
  "kinewright-hash",
  "kinewright-job-sys",
  "kinewright-media",
@@ -2329,7 +2330,6 @@ dependencies = [
  "stats_alloc",
  "thiserror 2.0.19",
  "tokio",
- "zbus",
 ]
 
 [[package]]
@@ -2370,6 +2370,13 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.19",
  "unicode-general-category",
+]
+
+[[package]]
+name = "kinewright-desktop-notify"
+version = "0.1.0"
+dependencies = [
+ "zbus",
 ]
 
 [[package]]

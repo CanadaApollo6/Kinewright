@@ -1,7 +1,12 @@
-//! JA-1 S6 C4 test support: a private session bus with a fake notification
-//! daemon on it. Nothing here reaches the person's session bus: the daemon
+//! JA-1 S6 C4 test support, behind the `test-bus` feature: a private session
+//! bus with a fake notification daemon on it. Nothing here reaches the person's session bus: the daemon
 //! runs with an empty environment and its own configuration, which listens on
 //! a fresh abstract socket and activates no services.
+#![allow(
+    clippy::missing_panics_doc,
+    clippy::must_use_candidate,
+    reason = "test support: every failure here is the calling test's failure"
+)]
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Read},
@@ -19,11 +24,11 @@ use zbus::{
     zvariant::OwnedValue,
 };
 
-use super::{Connect, DEFAULT_ACTION, DESTINATION, INTERFACE, PATH};
+use super::{Bus, Connect, DEFAULT_ACTION, DESTINATION, DaemonName, Error, INTERFACE, PATH};
 
 /// One `Notify` call the fake daemon answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::writer_host) struct NotifyCall {
+pub struct NotifyCall {
     pub id: u32,
     pub app_name: String,
     pub replaces_id: u32,
@@ -37,7 +42,7 @@ pub(in crate::writer_host) struct NotifyCall {
 
 /// How the fake daemon behaves.
 #[derive(Default)]
-pub(in crate::writer_host) struct Daemon {
+pub struct Daemon {
     pub capabilities: Vec<String>,
     pub calls: Mutex<Vec<NotifyCall>>,
     /// `Notify` answers with an error.
@@ -93,7 +98,7 @@ impl Fake {
 }
 
 /// Poll `ready` for up to 30 s; no channel or timed receive (PITFALLS).
-pub(in crate::writer_host) fn wait_for(ready: impl Fn() -> bool, marker: &str) {
+pub fn wait_for(ready: impl Fn() -> bool, marker: &str) {
     let started = Instant::now();
     while !ready() {
         assert!(started.elapsed() < Duration::from_secs(30), "{marker}");
@@ -102,7 +107,7 @@ pub(in crate::writer_host) fn wait_for(ready: impl Fn() -> bool, marker: &str) {
 }
 
 /// A private `dbus-daemon`, killed and reaped on drop.
-pub(in crate::writer_host) struct PrivateBus {
+pub struct PrivateBus {
     child: Child,
     address: String,
     config: std::path::PathBuf,
@@ -117,7 +122,7 @@ impl Drop for PrivateBus {
 }
 
 impl PrivateBus {
-    pub(in crate::writer_host) fn start() -> Self {
+    pub fn start() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let name = format!(
             "kinewright-s6c4-{}-{}",
@@ -170,22 +175,26 @@ impl PrivateBus {
     }
 
     /// The notifier's way onto this bus.
-    pub(in crate::writer_host) fn connect(&self) -> Connect {
+    pub fn connect(&self) -> Connect {
         let address = self.address.clone();
         Arc::new(move || {
-            Builder::address(address.as_str())?
+            Ok(Bus(Builder::address(address.as_str())?
                 .method_timeout(Duration::from_secs(5))
-                .build()
+                .build()?))
         })
     }
 
     /// A way onto this bus that always fails, as a missing bus does.
-    pub(in crate::writer_host) fn refused() -> Connect {
-        Arc::new(|| Err(zbus::Error::Address("no session bus in this test".into())))
+    pub fn refused() -> Connect {
+        Arc::new(|| {
+            Err(Error(zbus::Error::Address(
+                "no session bus in this test".into(),
+            )))
+        })
     }
 
     /// A fake daemon that owns the notification name on this bus.
-    pub(in crate::writer_host) fn daemon(&self, actions: bool) -> (Arc<Daemon>, Connection) {
+    pub fn daemon(&self, actions: bool) -> (Arc<Daemon>, Peer) {
         let daemon = Arc::new(Daemon {
             capabilities: if actions {
                 vec!["actions".into(), "body".into()]
@@ -202,28 +211,59 @@ impl PrivateBus {
             .unwrap()
             .build()
             .unwrap();
-        (daemon, connection)
+        (daemon, Peer(connection))
     }
 
     /// Another client on this bus, which does not own the daemon's name.
-    pub(in crate::writer_host) fn stranger(&self) -> Connection {
-        Builder::address(self.address.as_str())
-            .unwrap()
-            .build()
-            .unwrap()
+    pub fn stranger(&self) -> Peer {
+        Peer(
+            Builder::address(self.address.as_str())
+                .unwrap()
+                .build()
+                .unwrap(),
+        )
     }
 }
 
-/// Emit a notification signal from `from`.
-pub(in crate::writer_host) fn emit<B>(from: &Connection, member: &str, body: &B)
-where
-    B: serde::Serialize + zbus::zvariant::DynamicType,
-{
-    from.emit_signal(None::<BusName<'_>>, PATH, INTERFACE, member, body)
+/// A client on a private bus: the fake daemon's connection, or a stranger's.
+/// Dropping it closes the connection; the fake daemon serves while it lives.
+pub struct Peer(Connection);
+
+impl Peer {
+    /// Its unique name, as a notification's daemon.
+    #[must_use]
+    pub fn name(&self) -> DaemonName {
+        DaemonName(self.0.unique_name().unwrap().clone())
+    }
+}
+
+/// Action `action` on notification `id`, from `from`.
+pub fn action(from: &Peer, id: u32, action: &str) {
+    from.0
+        .emit_signal(
+            None::<BusName<'_>>,
+            PATH,
+            INTERFACE,
+            "ActionInvoked",
+            &(id, action),
+        )
         .unwrap();
 }
 
 /// A click on notification `id`.
-pub(in crate::writer_host) fn click(from: &Connection, id: u32) {
-    emit(from, "ActionInvoked", &(id, DEFAULT_ACTION));
+pub fn click(from: &Peer, id: u32) {
+    action(from, id, DEFAULT_ACTION);
+}
+
+/// Notification `id` closed (reason 2, dismissed), from `from`.
+pub fn closed(from: &Peer, id: u32) {
+    from.0
+        .emit_signal(
+            None::<BusName<'_>>,
+            PATH,
+            INTERFACE,
+            "NotificationClosed",
+            &(id, 2_u32),
+        )
+        .unwrap();
 }

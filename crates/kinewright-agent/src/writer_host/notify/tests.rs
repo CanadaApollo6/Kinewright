@@ -9,7 +9,7 @@ use kinewright_project::{bundle_records::RecordKind, studio_records::SnapshotKey
 
 use super::{
     DEFAULT_ACTION, MAX_QUEUED, Notifier, SealNotice,
-    test_bus::{PrivateBus, click, emit, wait_for},
+    test_bus::{Peer, PrivateBus, action, click, closed, wait_for},
 };
 
 fn key(n: u8) -> SnapshotKey {
@@ -116,18 +116,18 @@ fn ja1_s6_c4_no_gui_or_no_action_capability_offers_no_action() {
 /// Make `id` clickable from `daemon`, then close it from `from` and wait
 /// until the listener has handled that: every signal `from` sent before it
 /// has been handled too.
-fn handled_after(notifier: &Notifier, from: &zbus::blocking::Connection, id: u32) {
+fn handled_after(notifier: &Notifier, from: &Peer, id: u32) {
     super::lock(&notifier.shared).outstanding.insert(
         id,
         super::Outstanding {
-            daemon: from.unique_name().unwrap().clone(),
+            daemon: from.name(),
             target: super::Target {
                 version: key(9),
                 key_sha256: "cd".repeat(32),
             },
         },
     );
-    emit(from, "NotificationClosed", &(id, 2_u32));
+    closed(from, id);
     wait_for(
         || !super::lock(&notifier.shared).outstanding.contains_key(&id),
         "S6C4_MARKER_HANDLED",
@@ -152,7 +152,7 @@ fn ja1_s6_c4_one_click_on_this_hosts_notification_selects_once() {
     // A foreign ID, another action key, and a click from a client that is
     // not the daemon select nothing.
     click(&server, id + 100);
-    emit(&server, "ActionInvoked", &(id, "Show"));
+    action(&server, id, "Show");
     handled_after(&notifier, &server, id + 200);
     click(&stranger, id);
     handled_after(&notifier, &stranger, id + 201);
@@ -205,7 +205,7 @@ fn ja1_s6_c4_a_closed_notification_can_no_longer_be_clicked() {
         || super::lock(&notifier.shared).outstanding.contains_key(&id),
         "S6C4_OUTSTANDING",
     );
-    emit(&server, "NotificationClosed", &(id, 2_u32));
+    closed(&server, id);
     wait_for(
         || !super::lock(&notifier.shared).listening,
         "S6C4_CLOSED_ENDS_THE_WAIT",

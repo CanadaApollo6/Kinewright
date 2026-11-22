@@ -4,6 +4,7 @@ members = [
     "crates/kinewright-media-ipc",
     "crates/kinewright-media-helper",
     "crates/kinewright-media-supervisor",
+    "crates/kinewright-desktop-notify",
     "crates/kinewright-media-client",
     "crates/kinewright-media-input",
     "crates/kinewright-hash",

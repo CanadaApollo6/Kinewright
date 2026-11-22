@@ -26,6 +26,9 @@ bus = { package = "zbus", version = "=5.19.0" }
         self.app = self.member("kinewright-app")
         self.member("kinewright-media-supervisor", '[dependencies]\nzbus.workspace = true\n')
         self.project = self.member("kinewright-project", '[features]\nms2-test-bin-dir = []\n')
+        self.notify = self.member(
+            "kinewright-desktop-notify",
+            '[target.\'cfg(target_os = "linux")\'.dependencies]\nzbus.workspace = true\n')
 
     def member(self, name, dependencies=""):
         directory = self.root / "crates" / name
@@ -79,6 +82,27 @@ bus = { package = "zbus", version = "=5.19.0" }
         result = self.run_gate()
         self.assertEqual(result.returncode, 1)
         self.assertIn("crates/kinewright-app/src/main.rs:1: app mentions", result.stderr)
+
+    def test_agent_reaches_zbus_only_through_the_notify_crate(self):
+        # setUp gives the notify crate direct zbus; the positive test covers it.
+        self.member("kinewright-agent", '[target.\'cfg(target_os = "linux")\'.dependencies]\n'
+                    'kinewright-desktop-notify = { path = "../kinewright-desktop-notify" }\n')
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_agent_cannot_declare_zbus_beside_the_notify_crate(self):
+        self.member("kinewright-agent", '[target.\'cfg(target_os = "linux")\'.dependencies]\n'
+                    'zbus.workspace = true\n')
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("kinewright-agent declares direct zbus", result.stderr)
+
+    def test_notify_source_cannot_mention_systemd_manager(self):
+        (self.notify.parent / "src/bus.rs").write_text('const M: &str = "org.freedesktop.systemd1";\n')
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("crates/kinewright-desktop-notify/src/bus.rs:1: "
+                      "kinewright-desktop-notify mentions org.freedesktop.systemd1", result.stderr)
 
     def test_two_zbus_versions_fail(self):
         lock = self.root / "Cargo.lock"

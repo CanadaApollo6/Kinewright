@@ -35,7 +35,7 @@ fn s6c4_notify_on_private_bus(
 ) -> (
     super::super::notify::test_bus::PrivateBus,
     std::sync::Arc<super::super::notify::test_bus::Daemon>,
-    zbus::blocking::Connection,
+    super::super::notify::test_bus::Peer,
 ) {
     let bus = super::super::notify::test_bus::PrivateBus::start();
     let (daemon, server) = bus.daemon(actions);

@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-"""Check the MS2 client dependency boundary and dev-only binary override."""
+"""Check the MS2 client dependency boundary and dev-only binary override.
+
+Direct zbus is allowed in exactly two crates, so that bus access stays where
+it can be reviewed:
+
+- kinewright-media-supervisor, the only client of the systemd user manager
+  (org.freedesktop.systemd1), which places media decode helpers in scopes.
+- kinewright-desktop-notify (JA-1 S6 C4), the org.freedesktop.Notifications
+  client for seal notifications. Its sources must never name the systemd
+  manager, so the notification crate cannot become a second systemd client.
+
+App crates must not name the systemd manager either.
+"""
 
 import argparse
 import fnmatch
@@ -10,6 +22,8 @@ import sys
 import tomllib
 
 SUPERVISOR = "kinewright-media-supervisor"
+NOTIFY = "kinewright-desktop-notify"
+ZBUS_ALLOWED = {SUPERVISOR, NOTIFY}
 MANAGER = "org.freedesktop.systemd1"
 DEPENDENCIES = ("dependencies", "build-dependencies", "dev-dependencies")
 PROJECT = "kinewright-project"
@@ -84,7 +98,7 @@ def check(root):
                     specification = shared[alias]
                     specification = specification if isinstance(specification, dict) else {}
                     dependency_base = root
-                if specification.get("package", alias) == "zbus" and name != SUPERVISOR:
+                if specification.get("package", alias) == "zbus" and name not in ZBUS_ALLOWED:
                     errors.append(f"{path.relative_to(root).as_posix()}: {name} declares direct zbus ({alias})")
                 # Cargo also makes in-workspace path dependencies implicit members.
                 if "path" in specification:
@@ -103,6 +117,12 @@ def check(root):
                 for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
                     if MANAGER in line:
                         errors.append(f"{source.relative_to(root).as_posix()}:{number}: app mentions {MANAGER}")
+        if name == NOTIFY:
+            for source in sorted(path.parent.rglob("*.rs")):
+                for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
+                    if MANAGER in line:
+                        errors.append(f"{source.relative_to(root).as_posix()}:{number}: "
+                                      f"{NOTIFY} mentions {MANAGER}")
     with (root / "Cargo.lock").open("rb") as source:
         packages = tomllib.load(source)["package"]
     copies = [p["version"] for p in packages if p["name"] == "zbus"]
@@ -124,7 +144,8 @@ def main():
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
-    print("MS2 client boundary: supervisor-only direct zbus, no app systemd client, "
+    print("MS2 client boundary: direct zbus only in the supervisor and the notification client, "
+          "no app or notification systemd client, "
           "one locked zbus, dev-only test binary override")
     return 0
 

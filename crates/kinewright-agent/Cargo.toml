@@ -91,8 +91,9 @@ required-features = ["eval-harness"]
 [target.'cfg(target_os = "linux")'.dependencies]
 rustls = { version = "=0.23.43", optional = true }
 rustls-native-certs = { version = "=0.8.4", optional = true }
-# JA-1 S6 C4: the seal notification on the session bus.
-zbus.workspace = true
+# JA-1 S6 C4: the seal notification on the session bus. Only that crate and
+# kinewright-media-supervisor depend on zbus (scripts/ms2_client_boundary.py).
+kinewright-desktop-notify = { path = "../kinewright-desktop-notify" }
 
 [dev-dependencies]
 stats_alloc = "=0.1.10"
@@ -105,6 +106,7 @@ kinewright-project = { path = "../kinewright-project", features = ["test-util", 
 # MS2 native-test diagnostics (`kinewright-job-sys/test_support/ms2_diag.rs`):
 # the client's per-probe view and the kernel's Landlock ABI.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
+kinewright-desktop-notify = { path = "../kinewright-desktop-notify", features = ["test-bus"] }
 kinewright-media-client = { path = "../kinewright-media-client" }
 landlock.workspace = true
 
