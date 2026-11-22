@@ -18,6 +18,10 @@ use crate::{
 };
 use std::collections::BTreeSet;
 
+/// The G20 mutation's added delay: above the 250 ms durable-comment target.
+#[cfg(all(feature = "g20-comment-delay", debug_assertions))]
+const G20_COMMENT_DELAY_MS: u64 = 300;
+
 #[derive(Clone)]
 pub(crate) struct PreparedMetadataAuthority {
     issuer: crate::receipts::IssuerState,
@@ -1274,6 +1278,10 @@ impl ProjectBundle {
                 MetadataResult::Snapshot(key)
             }
             MetadataChange::SaveFeedback(revision) => {
+                // JA-1 S6 C5 G20 mutation: a delayed durable comment write,
+                // which the measured comment p95 must show.
+                #[cfg(all(feature = "g20-comment-delay", debug_assertions))]
+                std::thread::sleep(std::time::Duration::from_millis(G20_COMMENT_DELAY_MS));
                 revision.validate(self.store.limits())?;
                 self.read_snapshot(&revision.anchor.snapshot)?;
                 let previous = feedback.revisions.get(&revision.comment_id);

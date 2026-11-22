@@ -16,6 +16,9 @@ ms2-test-bin-dir = ["kinewright-media-client/probe-phase-logs"]
 slow-tests = []
 storage-heap-profile = []
 history-metrics = ["kinewright-core/history-metrics"]
+# JA-1 S6 C5 G20 mutation: delay every durable comment write. Measurement
+# builds only (see `studio_store.rs`); never enabled by a shipping crate.
+g20-comment-delay = []
 
 [dependencies]
 crossbeam-channel.workspace = true

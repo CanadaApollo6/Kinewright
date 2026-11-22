@@ -38,6 +38,9 @@ slow-tests = []
 # (`writer_host/review_s6_c5_measure.rs`), run by `scripts/measure-g20.py`.
 # Compiled only when asked for; never a default or a shipping feature.
 g20-measure = []
+# G20 mutation: the measurement with a delayed durable comment write. Builds
+# with debug assertions only; a release build with it fails to compile.
+g20-comment-delay = ["g20-measure", "kinewright-project/g20-comment-delay"]
 
 [[bin]]
 name = "kinewright"

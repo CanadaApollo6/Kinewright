@@ -2,6 +2,10 @@
 //! from the app in AW1 S1 (zero logic change except the named
 //! [`SidecarSession`] extraction delta).
 
+// JA-1 S6 C5: the G20 comment-delay mutation never reaches a release build.
+#[cfg(all(feature = "g20-comment-delay", not(debug_assertions)))]
+compile_error!("g20-comment-delay is a measurement mutation; build it with debug assertions");
+
 pub mod bundle;
 mod bundle_branch;
 pub mod bundle_commit;
