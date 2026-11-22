@@ -247,7 +247,10 @@ fn row_findings(
 }
 
 impl ProjectBundle {
-    fn review_descriptor(&self, snapshot: &SnapshotKey) -> Result<SnapshotDescriptor, BundleError> {
+    pub(super) fn review_descriptor(
+        &self,
+        snapshot: &SnapshotKey,
+    ) -> Result<SnapshotDescriptor, BundleError> {
         self.version_index()?
             .snapshots
             .get(&snapshot.version)

@@ -10,6 +10,8 @@ pub(crate) use staging::LiveStageSlot;
 pub use staging::{ReviewStageCharge, ReviewStaging};
 mod check_inputs;
 pub use check_inputs::{PendingReviewCheck, ReviewCheckInputs};
+// JA-1 S6 C2: save a sealed cut.
+pub mod delivery;
 mod seal;
 pub(crate) use seal::validate_version_receipt;
 pub use seal::{

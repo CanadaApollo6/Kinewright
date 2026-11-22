@@ -1971,6 +1971,18 @@ impl ProjectStore {
     ) -> Result<File, BundleError> {
         self.open_copy_source_inner(reference, false, Some(cancellation))
     }
+    /// JA-1 S6 C2: open owned bytes for a caller that hashes them while it
+    /// copies and publishes nothing unless that hash matches `reference`.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn open_owned_for_hashed_copy(
+        &self,
+        reference: &ObjectRef,
+    ) -> Result<File, BundleError> {
+        self.closure_with_inventory(std::slice::from_ref(reference), false)?;
+        let path = Self::object_path(reference)?;
+        self.with_namespace(|namespace| namespace.open_owned(&path))?
+            .ok_or_else(|| BundleError::Corrupt("missing owned object".into()))
+    }
     fn open_copy_source(
         &self,
         reference: &ObjectRef,

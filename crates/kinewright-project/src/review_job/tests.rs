@@ -1995,3 +1995,6 @@ fn ja1_s5a_c7_fix2_persisted_checks_cannot_name_a_reviewer_task() {
         "C7_FIX2_REVIEWER_TASK_REFUSED"
     );
 }
+
+// JA-1 S6 C2: save a sealed cut.
+include!("delivery_tests.rs");
