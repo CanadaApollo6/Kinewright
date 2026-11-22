@@ -2001,3 +2001,6 @@ include!("delivery_tests.rs");
 
 // JA-1 S6 C2 fix 1: admission, staging identity and the remaining witnesses.
 include!("delivery_fix1_tests.rs");
+
+// JA-1 S6 C4: version numbers and the seals `ListVersions` reports.
+include!("s6_c4_tests.rs");

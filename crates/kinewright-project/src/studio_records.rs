@@ -43,6 +43,11 @@ pub struct SnapshotKey {
     pub document_hash: String,
     pub input_manifest_ref: ObjectRef,
 }
+/// JA-1 S6 C4: a version's label from its publish number.
+#[must_use]
+pub fn version_label(number: u32) -> String {
+    format!("v{number}")
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotDescriptor {
@@ -61,8 +66,16 @@ pub struct SnapshotDescriptor {
     pub review_evidence_ref: Option<ObjectRef>,
     pub parent_version: Option<VersionId>,
     pub run_provenance: Option<RunId>,
+    /// JA-1 S6 C4: the version's place in publish order, from 1. Its label
+    /// is `v{number}`; a version id is random and says nothing of order.
+    pub number: u32,
 }
 impl SnapshotDescriptor {
+    /// The version's label in Studio and in notifications: `v3`.
+    #[must_use]
+    pub fn label(&self) -> String {
+        version_label(self.number)
+    }
     #[must_use]
     pub fn references(&self) -> Vec<ObjectRef> {
         let mut refs = vec![

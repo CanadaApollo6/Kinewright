@@ -87,6 +87,8 @@ impl HostCommandOwner {
             review_evidence_ref: None,
             parent_version: None,
             run_provenance: None,
+            // A run's inputs are no published version; it has no number.
+            number: 0,
         })
     }
     pub(super) fn prepare_run_inputs(

@@ -895,6 +895,10 @@ pub struct HostReply {
     pub submitted_revisions: Vec<kinewright_project::studio_records::FeedbackRevision>,
     #[serde(default)]
     pub versions: Vec<kinewright_project::studio_records::SnapshotKey>,
+    /// JA-1 S6 C4: `ListVersions` also reports each version's seal receipts,
+    /// in publish order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sealed_versions: Vec<kinewright_project::review_job::delivery::SealedVersion>,
     pub snapshot: Option<kinewright_project::studio_records::SnapshotDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub editorial_audit: Option<kinewright_project::editorial::EditorialAudit>,

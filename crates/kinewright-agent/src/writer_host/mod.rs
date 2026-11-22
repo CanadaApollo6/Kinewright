@@ -2543,6 +2543,8 @@ impl HostCommandOwner {
             }
             HostCommand::ListVersions => {
                 reply.versions = self.owner()?.studio_versions()?;
+                // JA-1 S6 C4: and every version's seal receipts.
+                reply.sealed_versions = self.owner()?.studio_sealed_versions()?;
             }
             HostCommand::LeaseSnapshot { .. }
             | HostCommand::LeaseCurrentEdit { .. }

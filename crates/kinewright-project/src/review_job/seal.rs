@@ -259,6 +259,44 @@ impl ProjectBundle {
             .ok_or_else(|| BundleError::Identity("review version missing".into()))
     }
 
+    /// JA-1 S6 C4: every version, in publish order.
+    ///
+    /// # Errors
+    /// The version index cannot be read.
+    pub fn versions_in_publish_order(&self) -> Result<Vec<SnapshotKey>, BundleError> {
+        let index = self.version_index()?;
+        let mut versions: Vec<&SnapshotDescriptor> = index.snapshots.values().collect();
+        versions.sort_by_key(|descriptor| descriptor.number);
+        Ok(versions
+            .into_iter()
+            .map(|descriptor| descriptor.key.clone())
+            .collect())
+    }
+
+    /// JA-1 S6 C4: every seal receipt kept on a version, in publish order,
+    /// then in the order the version keeps its receipts.
+    ///
+    /// # Errors
+    /// The version index or a receipt cannot be read.
+    pub fn sealed_versions(&self) -> Result<Vec<super::delivery::SealedVersion>, BundleError> {
+        let index = self.version_index()?;
+        let mut sealed = Vec::new();
+        for descriptor in index.snapshots.values() {
+            for (_, receipt) in self.review_receipts(descriptor)? {
+                let receipt = receipt.take();
+                sealed.push(super::delivery::SealedVersion {
+                    key: descriptor.key.clone(),
+                    number: descriptor.number,
+                    outcome: receipt.outcome,
+                    key_sha256: receipt.key_sha256,
+                });
+            }
+        }
+        // Stable: a version's receipts keep their order.
+        sealed.sort_by_key(|entry| entry.number);
+        Ok(sealed)
+    }
+
     /// Every seal receipt kept on this version.
     pub fn review_receipts(
         &self,

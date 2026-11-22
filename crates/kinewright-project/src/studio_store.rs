@@ -1230,6 +1230,15 @@ impl ProjectBundle {
                 {
                     return Err(BundleError::HistoryChanged);
                 }
+                // JA-1 S6 C4: the next number in publish order.
+                let number = versions
+                    .snapshots
+                    .values()
+                    .map(|descriptor| descriptor.number)
+                    .max()
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .ok_or(BundleError::Capacity("Studio versions"))?;
                 let key = SnapshotKey {
                     project: self.project_id.clone(),
                     version: p.version.clone(),
@@ -1252,6 +1261,7 @@ impl ProjectBundle {
                     review_evidence_ref: None,
                     parent_version: p.parent_version.clone(),
                     run_provenance: p.run_provenance.clone(),
+                    number,
                 };
                 self.validate_snapshot(&descriptor)?;
                 for r in &p.revision_refs {
@@ -2223,14 +2233,15 @@ impl crate::editing_session::Ja1EditingSession {
         self.active_bundle()?
             .prepare_frozen_context_descriptor(descriptor)
     }
+    /// Every version, in publish order (JA-1 S6 C4).
     pub fn studio_versions(&self) -> Result<Vec<SnapshotKey>, BundleError> {
-        Ok(self
-            .active_bundle()?
-            .version_index()?
-            .snapshots
-            .values()
-            .map(|descriptor| descriptor.key.clone())
-            .collect())
+        self.active_bundle()?.versions_in_publish_order()
+    }
+    /// JA-1 S6 C4: every version's seal receipts, in publish order.
+    pub fn studio_sealed_versions(
+        &self,
+    ) -> Result<Vec<crate::review_job::delivery::SealedVersion>, BundleError> {
+        self.active_bundle()?.sealed_versions()
     }
 }
 

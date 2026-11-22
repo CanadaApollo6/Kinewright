@@ -29,6 +29,32 @@ pub enum SealedSaveStatus {
     Failed { reason: String },
 }
 
+/// JA-1 S6 C4: one seal receipt of one version, as `ListVersions` reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SealedVersion {
+    pub key: SnapshotKey,
+    /// The version's publish number; its label is `v{number}`.
+    pub number: u32,
+    pub outcome: SealedReviewOutcome,
+    /// The receipt's key digest. A notification click selects the version
+    /// only when its digest is one of these.
+    pub key_sha256: String,
+}
+
+/// JA-1 S6 C4: the notification's sentence for a sealed version, from its
+/// receipt outcome: "v3 is delivered" or "v3 is reviewed, facts not
+/// checked". A `ReviewedFactsNotChecked` cut is never called delivered (L2).
+#[must_use]
+pub fn seal_notice_text(label: &str, outcome: &SealedReviewOutcome) -> String {
+    match outcome {
+        SealedReviewOutcome::Delivered => format!("{label} is delivered"),
+        SealedReviewOutcome::ReviewedFactsNotChecked { .. } => {
+            format!("{label} is reviewed, facts not checked")
+        }
+    }
+}
+
 /// The words Studio, the folder name and `receipt.txt` use for an outcome.
 /// A `ReviewedFactsNotChecked` cut is never called delivered (L2).
 #[must_use]
