@@ -92,6 +92,9 @@ pub(crate) enum Action {
     },
     StudioManualPlayback(Arc<Document>),
     StudioSelect(kinewright_project::studio_records::SnapshotKey),
+    /// JA-1 S6 C4: a desktop notification click; selects its version only
+    /// when the click's digest is that version's sealed receipt.
+    StudioNotificationSelect(kinewright_agent::writer_host::NotificationSelect),
     StudioEditCopy(kinewright_project::studio_records::SnapshotKey),
     ImportMedia(PathBuf),
     ChangeMediaInterpretation(Box<kinewright_core::Operation>),
@@ -141,6 +144,7 @@ impl Action {
             | Self::StudioReview(_)
             | Self::StudioRulebook { .. }
             | Self::StudioSelect(_)
+            | Self::StudioNotificationSelect(_)
             | Self::Retry
             | Self::OpenRecovery
             | Self::Abandon
@@ -171,6 +175,7 @@ impl Action {
                 | Self::StudioRulebook { .. }
                 | Self::StudioManualPlayback(_)
                 | Self::StudioSelect(_)
+                | Self::StudioNotificationSelect(_)
                 | Self::ImportMedia(_)
                 | Self::ChangeMediaInterpretation(_)
                 | Self::PreviewRecovery(_)
@@ -182,6 +187,18 @@ impl Action {
                 | Self::Cancel
         )
     }
+}
+/// JA-1 S6 C4: the version a notification click selects: the sealed version
+/// with exactly the clicked key and receipt digest, else none. Never "the
+/// newest".
+pub(crate) fn notification_target(
+    sealed: &[kinewright_project::review_job::delivery::SealedVersion],
+    select: &kinewright_agent::writer_host::NotificationSelect,
+) -> Option<SnapshotKey> {
+    sealed
+        .iter()
+        .find(|version| version.key == select.version && version.key_sha256 == select.key_sha256)
+        .map(|version| version.key.clone())
 }
 enum Choice {
     SuccessorSave(Option<PathBuf>),
@@ -220,6 +237,10 @@ pub(crate) struct Ja1Attachment {
     pub message: String,
     pub(crate) studio_ready: Option<Arc<kinewright_project::studio_store::FrozenContext>>,
     pub(crate) studio_versions_ready: Option<Vec<kinewright_project::studio_records::SnapshotKey>>,
+    /// JA-1 S6 C4: the sealed versions read when the project opened, for the
+    /// ready line.
+    pub(crate) studio_sealed_ready:
+        Option<Vec<kinewright_project::review_job::delivery::SealedVersion>>,
     pub(crate) studio_edit_pending: bool,
     pub(crate) studio_editorial_ready: Option<EditorialDetails>,
     pub(crate) studio_error_ready: Option<crate::studio::StudioFailure>,
@@ -289,10 +310,14 @@ impl Ja1Attachment {
     }
     pub fn new(owner: Ja1EditingSession) -> Result<Self, BundleError> {
         let view = Some(PreparedView::prepare(owner.core())?);
+        // An unreadable list shows no ready line; the Versions window reports
+        // the damage when the person opens it.
+        let sealed = owner.studio_sealed_versions().ok();
         let mut this = Self {
             imported_media: None,
             studio_ready: None,
             studio_versions_ready: None,
+            studio_sealed_ready: sealed,
             studio_edit_pending: false,
             studio_editorial_ready: None,
             studio_error_ready: None,
@@ -548,6 +573,16 @@ impl Ja1Attachment {
                     return Err(error);
                 }
                 return refresh;
+            }
+            Action::StudioNotificationSelect(select) => {
+                let sealed = self.studio_sealed_versions();
+                // Acknowledge whatever the check says, so the host stops
+                // repeating this click; a second click selects nothing.
+                self.acknowledge_notification(select.nonce);
+                return match notification_target(&sealed?, select) {
+                    Some(key) => self.apply(Action::StudioSelect(key)),
+                    None => Ok(()),
+                };
             }
             Action::StudioSelect(key) => match self.studio_context(key) {
                 Ok(context) => {
@@ -961,6 +996,38 @@ impl Ja1Attachment {
             return Ok(reply.versions);
         }
         self.owner.studio_versions()
+    }
+    /// JA-1 S6 C4: every sealed version with its outcome, for the ready line
+    /// and the notification click check.
+    pub(crate) fn studio_sealed_versions(
+        &self,
+    ) -> Result<Vec<kinewright_project::review_job::delivery::SealedVersion>, BundleError> {
+        if let Some(host) = &self.host {
+            let reply = host
+                .client
+                .request(kinewright_agent::writer_host::HostCommand::ListVersions)
+                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            if let Some(error) = reply.error {
+                return Err(BundleError::Corrupt(error.message));
+            }
+            return Ok(reply.sealed_versions);
+        }
+        self.owner.studio_sealed_versions()
+    }
+    /// JA-1 S6 C4: the click the attached host reported, once.
+    pub(crate) fn take_notification_select(
+        &mut self,
+    ) -> Option<kinewright_agent::writer_host::NotificationSelect> {
+        self.host.as_mut()?.take_notification_select()
+    }
+    /// Tell the host this click was handled. A lost acknowledgement only
+    /// repeats the click, which the nonce already ignores.
+    fn acknowledge_notification(&mut self, nonce: u64) {
+        if let Some(host) = self.host.as_mut() {
+            let _ = host.studio_request(&kinewright_agent::writer_host::HostCommand::Review(
+                kinewright_project::review_job::ReviewControl::AcknowledgeNotification { nonce },
+            ));
+        }
     }
     fn studio_review(
         &mut self,
@@ -1638,6 +1705,7 @@ impl Ja1Attachment {
             | Action::StudioRulebook { .. }
             | Action::StudioManualPlayback(_)
             | Action::StudioSelect(_)
+            | Action::StudioNotificationSelect(_)
             | Action::StudioEditCopy(_) => {
                 return Err(BundleError::HistoryChanged);
             }

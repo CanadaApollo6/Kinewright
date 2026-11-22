@@ -1385,3 +1385,151 @@ fn ja1_s5a_c7_fix2_studio_buttons_load_the_selected_review() {
     assert_eq!(c7f2_details_version(&app), Some(Some(key)));
     in1_shutdown(&mut app);
 }
+
+/// JA-1 S6 C4: a sealed version as the list reports it.
+fn s6c4_sealed(
+    key: &SnapshotKey,
+    number: u32,
+    digest: &str,
+) -> kinewright_project::review_job::delivery::SealedVersion {
+    kinewright_project::review_job::delivery::SealedVersion {
+        key: key.clone(),
+        number,
+        outcome: kinewright_core::output_review::SealedReviewOutcome::Delivered,
+        key_sha256: digest.into(),
+    }
+}
+
+/// Another version of the same project, which no bundle holds.
+fn s6c4_other(key: &SnapshotKey) -> SnapshotKey {
+    SnapshotKey {
+        version: VersionId::fresh().unwrap(),
+        ..key.clone()
+    }
+}
+
+#[test]
+fn ja1_s6_c4_ready_line_names_the_newest_sealed_version() {
+    let fixtures = fixtures();
+    let key = fixtures.contexts[0].snapshot.descriptor.key.clone();
+    let older = s6c4_other(&key);
+    assert_eq!(ready_line(&[]), None, "S6C4_NOTHING_SEALED_NO_LINE");
+    // Listed out of order: the highest number wins, not the last listed.
+    let line = ready_line(&[s6c4_sealed(&key, 3, "a"), s6c4_sealed(&older, 2, "b")]).unwrap();
+    assert_eq!(line.key, key, "S6C4_READY_NEWEST");
+    assert_eq!(line.text, "Ready: v3, Delivered", "S6C4_READY_WORDS");
+    // Two receipts for one number: the last one.
+    let line = ready_line(&[s6c4_sealed(&older, 3, "a"), s6c4_sealed(&key, 3, "b")]).unwrap();
+    assert_eq!(line.key, key, "S6C4_READY_LAST_RECEIPT");
+}
+
+#[test]
+fn ja1_s6_c4_ready_line_show_selects_it_and_dismiss_hides_it_for_the_session() {
+    let mut fixtures = fixtures();
+    let context = Arc::clone(&fixtures.contexts[0]);
+    let key = context.snapshot.descriptor.key.clone();
+    let older = s6c4_other(&key);
+    let sealed = vec![s6c4_sealed(&older, 1, "a"), s6c4_sealed(&key, 2, "b")];
+    let (mut app, _engine) = in1_harness(context.document.clone());
+    attach(&mut app, fixtures.owners.remove(0));
+    let ctx = egui::Context::default();
+    let offer = |app: &mut KinewrightApp| {
+        app.focused_mut().ja1.as_mut().unwrap().studio_sealed_ready = Some(sealed.clone());
+        app.sync_studio_selection();
+    };
+    offer(&mut app);
+    assert_eq!(
+        app.focused().studio.ready.as_ref().map(|ready| &ready.key),
+        Some(&key),
+        "S6C4_READY_ON_OPEN"
+    );
+    assert_eq!(
+        app.studio_selected_key(),
+        None,
+        "S6C4_READY_SELECTS_NOTHING_ALONE"
+    );
+    // Opening starts the current edit's playback job: Show waits for it.
+    if app.focused().ja1_job.is_some() {
+        app.show_ready_version();
+        assert!(
+            app.focused().studio.ready.is_some(),
+            "S6C4_BUSY_SHOW_KEEPS_THE_LINE"
+        );
+    }
+    c7f2_settle(&mut app, &ctx);
+    app.show_ready_version();
+    c7f2_settle(&mut app, &ctx);
+    assert_eq!(
+        app.studio_selected_key(),
+        Some(key.clone()),
+        "S6C4_SHOW_SELECTS: {:?} {}",
+        app.focused().studio.failure,
+        app.status,
+    );
+    assert_eq!(
+        app.focused().studio.ready,
+        None,
+        "S6C4_SHOW_RETIRES_THE_LINE"
+    );
+    // The same session never offers it again, nor after a dismiss.
+    offer(&mut app);
+    assert_eq!(app.focused().studio.ready, None, "S6C4_ONCE_PER_SESSION");
+    app.return_to_current_edit();
+    app.focused_mut().studio.ready_done = false;
+    offer(&mut app);
+    assert!(app.focused().studio.ready.is_some(), "S6C4_OFFERED_AGAIN");
+    app.dismiss_ready_line();
+    assert_eq!(app.focused().studio.ready, None, "S6C4_DISMISS_HIDES");
+    assert!(
+        app.focused().ja1_job.is_none(),
+        "S6C4_DISMISS_SELECTS_NOTHING"
+    );
+    offer(&mut app);
+    assert_eq!(app.focused().studio.ready, None, "S6C4_DISMISS_LASTS");
+    assert_eq!(
+        app.studio_selected_key(),
+        None,
+        "S6C4_DISMISS_KEEPS_CURRENT_EDIT"
+    );
+}
+
+#[test]
+fn ja1_s6_c4_a_click_selects_only_its_exact_receipt() {
+    use crate::ja1_attachment::notification_target;
+    use kinewright_agent::writer_host::NotificationSelect;
+    let fixtures = fixtures();
+    let key = fixtures.contexts[0].snapshot.descriptor.key.clone();
+    let newer = s6c4_other(&key);
+    let sealed = vec![
+        s6c4_sealed(&key, 1, "digest-1"),
+        s6c4_sealed(&newer, 2, "digest-2"),
+    ];
+    let click = |version: &SnapshotKey, digest: &str| NotificationSelect {
+        nonce: 1,
+        version: version.clone(),
+        key_sha256: digest.into(),
+    };
+    assert_eq!(
+        notification_target(&sealed, &click(&key, "digest-1")),
+        Some(key.clone()),
+        "S6C4_EXACT_CLICK_SELECTS"
+    );
+    // A digest that is another version's, or no receipt's, selects nothing,
+    // and never falls back to the newest.
+    assert_eq!(
+        notification_target(&sealed, &click(&key, "digest-2")),
+        None,
+        "S6C4_WRONG_DIGEST"
+    );
+    assert_eq!(
+        notification_target(&sealed, &click(&key, "unknown")),
+        None,
+        "S6C4_NO_RECEIPT"
+    );
+    let foreign = s6c4_other(&key);
+    assert_eq!(
+        notification_target(&sealed, &click(&foreign, "digest-1")),
+        None,
+        "S6C4_FOREIGN_VERSION"
+    );
+}

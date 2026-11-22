@@ -101,6 +101,11 @@ pub(super) struct HostAttachment {
     pub cut: Option<AcceptedCut>,
     heartbeat: Option<StatusLane>,
     last_heartbeat: Instant,
+    /// JA-1 S6 C4: a desktop notification click the host reported and this
+    /// view has not acted on yet; the host repeats it until acknowledged.
+    notification_select: Option<kinewright_agent::writer_host::NotificationSelect>,
+    /// The newest click nonce taken, so a repeated status selects once.
+    last_select_nonce: u64,
     pub manual: Option<super::ManualProducerGate>,
     // UI commands and notices outlive a replaceable manual lease during recovery.
     pub(super) edits: crate::manual_edits::ManualEdits,
@@ -450,6 +455,8 @@ impl HostAttachment {
             cut,
             heartbeat: None,
             last_heartbeat: Instant::now(),
+            notification_select: None,
+            last_select_nonce: 0,
             manual: None,
             manual_client,
             #[cfg(all(test, target_os = "linux"))]
@@ -521,6 +528,8 @@ impl HostAttachment {
             cut: None,
             heartbeat: None,
             last_heartbeat: Instant::now(),
+            notification_select: None,
+            last_select_nonce: 0,
             manual: None,
             manual_client: serde_json::to_value(
                 kinewright_agent::writer_host::HostAuth::generate().map_err(host_error)?,
@@ -889,6 +898,7 @@ impl HostAttachment {
             | Action::StudioRulebook { .. }
             | Action::StudioManualPlayback(_)
             | Action::StudioSelect(_)
+            | Action::StudioNotificationSelect(_)
             | Action::StudioEditCopy(_) => {
                 return Err(BundleError::HistoryChanged);
             }
@@ -1040,8 +1050,14 @@ impl HostAttachment {
         self.recovery_pause == RecoveryPause::ReopenRequired
     }
 
-    pub fn accept_status(&mut self, status: HostStatus) {
+    pub fn accept_status(&mut self, mut status: HostStatus) {
         self.client = self.client.with_roots(status.admitted_roots.clone());
+        if let Some(select) = status.notification_select.take()
+            && select.nonce > self.last_select_nonce
+        {
+            self.last_select_nonce = select.nonce;
+            self.notification_select = Some(select);
+        }
         self.status = status;
         self.status.frozen |= self.unknown_operation;
         if self.recovery_reopen_required() {
@@ -1154,6 +1170,13 @@ impl HostAttachment {
             }));
         }
         Ok(None)
+    }
+
+    /// JA-1 S6 C4: the click this view has not acted on, once.
+    pub(super) fn take_notification_select(
+        &mut self,
+    ) -> Option<kinewright_agent::writer_host::NotificationSelect> {
+        self.notification_select.take()
     }
 
     pub fn recovery_running(&self) -> bool {

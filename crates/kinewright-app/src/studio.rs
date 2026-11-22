@@ -163,6 +163,10 @@ pub(crate) struct Studio {
     pub(crate) manual_failure: Option<ManualFailure>,
     versions: Vec<SnapshotKey>,
     versions_open: bool,
+    /// JA-1 S6 C4: "Ready: v3, Delivered — Show", until the person selects a
+    /// version or dismisses it, for this session only.
+    pub(crate) ready: Option<ReadyLine>,
+    ready_done: bool,
     editorial: Option<EditorialDetails>,
     output_review: crate::studio_review::OutputReview,
     pub(crate) tab: Tab,
@@ -173,6 +177,30 @@ pub(crate) struct Studio {
     unseen: usize,
     jump: bool,
     neutral: bool,
+}
+
+/// JA-1 S6 C4: the newest sealed version, offered when the project opens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReadyLine {
+    pub(crate) key: SnapshotKey,
+    /// "Ready: v3, Delivered", in the L2 words for its outcome.
+    pub(crate) text: String,
+}
+
+/// The ready line for the newest sealed version: the highest number, and the
+/// last receipt among equals. None when nothing is sealed.
+pub(crate) fn ready_line(
+    sealed: &[kinewright_project::review_job::delivery::SealedVersion],
+) -> Option<ReadyLine> {
+    let newest = sealed.iter().max_by_key(|version| version.number)?;
+    Some(ReadyLine {
+        key: newest.key.clone(),
+        text: format!(
+            "Ready: {}, {}",
+            kinewright_project::studio_records::version_label(newest.number),
+            kinewright_project::review_job::delivery::outcome_label(&newest.outcome),
+        ),
+    })
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -646,9 +674,27 @@ impl KinewrightApp {
             .as_ref()
             .map(|context| context.snapshot.descriptor.key.clone())
     }
-    /// Select a version; its review loads with it.
+    /// Select a version; its review loads with it. Any selection retires the
+    /// ready line.
     pub(crate) fn select_studio_version(&mut self, key: SnapshotKey) {
+        self.dismiss_ready_line();
         self.start_ja1(Action::StudioSelect(key));
+    }
+    /// Ready line → Show: select the version it names. While the tab is busy
+    /// the line stays, so the click is never lost.
+    pub(crate) fn show_ready_version(&mut self) {
+        if self.focused().ja1_job.is_some() {
+            return;
+        }
+        if let Some(ready) = self.focused_mut().studio.ready.take() {
+            self.select_studio_version(ready.key);
+        }
+    }
+    /// The ready line goes for the rest of this session; nothing is stored.
+    pub(crate) fn dismiss_ready_line(&mut self) {
+        let studio = &mut self.focused_mut().studio;
+        studio.ready = None;
+        studio.ready_done = true;
     }
     /// The Versions button: list the versions and load the selected one's
     /// review.
@@ -671,6 +717,29 @@ impl KinewrightApp {
                 .and_then(|details| details.version.clone())
         }))
     }
+    /// JA-1 S6 C4: offer the ready line once per session, and act on a
+    /// desktop notification click once this tab is idle.
+    fn sync_ready_and_click(
+        &mut self,
+        sealed: Option<Vec<kinewright_project::review_job::delivery::SealedVersion>>,
+    ) {
+        if let Some(sealed) = sealed
+            && !self.focused().studio.ready_done
+        {
+            self.focused_mut().studio.ready = ready_line(&sealed);
+        }
+        // The attachment selects only on an exact receipt match.
+        if self.focused().ja1_job.is_none()
+            && let Some(select) = self
+                .focused_mut()
+                .ja1
+                .as_mut()
+                .and_then(crate::ja1_attachment::Ja1Attachment::take_notification_select)
+        {
+            self.dismiss_ready_line();
+            self.start_ja1(Action::StudioNotificationSelect(select));
+        }
+    }
     pub(crate) fn sync_studio_selection(&mut self) {
         let Some(attachment) = &mut self.focused_mut().ja1 else {
             return;
@@ -679,6 +748,7 @@ impl KinewrightApp {
         let manual = attachment.studio_manual_ready.take();
         let context = attachment.studio_ready.take();
         let versions = attachment.studio_versions_ready.take();
+        let sealed = attachment.studio_sealed_ready.take();
         let editorial = attachment.studio_editorial_ready.take();
         let review = attachment.studio_review_ready.take();
         let save_notice = attachment.studio_save_notice_ready.take();
@@ -717,6 +787,7 @@ impl KinewrightApp {
         if let Some(versions) = versions {
             self.focused_mut().studio.versions = versions;
         }
+        self.sync_ready_and_click(sealed);
         if let Some(context) = context
             && let Err(error) = self.install_studio_context(context)
         {
@@ -1037,6 +1108,20 @@ impl KinewrightApp {
         }
         if quiet_button(ui, "Versions", true, false).clicked() {
             self.open_studio_versions();
+        }
+        if let Some(ready) = &self.focused().studio.ready {
+            // Right to left: "Ready: v3, Delivered — Show ×".
+            let dismiss = quiet_button(ui, "\u{00d7}", true, false)
+                .on_hover_text("Dismiss")
+                .clicked();
+            let idle = self.focused().ja1_job.is_none();
+            let show = quiet_button(ui, "Show", idle, false).clicked();
+            ui.label(format!("{} \u{2014}", ready.text));
+            if dismiss {
+                self.dismiss_ready_line();
+            } else if show {
+                self.show_ready_version();
+            }
         }
         let manual_ready = self
             .focused()
