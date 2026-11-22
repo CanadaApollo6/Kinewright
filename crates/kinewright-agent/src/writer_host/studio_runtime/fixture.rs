@@ -87,6 +87,7 @@ struct State {
     recovery: Mutex<(u8, u8)>,
     recovery_changed: std::sync::Condvar,
     hold_startup_ingress: AtomicBool,
+    hold_dispatch: AtomicBool,
     root: PathBuf,
     mode: ProtocolFixtureMode,
     /// C6: `scripted` speaks Codex's dialect, `scripted-claude` Claude's.
@@ -139,6 +140,7 @@ impl ProtocolFixture {
             recovery: Mutex::new((0, 0)),
             recovery_changed: std::sync::Condvar::new(),
             hold_startup_ingress: AtomicBool::new(false),
+            hold_dispatch: AtomicBool::new(false),
             root: root.into(),
             mode,
             connector,
@@ -212,6 +214,11 @@ impl ProtocolFixture {
     }
     pub fn hold_startup_ingress(&self) {
         self.0.hold_startup_ingress.store(true, Ordering::Release);
+    }
+    /// JA-1 S6 C4 fix 1: hold the next Revise cut at dispatch, while it owns
+    /// the host's one command slot, until release; other requests are busy.
+    pub fn hold_dispatch(&self) {
+        self.0.hold_dispatch.store(true, Ordering::Release);
     }
     pub fn release_recovery(&self) {
         self.0
@@ -356,7 +363,9 @@ impl ProtocolFixture {
                     || (matches!(phase, super::RecoveryPhase::Restored)
                         && recovery.mode == ProtocolFixtureMode::RecoveryRestoredHeld)
                     || (matches!(phase, super::RecoveryPhase::BeforeIngress)
-                        && recovery.hold_startup_ingress.load(Ordering::Acquire));
+                        && recovery.hold_startup_ingress.load(Ordering::Acquire))
+                    || (matches!(phase, super::RecoveryPhase::Dispatch)
+                        && recovery.hold_dispatch.load(Ordering::Acquire));
                 if held {
                     // A test hold must not prevent the HTTP control which releases it from running.
                     tokio::task::block_in_place(|| {

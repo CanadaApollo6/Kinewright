@@ -241,6 +241,9 @@ pub(crate) struct Ja1Attachment {
     /// ready line.
     pub(crate) studio_sealed_ready:
         Option<Vec<kinewright_project::review_job::delivery::SealedVersion>>,
+    /// JA-1 S6 C4 fix 1: a click whose check could not run, and why.
+    pub(crate) studio_click_failed_ready:
+        Option<(kinewright_agent::writer_host::NotificationSelect, String)>,
     pub(crate) studio_edit_pending: bool,
     pub(crate) studio_editorial_ready: Option<EditorialDetails>,
     pub(crate) studio_error_ready: Option<crate::studio::StudioFailure>,
@@ -279,6 +282,12 @@ pub(crate) struct Ja1Attachment {
     before_manual_playback: Option<Box<dyn FnOnce() + Send>>,
     #[cfg(all(test, target_os = "linux"))]
     before_host_reply: Option<fn(&mut kinewright_agent::writer_host::HostReply)>,
+    /// JA-1 S6 C4 fix 1: edits the click check's real `ListVersions` reply.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) before_sealed_versions: Option<fn(&mut kinewright_agent::writer_host::HostReply)>,
+    /// Every click nonce acknowledged, in order.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) acknowledged: Vec<u64>,
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fixture_host: Option<kinewright_agent::writer_host::WriterHost>,
     known_agent_effects: std::collections::BTreeSet<PathBuf>,
@@ -318,6 +327,7 @@ impl Ja1Attachment {
             studio_ready: None,
             studio_versions_ready: None,
             studio_sealed_ready: sealed,
+            studio_click_failed_ready: None,
             studio_edit_pending: false,
             studio_editorial_ready: None,
             studio_error_ready: None,
@@ -348,6 +358,10 @@ impl Ja1Attachment {
             before_manual_playback: None,
             #[cfg(all(test, target_os = "linux"))]
             before_host_reply: None,
+            #[cfg(all(test, target_os = "linux"))]
+            before_sealed_versions: None,
+            #[cfg(all(test, target_os = "linux"))]
+            acknowledged: Vec::new(),
             #[cfg(all(test, target_os = "linux"))]
             fixture_host: None,
             known_agent_effects: std::collections::BTreeSet::new(),
@@ -575,11 +589,19 @@ impl Ja1Attachment {
                 return refresh;
             }
             Action::StudioNotificationSelect(select) => {
-                let sealed = self.studio_sealed_versions();
-                // Acknowledge whatever the check says, so the host stops
-                // repeating this click; a second click selects nothing.
+                // JA-1 S6 C4 fix 1: a check that could not run keeps the
+                // click, unacknowledged, for the person to try again.
+                let sealed = match self.notification_versions() {
+                    Ok(sealed) => sealed,
+                    Err(words) => {
+                        self.studio_click_failed_ready = Some((select.clone(), words));
+                        return Ok(());
+                    }
+                };
+                // The check ran: acknowledge it, match or not, so the host
+                // stops repeating this click.
                 self.acknowledge_notification(select.nonce);
-                return match notification_target(&sealed?, select) {
+                return match notification_target(&sealed, select) {
                     Some(key) => self.apply(Action::StudioSelect(key)),
                     None => Ok(()),
                 };
@@ -997,22 +1019,35 @@ impl Ja1Attachment {
         }
         self.owner.studio_versions()
     }
-    /// JA-1 S6 C4: every sealed version with its outcome, for the ready line
-    /// and the notification click check.
-    pub(crate) fn studio_sealed_versions(
-        &self,
-    ) -> Result<Vec<kinewright_project::review_job::delivery::SealedVersion>, BundleError> {
-        if let Some(host) = &self.host {
-            let reply = host
-                .client
-                .request(kinewright_agent::writer_host::HostCommand::ListVersions)
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            if let Some(error) = reply.error {
-                return Err(BundleError::Corrupt(error.message));
-            }
-            return Ok(reply.sealed_versions);
+    /// JA-1 S6 C4: every sealed version with its outcome, for the
+    /// notification click check, or the words for why it could not be read.
+    /// Like every Studio control it waits for the heartbeat and asks a busy
+    /// host once more (fix 1).
+    fn notification_versions(
+        &mut self,
+    ) -> Result<Vec<kinewright_project::review_job::delivery::SealedVersion>, String> {
+        let Some(host) = self.host.as_mut() else {
+            return self
+                .owner
+                .studio_sealed_versions()
+                .map_err(|e| e.to_string());
+        };
+        let mut reply =
+            match host.studio_request(&kinewright_agent::writer_host::HostCommand::ListVersions) {
+                Ok(reply) => reply,
+                Err(kinewright_agent::writer_host::HostError::Refused(refusal)) => {
+                    return Err(host::refusal_words(&refusal));
+                }
+                Err(error) => return Err(error.to_string()),
+            };
+        #[cfg(all(test, target_os = "linux"))]
+        if let Some(hook) = self.before_sealed_versions {
+            hook(&mut reply);
         }
-        self.owner.studio_sealed_versions()
+        match reply.error.take() {
+            Some(refusal) => Err(host::refusal_words(&refusal)),
+            None => Ok(reply.sealed_versions),
+        }
     }
     /// JA-1 S6 C4: the click the attached host reported, once.
     pub(crate) fn take_notification_click(
@@ -1023,6 +1058,8 @@ impl Ja1Attachment {
     /// Tell the host this click was handled. A lost acknowledgement only
     /// repeats the click, which the nonce already ignores.
     fn acknowledge_notification(&mut self, nonce: u64) {
+        #[cfg(all(test, target_os = "linux"))]
+        self.acknowledged.push(nonce);
         if let Some(host) = self.host.as_mut() {
             let _ = host.studio_request(&kinewright_agent::writer_host::HostCommand::Review(
                 kinewright_project::review_job::ReviewControl::AcknowledgeNotification { nonce },

@@ -634,3 +634,109 @@ fn c7_followup_manual_busy_stays_manual_with_truthful_words() {
 fn c7_runtime_fix1_presend_error_keeps_stop_arm_and_exact_request() {
     restored_stop(StopRetryInterruption::BeforeSend);
 }
+
+/// JA-1 S6 C4 fix 1: marks every listed version sealed, as a seal would.
+fn s6c4f1_seal_all(reply: &mut kinewright_agent::writer_host::HostReply) {
+    reply.sealed_versions = reply
+        .versions
+        .iter()
+        .zip(1..)
+        .map(
+            |(key, number)| kinewright_project::review_job::delivery::SealedVersion {
+                key: key.clone(),
+                number,
+                outcome: kinewright_core::output_review::SealedReviewOutcome::Delivered,
+                key_sha256: "s6c4f1-digest".into(),
+            },
+        )
+        .collect();
+}
+
+fn s6c4f1_settle(app: &mut KinewrightApp, ctx: &egui::Context) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while app.focused().ja1_job.is_some() || app.focused().ja1.is_none() {
+        app.poll_background(ctx);
+        assert!(std::time::Instant::now() < deadline, "S6C4F1_JOB_SETTLES");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    app.sync_studio_selection();
+}
+
+/// JA-1 S6 C4 fix 1: a notification click while another request holds the
+/// host's lane is neither lost nor acknowledged. Studio says why and offers
+/// Try again, which selects the clicked version once the lane is free.
+#[test]
+fn ja1_s6_c4_fix1_a_click_while_another_request_holds_the_lane_still_selects() {
+    use kinewright_agent::writer_host::NotificationSelect;
+    let mut project = project("s6c4f1-click-busy");
+    let request = c7_unconsumed_batch(&mut project);
+    let fixture = ProtocolFixture::new(project.temp.root(), ProtocolFixtureMode::Dormant);
+    let mut attachment = launch_with_fixture(&project, &fixture);
+    assert!(
+        fixture.wait_recovery(RecoveryPhase::Completed, Duration::from_secs(5)),
+        "S6C4F1_RECOVERED"
+    );
+    // The Revise cut below keeps the host's one command slot until release.
+    fixture.hold_dispatch();
+    let key = attachment
+        .studio_versions()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("S6C4F1_A_PUBLISHED_VERSION");
+    attachment.before_sealed_versions = Some(s6c4f1_seal_all);
+    let client = attachment.host_client().unwrap();
+    let mut app = in_app(&mut project, attachment);
+    let ctx = egui::Context::default();
+    let click = NotificationSelect {
+        nonce: 1,
+        version: key.clone(),
+        key_sha256: "s6c4f1-digest".into(),
+    };
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            client.request(HostCommand::ReviseCut {
+                request: request.clone(),
+            })
+        });
+        let queued = fixture.wait_recovery(RecoveryPhase::Dispatch, Duration::from_secs(5));
+        if queued {
+            app.start_ja1(crate::ja1_attachment::Action::StudioNotificationSelect(
+                click.clone(),
+            ));
+            s6c4f1_settle(&mut app, &ctx);
+        }
+        let retry = app.focused().studio.click_retry.clone();
+        let acknowledged = app.focused().ja1.as_ref().unwrap().acknowledged.clone();
+        let selected = app.studio_selected_key();
+        // Release the held request even when an assertion below fails.
+        fixture.release();
+        let _ = first.join().unwrap();
+        assert!(queued, "S6C4F1_LANE_HELD");
+        assert_eq!(selected, None, "S6C4F1_BUSY_SELECTS_NOTHING_YET");
+        assert_eq!(
+            retry,
+            Some((click.clone(), "The writer host is busy; try again.".into())),
+            "S6C4F1_BUSY_IS_SAID_AND_THE_CLICK_KEPT"
+        );
+        assert!(acknowledged.is_empty(), "S6C4F1_UNCHECKED_NOT_ACKNOWLEDGED");
+    });
+    app.retry_notification_click();
+    s6c4f1_settle(&mut app, &ctx);
+    assert_eq!(
+        app.studio_selected_key(),
+        Some(key),
+        "S6C4F1_TRY_AGAIN_SELECTS: {:?} {}",
+        app.focused().studio.failure,
+        app.status
+    );
+    assert!(
+        app.focused().studio.click_retry.is_none(),
+        "S6C4F1_TRY_AGAIN_RETIRES_THE_LINE"
+    );
+    assert_eq!(
+        app.focused().ja1.as_ref().unwrap().acknowledged,
+        vec![1],
+        "S6C4F1_ACKNOWLEDGED_ONCE_CHECKED"
+    );
+}

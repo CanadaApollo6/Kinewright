@@ -167,6 +167,9 @@ pub(crate) struct Studio {
     /// version or dismisses it, for this session only.
     pub(crate) ready: Option<ReadyLine>,
     ready_done: bool,
+    /// JA-1 S6 C4 fix 1: a notification click whose check could not run, and
+    /// why, until the person tries again or dismisses it.
+    pub(crate) click_retry: Option<(kinewright_agent::writer_host::NotificationSelect, String)>,
     editorial: Option<EditorialDetails>,
     output_review: crate::studio_review::OutputReview,
     pub(crate) tab: Tab,
@@ -678,7 +681,18 @@ impl KinewrightApp {
     /// ready line.
     pub(crate) fn select_studio_version(&mut self, key: SnapshotKey) {
         self.dismiss_ready_line();
+        self.focused_mut().studio.click_retry = None;
         self.start_ja1(Action::StudioSelect(key));
+    }
+    /// Try again on a notification click whose check could not run. While
+    /// the tab is busy the line stays.
+    pub(crate) fn retry_notification_click(&mut self) {
+        if self.focused().ja1_job.is_some() {
+            return;
+        }
+        if let Some((select, _)) = self.focused_mut().studio.click_retry.take() {
+            self.start_ja1(Action::StudioNotificationSelect(select));
+        }
     }
     /// Ready line → Show: select the version it names. While the tab is busy
     /// the line stays, so the click is never lost.
@@ -719,10 +733,21 @@ impl KinewrightApp {
     }
     /// JA-1 S6 C4: offer the ready line once per session, and act on a
     /// desktop notification click once this tab is idle.
-    fn sync_ready_and_click(
-        &mut self,
-        sealed: Option<Vec<kinewright_project::review_job::delivery::SealedVersion>>,
-    ) {
+    fn sync_ready_and_click(&mut self) {
+        let (sealed, click_failed) = self
+            .focused_mut()
+            .ja1
+            .as_mut()
+            .map(|attachment| {
+                (
+                    attachment.studio_sealed_ready.take(),
+                    attachment.studio_click_failed_ready.take(),
+                )
+            })
+            .unwrap_or_default();
+        if click_failed.is_some() {
+            self.focused_mut().studio.click_retry = click_failed;
+        }
         if let Some(sealed) = sealed
             && !self.focused().studio.ready_done
         {
@@ -737,6 +762,8 @@ impl KinewrightApp {
                 .and_then(crate::ja1_attachment::Ja1Attachment::take_notification_click)
         {
             self.dismiss_ready_line();
+            // A newer click replaces one waiting to be tried again.
+            self.focused_mut().studio.click_retry = None;
             self.start_ja1(Action::StudioNotificationSelect(select));
         }
     }
@@ -748,7 +775,6 @@ impl KinewrightApp {
         let manual = attachment.studio_manual_ready.take();
         let context = attachment.studio_ready.take();
         let versions = attachment.studio_versions_ready.take();
-        let sealed = attachment.studio_sealed_ready.take();
         let editorial = attachment.studio_editorial_ready.take();
         let review = attachment.studio_review_ready.take();
         let save_notice = attachment.studio_save_notice_ready.take();
@@ -787,7 +813,7 @@ impl KinewrightApp {
         if let Some(versions) = versions {
             self.focused_mut().studio.versions = versions;
         }
-        self.sync_ready_and_click(sealed);
+        self.sync_ready_and_click();
         if let Some(context) = context
             && let Err(error) = self.install_studio_context(context)
         {
@@ -1108,6 +1134,22 @@ impl KinewrightApp {
         }
         if quiet_button(ui, "Versions", true, false).clicked() {
             self.open_studio_versions();
+        }
+        if let Some((_, words)) = &self.focused().studio.click_retry {
+            // Right to left: "… — Try again ×".
+            let dismiss = quiet_button(ui, "\u{00d7}", true, false)
+                .on_hover_text("Dismiss")
+                .clicked();
+            let idle = self.focused().ja1_job.is_none();
+            let retry = quiet_button(ui, "Try again", idle, false).clicked();
+            ui.label(format!(
+                "The clicked version did not open: {words} \u{2014}"
+            ));
+            if dismiss {
+                self.focused_mut().studio.click_retry = None;
+            } else if retry {
+                self.retry_notification_click();
+            }
         }
         if let Some(ready) = &self.focused().studio.ready {
             // Right to left: "Ready: v3, Delivered — Show ×".
