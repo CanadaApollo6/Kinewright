@@ -9,7 +9,10 @@
 //! reason and the other rows still run. The visual row is the bound Reviewer
 //! attempt's own `submit_visual_judgment`, never a host caller's.
 use std::{
-    sync::{Arc, Mutex, MutexGuard, Weak},
+    sync::{
+        Arc, Mutex, MutexGuard, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -171,63 +174,99 @@ enum DriverStep {
     Done,
 }
 
+/// The next step, decided under the lock. A step that ends the driver marks
+/// it exiting before the lock is released, so a Resume that follows starts a
+/// new driver instead of waiting on this one.
 fn driver_step(
     host: &Weak<Mutex<HostCommandOwner>>,
     token: &ReviewToken,
+    cancel: &ExportCancellation,
+    stalled: bool,
+    exiting: &AtomicBool,
 ) -> Result<DriverStep, HostError> {
     let host = upgrade(host)?;
     let mut owner = lock(&host)?;
-    owner.review_authority(token)?;
-    // The encode worker holds the staging until it is retired; the seal
-    // refuses while it is held, so retire a finished worker here and wait
-    // for one that is still returning.
-    owner.retire_review_worker()?;
-    if owner
-        .review_runtime
-        .worker
-        .as_ref()
-        .is_some_and(|worker| &worker.token == token)
-    {
-        return Ok(DriverStep::Wait);
+    let step = owner.next_driver_step(token, cancel, stalled);
+    if !matches!(
+        step,
+        Ok(DriverStep::Wait | DriverStep::Drive(_) | DriverStep::Seal)
+    ) {
+        exiting.store(true, Ordering::Release);
     }
-    let bundle = owner.owner()?.review_source_bundle(&token.project)?;
-    Ok(
-        match bundle
-            .review_job()?
-            .filter(|job| &job.token == token)
-            .map(|job| job.phase.clone())
+    step
+}
+
+impl HostCommandOwner {
+    fn next_driver_step(
+        &mut self,
+        token: &ReviewToken,
+        cancel: &ExportCancellation,
+        stalled: bool,
+    ) -> Result<DriverStep, HostError> {
+        // A Stop, a change of project or the seal ended this host's authority
+        // over the job; a failure that could not be recorded waits for Status.
+        if stalled || cancel.is_cancelled() || self.review_runtime.verified.as_ref() != Some(token)
         {
-            Some(ReviewPhase::ReadyToSeal { .. }) => DriverStep::Seal,
-            Some(ReviewPhase::Checking(checks)) => checks
-                .reviewer_attempt
-                .map_or(DriverStep::Wait, DriverStep::Drive),
-            _ => DriverStep::Done,
-        },
-    )
+            return Ok(DriverStep::Done);
+        }
+        self.review_authority(token)?;
+        if self.review_frozen() {
+            return Ok(DriverStep::Wait);
+        }
+        // The encode worker holds the staging until it is retired; the seal
+        // refuses while it is held, so retire a finished worker here and wait
+        // for one that is still returning.
+        self.retire_review_worker()?;
+        if self
+            .review_runtime
+            .worker
+            .as_ref()
+            .is_some_and(|worker| &worker.token == token)
+        {
+            return Ok(DriverStep::Wait);
+        }
+        let bundle = self.owner()?.review_source_bundle(&token.project)?;
+        Ok(
+            match bundle
+                .review_job()?
+                .filter(|job| &job.token == token)
+                .map(|job| job.phase.clone())
+            {
+                Some(ReviewPhase::ReadyToSeal { .. }) => DriverStep::Seal,
+                Some(ReviewPhase::Checking(checks)) => checks
+                    .reviewer_attempt
+                    .map_or(DriverStep::Wait, DriverStep::Drive),
+                _ => DriverStep::Done,
+            },
+        )
+    }
 }
 
 /// The production driver: wait for a Reviewer of the cut to claim the
 /// check, run every check, then seal. A `ReadyToSeal` job is sealed directly.
-/// A refusal that leaves the job checking pauses it with the reason, so
-/// `Resume` binds afresh; a Stop or shutdown cancels it instead.
+/// A failure pauses the job with its reason where Status shows it, so only
+/// `Resume` continues; a Stop or shutdown cancels it instead. The driver
+/// stays with its job until a step under the lock ends it.
 pub(in crate::writer_host) fn run_review_driver(
     host: &Weak<Mutex<HostCommandOwner>>,
     token: &ReviewToken,
     command: &SessionId,
     cancel: &ExportCancellation,
+    exiting: &AtomicBool,
 ) {
-    let result = loop {
-        if cancel.is_cancelled() {
-            return;
-        }
-        match driver_step(host, token) {
-            Ok(DriverStep::Wait) => thread::sleep(REVIEWER_POLL),
+    let mut stalled = false;
+    loop {
+        let failed = match driver_step(host, token, cancel, stalled, exiting) {
+            Ok(DriverStep::Wait) => {
+                thread::sleep(REVIEWER_POLL);
+                continue;
+            }
             Ok(DriverStep::Done) | Err(_) => return,
             Ok(DriverStep::Drive(attempt)) => {
                 let config = DriverConfiguration::production(&attempt);
                 let check =
                     super::review_checks::commit_5_check(&config.scan, &config.speech, cancel);
-                break drive_review(
+                drive_review(
                     host,
                     token,
                     &attempt,
@@ -236,34 +275,49 @@ pub(in crate::writer_host) fn run_review_driver(
                     &check,
                     &mut AwaitReviewer,
                     cancel,
-                );
+                )
+                .err()
             }
-            Ok(DriverStep::Seal) => {
-                let sealed = (|| {
-                    let host = upgrade(host)?;
-                    let expected = lock(&host)?.production_review_digest(token)?;
-                    seal_checked_review(&host, token, command, expected, cancel)
-                })();
-                // A failed seal stays ReadyToSeal; the next Status retries it.
-                let _ = sealed;
-                return;
-            }
+            Ok(DriverStep::Seal) => (|| {
+                let host = upgrade(host)?;
+                let expected = lock(&host)?.production_review_digest(token)?;
+                seal_checked_review(&host, token, command, expected, cancel)
+            })()
+            .err(),
+        };
+        if let Some(error) = failed {
+            stalled = !pause_after_failure(host, token, cancel, &error);
         }
-    };
-    let Err(error) = result else {
-        return;
-    };
+    }
+}
+
+/// Record why the driver's checks or seal failed. `false`: nothing was
+/// recorded, and the driver leaves the job to the next Status.
+fn pause_after_failure(
+    host: &Weak<Mutex<HostCommandOwner>>,
+    token: &ReviewToken,
+    cancel: &ExportCancellation,
+    error: &HostError,
+) -> bool {
+    // A Stop, a change of project or shutdown: the next step ends the driver.
     if cancel.is_cancelled() {
-        return;
+        return true;
     }
-    if let Some(host) = host.upgrade()
-        && let Ok(mut owner) = host.lock()
-        && owner.review_can_record(token).is_ok()
-        && let Ok(session) = owner.owner_mut()
-        && let Ok(bundle) = session.review_source_bundle_mut(&token.project)
-    {
-        let _ = bundle.update_review_job(token, UpdateReviewJob::Pause(error.to_string()));
-    }
+    let Some(host) = host.upgrade() else {
+        return false;
+    };
+    let Ok(mut owner) = host.lock() else {
+        return false;
+    };
+    owner.review_can_seal(token).is_ok()
+        && owner.owner_mut().is_ok_and(|session| {
+            session
+                .review_source_bundle_mut(&token.project)
+                .and_then(|bundle| {
+                    bundle.update_review_job(token, UpdateReviewJob::Pause(error.to_string()))
+                })
+                .is_ok()
+        })
 }
 
 /// Bind once, run every check with the lock released, record each row, then
@@ -395,17 +449,35 @@ pub(in crate::writer_host) fn seal_checked_review(
         }
         owner.review_can_seal(token)?;
         #[cfg(test)]
-        if let Some(hook) = owner.review_runtime.seal_hook.clone() {
-            hook()?;
-        }
-        owner
+        let hook = owner.review_runtime.seal_hook.clone();
+        let prepared = owner
             .owner()?
             .review_source_bundle(&token.project)?
-            .prepare_review_artifact(token)?
+            .prepare_review_artifact(token)?;
+        #[cfg(test)]
+        let prepared = (prepared, hook);
+        prepared
+    };
+    #[cfg(test)]
+    let prepared = {
+        let (prepared, hook) = prepared;
+        if let Some(hook) = hook {
+            hook(cancel)?;
+        }
+        prepared
     };
     let verified = prepared.verify_for_seal(cancel)?;
     cancelled(cancel)?;
     let mut owner = lock(host)?;
+    // A seal that raced this one, a lost reply's or the driver's, already
+    // published the receipt: replay it.
+    if let Some(sealed) = owner
+        .owner_mut()?
+        .review_source_bundle_mut(&token.project)?
+        .sealed_review(token)?
+    {
+        return Ok(SealResult::Sealed(Box::new(sealed)));
+    }
     owner.review_can_seal(token)?;
     let result = owner
         .owner_mut()?

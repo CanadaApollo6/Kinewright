@@ -978,6 +978,8 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
             state.stop.notify_one();
         } else {
             #[cfg(target_os = "linux")]
+            HostCommandOwner::join_retired_review_drivers(&state.owner);
+            #[cfg(target_os = "linux")]
             state.runtime.update();
         }
         reply
@@ -2122,6 +2124,16 @@ impl HostCommandOwner {
         let current_snapshot_owner = self.snapshot_read_owner();
         #[cfg(target_os = "linux")]
         self.revoke_native_owner(current_snapshot_owner.as_ref());
+        // Save As or an open moved the editor: the source's review driver and
+        // verification stop, and the request below joins the driver.
+        #[cfg(target_os = "linux")]
+        if let Some((previous, _)) = &previous_snapshot_owner
+            && current_snapshot_owner
+                .as_ref()
+                .is_none_or(|(current, _)| current != previous)
+        {
+            self.review_runtime.leave_project(previous);
+        }
         if reply.activation.is_some() || current_snapshot_owner != previous_snapshot_owner {
             for attachment in &mut self.attachments {
                 attachment.snapshot_leases.clear();

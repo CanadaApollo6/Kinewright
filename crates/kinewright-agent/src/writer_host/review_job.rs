@@ -1,8 +1,12 @@
 use std::{
     collections::BTreeSet,
     io::{self, Seek},
-    sync::{Arc, Mutex, MutexGuard, Weak},
+    sync::{
+        Arc, Mutex, MutexGuard, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use kinewright_core::{ExportCancellation, ExportSettings, MediaError};
@@ -11,8 +15,9 @@ use kinewright_project::{
     bundle::BundleError,
     bundle_records::{ObjectRef, RecordKind, SessionId},
     review_job::{
-        ReviewControl, ReviewJob, ReviewPhase, ReviewRequest, ReviewStage, ReviewStageCharge,
-        ReviewStaging, ReviewStatus, ReviewToken, SealResult, UpdateReviewJob, empty_annotations,
+        PreparedReviewArtifact, ReviewControl, ReviewJob, ReviewPhase, ReviewRequest, ReviewStage,
+        ReviewStageCharge, ReviewStaging, ReviewStatus, ReviewToken, SealResult, UpdateReviewJob,
+        empty_annotations,
     },
     studio_records::SnapshotKey,
     studio_store::FrozenContextRequest,
@@ -55,6 +60,10 @@ impl Drop for LiveStage {
 
 #[cfg(test)]
 pub(super) type ReviewCancelHook = Arc<dyn Fn(&ExportCancellation) + Send + Sync>;
+/// A test hook a seal runs before it hashes; an error fails the seal.
+#[cfg(test)]
+pub(super) type ReviewSealHook =
+    Arc<dyn Fn(&ExportCancellation) -> Result<(), HostError> + Send + Sync>;
 
 #[derive(Default)]
 pub(super) struct ReviewRuntime {
@@ -67,6 +76,16 @@ pub(super) struct ReviewRuntime {
     active_cancellations: Vec<(ReviewToken, ExportCancellation)>,
     // The check driver; Stop and shutdown cancel it, shutdown joins it.
     driver: Option<Driver>,
+    // Drivers that exited, or that a Stop or a change of project cancelled.
+    // None of them blocks a new driver; each is joined with the lock released.
+    retired_drivers: Vec<Driver>,
+    // The reopen thread; shutdown cancels and joins it.
+    reopen: Option<Reopen>,
+    // The job whose retained artifact is hashed with the lock released.
+    verifying: Option<ReviewToken>,
+    // Counts drivers started, so a test can tell a new driver from the old one.
+    #[cfg(test)]
+    driver_generation: u64,
     #[cfg(test)]
     probe: Option<Arc<dyn Fn(ReviewPoint) + Send + Sync>>,
     #[cfg(test)]
@@ -78,8 +97,15 @@ pub(super) struct ReviewRuntime {
     // Production always drives a checking job; legacy fixtures bind by hand.
     #[cfg(test)]
     pub(super) auto_drive: bool,
+    // Runs with the lock released, before a seal hashes the artifact.
     #[cfg(test)]
-    pub(super) seal_hook: Option<Arc<dyn Fn() -> Result<(), HostError> + Send + Sync>>,
+    pub(super) seal_hook: Option<ReviewSealHook>,
+    // Runs with the lock released, before a reopen hashes the artifact.
+    #[cfg(test)]
+    pub(super) verify_hook: Option<ReviewCancelHook>,
+    // Runs on a driver thread that has decided to exit, after its last lock.
+    #[cfg(test)]
+    pub(super) driver_exit_hook: Option<ReviewCancelHook>,
 }
 
 #[cfg(test)]
@@ -121,7 +147,33 @@ struct Worker {
 struct Driver {
     token: ReviewToken,
     cancellation: ExportCancellation,
+    // Set under the lock by the step that ends the driver; the thread then
+    // returns without taking the lock again.
+    exiting: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+}
+
+impl Driver {
+    /// Still the job's driver: neither exiting, cancelled nor finished.
+    fn live(&self) -> bool {
+        !self.exiting.load(Ordering::Acquire)
+            && !self.cancellation.is_cancelled()
+            && self
+                .thread
+                .as_ref()
+                .is_some_and(|thread| !thread.is_finished())
+    }
+}
+
+struct Reopen {
+    cancellation: ExportCancellation,
+    thread: Option<JoinHandle<()>>,
+}
+
+fn join_other(thread: JoinHandle<()>) {
+    if thread.thread().id() != thread::current().id() {
+        let _ = thread.join();
+    }
 }
 
 // The runtime drops before the editing session, so the worker is joined while
@@ -129,10 +181,8 @@ struct Driver {
 impl Drop for ReviewRuntime {
     fn drop(&mut self) {
         self.cancel_for_shutdown();
-        if let Some(thread) = self.driver.as_mut().and_then(|driver| driver.thread.take())
-            && thread.thread().id() != thread::current().id()
-        {
-            let _ = thread.join();
+        for thread in self.take_threads() {
+            join_other(thread);
         }
         let Some(worker) = &mut self.worker else {
             return;
@@ -153,12 +203,54 @@ impl ReviewRuntime {
         if let Some(worker) = &self.worker {
             worker.cancellation.cancel();
         }
-        if let Some(driver) = &self.driver {
+        for driver in self.driver.iter().chain(&self.retired_drivers) {
             driver.cancellation.cancel();
+        }
+        if let Some(reopen) = &self.reopen {
+            reopen.cancellation.cancel();
         }
         for (_, cancel) in &self.active_cancellations {
             cancel.cancel();
         }
+    }
+
+    /// Every driver and reopen thread, for joining with the lock released.
+    fn take_threads(&mut self) -> Vec<JoinHandle<()>> {
+        self.driver
+            .iter_mut()
+            .chain(&mut self.retired_drivers)
+            .filter_map(|driver| driver.thread.take())
+            .chain(self.reopen.as_mut().and_then(|reopen| reopen.thread.take()))
+            .collect()
+    }
+
+    /// The active project changed: no driver, verification or read of the
+    /// source continues, and nothing of it blocks the new project.
+    pub(super) fn leave_project(
+        &mut self,
+        project: &kinewright_project::bundle_records::ProjectId,
+    ) {
+        if let Some(driver) = self
+            .driver
+            .take_if(|driver| &driver.token.project == project)
+        {
+            driver.cancellation.cancel();
+            self.retired_drivers.push(driver);
+        }
+        if self
+            .verified
+            .as_ref()
+            .is_some_and(|token| &token.project == project)
+        {
+            self.verified = None;
+        }
+        for (token, cancel) in &self.active_cancellations {
+            if &token.project == project {
+                cancel.cancel();
+            }
+        }
+        self.active_cancellations
+            .retain(|(_, cancel)| !cancel.is_cancelled());
     }
 
     pub(super) fn register_review_cancellation(
@@ -214,6 +306,7 @@ impl ReviewRuntime {
 }
 
 const DRIVER_RUNNING: &str = "The output review checks are still running.";
+const REVOKED: &str = "Output review authority was revoked.";
 const BUSY_WORKER: &str =
     "Another output review is still encoding or retiring; stop it or wait for it to finish first.";
 
@@ -222,34 +315,176 @@ const BUSY_WORKER: &str =
 pub(super) static AUTO_DRIVE_ON_OPEN: Mutex<BTreeSet<std::path::PathBuf>> =
     Mutex::new(BTreeSet::new());
 
-/// After the endpoint serves: verify a reopened job's artifact off the
-/// caller's thread and start its driver.
+/// Reopen hooks a fixture installs before its host starts.
+#[cfg(test)]
+pub(super) static VERIFY_HOOK_ON_OPEN: Mutex<Vec<(std::path::PathBuf, ReviewCancelHook)>> =
+    Mutex::new(Vec::new());
+
+const VERIFY_POLL: Duration = Duration::from_millis(20);
+const VERIFY_CANCELLED: &str = "The output review verification was cancelled.";
+
+/// After the endpoint serves: verify a reopened job's artifact and start its
+/// driver on a tracked thread. Shutdown cancels and joins it.
 pub(super) fn resume_after_open(host: &Arc<Mutex<HostCommandOwner>>) {
+    let Ok(mut owner) = host.lock() else {
+        return;
+    };
+    #[cfg(test)]
+    if let Some(path) = owner.config.path.clone() {
+        if AUTO_DRIVE_ON_OPEN
+            .lock()
+            .is_ok_and(|paths| paths.contains(&path))
+        {
+            owner.review_runtime.auto_drive = true;
+        }
+        if let Ok(mut hooks) = VERIFY_HOOK_ON_OPEN.lock()
+            && let Some(index) = hooks.iter().position(|(hooked, _)| hooked == &path)
+        {
+            owner.review_runtime.verify_hook = Some(hooks.remove(index).1);
+        }
+    }
+    if !owner.auto_drive()
+        || owner.owner.is_none()
+        || owner.lifecycle.stopping()
+        || owner.review_runtime.reopen.is_some()
+    {
+        return;
+    }
+    let cancellation = ExportCancellation::default();
     let weak = Arc::downgrade(host);
-    let _ = thread::Builder::new()
-        .name("output-review-reopen".into())
-        .spawn(move || {
-            let Some(host) = weak.upgrade() else {
-                return;
-            };
-            let Ok(mut owner) = host.lock() else {
-                return;
-            };
-            #[cfg(test)]
-            if let Some(path) = &owner.config.path
-                && AUTO_DRIVE_ON_OPEN
-                    .lock()
-                    .is_ok_and(|paths| paths.contains(path))
-            {
-                owner.review_runtime.auto_drive = true;
-            }
-            if !owner.auto_drive() || owner.owner.is_none() {
-                return;
-            }
-            if owner.reconcile_review_job().is_ok() && owner.verify_reopened_review().is_ok() {
-                let _ = owner.ensure_review_driver();
-            }
+    let thread = {
+        let cancellation = cancellation.clone();
+        thread::Builder::new()
+            .name("output-review-reopen".into())
+            .spawn(move || reopen_review(&weak, &cancellation))
+    };
+    if let Ok(thread) = thread {
+        owner.review_runtime.reopen = Some(Reopen {
+            cancellation,
+            thread: Some(thread),
         });
+    }
+}
+
+/// How often the reopen thread looks again while recovery, a branch switch
+/// or native recovery owns the project.
+const FROZEN_POLL: Duration = Duration::from_millis(100);
+
+/// Run `step` under the lock once the project is not frozen. `None`: the host
+/// went away, stopped or cancelled the thread.
+fn when_thawed<T>(
+    host: &Weak<Mutex<HostCommandOwner>>,
+    cancel: &ExportCancellation,
+    mut step: impl FnMut(&mut HostCommandOwner) -> T,
+) -> Option<T> {
+    loop {
+        {
+            let host = host.upgrade()?;
+            let mut owner = host.lock().ok()?;
+            if cancel.is_cancelled() || owner.lifecycle.stopping() {
+                return None;
+            }
+            if !owner.review_frozen() {
+                return Some(step(&mut owner));
+            }
+        }
+        thread::sleep(FROZEN_POLL);
+    }
+}
+
+fn reopen_review(host: &Weak<Mutex<HostCommandOwner>>, cancel: &ExportCancellation) {
+    if !when_thawed(host, cancel, |owner| owner.reconcile_review_job().is_ok()).unwrap_or(false)
+        || verify_reopened(host, Some(cancel)).is_err()
+    {
+        return;
+    }
+    let _ = when_thawed(host, cancel, HostCommandOwner::ensure_review_driver);
+}
+
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one value per verification, moved straight into the hash"
+)]
+enum Verification {
+    Done,
+    // Another caller is hashing the artifact.
+    Busy,
+    Hash {
+        token: ReviewToken,
+        prepared: PreparedReviewArtifact,
+        cancel: ExportCancellation,
+        #[cfg(test)]
+        hook: Option<ReviewCancelHook>,
+    },
+}
+
+/// Clears the verification mark however the hash ends.
+struct Verifying<'a> {
+    host: &'a Weak<Mutex<HostCommandOwner>>,
+    token: ReviewToken,
+}
+
+impl Drop for Verifying<'_> {
+    fn drop(&mut self) {
+        if let Some(host) = self.host.upgrade()
+            && let Ok(mut owner) = host.lock()
+            && owner.review_runtime.verifying.as_ref() == Some(&self.token)
+        {
+            owner.review_runtime.verifying = None;
+        }
+    }
+}
+
+/// The host must publish discovery before a potentially large artifact read.
+/// Review entry points verify the retained bytes before accepting a resume:
+/// the artifact is hashed with the lock released, then the job is checked
+/// again under it. A caller that finds a verification under way waits for it.
+pub(super) fn verify_reopened(
+    host: &Weak<Mutex<HostCommandOwner>>,
+    external: Option<&ExportCancellation>,
+) -> Result<(), HostError> {
+    loop {
+        let begun = {
+            let host = host.upgrade().ok_or_else(unavailable)?;
+            let mut owner = lock(&host)?;
+            owner.begin_reopen_verification(external)?
+        };
+        match begun {
+            Verification::Done => return Ok(()),
+            Verification::Busy => {
+                if external.is_some_and(ExportCancellation::is_cancelled) {
+                    return Err(refused(VERIFY_CANCELLED));
+                }
+                thread::sleep(VERIFY_POLL);
+            }
+            Verification::Hash {
+                token,
+                prepared,
+                cancel,
+                #[cfg(test)]
+                hook,
+            } => {
+                let mark = Verifying {
+                    host,
+                    token: token.clone(),
+                };
+                #[cfg(test)]
+                if let Some(hook) = hook {
+                    hook(&cancel);
+                }
+                let hashed = prepared.open_verified_cancellable(&cancel).map(drop);
+                drop(prepared);
+                drop(mark);
+                hashed?;
+                if cancel.is_cancelled() {
+                    return Err(refused(VERIFY_CANCELLED));
+                }
+                let host = host.upgrade().ok_or_else(unavailable)?;
+                let mut owner = lock(&host)?;
+                return owner.finish_reopen_verification(&token);
+            }
+        }
+    }
 }
 
 fn unavailable() -> HostError {
@@ -290,12 +525,16 @@ pub(super) fn execute(
                 return queue(host, bearer, request, snapshot, None);
             }
             ReviewControl::Seal { token, command } => {
-                let (expected, cancel) = {
+                {
                     let mut owner = lock(host)?;
                     owner.authorize_review(bearer, request)?;
                     owner.reconcile_review_job()?;
-                    // Straight after a reopen: verify the retained artifact first.
-                    owner.verify_reopened_review()?;
+                }
+                // Straight after a reopen: verify the retained artifact first.
+                verify_reopened(&Arc::downgrade(host), None)?;
+                let (expected, cancel) = {
+                    let mut owner = lock(host)?;
+                    owner.authorize_review(bearer, request)?;
                     // A lost reply: the job is already retired with its receipt.
                     if let Some(sealed) = owner
                         .owner_mut()?
@@ -306,7 +545,11 @@ pub(super) fn execute(
                         return owner.review_status();
                     }
                     owner.retire_finished_driver();
-                    if owner.review_runtime.driver.is_some() {
+                    // A driver still checking owns the job. One that seals a
+                    // ready job races this seal; the loser replays the receipt.
+                    if owner.review_runtime.driver.is_some()
+                        && !owner.review_ready_to_seal(token)?
+                    {
                         return Err(refused(DRIVER_RUNNING));
                     }
                     let expected = owner.production_review_digest(token)?;
@@ -324,6 +567,17 @@ pub(super) fn execute(
                     }
                     SealResult::Paused(status) => Ok(Some(*status)),
                 };
+            }
+            ReviewControl::Status | ReviewControl::Resume(_) | ReviewControl::Check { .. } => {
+                let reconciled = {
+                    let mut owner = lock(host)?;
+                    owner.authorize_review(bearer, request)?;
+                    owner.reconcile_review_job().is_ok()
+                };
+                // A reconcile failure is answered below, as before.
+                if reconciled {
+                    verify_reopened(&Arc::downgrade(host), None)?;
+                }
             }
             _ => {}
         }
@@ -474,7 +728,50 @@ impl HostCommandOwner {
         self.review_runtime
             .driver
             .as_ref()
-            .is_none_or(|driver| driver.thread.as_ref().is_none_or(JoinHandle::is_finished))
+            .is_none_or(|driver| !driver.live())
+    }
+
+    /// The number of drivers started, and whether the newest still drives.
+    #[cfg(test)]
+    pub(super) fn review_fixture_driver_generation(&self) -> (u64, bool) {
+        (
+            self.review_runtime.driver_generation,
+            self.review_runtime
+                .driver
+                .as_ref()
+                .is_some_and(Driver::live),
+        )
+    }
+
+    /// Driver threads not yet joined: the slot's and the retired ones.
+    #[cfg(test)]
+    pub(super) fn review_fixture_driver_threads(&self) -> usize {
+        self.review_runtime
+            .driver
+            .iter()
+            .chain(&self.review_runtime.retired_drivers)
+            .filter(|driver| driver.thread.is_some())
+            .count()
+    }
+
+    /// The reopen thread exists and has not finished.
+    #[cfg(test)]
+    pub(super) fn review_fixture_reopen_running(&self) -> bool {
+        self.review_runtime
+            .reopen
+            .as_ref()
+            .and_then(|reopen| reopen.thread.as_ref())
+            .is_some_and(|thread| !thread.is_finished())
+    }
+
+    #[cfg(test)]
+    pub(super) fn review_fixture_freeze(&mut self, frozen: bool) {
+        self.switch_frozen = frozen;
+    }
+
+    #[cfg(test)]
+    pub(super) fn review_fixture_verified(&self) -> Option<ReviewToken> {
+        self.review_runtime.verified.clone()
     }
 
     #[cfg(test)]
@@ -504,12 +801,16 @@ impl HostCommandOwner {
     }
 
     pub(super) fn join_review_for_shutdown(host: &Mutex<Self>) {
-        let driver = host
-            .lock()
-            .ok()
-            .and_then(|mut owner| owner.review_runtime.driver.as_mut()?.thread.take());
-        if let Some(driver) = driver {
-            let _ = driver.join();
+        // The reopen thread and every driver, cancelled by the fence.
+        let threads = host.lock().map_or_else(
+            |_| Vec::new(),
+            |mut owner| {
+                owner.review_runtime.cancel_for_shutdown();
+                owner.review_runtime.take_threads()
+            },
+        );
+        for thread in threads {
+            join_other(thread);
         }
         let thread = host
             .lock()
@@ -603,12 +904,6 @@ impl HostCommandOwner {
                 return Ok(Some(pending.clone()));
             }
             return Err(error);
-        }
-        if matches!(
-            control,
-            ReviewControl::Status | ReviewControl::Resume(_) | ReviewControl::Check { .. }
-        ) {
-            self.verify_reopened_review()?;
         }
         match control {
             // A reopened Checking or ReadyToSeal job resumes its driver.
@@ -848,26 +1143,77 @@ impl HostCommandOwner {
         Ok(())
     }
 
-    // The host must publish discovery before a potentially large artifact read.
-    // Review entry points verify the retained bytes before accepting a resume.
-    fn verify_reopened_review(&mut self) -> Result<(), HostError> {
+    /// Pin the reopened job's artifact for hashing with the lock released.
+    fn begin_reopen_verification(
+        &mut self,
+        external: Option<&ExportCancellation>,
+    ) -> Result<Verification, HostError> {
+        if self.lifecycle.stopping() {
+            return Err(refused(REVOKED));
+        }
         let bundle = self.owner()?.review_bundle()?;
         let Some(job) = bundle.review_job()?.filter(|job| {
             job.artifact_ref.is_some()
                 && job.phase != ReviewPhase::Stopping
                 && self.review_runtime.verified.as_ref() != Some(&job.token)
         }) else {
+            return Ok(Verification::Done);
+        };
+        let token = job.token.clone();
+        drop(job);
+        if self.review_runtime.verifying.as_ref() == Some(&token) {
+            return Ok(Verification::Busy);
+        }
+        let prepared = bundle.prepare_review_artifact(&token)?;
+        let cancel = self
+            .review_runtime
+            .register_review_cancellation(&token, external);
+        self.review_runtime.verifying = Some(token.clone());
+        Ok(Verification::Hash {
+            token,
+            prepared,
+            cancel,
+            #[cfg(test)]
+            hook: self.review_runtime.verify_hook.clone(),
+        })
+    }
+
+    /// The bytes matched: if the job is still the one hashed, an attempt bound
+    /// by a former process is unbound and the artifact counts as verified.
+    fn finish_reopen_verification(&mut self, token: &ReviewToken) -> Result<(), HostError> {
+        let bundle = self.owner()?.review_bundle()?;
+        let Some(job) = bundle.review_job()?.filter(|job| {
+            &job.token == token && job.artifact_ref.is_some() && job.phase != ReviewPhase::Stopping
+        }) else {
             return Ok(());
         };
-        drop(bundle.open_review_artifact(&job.token)?);
-        let token = job.token.clone();
-        if matches!(&job.phase, ReviewPhase::Checking(checks) if checks.reviewer_attempt.is_some())
-        {
-            self.owner_mut()?
-                .update_review_job(&token, UpdateReviewJob::UnbindChecks)?;
+        if self.review_runtime.verified.as_ref() == Some(token) {
+            return Ok(());
         }
-        self.review_runtime.verified = Some(token);
+        // Recovery, a branch switch or native recovery took the project
+        // during the hash: nothing is written; the next command verifies again.
+        if self.review_frozen() {
+            return Err(refused(REVOKED));
+        }
+        let bound = matches!(&job.phase, ReviewPhase::Checking(checks) if checks.reviewer_attempt.is_some());
+        drop(job);
+        self.review_authority(token)?;
+        if bound {
+            self.owner_mut()?
+                .update_review_job(token, UpdateReviewJob::UnbindChecks)?;
+        }
+        self.review_runtime.verified = Some(token.clone());
         Ok(())
+    }
+
+    /// Recovery, a branch switch or native recovery owns the project: review
+    /// threads wait and start nothing.
+    pub(super) fn review_frozen(&self) -> bool {
+        self.lifecycle.stopping()
+            || self.recovery_only
+            || self.recovering
+            || self.switch_frozen
+            || self.native_recovery_pending
     }
 
     /// A retained project's retirement failure waits for its next command or
@@ -1083,7 +1429,7 @@ impl HostCommandOwner {
             || !self.retention_proven
             || self.review_runtime.fenced(token)
         {
-            return Err(refused("Output review authority was revoked."));
+            return Err(refused(REVOKED));
         }
         Ok(())
     }
@@ -1171,16 +1517,52 @@ impl HostCommandOwner {
             .configuration_sha256)
     }
 
+    fn review_ready_to_seal(&self, token: &ReviewToken) -> Result<bool, HostError> {
+        Ok(self
+            .owner()?
+            .review_source_bundle(&token.project)?
+            .review_job()?
+            .is_some_and(|job| {
+                &job.token == token && matches!(job.phase, ReviewPhase::ReadyToSeal { .. })
+            }))
+    }
+
+    /// Free the driver slot of a driver that is no longer live, and join
+    /// retired drivers that have finished. An exiting or cancelled driver
+    /// never blocks a new one; it is joined later with the lock released.
     fn retire_finished_driver(&mut self) {
-        if self
-            .review_runtime
-            .driver
-            .as_ref()
-            .is_some_and(|driver| driver.thread.as_ref().is_none_or(JoinHandle::is_finished))
-            && let Some(mut driver) = self.review_runtime.driver.take()
-            && let Some(thread) = driver.thread.take()
-        {
-            let _ = thread.join();
+        let runtime = &mut self.review_runtime;
+        if let Some(driver) = runtime.driver.take_if(|driver| !driver.live()) {
+            runtime.retired_drivers.push(driver);
+        }
+        for driver in &mut runtime.retired_drivers {
+            if let Some(thread) = driver.thread.take_if(|thread| thread.is_finished()) {
+                join_other(thread);
+            }
+        }
+        runtime
+            .retired_drivers
+            .retain(|driver| driver.thread.is_some());
+    }
+
+    /// Join retired drivers with the lock released: every one is cancelled
+    /// or exiting, so each returns promptly.
+    pub(super) fn join_retired_review_drivers(host: &Mutex<Self>) {
+        let threads: Vec<_> = host.lock().map_or_else(
+            |_| Vec::new(),
+            |mut owner| {
+                let runtime = &mut owner.review_runtime;
+                for driver in &runtime.retired_drivers {
+                    driver.cancellation.cancel();
+                }
+                std::mem::take(&mut runtime.retired_drivers)
+                    .into_iter()
+                    .filter_map(|mut driver| driver.thread.take())
+                    .collect()
+            },
+        );
+        for thread in threads {
+            join_other(thread);
         }
     }
 
@@ -1200,7 +1582,7 @@ impl HostCommandOwner {
     /// on entry to Checking, on Resume and on Status, so a reopened job
     /// continues to its seal.
     pub(super) fn ensure_review_driver(&mut self) -> Result<(), HostError> {
-        if !self.auto_drive() {
+        if !self.auto_drive() || self.review_frozen() {
             return Ok(());
         }
         self.retire_finished_driver();
@@ -1237,7 +1619,7 @@ impl HostCommandOwner {
             .review_runtime
             .driver
             .as_ref()
-            .is_some_and(|driver| &driver.token == token);
+            .is_some_and(|driver| &driver.token == token && driver.live());
         if self.review_runtime.driver.is_some() && !waiting {
             return Err(refused(DRIVER_RUNNING));
         }
@@ -1293,12 +1675,7 @@ impl HostCommandOwner {
             .review_runtime
             .driver
             .as_ref()
-            .filter(|driver| {
-                driver
-                    .thread
-                    .as_ref()
-                    .is_some_and(|thread| !thread.is_finished())
-            })
+            .filter(|driver| driver.live())
             .map(|driver| driver.token.clone())
         else {
             return Ok(());
@@ -1326,18 +1703,37 @@ impl HostCommandOwner {
             .review_runtime
             .register_review_cancellation(token, None);
         let weak = self.runtime_owner.clone();
+        let exiting = Arc::new(AtomicBool::new(false));
+        #[cfg(test)]
+        let exit_hook = self.review_runtime.driver_exit_hook.clone();
         let thread = {
             let token = token.clone();
             let cancellation = cancellation.clone();
+            let exiting = Arc::clone(&exiting);
             thread::Builder::new()
                 .name("output-review-checks".into())
                 .spawn(move || {
-                    review_driver::run_review_driver(&weak, &token, &command, &cancellation);
+                    review_driver::run_review_driver(
+                        &weak,
+                        &token,
+                        &command,
+                        &cancellation,
+                        &exiting,
+                    );
+                    #[cfg(test)]
+                    if let Some(hook) = exit_hook {
+                        hook(&cancellation);
+                    }
                 })?
         };
+        #[cfg(test)]
+        {
+            self.review_runtime.driver_generation += 1;
+        }
         self.review_runtime.driver = Some(Driver {
             token: token.clone(),
             cancellation,
+            exiting,
             thread: Some(thread),
         });
         Ok(())

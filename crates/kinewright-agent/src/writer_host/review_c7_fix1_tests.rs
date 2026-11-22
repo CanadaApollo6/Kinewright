@@ -203,9 +203,12 @@ fn ja1_s5a_c7_fix1_reopen_during_checking_reaches_the_seal() {
         c7_job_driven(c7f_fixture(c7_title_doc("Hello world")), true),
         true,
     );
-    let status = s5_review_call(&f.editor, ReviewControl::Status).unwrap();
-    let ReviewPhase::Checking(checks) = &status.phase else {
-        panic!("C7F_REOPENED_CHECKING: {:?}", status.phase);
+    // No Status: Status would start a driver itself and hide a reopen that
+    // never resumed one.
+    s5_review_until(|| c7f2_generation(&f) == (1, true), "C7F_REOPEN_DRIVES");
+    let phase = c7f_phase(&f);
+    let Some(ReviewPhase::Checking(checks)) = &phase else {
+        panic!("C7F_REOPENED_CHECKING: {phase:?}");
     };
     assert!(
         checks.reviewer_attempt.is_none(),
@@ -220,6 +223,19 @@ fn ja1_s5a_c7_fix1_reopen_during_checking_reaches_the_seal() {
 
 /// A job whose rows are all recorded and whose seal was held, after a reopen.
 #[cfg(target_os = "linux")]
+/// A seal hook that holds the seal until the driver is cancelled, then fails.
+type C7f2SealHook = super::super::review_job::ReviewSealHook;
+fn c7f2_held_seal(entered: &Arc<std::sync::atomic::AtomicBool>) -> C7f2SealHook {
+    let entered = Arc::clone(entered);
+    Arc::new(move |cancel: &kinewright_core::ExportCancellation| {
+        entered.store(true, std::sync::atomic::Ordering::SeqCst);
+        while !cancel.is_cancelled() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Err(HostRefusal::new("review_refused", "C7F_SEAL_HELD").into())
+    })
+}
+
 fn c7f_ready_then_reopen(
     drive_on_open: bool,
 ) -> (
@@ -228,6 +244,7 @@ fn c7f_ready_then_reopen(
     kinewright_project::bundle_records::SessionId,
 ) {
     let job = c7_job_driven(c7f_fixture(c7_title_doc("Hello world")), true);
+    let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
     job.f
         .host
         .owner
@@ -236,14 +253,12 @@ fn c7f_ready_then_reopen(
         .lock()
         .unwrap()
         .review_runtime
-        .seal_hook = Some(Arc::new(|| {
-        Err(HostRefusal::new("review_refused", "C7F_SEAL_HELD").into())
-    }));
+        .seal_hook = Some(c7f2_held_seal(&entered));
     c7_judge(&job.reviewer);
     s5_review_until(
         || {
             matches!(c7f_phase(&job.f), Some(ReviewPhase::ReadyToSeal { .. }))
-                && c7f_driver_done(&job.f)
+                && entered.load(std::sync::atomic::Ordering::SeqCst)
         },
         "C7F_READY_TO_SEAL_HELD",
     );
