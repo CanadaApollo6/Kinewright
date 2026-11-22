@@ -979,6 +979,9 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
         } else {
             #[cfg(target_os = "linux")]
             HostCommandOwner::join_retired_review_drivers(&state.owner);
+            // ConfirmSwitch, ConfirmBarrier, Abandon and RescueTo thaw here.
+            #[cfg(target_os = "linux")]
+            HostCommandOwner::persist_stops_after_thaw(&state.owner);
             #[cfg(target_os = "linux")]
             state.runtime.update();
         }

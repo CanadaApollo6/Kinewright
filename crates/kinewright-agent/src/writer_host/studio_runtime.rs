@@ -180,6 +180,9 @@ impl Drop for RecoveryExit {
             owner.native_recovery_status = status;
             owner.native_recovery_pending = !recovered;
         }
+        if recovered {
+            HostCommandOwner::persist_stops_after_thaw(&self.host);
+        }
         {
             let mut state = self
                 .state

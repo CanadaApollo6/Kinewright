@@ -1159,6 +1159,22 @@ impl HostCommandOwner {
         result
     }
 
+    /// The first point after a freeze ends, a /host request or native
+    /// recovery's exit: a Stop queued behind the freeze persists now, without
+    /// waiting for the next review command.
+    pub(super) fn persist_stops_after_thaw(host: &Mutex<Self>) {
+        let Ok(mut owner) = host.lock() else {
+            return;
+        };
+        if owner.review_runtime.pending_stop.is_empty()
+            || owner.review_frozen()
+            || owner.settlement_owned_elsewhere()
+        {
+            return;
+        }
+        let _ = owner.persist_pending_stops();
+    }
+
     pub(super) fn reconcile_review_job(&mut self) -> Result<(), HostError> {
         if self.settlement_owned_elsewhere() {
             return Err(BundleError::Unsettled.into());
