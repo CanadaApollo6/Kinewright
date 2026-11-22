@@ -1998,3 +1998,6 @@ fn ja1_s5a_c7_fix2_persisted_checks_cannot_name_a_reviewer_task() {
 
 // JA-1 S6 C2: save a sealed cut.
 include!("delivery_tests.rs");
+
+// JA-1 S6 C2 fix 1: admission, staging identity and the remaining witnesses.
+include!("delivery_fix1_tests.rs");

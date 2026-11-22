@@ -297,12 +297,19 @@ mod linux {
     pub const HASH_MISMATCH: &str =
         "The copied video does not match the sealed review; nothing was saved.";
     pub const SAVE_STOPPED: &str = "The save was stopped; nothing was saved.";
+    pub const ROOT_UNCHECKED: &str =
+        "The project's own folders could not be checked, so nothing was saved.";
+    pub const STAGING_CHANGED: &str =
+        "The save's working folder was replaced while it ran; nothing was saved.";
 
     /// A folder the person picked, held open by its directory handle. Every
     /// write is relative to this handle, never to its path.
     pub struct SaveDestination {
         parent: File,
         display: PathBuf,
+        /// Test seam: the free space the folder reports.
+        #[cfg(test)]
+        available: Option<u64>,
     }
 
     fn refused(message: &str) -> BundleError {
@@ -314,14 +321,24 @@ mod linux {
         Ok((metadata.dev(), metadata.ino()))
     }
 
+    /// Whether `name` under `directory` is still the inode `id`, without
+    /// following a symlink.
+    fn entry_is(directory: &File, name: &str, id: (u64, u64)) -> bool {
+        fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
+            .is_ok_and(|stat| (stat.st_dev, stat.st_ino) == id)
+    }
+
     /// Admit `folder` as a save destination. It must be an existing absolute
-    /// directory reached without a symlink in its last component, and it must
-    /// not be, or lie inside, any of `refused_roots` (the bundle, the project
-    /// store, the application data). The check walks the held handle's own
-    /// ancestors by device and inode, so a path spelling cannot slip past it.
+    /// directory, and it must not be, or lie inside, any of `refused_roots`
+    /// (the bundle, the project store, the application data). The folder is
+    /// opened first, following a symlink the person picked; every later check
+    /// is of that held handle, never of a path string: its shown path is the
+    /// handle's own, and the refusal walks the handle's real ancestors by
+    /// device and inode, so neither a symlink nor a path spelling slips past.
     ///
     /// # Errors
-    /// The folder is unusable or inside a refused root.
+    /// The folder is unusable, a refused root cannot be checked, or the
+    /// folder is inside a refused root.
     pub fn admit_save_folder(
         folder: &Path,
         refused_roots: &[&Path],
@@ -329,23 +346,25 @@ mod linux {
         if !folder.is_absolute() {
             return Err(refused("Choose an absolute folder to save the cut."));
         }
-        let canonical = folder.canonicalize()?;
+        // 1. Open the folder. From here on only the handle is checked.
         let parent = File::from(fs::open(
-            &canonical,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            folder,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
             Mode::empty(),
         )?);
-        let held = Path::new("/proc/self/fd").join(parent.as_raw_fd().to_string());
-        if held.canonicalize()? != canonical {
-            return Err(refused("The chosen folder changed while it was opened."));
-        }
+        let display =
+            std::fs::read_link(Path::new("/proc/self/fd").join(parent.as_raw_fd().to_string()))?;
+        // 2. The refused roots, by device and inode. Only a root that does
+        // not exist cannot contain the folder; any other failure refuses.
         let mut refused_ids = Vec::new();
         for root in refused_roots {
-            // A root that does not exist cannot contain the folder.
-            if let Ok(metadata) = std::fs::metadata(root) {
-                refused_ids.push((metadata.dev(), metadata.ino()));
+            match std::fs::metadata(root) {
+                Ok(metadata) => refused_ids.push((metadata.dev(), metadata.ino())),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => return Err(refused(ROOT_UNCHECKED)),
             }
         }
+        // 3. The held handle's real ancestors.
         let mut current = parent.try_clone()?;
         for _ in 0..4096 {
             let id = identity(&current)?;
@@ -361,7 +380,9 @@ mod linux {
             if identity(&up)? == id {
                 return Ok(SaveDestination {
                     parent,
-                    display: canonical,
+                    display,
+                    #[cfg(test)]
+                    available: None,
                 });
             }
             current = up;
@@ -387,18 +408,34 @@ mod linux {
             }
         }
 
+        /// Test seam: report `bytes` free instead of asking the file system.
+        #[cfg(test)]
+        #[must_use]
+        pub(crate) fn with_available(mut self, bytes: u64) -> Self {
+            self.available = Some(bytes);
+            self
+        }
+
         fn available(&self) -> Result<u64, BundleError> {
+            #[cfg(test)]
+            if let Some(bytes) = self.available {
+                return Ok(bytes);
+            }
             let stat = fs::fstatvfs(&self.parent)?;
             Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
         }
     }
 
     /// The hidden staging folder; removed on drop unless it was published.
+    /// Every removal is of an inode this save created: files go through the
+    /// held staging handle, and the folder's name is removed only while it
+    /// still names the held folder.
     struct Staging<'a> {
         parent: &'a File,
         name: String,
         directory: File,
-        files: Vec<String>,
+        id: (u64, u64),
+        files: Vec<(String, (u64, u64))>,
         published: bool,
     }
 
@@ -407,24 +444,34 @@ mod linux {
             if self.published {
                 return;
             }
-            // Only names this save created.
-            for file in &self.files {
-                let _ = fs::unlinkat(&self.directory, file.as_str(), AtFlags::empty());
+            for (file, id) in &self.files {
+                if entry_is(&self.directory, file, *id) {
+                    let _ = fs::unlinkat(&self.directory, file.as_str(), AtFlags::empty());
+                }
             }
-            let _ = fs::unlinkat(self.parent, self.name.as_str(), AtFlags::REMOVEDIR);
+            if entry_is(self.parent, &self.name, self.id) {
+                let _ = fs::unlinkat(self.parent, self.name.as_str(), AtFlags::REMOVEDIR);
+            }
         }
     }
 
     impl Staging<'_> {
         fn create(&mut self, file: String) -> Result<File, BundleError> {
-            let created = fs::openat(
+            let created = File::from(fs::openat(
                 &self.directory,
                 file.as_str(),
                 OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::from_raw_mode(0o644),
-            )?;
-            self.files.push(file);
-            Ok(File::from(created))
+            )?);
+            match identity(&created) {
+                Ok(id) => self.files.push((file, id)),
+                Err(error) => {
+                    // Just created by name in the held folder: remove it.
+                    let _ = fs::unlinkat(&self.directory, file.as_str(), AtFlags::empty());
+                    return Err(error.into());
+                }
+            }
+            Ok(created)
         }
     }
 
@@ -527,26 +574,20 @@ mod linux {
                 staging_name.as_str(),
                 Mode::from_raw_mode(0o755),
             )?;
-            let directory = match fs::openat(
+            // Without a handle the name cannot be proven ours, so a failed
+            // open leaves the empty hidden folder rather than remove by name.
+            let directory = File::from(fs::openat(
                 &destination.parent,
                 staging_name.as_str(),
                 OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::empty(),
-            ) {
-                Ok(directory) => File::from(directory),
-                Err(error) => {
-                    let _ = fs::unlinkat(
-                        &destination.parent,
-                        staging_name.as_str(),
-                        AtFlags::REMOVEDIR,
-                    );
-                    return Err(io::Error::from(error).into());
-                }
-            };
+            )?);
+            let id = identity(&directory)?;
             let mut staging = Staging {
                 parent: &destination.parent,
                 name: staging_name,
                 directory,
+                id,
                 files: Vec::new(),
                 published: false,
             };
@@ -561,6 +602,12 @@ mod linux {
             fs::fsync(&staging.directory)?;
             if cancel.is_cancelled() {
                 return Err(refused(SAVE_STOPPED));
+            }
+            // The name must still be the folder that was hashed and synced.
+            // A swap between this check and the rename needs a hostile local
+            // process (fix1 decisions).
+            if !entry_is(&destination.parent, &staging.name, staging.id) {
+                return Err(refused(STAGING_CHANGED));
             }
             match fs::renameat_with(
                 &destination.parent,
@@ -585,5 +632,6 @@ mod linux {
 
 #[cfg(target_os = "linux")]
 pub use linux::{
-    HASH_MISMATCH, INSIDE_PROJECT, NAME_TAKEN, RECEIPT_FILE, SAVE_STOPPED, video_file,
+    HASH_MISMATCH, INSIDE_PROJECT, NAME_TAKEN, RECEIPT_FILE, ROOT_UNCHECKED, SAVE_STOPPED,
+    STAGING_CHANGED, video_file,
 };
