@@ -224,6 +224,8 @@ pub(crate) struct Ja1Attachment {
     pub(crate) studio_editorial_ready: Option<EditorialDetails>,
     pub(crate) studio_error_ready: Option<crate::studio::StudioFailure>,
     pub(crate) studio_review_ready: Option<crate::studio_review::ReviewRefresh>,
+    /// JA-1 S6 C2 fix 1: why the last save or stop was refused.
+    pub(crate) studio_save_notice_ready: Option<String>,
     /// The scope a failed Current-edit acquisition tried, and whether the
     /// failure is temporary (S3 C11 fu1).
     pub(crate) studio_manual_failed: Option<(
@@ -295,6 +297,7 @@ impl Ja1Attachment {
             studio_editorial_ready: None,
             studio_error_ready: None,
             studio_review_ready: None,
+            studio_save_notice_ready: None,
             studio_manual_failed: None,
             studio_manual_ready: None,
             owner,
@@ -979,19 +982,31 @@ impl Ja1Attachment {
                 "Output review requires a saved project attached to the writer host.".into(),
             ));
         };
-        // JA-1 S6 C3: a heartbeat sent before this request carries a status
-        // from before it; settle it so it cannot land after this reply's.
-        host.settle_heartbeat();
-        let reply = host
-            .client
-            .request(kinewright_agent::writer_host::HostCommand::Review(control))
-            .map_err(|error| BundleError::Corrupt(error.to_string()))?;
-        // A queued review or a started save retains work at once, so a close
-        // in the next frame detaches instead of asking for Shutdown.
-        host.accept_status(reply.status.clone());
-        if let Some(error) = reply.error {
-            return Err(BundleError::Corrupt(error.message));
-        }
+        // A save's refusal is the person's to read in the save line, in the
+        // host's own words; it says nothing about the project's health.
+        let saving = matches!(
+            control,
+            kinewright_project::review_job::ReviewControl::SaveSealed { .. }
+                | kinewright_project::review_job::ReviewControl::StopSave
+        );
+        let refusal = match host
+            .studio_request(&kinewright_agent::writer_host::HostCommand::Review(control))
+        {
+            Ok(reply) => match reply.error {
+                None => Ok(reply),
+                Some(refusal) => Err(refusal),
+            },
+            Err(kinewright_agent::writer_host::HostError::Refused(refusal)) => Err(refusal),
+            Err(error) => return Err(BundleError::Corrupt(error.to_string())),
+        };
+        let reply = match refusal {
+            Ok(reply) => reply,
+            Err(refusal) if saving => {
+                self.studio_save_notice_ready = Some(host::refusal_words(&refusal));
+                return Ok(());
+            }
+            Err(refusal) => return Err(BundleError::Corrupt(refusal.message)),
+        };
         self.studio_review_ready = Some(crate::studio_review::ReviewRefresh(reply.review));
         // A Refresh or a seal can bring a new receipt: reload the selected
         // version's details so its label shows.

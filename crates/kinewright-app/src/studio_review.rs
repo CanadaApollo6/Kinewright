@@ -79,8 +79,12 @@ pub(crate) struct OutputReview {
     text_cards: String,
     intended_pauses: String,
     annotation_error: Option<String>,
-    /// The last save status the host reported.
+    /// The last save status the host reported, for `save_project`.
     save_status: Option<SealedSaveStatus>,
+    /// Why the last save or stop was refused, in the host's words.
+    save_notice: Option<String>,
+    /// The project the save line belongs to.
+    save_project: Option<kinewright_project::bundle_records::ProjectId>,
 }
 
 impl OutputReview {
@@ -88,9 +92,19 @@ impl OutputReview {
         &mut self,
         reply: Option<ReviewRefresh>,
         project: Option<&kinewright_project::bundle_records::ProjectId>,
+        save_notice: Option<String>,
     ) {
         if let Some(ReviewRefresh(status)) = reply {
             self.status = status;
+        }
+        // The save line of a project no longer shown goes with it.
+        if self.save_project.as_ref() != project {
+            self.save_project = project.cloned();
+            self.save_status = None;
+            self.save_notice = None;
+        }
+        if save_notice.is_some() {
+            self.save_notice = save_notice;
         }
         if self
             .status
@@ -215,7 +229,7 @@ impl OutputReview {
     /// JA-1 S6 C2: the save action for a sealed cut, named by its own
     /// label, and the status line of a running or finished save.
     fn show_save(
-        &self,
+        &mut self,
         ui: &mut egui::Ui,
         sealed: Option<&ReviewReceipt>,
     ) -> Option<ReviewControl> {
@@ -225,6 +239,9 @@ impl OutputReview {
             && let Some(folder) = rfd::FileDialog::new().pick_folder()
         {
             control = Some(save_control(receipt, folder));
+        }
+        if let Some(notice) = &self.save_notice {
+            ui.label(format!("Not saved: {notice}"));
         }
         match &self.save_status {
             Some(SealedSaveStatus::Saving { name }) => {
@@ -240,6 +257,9 @@ impl OutputReview {
                 ui.label(format!("Save failed: {reason}"));
             }
             None => {}
+        }
+        if control.is_some() {
+            self.save_notice = None;
         }
         control
     }
@@ -393,5 +413,37 @@ mod tests {
         };
         assert!(matches!(review.control, ReviewControl::Status));
         assert_eq!(review.version, Some(b), "C7F_REFRESH_NAMES_THE_SELECTION");
+    }
+
+    /// JA-1 S6 C2 fix 1 (Neon F3/F4): the save line belongs to the project
+    /// it was reported for, and a refusal is kept in the host's words.
+    #[test]
+    fn ja1_s6_c2_fix1_the_save_line_goes_with_its_project() {
+        let a = key().project;
+        let b = key().project;
+        let mut review = OutputReview::default();
+        review.refresh(None, Some(&a), None);
+        review.save_status = Some(SealedSaveStatus::Saved {
+            path: "/out/a-v1-delivered".into(),
+        });
+        review.refresh(
+            None,
+            Some(&a),
+            Some(
+                "A file or folder with that name already exists there; nothing was changed.".into(),
+            ),
+        );
+        assert!(review.save_status.is_some(), "S6F1_SAME_PROJECT_KEEPS_IT");
+        assert_eq!(
+            review.save_notice.as_deref(),
+            Some("A file or folder with that name already exists there; nothing was changed."),
+            "S6F1_NOTICE_IN_THE_HOSTS_WORDS"
+        );
+        review.refresh(None, Some(&b), None);
+        assert!(review.save_status.is_none(), "S6F1_SWITCH_DROPS_THE_STATUS");
+        assert!(review.save_notice.is_none(), "S6F1_SWITCH_DROPS_THE_NOTICE");
+        review.save_status = Some(SealedSaveStatus::Saving { name: "b".into() });
+        review.refresh(None, None, None);
+        assert!(review.save_status.is_none(), "S6F1_NO_PROJECT_NO_STATUS");
     }
 }

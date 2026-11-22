@@ -823,7 +823,72 @@ fn s6_c1_start_encode_with(
         },
         "S6_C1_QUEUED_WORKER_DONE",
     );
+    // A finished worker still holds the staging until it is retired, and
+    // the seal refuses while it is held. Production retires it in the
+    // driver's step; `c7_drive` skips that step, so retire it here the same
+    // way, under the lock.
+    {
+        let mut owner = shared.lock().unwrap();
+        owner.retire_review_worker().unwrap();
+        assert!(
+            owner.review_fixture_worker().is_none(),
+            "S6_C1_QUEUED_WORKER_RETIRED"
+        );
+        let job = owner
+            .owner()
+            .unwrap()
+            .review_bundle()
+            .unwrap()
+            .review_job()
+            .unwrap()
+            .expect("S6_C1_QUEUED_JOB");
+        assert!(job.stage.is_none(), "S6_C1_QUEUED_STAGE_RETIRED");
+    }
     status.token
+}
+
+/// The CI pause of the talking-head witness: the encode worker finishes after
+/// the helper's last Status, so nothing retired it and the seal found
+/// "Review staging is still held by the encode." Holding the worker after
+/// publication puts that ordering on every run; the helper must retire it.
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn ja1_s6_c2_fix2_a_late_worker_is_retired_before_the_seal() {
+    use kinewright_project::review_job::SealResult;
+    let f = Fixture::with_inputs(
+        false,
+        c7_title_doc("Hello world"),
+        "project.kinewright",
+        s5_c6_admit_embedded_font,
+    );
+    // Status sees Checking at once; the thread returns a second later.
+    f.host
+        .owner
+        .upgrade()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .review_fixture_probe(|at| {
+            if matches!(at, ReviewPoint::AfterPublication) {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        });
+    let job = c7_job_with(f, false, s6_c1_start_default_encode_at_source_raster);
+    let mut reviewer = C7Reviewer(|_: &ReviewToken| {
+        c7_judge(&job.reviewer);
+        Ok(())
+    });
+    let cancel = kinewright_core::ExportCancellation::default();
+    let result =
+        c7_drive(&job, &c7_real_check, &mut reviewer, &cancel).expect("S6C2F2_DRIVER_RUNS");
+    assert!(
+        matches!(result, SealResult::Sealed(_)),
+        "S6C2F2_LATE_WORKER_SEALS: {result:?}"
+    );
 }
 
 /// The default queue freezes the named −14 LUFS streaming target into the
