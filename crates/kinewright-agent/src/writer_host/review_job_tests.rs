@@ -106,6 +106,47 @@ fn s5_review_call(client: &HostClient, control: ReviewControl) -> Option<ReviewS
     .review
 }
 
+/// Queue `key` with the default review settings at the document's own
+/// raster, then resume it: for witnesses about the encode's fences, not the
+/// delivery raster, whose debug 1080p encode only widens their windows.
+fn s5_review_start_at_source_raster(
+    host: &WriterHost,
+    client: &HostClient,
+    key: &kinewright_project::studio_records::SnapshotKey,
+) -> ReviewToken {
+    let settings = {
+        let shared = host.owner.upgrade().unwrap();
+        let owner = shared.lock().unwrap();
+        let document = owner
+            .owner()
+            .unwrap()
+            .read_snapshot(key)
+            .unwrap()
+            .open_review_inputs()
+            .unwrap()
+            .document;
+        let mut settings = kinewright_core::output_review_default_settings(
+            &document,
+            kinewright_core::ExportCancellation::default(),
+        );
+        settings.resolution = document.resolution;
+        settings
+    };
+    let queued = s5_review_call(
+        client,
+        ReviewControl::Queue {
+            snapshot: key.clone(),
+            settings,
+            byte_limit: 64 << 20,
+        },
+    )
+    .unwrap();
+    assert_eq!(queued.phase, ReviewPhase::Queued);
+    s5_review_call(client, ReviewControl::Resume(queued.token))
+        .unwrap()
+        .token
+}
+
 fn s5_review_start(
     client: &HostClient,
     key: &kinewright_project::studio_records::SnapshotKey,
@@ -369,20 +410,36 @@ fn s5_review_stop_after_installation_never_publishes_after_acknowledgement() {
                 }
             });
     }
-    let token = s5_review_start(&client, &key);
+    let token = s5_review_start_at_source_raster(&host, &client, &key);
     s5_review_until(
         || held.load(Ordering::Acquire) == 1,
         "REVIEW_INSTALL_INSIDE_GATE",
     );
+    let shared = host.owner.upgrade().unwrap();
     let acknowledged = std::thread::scope(|scope| {
         let stop = scope.spawn(|| s5_review_call(&client, ReviewControl::Stop(token.clone())));
         std::thread::sleep(Duration::from_millis(300));
         assert!(!stop.is_finished(), "REVIEW_STOP_WAITS_FOR_THE_GATE");
         release.store(1, Ordering::Release);
+        // The Stop cancels the export as soon as the gate lets it in. The
+        // worker either reaches publication first, where the fence must
+        // refuse it, or its hash or inspection sees the cancellation and it
+        // ends before publication. Both publish nothing; the second is what a
+        // loaded CI runner saw (fix1 decisions).
         s5_review_until(
-            || held.load(Ordering::Acquire) == 2,
-            "REVIEW_INSTALLED_EXPORT_SUCCEEDED",
+            || {
+                held.load(Ordering::Acquire) == 2
+                    || shared
+                        .lock()
+                        .unwrap()
+                        .review_fixture_worker()
+                        .is_none_or(|(_, done)| done)
+            },
+            "REVIEW_INSTALLED_EXPORT_SETTLED",
         );
+        if held.load(Ordering::Acquire) != 2 {
+            eprintln!("S5_REVIEW_STOP_CANCELLED_BEFORE_PUBLICATION");
+        }
         stop.join().unwrap().unwrap()
     });
     release.store(2, Ordering::Release);
@@ -390,7 +447,6 @@ fn s5_review_stop_after_installation_never_publishes_after_acknowledgement() {
         acknowledged.phase,
         ReviewPhase::Stopping | ReviewPhase::Stopped
     ));
-    let shared = host.owner.upgrade().unwrap();
     s5_review_until(
         || {
             shared
