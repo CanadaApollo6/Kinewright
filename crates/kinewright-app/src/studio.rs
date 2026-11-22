@@ -899,6 +899,11 @@ impl KinewrightApp {
                         {
                             editorial_action = Some(action);
                         }
+                        let save_status = self
+                            .focused()
+                            .ja1
+                            .as_ref()
+                            .and_then(crate::ja1_attachment::Ja1Attachment::sealed_save_status);
                         let studio = &mut self.focused_mut().studio;
                         // The person's selection, not the last details read.
                         let selected = studio
@@ -909,6 +914,7 @@ impl KinewrightApp {
                             ui,
                             studio.editorial.as_ref(),
                             selected.as_ref(),
+                            save_status,
                         ) {
                             editorial_action = Some(action);
                         }

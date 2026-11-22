@@ -995,6 +995,13 @@ impl Ja1Attachment {
         Ok(())
     }
 
+    /// JA-1 S6 C2: what the host last reported about a sealed-cut save.
+    pub(crate) fn sealed_save_status(
+        &self,
+    ) -> Option<kinewright_project::review_job::delivery::SealedSaveStatus> {
+        self.host.as_ref()?.status.sealed_save.clone()
+    }
+
     fn read_studio_editorial(&mut self, version: Option<&SnapshotKey>) -> Result<(), BundleError> {
         let result = self.studio_editorial(version);
         match result {
@@ -1053,10 +1060,16 @@ impl Ja1Attachment {
                 .map(|key| self.owner.review_annotations(key))
                 .transpose()?
                 .flatten(),
+            // JA-1 S6 C2: the receipt of the profile Studio labels.
             receipt: version
                 .map(|key| self.owner.review_receipts(key))
                 .transpose()?
-                .and_then(|receipts| receipts.into_iter().next()),
+                .and_then(|receipts| {
+                    kinewright_project::review_job::delivery::receipt_for_profile(
+                        receipts,
+                        kinewright_core::output_review::CoverageProfileId::OutputReviewV1,
+                    )
+                }),
         })
     }
 

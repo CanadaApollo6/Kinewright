@@ -1,7 +1,10 @@
 use eframe::egui;
-use kinewright_core::output_review::{DeliveryException, EligibilityReason, SealedReviewOutcome};
+use kinewright_core::output_review::SealedReviewOutcome;
 use kinewright_project::{
-    review_job::{ReviewAnnotationFields, ReviewControl, ReviewPhase, ReviewStatus},
+    review_job::{
+        ReviewAnnotationFields, ReviewControl, ReviewPhase, ReviewReceipt, ReviewStatus,
+        delivery::{SealedSaveStatus, describe_exception, outcome_label, save_action_label},
+    },
     studio_records::SnapshotKey,
 };
 
@@ -23,6 +26,8 @@ pub(crate) struct ReviewAction {
 /// What the panel shows for the selected version.
 struct ReviewView<'a> {
     receipt: Option<(&'static str, Vec<String>)>,
+    /// The selected version's own receipt, which a save names exactly.
+    sealed: Option<&'a ReviewReceipt>,
     saved: Option<&'a ReviewAnnotationFields>,
     /// The details are the selected version's own.
     current: bool,
@@ -33,14 +38,18 @@ impl<'a> ReviewView<'a> {
         details: Option<&'a crate::ja1_attachment::EditorialDetails>,
         selected: Option<&SnapshotKey>,
     ) -> Self {
-        Self::of(
+        let mut view = Self::of(
             details.and_then(|details| details.version.as_ref()),
             details
                 .and_then(|details| details.receipt.as_ref())
                 .map(|receipt| (&receipt.key.snapshot, &receipt.outcome)),
             details.and_then(|details| details.annotations.as_ref()),
             selected,
-        )
+        );
+        view.sealed = details
+            .and_then(|details| details.receipt.as_ref())
+            .filter(|receipt| view.receipt.is_some() && Some(&receipt.key.snapshot) == selected);
+        view
     }
 
     fn of(
@@ -55,6 +64,7 @@ impl<'a> ReviewView<'a> {
             receipt: sealed
                 .filter(|_| current)
                 .and_then(|(snapshot, outcome)| receipt_lines(snapshot, outcome, selected)),
+            sealed: None,
             saved: saved.filter(|_| current),
             current,
         }
@@ -69,6 +79,8 @@ pub(crate) struct OutputReview {
     text_cards: String,
     intended_pauses: String,
     annotation_error: Option<String>,
+    /// The last save status the host reported.
+    save_status: Option<SealedSaveStatus>,
 }
 
 impl OutputReview {
@@ -94,7 +106,11 @@ impl OutputReview {
         ui: &mut egui::Ui,
         details: Option<&crate::ja1_attachment::EditorialDetails>,
         selected: Option<&SnapshotKey>,
+        save_status: Option<SealedSaveStatus>,
     ) -> Option<Action> {
+        if save_status.is_some() {
+            self.save_status = save_status;
+        }
         let version = selected;
         let view = ReviewView::new(details, selected);
         ui.separator();
@@ -147,6 +163,9 @@ impl OutputReview {
         }
 
         show_receipt(ui, view.receipt);
+        if let Some(save) = self.show_save(ui, view.sealed) {
+            control = Some(save);
+        }
 
         if let Some(version) = version {
             if self
@@ -193,6 +212,38 @@ impl OutputReview {
         control.map(|control| review_action(control, selected))
     }
 
+    /// JA-1 S6 C2: the save action for a sealed cut, named by its own
+    /// label, and the status line of a running or finished save.
+    fn show_save(
+        &self,
+        ui: &mut egui::Ui,
+        sealed: Option<&ReviewReceipt>,
+    ) -> Option<ReviewControl> {
+        let mut control = None;
+        if let Some(receipt) = sealed
+            && ui.button(save_action_label(&receipt.outcome)).clicked()
+            && let Some(folder) = rfd::FileDialog::new().pick_folder()
+        {
+            control = Some(save_control(receipt, folder));
+        }
+        match &self.save_status {
+            Some(SealedSaveStatus::Saving { name }) => {
+                ui.label(format!("Saving {name}…"));
+                if ui.button("Stop saving").clicked() {
+                    control = Some(ReviewControl::StopSave);
+                }
+            }
+            Some(SealedSaveStatus::Saved { path }) => {
+                ui.label(format!("Saved to {}", path.display()));
+            }
+            Some(SealedSaveStatus::Failed { reason }) => {
+                ui.label(format!("Save failed: {reason}"));
+            }
+            None => {}
+        }
+        control
+    }
+
     fn annotation_fields(&self) -> Result<ReviewAnnotationFields, serde_json::Error> {
         Ok(ReviewAnnotationFields {
             sourced_elements: serde_json::from_str(&self.sourced_elements)?,
@@ -206,6 +257,16 @@ fn json_array<T: serde::Serialize>(value: Option<&Vec<T>>) -> String {
     value
         .and_then(|value| serde_json::to_string(value).ok())
         .unwrap_or_else(|| "[]".into())
+}
+
+/// The save of exactly the receipt Studio shows.
+fn save_control(receipt: &ReviewReceipt, folder: std::path::PathBuf) -> ReviewControl {
+    ReviewControl::SaveSealed {
+        snapshot: receipt.key.snapshot.clone(),
+        coverage: receipt.key.profile,
+        key_sha256: receipt.key_sha256.clone(),
+        folder,
+    }
 }
 
 fn review_action(control: ReviewControl, selected: Option<&SnapshotKey>) -> Action {
@@ -238,40 +299,19 @@ fn receipt_lines(
     if selected != Some(sealed) {
         return None;
     }
-    Some(match outcome {
-        SealedReviewOutcome::Delivered => ("Delivered", Vec::new()),
-        SealedReviewOutcome::ReviewedFactsNotChecked { exceptions } => (
-            "Reviewed, facts not checked",
-            exceptions.iter().map(describe).collect(),
-        ),
-    })
-}
-
-fn describe(exception: &DeliveryException) -> String {
-    match exception {
-        DeliveryException::Element { element, reason } => {
-            let reason = match reason {
-                EligibilityReason::UnknownText(_) => "its text could not be read",
-                EligibilityReason::EmptyText => "it has no text",
-                EligibilityReason::CaptionSpeechNotDetermined => "its speech was not determined",
-                EligibilityReason::CaptionWordsDisagree => "its words differ from the speech",
-                EligibilityReason::CaptionWordClipped => "a caption word is clipped",
-                EligibilityReason::SourcedText => "it is sourced",
-                EligibilityReason::NumericCharacter => "it contains a number",
-                EligibilityReason::NumericTextUncomparable => "its numbers could not be compared",
-                EligibilityReason::CaptionTextUncomparable => "its text could not be compared",
-            };
-            format!("Clip {}: {reason}", element.0)
+    let not_checked = match outcome {
+        SealedReviewOutcome::Delivered => Vec::new(),
+        SealedReviewOutcome::ReviewedFactsNotChecked { exceptions } => {
+            exceptions.iter().map(describe_exception).collect()
         }
-        DeliveryException::OverlayInventoryNotDetermined(kind) => {
-            format!("The {kind:?} overlays could not be listed")
-        }
-    }
+    };
+    Some((outcome_label(outcome), not_checked))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kinewright_core::output_review::{DeliveryException, EligibilityReason};
     use kinewright_project::bundle_records::{HeadId, ObjectRef, ProjectId, RecordKind};
     use kinewright_project::studio_records::VersionId;
 
