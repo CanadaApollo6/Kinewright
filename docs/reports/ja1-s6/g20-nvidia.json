@@ -1,0 +1,451 @@
+{
+ "schema_version": 1,
+ "label": "nvidia",
+ "lane": "nvidia",
+ "runs_per_raster": 5,
+ "comment_delay_mutation": false,
+ "debug_assertions": true,
+ "identity": {
+  "commit": "fa27abdf75eb44b8f85928757e380c7cd0c7651b",
+  "worktree_clean": false,
+  "binary": "g20-baseline.bin",
+  "binary_sha256": "ace1141cbc2debb025ba3bc358af1e7afa872dcd35ade51bdf86fe215f5ca836",
+  "helpers_sha256": {
+   "kinewright-media-helper": "777f64348246c7788d5a3180048f5a6f31d5a0e0eba5b783856ccf5ad1de77ee",
+   "kinewright-media-supervisor": "9ee5a712a32a9d32ae81d2457a8b6d428008f0890aba3a15992193393d95c0b3"
+  },
+  "machine": {
+   "platform": "Linux-7.2.15-2-omarchy-x86_64-with-glibc2.44",
+   "cpu": "13th Gen Intel(R) Core(TM) i5-13600K",
+   "cpu_count": 20,
+   "mem_total_kib": 65563512,
+   "gpu": [
+    "NVIDIA GeForce RTX 3090",
+    "615.78.08"
+   ]
+  }
+ },
+ "niceness": 19,
+ "wall_seconds": 252.7,
+ "load_start": {
+  "time": 1795389560.1521003,
+  "loadavg": [
+   "1.61",
+   "2.37",
+   "2.89"
+  ],
+  "top5_cpu": [
+   {
+    "pid": 611052,
+    "comm": "claude",
+    "cpu_percent_one_core": 18.0
+   },
+   {
+    "pid": 317305,
+    "comm": "t3code",
+    "cpu_percent_one_core": 17.0
+   },
+   {
+    "pid": 3571057,
+    "comm": "t3code",
+    "cpu_percent_one_core": 5.0
+   },
+   {
+    "pid": 27106,
+    "comm": "slack",
+    "cpu_percent_one_core": 1.0
+   },
+   {
+    "pid": 396919,
+    "comm": "claude",
+    "cpu_percent_one_core": 1.0
+   }
+  ],
+  "gpu": {
+   "name": "NVIDIA GeForce RTX 3090",
+   "pstate": "P8",
+   "clocks_sm_mhz": "210",
+   "clocks_mem_mhz": "405",
+   "memory_used_mib": "5412",
+   "utilization_percent": "0"
+  }
+ },
+ "load_end": {
+  "time": 1795389813.8922875,
+  "loadavg": [
+   "1.72",
+   "1.94",
+   "2.58"
+  ],
+  "top5_cpu": [
+   {
+    "pid": 752917,
+    "comm": "python3",
+    "cpu_percent_one_core": 2.0
+   },
+   {
+    "pid": 3571057,
+    "comm": "t3code",
+    "cpu_percent_one_core": 1.0
+   },
+   {
+    "pid": 1,
+    "comm": "systemd",
+    "cpu_percent_one_core": 0.0
+   },
+   {
+    "pid": 2,
+    "comm": "kthreadd",
+    "cpu_percent_one_core": 0.0
+   },
+   {
+    "pid": 3,
+    "comm": "pool_workqueue_release",
+    "cpu_percent_one_core": 0.0
+   }
+  ],
+  "gpu": {
+   "name": "NVIDIA GeForce RTX 3090",
+   "pstate": "P8",
+   "clocks_sm_mhz": "210",
+   "clocks_mem_mhz": "405",
+   "memory_used_mib": "5411",
+   "utilization_percent": "0"
+  }
+ },
+ "timings": {
+  "workflows": 10,
+  "phases_ms": {
+   "default_delivery": {
+    "check": {
+     "n": 5,
+     "p50": 9013.616472000002,
+     "p95": 9163.788297,
+     "max": 9163.788297
+    },
+    "detach": {
+     "n": 5,
+     "p50": 8.036551,
+     "p95": 9.661954999999999,
+     "max": 9.661954999999999
+    },
+    "encode": {
+     "n": 5,
+     "p50": 20693.895664,
+     "p95": 21018.484394000003,
+     "max": 21018.484394000003
+    },
+    "exit": {
+     "n": 5,
+     "p50": 21.026531000000002,
+     "p95": 21.042336,
+     "max": 21.042336
+    },
+    "fixture": {
+     "n": 5,
+     "p50": 1358.383911,
+     "p95": 1368.43221,
+     "max": 1368.43221
+    },
+    "list_versions_after_reopen": {
+     "n": 5,
+     "p50": 6.531666,
+     "p95": 7.736168,
+     "max": 7.736168
+    },
+    "list_versions_warm": {
+     "n": 5,
+     "p50": 7.598655,
+     "p95": 9.218317,
+     "max": 9.218317
+    },
+    "notify": {
+     "n": 5,
+     "p50": 1.0570950000000001,
+     "p95": 2.107523,
+     "max": 2.107523
+    },
+    "queue": {
+     "n": 5,
+     "p50": 153.092523,
+     "p95": 160.252484,
+     "max": 160.252484
+    },
+    "reopen": {
+     "n": 5,
+     "p50": 474.136969,
+     "p95": 559.2235850000001,
+     "max": 559.2235850000001
+    },
+    "save": {
+     "n": 5,
+     "p50": 46.552047,
+     "p95": 53.071473,
+     "max": 53.071473
+    },
+    "save_request": {
+     "n": 5,
+     "p50": 9.250664,
+     "p95": 10.657032000000001,
+     "max": 10.657032000000001
+    },
+    "seal": {
+     "n": 5,
+     "p50": 131.44207999999998,
+     "p95": 132.10317999999998,
+     "max": 132.10317999999998
+    },
+    "save_throughput_mb_per_s": {
+     "n": 5,
+     "p50": 115.19860770032304,
+     "p95": 120.24634539168922,
+     "max": 120.24634539168922
+    },
+    "saved_bytes": {
+     "n": 5,
+     "p50": 5362731,
+     "p95": 5362731,
+     "max": 5362731
+    },
+    "outcomes": [
+     "Delivered"
+    ]
+   },
+   "source_raster": {
+    "check": {
+     "n": 5,
+     "p50": 1233.6386029999999,
+     "p95": 1303.796117,
+     "max": 1303.796117
+    },
+    "detach": {
+     "n": 5,
+     "p50": 9.218287,
+     "p95": 9.506945,
+     "max": 9.506945
+    },
+    "encode": {
+     "n": 5,
+     "p50": 878.1587119999999,
+     "p95": 956.0684339999999,
+     "max": 956.0684339999999
+    },
+    "exit": {
+     "n": 5,
+     "p50": 21.04392,
+     "p95": 22.046697,
+     "max": 22.046697
+    },
+    "fixture": {
+     "n": 5,
+     "p50": 1316.008016,
+     "p95": 1344.401687,
+     "max": 1344.401687
+    },
+    "list_versions_after_reopen": {
+     "n": 5,
+     "p50": 7.097785,
+     "p95": 8.008158,
+     "max": 8.008158
+    },
+    "list_versions_warm": {
+     "n": 5,
+     "p50": 9.066789,
+     "p95": 9.408055000000001,
+     "max": 9.408055000000001
+    },
+    "notify": {
+     "n": 5,
+     "p50": 1.057388,
+     "p95": 2.107249,
+     "max": 2.107249
+    },
+    "queue": {
+     "n": 5,
+     "p50": 140.356322,
+     "p95": 155.276117,
+     "max": 155.276117
+    },
+    "reopen": {
+     "n": 5,
+     "p50": 467.78390800000005,
+     "p95": 480.65797799999996,
+     "max": 480.65797799999996
+    },
+    "save": {
+     "n": 5,
+     "p50": 43.300088,
+     "p95": 47.436924999999995,
+     "max": 47.436924999999995
+    },
+    "save_request": {
+     "n": 5,
+     "p50": 7.957327,
+     "p95": 8.980161,
+     "max": 8.980161
+    },
+    "seal": {
+     "n": 5,
+     "p50": 129.514389,
+     "p95": 138.362026,
+     "max": 138.362026
+    },
+    "save_throughput_mb_per_s": {
+     "n": 5,
+     "p50": 8.299174819229004,
+     "p95": 8.726445723792686,
+     "max": 8.726445723792686
+    },
+    "saved_bytes": {
+     "n": 5,
+     "p50": 359355,
+     "p95": 359355,
+     "max": 359355
+    },
+    "outcomes": [
+     "Delivered"
+    ]
+   }
+  },
+  "comment_round_trip_ms": {
+   "n": 200,
+   "p50": 170.706954,
+   "p95": 198.662928,
+   "max": 288.953491
+  },
+  "comment_save_request_ms": {
+   "n": 200,
+   "p50": 140.734509,
+   "p95": 149.424678,
+   "max": 174.54065899999998
+  }
+ },
+ "memory": {
+  "samples": 4473,
+  "interval_ms": 50.0,
+  "per_process_by_name": {
+   "g20-baseline.bin": {
+    "processes": 1,
+    "peak_rss_kib": 1488472,
+    "peak_vmhwm_kib": 1488912,
+    "steady_rss_median_kib": 1102936,
+    "max_threads": 133
+   },
+   "ffmpeg-testgen": {
+    "processes": 10,
+    "peak_rss_kib": 25880,
+    "peak_vmhwm_kib": 25880,
+    "steady_rss_median_kib": 25138.0,
+    "max_threads": 43
+   },
+   "kinewright-media-helper": {
+    "processes": 20,
+    "peak_rss_kib": 6972,
+    "peak_vmhwm_kib": 6972,
+    "steady_rss_median_kib": 6918.0,
+    "max_threads": 1
+   },
+   "kinewright-medi": {
+    "processes": 20,
+    "peak_rss_kib": 9500,
+    "peak_vmhwm_kib": 9764,
+    "steady_rss_median_kib": 9442.0,
+    "max_threads": 2
+   },
+   "kinewright-media-supervisor": {
+    "processes": 1,
+    "peak_rss_kib": 4468,
+    "peak_vmhwm_kib": 4468,
+    "steady_rss_median_kib": 4468,
+    "max_threads": 2
+   },
+   "dbus-daemon": {
+    "processes": 10,
+    "peak_rss_kib": 4552,
+    "peak_vmhwm_kib": 4552,
+    "steady_rss_median_kib": 4322.0,
+    "max_threads": 1
+   }
+  },
+  "simultaneous_aggregate_rss_kib": {
+   "sampled_peak": 1497220,
+   "median": 1111948,
+   "note": "maximum over samples of the sum of RSS of the processes alive in that sample"
+  },
+  "vram": {
+   "samples": 462,
+   "tree_compute_apps_peak_mib": 213,
+   "tree_ever_listed": true,
+   "device_used_mib_min": 5412,
+   "device_used_mib_max": 5643,
+   "note": "per-process VRAM from nvidia-smi --query-compute-apps; device_used is device-wide (every process on the GPU), an annotation only"
+  },
+  "contamination": [
+   {
+    "t": 10.045881733996794,
+    "processes": [
+     {
+      "pid": 3571057,
+      "comm": "t3code",
+      "cpu_percent_one_core": 35.0
+     },
+     {
+      "pid": 317305,
+      "comm": "t3code",
+      "cpu_percent_one_core": 34.0
+     }
+    ]
+   },
+   {
+    "t": 60.27832123701228,
+    "processes": [
+     {
+      "pid": 757267,
+      "comm": "omarchy-agent-u",
+      "cpu_percent_one_core": 101.0
+     }
+    ]
+   },
+   {
+    "t": 120.51429215696407,
+    "processes": [
+     {
+      "pid": 3571057,
+      "comm": "t3code",
+      "cpu_percent_one_core": 33.0
+     },
+     {
+      "pid": 317305,
+      "comm": "t3code",
+      "cpu_percent_one_core": 31.0
+     }
+    ]
+   },
+   {
+    "t": 225.95923316397239,
+    "processes": [
+     {
+      "pid": 771512,
+      "comm": "omarchy-agent-u",
+      "cpu_percent_one_core": 99.0
+     }
+    ]
+   },
+   {
+    "t": 241.0148810870014,
+    "processes": [
+     {
+      "pid": 317305,
+      "comm": "t3code",
+      "cpu_percent_one_core": 87.0
+     },
+     {
+      "pid": 3571057,
+      "comm": "t3code",
+      "cpu_percent_one_core": 29.0
+     }
+    ]
+   }
+  ]
+ }
+}

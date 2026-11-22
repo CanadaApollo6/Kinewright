@@ -1,0 +1,416 @@
+{
+ "schema_version": 1,
+ "label": "lavapipe",
+ "lane": "lavapipe",
+ "runs_per_raster": 5,
+ "comment_delay_mutation": false,
+ "debug_assertions": true,
+ "identity": {
+  "commit": "fa27abdf75eb44b8f85928757e380c7cd0c7651b",
+  "worktree_clean": true,
+  "binary": "g20-baseline.bin",
+  "binary_sha256": "ace1141cbc2debb025ba3bc358af1e7afa872dcd35ade51bdf86fe215f5ca836",
+  "helpers_sha256": {
+   "kinewright-media-helper": "777f64348246c7788d5a3180048f5a6f31d5a0e0eba5b783856ccf5ad1de77ee",
+   "kinewright-media-supervisor": "9ee5a712a32a9d32ae81d2457a8b6d428008f0890aba3a15992193393d95c0b3"
+  },
+  "machine": {
+   "platform": "Linux-7.2.15-2-omarchy-x86_64-with-glibc2.44",
+   "cpu": "13th Gen Intel(R) Core(TM) i5-13600K",
+   "cpu_count": 20,
+   "mem_total_kib": 65563512,
+   "gpu": [
+    "NVIDIA GeForce RTX 3090",
+    "615.78.08"
+   ]
+  }
+ },
+ "niceness": 19,
+ "wall_seconds": 249.9,
+ "load_start": {
+  "time": 1795389308.0233166,
+  "loadavg": [
+   "1.28",
+   "3.09",
+   "3.23"
+  ],
+  "top5_cpu": [
+   {
+    "pid": 1069,
+    "comm": "systemd-oomd",
+    "cpu_percent_one_core": 1.0
+   },
+   {
+    "pid": 159928,
+    "comm": "quickshell",
+    "cpu_percent_one_core": 1.0
+   },
+   {
+    "pid": 317305,
+    "comm": "t3code",
+    "cpu_percent_one_core": 1.0
+   },
+   {
+    "pid": 733230,
+    "comm": "bash",
+    "cpu_percent_one_core": 1.0
+   },
+   {
+    "pid": 733235,
+    "comm": "bash",
+    "cpu_percent_one_core": 1.0
+   }
+  ],
+  "gpu": {
+   "name": "NVIDIA GeForce RTX 3090",
+   "pstate": "P8",
+   "clocks_sm_mhz": "210",
+   "clocks_mem_mhz": "405",
+   "memory_used_mib": "5412",
+   "utilization_percent": "0"
+  }
+ },
+ "load_end": {
+  "time": 1795389558.9556382,
+  "loadavg": [
+   "1.66",
+   "2.39",
+   "2.90"
+  ],
+  "top5_cpu": [
+   {
+    "pid": 159928,
+    "comm": "quickshell",
+    "cpu_percent_one_core": 1.0
+   },
+   {
+    "pid": 733818,
+    "comm": "python3",
+    "cpu_percent_one_core": 1.0
+   },
+   {
+    "pid": 3571057,
+    "comm": "t3code",
+    "cpu_percent_one_core": 1.0
+   },
+   {
+    "pid": 1,
+    "comm": "systemd",
+    "cpu_percent_one_core": 0.0
+   },
+   {
+    "pid": 2,
+    "comm": "kthreadd",
+    "cpu_percent_one_core": 0.0
+   }
+  ],
+  "gpu": {
+   "name": "NVIDIA GeForce RTX 3090",
+   "pstate": "P8",
+   "clocks_sm_mhz": "210",
+   "clocks_mem_mhz": "405",
+   "memory_used_mib": "5412",
+   "utilization_percent": "0"
+  }
+ },
+ "timings": {
+  "workflows": 10,
+  "phases_ms": {
+   "default_delivery": {
+    "check": {
+     "n": 5,
+     "p50": 8843.881888,
+     "p95": 8940.408800000001,
+     "max": 8940.408800000001
+    },
+    "detach": {
+     "n": 5,
+     "p50": 8.489157,
+     "p95": 8.845501,
+     "max": 8.845501
+    },
+    "encode": {
+     "n": 5,
+     "p50": 20102.128619,
+     "p95": 20788.695826000003,
+     "max": 20788.695826000003
+    },
+    "exit": {
+     "n": 5,
+     "p50": 21.034996,
+     "p95": 22.070671,
+     "max": 22.070671
+    },
+    "fixture": {
+     "n": 5,
+     "p50": 1341.355431,
+     "p95": 1382.790694,
+     "max": 1382.790694
+    },
+    "list_versions_after_reopen": {
+     "n": 5,
+     "p50": 7.897295000000001,
+     "p95": 8.116198,
+     "max": 8.116198
+    },
+    "list_versions_warm": {
+     "n": 5,
+     "p50": 7.375686,
+     "p95": 9.579904,
+     "max": 9.579904
+    },
+    "notify": {
+     "n": 5,
+     "p50": 1.055103,
+     "p95": 2.107071,
+     "max": 2.107071
+    },
+    "queue": {
+     "n": 5,
+     "p50": 149.62465,
+     "p95": 171.683798,
+     "max": 171.683798
+    },
+    "reopen": {
+     "n": 5,
+     "p50": 476.241433,
+     "p95": 487.827566,
+     "max": 487.827566
+    },
+    "save": {
+     "n": 5,
+     "p50": 52.887345,
+     "p95": 58.951399,
+     "max": 58.951399
+    },
+    "save_request": {
+     "n": 5,
+     "p50": 10.842495000000001,
+     "p95": 11.718076,
+     "max": 11.718076
+    },
+    "seal": {
+     "n": 5,
+     "p50": 129.886557,
+     "p95": 140.85207599999998,
+     "max": 140.85207599999998
+    },
+    "save_throughput_mb_per_s": {
+     "n": 5,
+     "p50": 101.44328477823947,
+     "p95": 108.4146123074472,
+     "max": 108.4146123074472
+    },
+    "saved_bytes": {
+     "n": 5,
+     "p50": 5365066,
+     "p95": 5365066,
+     "max": 5365066
+    },
+    "outcomes": [
+     "Delivered"
+    ]
+   },
+   "source_raster": {
+    "check": {
+     "n": 5,
+     "p50": 1251.065465,
+     "p95": 1296.149067,
+     "max": 1296.149067
+    },
+    "detach": {
+     "n": 5,
+     "p50": 8.591612,
+     "p95": 9.591901,
+     "max": 9.591901
+    },
+    "encode": {
+     "n": 5,
+     "p50": 898.769626,
+     "p95": 914.392375,
+     "max": 914.392375
+    },
+    "exit": {
+     "n": 5,
+     "p50": 21.002439000000003,
+     "p95": 21.042441,
+     "max": 21.042441
+    },
+    "fixture": {
+     "n": 5,
+     "p50": 1355.875105,
+     "p95": 1363.216333,
+     "max": 1363.216333
+    },
+    "list_versions_after_reopen": {
+     "n": 5,
+     "p50": 8.141614,
+     "p95": 8.366327,
+     "max": 8.366327
+    },
+    "list_versions_warm": {
+     "n": 5,
+     "p50": 7.850879999999999,
+     "p95": 9.524089,
+     "max": 9.524089
+    },
+    "notify": {
+     "n": 5,
+     "p50": 1.057687,
+     "p95": 2.1072930000000003,
+     "max": 2.1072930000000003
+    },
+    "queue": {
+     "n": 5,
+     "p50": 148.175015,
+     "p95": 156.105878,
+     "max": 156.105878
+    },
+    "reopen": {
+     "n": 5,
+     "p50": 474.470077,
+     "p95": 481.21293199999997,
+     "max": 481.21293199999997
+    },
+    "save": {
+     "n": 5,
+     "p50": 43.201856,
+     "p95": 44.973476,
+     "max": 44.973476
+    },
+    "save_request": {
+     "n": 5,
+     "p50": 8.333471,
+     "p95": 9.394602,
+     "max": 9.394602
+    },
+    "seal": {
+     "n": 5,
+     "p50": 133.810595,
+     "p95": 135.811348,
+     "max": 135.811348
+    },
+    "save_throughput_mb_per_s": {
+     "n": 5,
+     "p50": 8.307698632206913,
+     "p95": 8.8093917165926,
+     "max": 8.8093917165926
+    },
+    "saved_bytes": {
+     "n": 5,
+     "p50": 358908,
+     "p95": 358908,
+     "max": 358908
+    },
+    "outcomes": [
+     "Delivered"
+    ]
+   }
+  },
+  "comment_round_trip_ms": {
+   "n": 200,
+   "p50": 174.057466,
+   "p95": 191.090755,
+   "max": 291.15034699999995
+  },
+  "comment_save_request_ms": {
+   "n": 200,
+   "p50": 142.84381299999998,
+   "p95": 150.073445,
+   "max": 160.908941
+  }
+ },
+ "memory": {
+  "samples": 4413,
+  "interval_ms": 50.0,
+  "per_process_by_name": {
+   "g20-baseline.bin": {
+    "processes": 1,
+    "peak_rss_kib": 1378264,
+    "peak_vmhwm_kib": 1378264,
+    "steady_rss_median_kib": 975364,
+    "max_threads": 170
+   },
+   "ffmpeg-testgen": {
+    "processes": 10,
+    "peak_rss_kib": 26148,
+    "peak_vmhwm_kib": 26148,
+    "steady_rss_median_kib": 25454.0,
+    "max_threads": 43
+   },
+   "kinewright-media-helper": {
+    "processes": 20,
+    "peak_rss_kib": 6996,
+    "peak_vmhwm_kib": 6996,
+    "steady_rss_median_kib": 6906.0,
+    "max_threads": 1
+   },
+   "kinewright-medi": {
+    "processes": 20,
+    "peak_rss_kib": 9444,
+    "peak_vmhwm_kib": 9728,
+    "steady_rss_median_kib": 9406.0,
+    "max_threads": 2
+   },
+   "kinewright-media-supervisor": {
+    "processes": 1,
+    "peak_rss_kib": 4608,
+    "peak_vmhwm_kib": 4608,
+    "steady_rss_median_kib": 4608,
+    "max_threads": 2
+   },
+   "dbus-daemon": {
+    "processes": 10,
+    "peak_rss_kib": 4544,
+    "peak_vmhwm_kib": 4544,
+    "steady_rss_median_kib": 4330.0,
+    "max_threads": 1
+   }
+  },
+  "simultaneous_aggregate_rss_kib": {
+   "sampled_peak": 1387128,
+   "median": 985420,
+   "note": "maximum over samples of the sum of RSS of the processes alive in that sample"
+  },
+  "vram": {
+   "samples": 460,
+   "tree_compute_apps_peak_mib": 0,
+   "tree_ever_listed": false,
+   "device_used_mib_min": 5412,
+   "device_used_mib_max": 5425,
+   "note": "per-process VRAM from nvidia-smi --query-compute-apps; device_used is device-wide (every process on the GPU), an annotation only"
+  },
+  "contamination": [
+   {
+    "t": 95.42341062397463,
+    "processes": [
+     {
+      "pid": 3571057,
+      "comm": "t3code",
+      "cpu_percent_one_core": 29.0
+     }
+    ]
+   },
+   {
+    "t": 160.70048207096988,
+    "processes": [
+     {
+      "pid": 3571057,
+      "comm": "t3code",
+      "cpu_percent_one_core": 32.0
+     }
+    ]
+   },
+   {
+    "t": 180.7946561059798,
+    "processes": [
+     {
+      "pid": 3571057,
+      "comm": "t3code",
+      "cpu_percent_one_core": 33.0
+     }
+    ]
+   }
+  ]
+ }
+}

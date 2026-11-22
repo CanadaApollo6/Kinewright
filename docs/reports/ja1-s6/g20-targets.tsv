@@ -1,0 +1,24 @@
+target	lavapipe	nvidia	result	note
+durable comment <=250 ms (p95, host round trip)	191.1 ms	198.7 ms	PASS	n=200 per lane; mutation lane 504.7 ms (MISS, intended)
+UI p95 callback <=16.7 ms	-	-	OPEN	existing instrumentation runs in the GUI; no GUI driver (R6)
+gesture to presented frame p95 <=100 ms warm	-	-	OPEN	needs UI driver
+version presentation p95 <=500 ms warm / 2 s cold	-	-	OPEN	presentation needs GUI; host ListVersions p95 9.6 / 9.4 ms (REPORT)
+Pause/Stop UI <=100 ms	-	-	OPEN	needs GUI
+host control metadata <=64 MiB	-	-	OPEN	no counter exposed
+command ingress 64 x 256 KiB	-	-	OPEN	admission bound not exercised
+driver/event ingress	-	-	OPEN	no provider run
+GUI event cache 8 MiB / 200 rows	-	-	OPEN	needs GUI
+histories 32 / 128 MiB	-	-	OPEN	not exposed; transient clones not counted
+comments 2000 / 16 KiB / 512 points	-	-	OPEN	cap not approached
+records 100 versions / metadata <=512 MiB	-	-	OPEN	cap not approached
+recovery roots (growth)	-	-	OPEN	needs repeated manual saves (UI)
+verified bytes per metadata commit	-	-	OPEN	no counter exposed
+run records	-	-	OPEN	not reached
+guardian RSS	-	-	OPEN	no guardian process in the fixture
+review imagery 12 frames <=8 MiB	-	-	OPEN	not recorded by the harness
+playback/background	-	-	OPEN	no player in a host-only run
+Windows lanes	-	-	OPEN	Linux only (R7)
+peak simultaneous RSS (tree)	1355 MiB	1462 MiB	REPORT	sampled per-sample sum, 50 ms
+VRAM (tree, compute-apps)	0 MiB	213 MiB	REPORT	read-only nvidia-smi poll
+save throughput default delivery (p50)	101 MB/s	115 MB/s	REPORT	5.37 MB saves; fsync-dominated
+reopen (p50 / p95)	476 / 488 ms	474 / 559 ms	REPORT	host-only cold open of the bundle

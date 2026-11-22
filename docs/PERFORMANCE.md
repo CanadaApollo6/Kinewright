@@ -90,6 +90,23 @@ cycles, long undo histories, many distinct source files, and export throughput.
 Measure Windows independently. Investigate source verification concurrency and
 thumbnail LRU updates only with a workload that exposes their actual cost.
 
+## JA-1 S6 G20 host measurement
+
+`docs/reports/ja1-s6/g20.md` measures the JA-1 §12 targets that a scripted host
+workflow and a `/proc` sampler can reach. The workflow is queue, encode,
+check, seal, save, comments, detach, exit and reopen, with a scripted
+Reviewer. It ran on lavapipe and the RTX 3090, through `scripts/measure-g20.py`
+and the `g20-measure` test.
+
+- **Durable comment.** It passes the 250 ms target: the host round-trip p95
+  was 191 ms on lavapipe and 199 ms on the 3090. A 300 ms delayed-write
+  mutation raised it to 505 ms.
+- **GUI targets.** Every GUI-side target stays OPEN: callbacks, gesture to
+  frame, version presentation and Pause/Stop UI. So do the bounded-storage
+  counters, guardian and provider RSS, and the Windows lanes.
+- **Memory.** The RSS and VRAM figures cover a host running inside the test
+  process, with no GUI. They are not whole-Studio figures.
+
 
 ## PF1 S4c qualified evidence (R91/R92/R93)
 
