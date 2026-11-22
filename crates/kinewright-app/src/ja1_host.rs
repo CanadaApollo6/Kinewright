@@ -1061,10 +1061,7 @@ impl HostAttachment {
                 .join()
                 .map_err(|_| BundleError::HistoryChanged)?
                 .map_err(host_error)?;
-            if reply.error.is_none() && reply.detached.is_some() {
-                self.continuation_detached = true;
-                self.heartbeat = None;
-            }
+            self.accept_hook_reply(&reply);
             self.hook_reply = Some(reply.clone());
             return Ok(Some(reply));
         }
@@ -1154,6 +1151,16 @@ impl HostAttachment {
             .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some()))
     }
 
+    fn accept_hook_reply(&mut self, reply: &HostReply) {
+        if reply.error.is_none() && reply.detached.is_some() {
+            self.continuation_detached = true;
+            self.heartbeat = None;
+        } else if reply.error.is_some() {
+            // JA-1 S6 C3: a refused detach carries the host's current work,
+            // so the next close shuts down once none is retained.
+            self.status = reply.status.clone();
+        }
+    }
     pub fn request_close(&mut self) -> bool {
         if self.continuation_detached {
             return true;
@@ -1161,7 +1168,7 @@ impl HostAttachment {
         if self.shutdown_accepted {
             return true;
         }
-        if self.status.continuation_runs > 0 {
+        if retains_work(&self.status) {
             if self.hook_inflight.is_none()
                 && self
                     .hook_reply
@@ -1252,7 +1259,7 @@ impl HostAttachment {
         self.hook_reply.take()
     }
     pub(super) fn continuation_pending(&self) -> bool {
-        self.status.continuation_runs > 0 && !self.continuation_detached
+        retains_work(&self.status) && !self.continuation_detached
     }
     #[allow(
         dead_code,
@@ -1516,6 +1523,16 @@ pub(crate) fn person_data_dir() -> Result<PathBuf, BundleError> {
     kinewright_media::default_data_dir().map_err(|error| BundleError::Identity(error.to_string()))
 }
 
+/// JA-1 S6 C3: closing the window detaches instead of shutting down while
+/// the host retains a continuation run, an active review or a running save.
+fn retains_work(status: &HostStatus) -> bool {
+    status.continuation_runs > 0
+        || status.review_active
+        || matches!(
+            status.sealed_save,
+            Some(kinewright_project::review_job::delivery::SealedSaveStatus::Saving { .. })
+        )
+}
 #[allow(
     clippy::needless_pass_by_value,
     reason = "map_err consumes the owned transport error at this boundary"
@@ -1543,4 +1560,41 @@ pub(super) fn executable() -> PathBuf {
         .and_then(|path| path.parent().map(|parent| parent.join(name)))
         .filter(|path| path.is_file())
         .unwrap_or_else(|| PathBuf::from(name))
+}
+
+#[cfg(test)]
+mod close_rule_tests {
+    use super::{HostStatus, retains_work};
+    use kinewright_project::review_job::delivery::SealedSaveStatus;
+
+    // JA-1 S6 C3: a run, an active review or a running save keeps the host;
+    // nothing else does, and a finished save never does.
+    #[test]
+    fn s6_c3_close_detaches_only_for_retained_work() {
+        assert!(!retains_work(&HostStatus::default()));
+        let run = HostStatus {
+            continuation_runs: 1,
+            ..HostStatus::default()
+        };
+        assert!(retains_work(&run));
+        let review = HostStatus {
+            review_active: true,
+            ..HostStatus::default()
+        };
+        assert!(retains_work(&review));
+        let saving = HostStatus {
+            sealed_save: Some(SealedSaveStatus::Saving {
+                name: "cut.mp4".into(),
+            }),
+            ..HostStatus::default()
+        };
+        assert!(retains_work(&saving));
+        let saved = HostStatus {
+            sealed_save: Some(SealedSaveStatus::Saved {
+                path: "cut.mp4".into(),
+            }),
+            ..HostStatus::default()
+        };
+        assert!(!retains_work(&saved));
+    }
 }
