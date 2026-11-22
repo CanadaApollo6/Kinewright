@@ -487,6 +487,15 @@ impl ProjectBundle {
         self.review_status()
     }
 
+    /// A settle would write first: the root shows a job its owner may still
+    /// roll back. A failed object query counts as unsettled.
+    #[must_use]
+    pub fn review_root_unsettled(&self) -> bool {
+        self.unsettled
+            || self.pending_metadata.is_some()
+            || self.store.has_unsettled_objects().unwrap_or(true)
+    }
+
     pub fn review_status(&self) -> Result<Option<ReviewStatus>, BundleError> {
         if let Some(job) = self.review_job()? {
             return Ok(Some(ReviewStatus {

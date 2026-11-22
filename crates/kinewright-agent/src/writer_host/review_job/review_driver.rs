@@ -447,6 +447,9 @@ pub(in crate::writer_host) fn seal_checked_review(
 ) -> Result<SealResult, HostError> {
     let prepared = {
         let mut owner = lock(host)?;
+        // The gate comes first: a replay settles the root, and a frozen or
+        // elsewhere-owned root is settled only by its owner.
+        owner.review_authority(token)?;
         if let Some(sealed) = owner
             .owner_mut()?
             .review_source_bundle_mut(&token.project)?
@@ -477,7 +480,8 @@ pub(in crate::writer_host) fn seal_checked_review(
     cancelled(cancel)?;
     let mut owner = lock(host)?;
     // A seal that raced this one, a lost reply's or the driver's, already
-    // published the receipt: replay it.
+    // published the receipt: replay it, behind the same gate.
+    owner.review_authority(token)?;
     if let Some(sealed) = owner
         .owner_mut()?
         .review_source_bundle_mut(&token.project)?

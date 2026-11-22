@@ -920,7 +920,11 @@ impl HostCommandOwner {
     }
 
     /// Status while frozen: a Stop waiting to persist, else the stored job.
+    /// An unsettled root shows no phase: its owner may still roll it back.
     fn frozen_review_status(&self) -> Result<Option<ReviewStatus>, HostError> {
+        if self.owner()?.review_bundle()?.review_root_unsettled() {
+            return Err(BundleError::Unsettled.into());
+        }
         if let Some(pending) = self
             .owner()?
             .project_id()
@@ -1014,6 +1018,18 @@ impl HostCommandOwner {
             // While frozen the phase is read without settling the root.
             let pending_owner = self.settlement_owned_elsewhere();
             let frozen = self.review_writes_frozen();
+            // While frozen an unsettled root is neither settled nor read, so
+            // no generation is armed from it.
+            if frozen
+                && !pending_owner
+                && self.owner().is_ok_and(|session| {
+                    session
+                        .review_source_bundle(&token.project)
+                        .is_ok_and(kinewright_project::bundle::ProjectBundle::review_root_unsettled)
+                })
+            {
+                return Err(refused(FROZEN));
+            }
             let phase = match self.owner_mut().map_err(drop).and_then(|session| {
                 if pending_owner {
                     return Err(());
