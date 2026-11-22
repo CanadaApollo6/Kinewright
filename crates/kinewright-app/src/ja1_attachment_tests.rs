@@ -4353,3 +4353,96 @@ fn te13_fix2_host_studio_hides_removed_task_branch() {
 }
 
 include!("ja1_te13_fix3_tests.rs");
+
+/// JA-1 S6 C3 fix 1 (GLM M1, Neon B1): a close inside the window before a
+/// heartbeat reports the review detaches; the review finishes in the host.
+#[cfg(target_os = "linux")]
+#[test]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn ja1_s6_c3_fix1_close_in_the_stale_status_window_detaches_a_running_review() {
+    use kinewright_agent::writer_host::SessionRoots;
+    use kinewright_project::review_job::{ReviewControl, ReviewPhase};
+    let mut fixture = crate::studio::tests::fixtures();
+    let key = fixture.contexts[0].snapshot.descriptor.key.clone();
+    fixture.contexts.clear();
+    let mut app = Ja1Attachment::new(fixture.owners.remove(0)).unwrap();
+    app.launch_host(
+        "s6c3-fix1-close".into(),
+        SessionRoots {
+            read: vec![fixture.root.root().into()],
+            write: vec![fixture.root.root().into()],
+        },
+    )
+    .unwrap();
+    let path = app.project_path().expect("S6C3F_SAVED_PROJECT");
+    let review = |app: &mut Ja1Attachment, control| {
+        app.studio_review(crate::studio_review::ReviewAction {
+            control,
+            version: None,
+        })
+    };
+    let queued = review(&mut app, ReviewControl::QueueDefault(key));
+    if let Err(error) = &queued {
+        assert!(app.close(), "baseline child reaped");
+        panic!("S6C3F_QUEUE: {error}");
+    }
+    // The queue reply's status lands at once, before any heartbeat.
+    assert!(
+        app.host.as_ref().unwrap().status.review_active,
+        "S6C3F_QUEUE_STATUS_AT_ONCE"
+    );
+    let token = app
+        .studio_review_ready
+        .take()
+        .and_then(|refresh| refresh.0)
+        .expect("S6C3F_QUEUED_STATUS")
+        .token;
+    review(&mut app, ReviewControl::Resume(token)).unwrap();
+    // The stale-status window: this view has not seen the review yet, so
+    // close asks for Shutdown. The host refuses; close detaches at once.
+    app.host.as_mut().unwrap().status.review_active = false;
+    assert!(!app.request_close(), "S6C3F_FIRST_CLOSE_WAITS");
+    assert!(
+        app.host.as_ref().unwrap().detach_requested(),
+        "S6C3F_REFUSED_SHUTDOWN_DETACHES"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !app.close() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "S6C3F_CLOSE_NEVER_DETACHED"
+        );
+        let _ = app.poll_host();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // The detached host encodes, finds no Reviewer and pauses, then exits.
+    let pool = kinewright_project::operation_history::HistoryPool::new(
+        kinewright_project::operation_history::PoolLimits::default(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    let reopened = loop {
+        match kinewright_project::editing_session::Ja1EditingSession::open(&path, &pool) {
+            Ok(session) => break session,
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(error) => panic!("S6C3F_DETACHED_HOST_NEVER_EXITED: {error}"),
+        }
+    };
+    let phase = reopened
+        .review_bundle()
+        .unwrap()
+        .review_job()
+        .unwrap()
+        .map(|job| job.phase.clone());
+    let Some(ReviewPhase::Paused { reason, .. }) = &phase else {
+        panic!("S6C3F_THE_REVIEW_RAN_ON: {phase:?}");
+    };
+    assert!(
+        reason.contains("No Reviewer is left"),
+        "S6C3F_PAUSE_REASON: {reason}"
+    );
+}

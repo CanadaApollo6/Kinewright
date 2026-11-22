@@ -999,12 +999,27 @@ fn s5_review_shutdown_joins_a_held_encode_before_reopen() {
     let (arrived, release, _) = s5_review_hold(&host, ReviewPoint::BeforeEncode);
     let token = s5_review_start(&client, &key);
     s5_review_until(|| arrived.load(Ordering::Acquire), "REVIEW_SHUTDOWN_HOLD");
+    // JA-1 S6 C3: the GUI's Shutdown never kills a running review.
+    let refused = client.request(HostCommand::Shutdown).unwrap();
+    assert_eq!(
+        refused.error.map(|error| error.code).as_deref(),
+        Some("review_retained"),
+        "REVIEW_SHUTDOWN_REFUSED"
+    );
+    // The host's own exit (a detached exit, the process going) still fences
+    // and joins the held worker before the project lock goes.
     std::thread::scope(|scope| {
-        let shutdown = scope.spawn(|| client.request(HostCommand::Shutdown).unwrap());
+        {
+            let owner = host.owner.upgrade().unwrap();
+            let mut owner = owner.lock().unwrap();
+            owner.begin_shutdown();
+            owner.lifecycle.request_detached_exit();
+        }
+        let shutdown = scope.spawn(|| host.wait_until_stopped());
         std::thread::sleep(Duration::from_millis(300));
         let waited = !shutdown.is_finished();
         release.store(true, Ordering::Release);
-        ok(shutdown.join().unwrap(), "REVIEW_SHUTDOWN");
+        shutdown.join().unwrap();
         assert!(waited, "REVIEW_SHUTDOWN_JOINS_THE_WORKER");
     });
     drop(client);

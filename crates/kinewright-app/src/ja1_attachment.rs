@@ -964,7 +964,7 @@ impl Ja1Attachment {
         review: crate::studio_review::ReviewAction,
     ) -> Result<(), BundleError> {
         let crate::studio_review::ReviewAction { control, version } = review;
-        let Some(host) = self.host.as_ref() else {
+        let Some(host) = self.host.as_mut() else {
             // Refresh with no host: show the stored review and say why
             // nothing is running.
             if matches!(
@@ -979,10 +979,16 @@ impl Ja1Attachment {
                 "Output review requires a saved project attached to the writer host.".into(),
             ));
         };
+        // JA-1 S6 C3: a heartbeat sent before this request carries a status
+        // from before it; settle it so it cannot land after this reply's.
+        host.settle_heartbeat();
         let reply = host
             .client
             .request(kinewright_agent::writer_host::HostCommand::Review(control))
             .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+        // A queued review or a started save retains work at once, so a close
+        // in the next frame detaches instead of asking for Shutdown.
+        host.accept_status(reply.status.clone());
         if let Some(error) = reply.error {
             return Err(BundleError::Corrupt(error.message));
         }

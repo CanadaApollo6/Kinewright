@@ -128,6 +128,27 @@ impl HostCommandOwner {
             })
     }
 
+    /// The tasks the effect pump would launch next: each lane's head effect
+    /// whose task can launch with context to spare. A task under a native
+    /// wait is listed too, as every native wait clears when it is due. The
+    /// pump and a detached host's exit check share this, so a run between
+    /// attempts (a result wake, a retry after `NotDispatched`, queued
+    /// steering, a readiness check in flight) is never taken for idle.
+    pub(crate) fn native_launch_candidates(
+        state: &crate::orchestration::orchestration_records::RunProjection,
+    ) -> impl Iterator<Item = &crate::orchestration::orchestration_records::TaskId> {
+        state
+            .effects
+            .iter()
+            .filter(|effect| {
+                crate::orchestration::outbox::next_effect(state, &effect.lane)
+                    .is_some_and(|next| next.id == effect.id)
+                    && Self::native_task_can_launch(state, &effect.task)
+                    && !Self::native_launch_context_full(state, &effect.task)
+            })
+            .map(|effect| &effect.task)
+    }
+
     pub(super) fn durable_run_accounting(
         &self,
         state: &crate::orchestration::orchestration_records::RunProjection,

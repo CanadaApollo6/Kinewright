@@ -167,7 +167,7 @@ impl HostCommandOwner {
     }
     /// An active review job or a running sealed save keeps the host alive.
     #[cfg(target_os = "linux")]
-    fn review_retained(&self) -> bool {
+    pub(super) fn review_retained(&self) -> bool {
         self.review_active().unwrap_or(true)
             || matches!(
                 self.review_runtime.sealed_save_status(),
@@ -175,10 +175,13 @@ impl HostCommandOwner {
             )
     }
     /// JA-1 S6 C3: a retained run still has work in flight: a live attempt,
-    /// a task whose first attempt has not launched yet, unsettled cleanup, a
-    /// provider wait or an edit awaiting application. A Pending run whose
-    /// attempts all retired and whose cleanup settled is durable; like a
-    /// Paused review it waits for the next open. A read error counts as work.
+    /// a task the effect pump would launch next (a first launch, a result
+    /// wake, a retry, queued steering, a readiness check), unsettled
+    /// cleanup, a provider wait or an edit awaiting application. A Pending
+    /// run with none of these (Paused or Interrupted, all attempts retired,
+    /// cleanup settled) is durable; like a Paused review it waits for the
+    /// next open. A read error counts as work. The Reviewer pause check
+    /// (`no_reviewer_can_start`) shares this predicate.
     pub(super) fn retained_run_working(&self) -> bool {
         use crate::orchestration::orchestration_records::{AttemptState, RunCleanup, RunOutcome};
         if !self.hooks.pending_edit_applications.is_empty() {
@@ -199,7 +202,9 @@ impl HostCommandOwner {
                             || (projection.outcome == RunOutcome::Pending
                                 && (projection.attempts.iter().any(|attempt| {
                                     !matches!(attempt.state, AttemptState::Retired(_))
-                                }) || run_launch_pending(&projection)))
+                                }) || Self::native_launch_candidates(&projection)
+                                    .next()
+                                    .is_some()))
                     })
         })
     }
@@ -245,10 +250,27 @@ impl HostCommandOwner {
             return;
         }
         #[cfg(target_os = "linux")]
+        {
+            // A wait that cannot clear without the GUI is released into a
+            // durable ProviderSettings wait the next open shows.
+            let waiting: Vec<_> = owner
+                .hooks
+                .runs
+                .iter()
+                .filter(|(_, run)| run.pending_provider_wait.is_some())
+                .map(|(id, _)| id.clone())
+                .collect();
+            for run in waiting {
+                let _ = owner.retry_pending_provider_wait(&run);
+            }
+        }
+        #[cfg(target_os = "linux")]
         if !owner.review_frozen() && !owner.settlement_owned_elsewhere() {
-            // Stop retirement: a finished worker's Stopping job retires here.
-            let _ = owner.retire_review_worker();
-            let _ = owner.persist_pending_stops();
+            // The detached host drives its own review: retire a finished
+            // worker, persist a Stop, recover a lost encode, and start a
+            // driver missed during a freeze.
+            let _ = owner.reconcile_review_job();
+            let _ = owner.ensure_review_driver();
         }
         owner.exit_when_detached_work_ends();
     }
@@ -279,23 +301,4 @@ impl HostCommandOwner {
         self.attachments[index].person_facing = true;
         Ok(auth)
     }
-}
-
-/// JA-1 S6 C3: an active run has an open task that never had an attempt, so
-/// its first launch is still to come. A task requeued after an interrupted
-/// attempt is not: it waits for the next open, as a Paused run does.
-fn run_launch_pending(
-    projection: &crate::orchestration::orchestration_records::RunProjection,
-) -> bool {
-    use crate::orchestration::orchestration_records::{RunPhase, TaskState};
-    matches!(
-        projection.phase,
-        RunPhase::Queued | RunPhase::Running | RunPhase::Reviewing
-    ) && projection.tasks.iter().any(|task| {
-        matches!(task.state, TaskState::Queued | TaskState::Preparing)
-            && !projection
-                .attempts
-                .iter()
-                .any(|attempt| attempt.identity.task == task.id)
-    })
 }

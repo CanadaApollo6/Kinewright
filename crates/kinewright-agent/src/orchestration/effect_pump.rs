@@ -316,16 +316,12 @@ impl<L: GuardianLauncher> EffectPump<L> {
         );
         let accounting = host.native_accounting(&state).map_err(io::Error::other)?;
         let ready = self.active.len() < 3
-            && state.effects.iter().any(|e| {
-                crate::orchestration::outbox::next_effect(&state, &e.lane)
-                    .is_some_and(|n| n.id == e.id)
-                    && HostCommandOwner::native_task_can_launch(&state, &e.task)
-                    && !HostCommandOwner::native_launch_context_full(&state, &e.task)
-                    && !accounting.as_ref().is_some_and(|a| {
-                        a.tasks
-                            .iter()
-                            .any(|t| t.task == e.task.0 && t.wait_reason.is_some())
-                    })
+            && HostCommandOwner::native_launch_candidates(&state).any(|task| {
+                !accounting.as_ref().is_some_and(|a| {
+                    a.tasks
+                        .iter()
+                        .any(|t| t.task == task.0 && t.wait_reason.is_some())
+                })
             });
         let now = self.observe_clock(&mut host, &state, &identity, ready)?;
         host.clear_due_native_waits(&self.producer, &self.run, now)

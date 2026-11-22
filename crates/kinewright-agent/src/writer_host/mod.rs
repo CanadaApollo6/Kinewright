@@ -3112,6 +3112,27 @@ impl HostCommandOwner {
                 reply.session = Some(self.session_status(session)?);
             }
             HostCommand::Shutdown => {
+                // JA-1 S6 C3: a review or a sealed save outlives the GUI only
+                // through Detach; Shutdown never kills one. The more specific refusal
+                // comes first: the person sees what their close would stop.
+                #[cfg(target_os = "linux")]
+                if self.review_retained() {
+                    let saving = matches!(
+                        self.review_runtime.sealed_save_status(),
+                        Some(
+                            kinewright_project::review_job::delivery::SealedSaveStatus::Saving { .. }
+                        )
+                    );
+                    return Err(HostRefusal::new(
+                        "review_retained",
+                        if saving {
+                            "the delivered cut is still saving; detach the GUI or stop the save before closing its source"
+                        } else {
+                            "an output review is running; detach the GUI or stop the review before closing its source"
+                        },
+                    )
+                    .into());
+                }
                 if self.hooks.runs.values().any(|run| run.continuable) {
                     return Err(HostRefusal::new(
                         "continuation_required",

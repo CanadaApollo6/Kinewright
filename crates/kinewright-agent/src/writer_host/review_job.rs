@@ -1401,8 +1401,10 @@ impl HostCommandOwner {
     }
 
     /// JA-1 S6 C3: review work a detached host must finish before it exits:
-    /// an active or Stopping job, a pending Stop, an encode worker or its
-    /// cleanup, a running save, or a freeze. A read error counts as work.
+    /// an Encoding, Checking, `ReadyToSeal` or Stopping job, a pending Stop,
+    /// an encode worker or its cleanup, a running save, or a freeze. A
+    /// Queued job only waits for the person's Resume, so like a Paused one it
+    /// stays persisted for the next open. A read error counts as work.
     pub(super) fn review_work_remains(&self) -> bool {
         let runtime = &self.review_runtime;
         self.review_writes_frozen()
@@ -1414,7 +1416,10 @@ impl HostCommandOwner {
             )
             || self.review_phase().map_or(true, |phase| {
                 phase.is_some_and(|phase| {
-                    !matches!(phase, ReviewPhase::Paused { .. } | ReviewPhase::Stopped)
+                    !matches!(
+                        phase,
+                        ReviewPhase::Queued | ReviewPhase::Paused { .. } | ReviewPhase::Stopped
+                    )
                 })
             })
     }

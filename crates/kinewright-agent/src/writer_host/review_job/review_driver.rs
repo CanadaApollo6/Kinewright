@@ -516,9 +516,10 @@ pub(in crate::writer_host) fn seal_checked_review(
         .seal_review(token, command, expected_configuration_sha256, &verified)?;
     if matches!(result, SealResult::Sealed(_)) {
         owner.release_sealed_review(token);
-        // JA-1 S6 C3: the seal ended the review; a detached host may exit.
-        owner.exit_when_detached_work_ends();
     }
+    // JA-1 S6 C3: a seal or a refused seal (the job Paused) ends the review;
+    // a detached host may exit.
+    owner.exit_when_detached_work_ends();
     Ok(result)
 }
 

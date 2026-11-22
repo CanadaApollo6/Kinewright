@@ -722,7 +722,7 @@ impl HostAttachment {
         self.last_heartbeat = Instant::now();
         self.heartbeat.take()
     }
-    fn settle_heartbeat(&mut self) {
+    pub(crate) fn settle_heartbeat(&mut self) {
         if let Some(heartbeat) = self.take_heartbeat() {
             let _ = heartbeat.join();
         }
@@ -1187,8 +1187,15 @@ impl HostAttachment {
             match self.client.request(HostCommand::Shutdown) {
                 Ok(reply) if reply.error.is_none() => {}
                 Ok(reply) => {
-                    self.status = reply.status.clone();
-                    self.hook_reply = Some(reply);
+                    // JA-1 S6 C3: the host refuses Shutdown while it retains
+                    // a run, a review or a save this view had not seen yet.
+                    // Adopt its status and detach; the next close finishes.
+                    self.accept_status(reply.status.clone());
+                    if retains_work(&self.status) {
+                        let _ = self.request_hook(HostCommand::DetachForContinuation);
+                    } else {
+                        self.hook_reply = Some(reply);
+                    }
                     return false;
                 }
                 Err(_) => return false,
@@ -1257,6 +1264,11 @@ impl HostAttachment {
     )]
     pub(super) fn take_hook_reply(&mut self) -> Option<HostReply> {
         self.hook_reply.take()
+    }
+    /// A detach request is in flight or confirmed.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn detach_requested(&self) -> bool {
+        self.hook_inflight.is_some() || self.continuation_detached
     }
     pub(super) fn continuation_pending(&self) -> bool {
         retains_work(&self.status) && !self.continuation_detached
