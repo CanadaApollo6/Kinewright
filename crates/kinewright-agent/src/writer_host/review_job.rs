@@ -345,10 +345,7 @@ pub(super) fn resume_after_open(host: &Arc<Mutex<HostCommandOwner>>) {
             owner.review_runtime.verify_hook = Some(hooks.remove(index).1);
         }
     }
-    if !owner.auto_drive()
-        || owner.owner.is_none()
-        || owner.lifecycle.stopping()
-        || owner.review_runtime.reopen.is_some()
+    if owner.owner.is_none() || owner.lifecycle.stopping() || owner.review_runtime.reopen.is_some()
     {
         return;
     }
@@ -395,7 +392,12 @@ fn when_thawed<T>(
 }
 
 fn reopen_review(host: &Weak<Mutex<HostCommandOwner>>, cancel: &ExportCancellation) {
-    if !when_thawed(host, cancel, |owner| owner.reconcile_review_job().is_ok()).unwrap_or(false)
+    // The open reconciles here, once recovery, a branch switch and native
+    // recovery have settled, never on the open itself.
+    if !when_thawed(host, cancel, |owner| {
+        owner.reconcile_review_job().is_ok() && owner.auto_drive()
+    })
+    .unwrap_or(false)
         || verify_reopened(host, Some(cancel)).is_err()
     {
         return;

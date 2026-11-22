@@ -1137,10 +1137,10 @@ fn s5_review_check_attempt_survives_status_and_dies_with_its_process() {
     drop(client);
     kinewright_project::io_observer::fail_once("review_stop_before_admission", || drop(host));
     let (host, client) = s5_review_host(temp.root());
-    assert_eq!(
-        s5_review_attempt(&host),
-        None,
-        "REVIEW_REOPEN_UNBINDS_THE_DEAD_ATTEMPT"
+    // The reopen thread unbinds once native recovery has settled.
+    s5_review_until(
+        || s5_review_attempt(&host).is_none(),
+        "REVIEW_REOPEN_UNBINDS_THE_DEAD_ATTEMPT",
     );
     let shared = host.owner.upgrade().unwrap();
     let unverified = shared

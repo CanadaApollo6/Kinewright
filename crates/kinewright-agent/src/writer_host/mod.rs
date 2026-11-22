@@ -1930,10 +1930,9 @@ impl HostCommandOwner {
         if let Some(initial_snapshot) = bootstrap_snapshot {
             host.install_verified(initial_snapshot)?;
         }
-        #[cfg(target_os = "linux")]
-        if host.owner.is_some() {
-            let _ = host.reconcile_review_job();
-        }
+        // The review job reconciles on the reopen thread once the project
+        // thaws (`review_job::resume_after_open`), never here: a switch, native
+        // recovery or a recovery-only owner is not settled yet.
         Ok(host)
     }
     #[cfg(feature = "eval-harness")]
