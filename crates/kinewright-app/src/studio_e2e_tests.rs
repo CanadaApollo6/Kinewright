@@ -1127,6 +1127,59 @@ fn s3_c11_current_edit_plays_host_attached() {
     retire.wait();
 }
 
+/// JA-1 S6 C2 fix 1 (Neon F4): a Studio save control sent while the App's
+/// status heartbeat holds the host's one ingress waits for it instead of
+/// meeting a 429, keeps the reply's status, and shows a refusal in the
+/// host's own words in the save line, never as a damaged project.
+#[test]
+fn ja1_s6_c2_fix1_stop_save_waits_for_the_heartbeat_and_says_why() {
+    let mut retire = Retire::default();
+    let (fixture, owner, _a, _b) = two_versions();
+    let attachment = launch(&fixture, owner, "s6f1-heartbeat");
+    let (mut app, engine) = in1_harness(Document::default());
+    retire.arm(&engine);
+    install(&mut app, &fixture, attachment);
+    let ctx = egui::Context::default();
+    let proxy = app
+        .focused_mut()
+        .ja1
+        .as_mut()
+        .unwrap()
+        .hold_host_request("status", Duration::from_secs(2));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !proxy.dropped.load(std::sync::atomic::Ordering::Acquire) {
+        assert!(Instant::now() < deadline, "S6F1_NO_HEARTBEAT");
+        app.focused_mut().ja1.as_mut().unwrap().poll_host();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let attachment = app.focused_mut().ja1.as_mut().unwrap();
+    let stopped = attachment.apply(Action::StudioReview(Box::new(
+        crate::studio_review::ReviewAction {
+            control: kinewright_project::review_job::ReviewControl::StopSave,
+            version: None,
+        },
+    )));
+    assert!(stopped.is_ok(), "S6F1_STOP_SAVE_NOT_A_FAILURE: {stopped:?}");
+    assert!(
+        attachment.studio_error_ready.is_none(),
+        "S6F1_NEVER_DAMAGED_OR_UNAVAILABLE"
+    );
+    assert_eq!(
+        attachment.studio_save_notice_ready.as_deref(),
+        Some("No sealed cut is being saved."),
+        "S6F1_REFUSAL_IN_THE_HOSTS_WORDS"
+    );
+    let host = app.focused().ja1.as_ref().unwrap().host_pid().unwrap();
+    close_host(&mut app, &ctx);
+    app.focused_mut().ja1 = None;
+    end_host(host);
+    drop(proxy);
+    in1_shutdown(&mut app);
+    drop(app);
+    drop(engine);
+    retire.wait();
+}
+
 /// S4b C5 fix 12: the C11 Save As while the App's own status heartbeat is
 /// still at the host. The host admits one command at a time and answers a
 /// second with 429, which reads as `attachment_refused` (CI run 41451669158,

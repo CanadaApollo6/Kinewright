@@ -728,6 +728,19 @@ impl HostAttachment {
         }
     }
 
+    /// JA-1 S6 C2 fix 1: one Studio review control. Like every other
+    /// command it first waits for the status heartbeat; a host still busy
+    /// with another lane is asked once more, then the person is told to try
+    /// again. The reply's status is kept at once.
+    pub(super) fn studio_request(&mut self, command: &HostCommand) -> Result<HostReply, HostError> {
+        let reply = retry_busy(|| {
+            self.settle_heartbeat();
+            self.client.request(command.clone())
+        })?;
+        self.accept_status(reply.status.clone());
+        Ok(reply)
+    }
+
     fn foreground_request(&mut self, command: HostCommand) -> Result<HostReply, BundleError> {
         let operation = self.next_operation;
         self.next_operation = operation
@@ -1516,6 +1529,41 @@ pub(crate) fn person_data_dir() -> Result<PathBuf, BundleError> {
     kinewright_media::default_data_dir().map_err(|error| BundleError::Identity(error.to_string()))
 }
 
+/// What a Studio control says when the host stayed busy.
+pub(crate) const HOST_BUSY: &str = "The writer host is busy; try again.";
+const BUSY_CODE: &str = "host_busy";
+
+/// Send once, and once more if the host answered busy (`429`); a second
+/// busy answer becomes [`HOST_BUSY`].
+fn retry_busy(
+    mut send: impl FnMut() -> Result<HostReply, HostError>,
+) -> Result<HostReply, HostError> {
+    for _ in 0..2 {
+        match send() {
+            Err(HostError::Refused(refusal)) if refusal.code == BUSY_CODE => {}
+            other => return other,
+        }
+    }
+    Err(HostError::Refused(
+        kinewright_agent::writer_host::HostRefusal {
+            code: BUSY_CODE.into(),
+            message: HOST_BUSY.into(),
+            native_code: None,
+        },
+    ))
+}
+
+/// The words a person reads for a refused Studio control: the host's own
+/// message, without its error-kind prefix.
+pub(crate) fn refusal_words(refusal: &kinewright_agent::writer_host::HostRefusal) -> String {
+    let prefix = format!("{}: ", refusal.code);
+    refusal
+        .message
+        .strip_prefix(&prefix)
+        .unwrap_or(&refusal.message)
+        .to_owned()
+}
+
 #[allow(
     clippy::needless_pass_by_value,
     reason = "map_err consumes the owned transport error at this boundary"
@@ -1543,4 +1591,55 @@ pub(super) fn executable() -> PathBuf {
         .and_then(|path| path.parent().map(|parent| parent.join(name)))
         .filter(|path| path.is_file())
         .unwrap_or_else(|| PathBuf::from(name))
+}
+
+#[cfg(test)]
+mod studio_request_tests {
+    use super::*;
+
+    fn busy() -> Result<HostReply, HostError> {
+        Err(HostError::Refused(
+            kinewright_agent::writer_host::HostRefusal {
+                code: BUSY_CODE.into(),
+                message: "The host is busy. This request has not been dispatched.".into(),
+                native_code: None,
+            },
+        ))
+    }
+
+    #[test]
+    fn ja1_s6_c2_fix1_a_busy_host_is_asked_once_more_then_named() {
+        let mut calls = 0;
+        let reply = retry_busy(|| {
+            calls += 1;
+            if calls == 1 {
+                busy()
+            } else {
+                Ok(HostReply::default())
+            }
+        });
+        assert!(reply.is_ok() && calls == 2, "S6F1_RETRIED_ONCE");
+        let mut calls = 0;
+        let Err(HostError::Refused(refusal)) = retry_busy(|| {
+            calls += 1;
+            busy()
+        }) else {
+            panic!("S6F1_BUSY_TWICE_REFUSES");
+        };
+        assert_eq!(calls, 2, "S6F1_NEVER_A_THIRD_TRY");
+        assert_eq!(refusal_words(&refusal), HOST_BUSY, "S6F1_BUSY_WORDS");
+    }
+
+    #[test]
+    fn ja1_s6_c2_fix1_refusal_words_drop_the_kind() {
+        let refusal = kinewright_agent::writer_host::HostRefusal {
+            code: "identity_refused".into(),
+            message: "identity_refused: Choose a folder outside the project.".into(),
+            native_code: None,
+        };
+        assert_eq!(
+            refusal_words(&refusal),
+            "Choose a folder outside the project."
+        );
+    }
 }

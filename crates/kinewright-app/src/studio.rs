@@ -681,6 +681,7 @@ impl KinewrightApp {
         let versions = attachment.studio_versions_ready.take();
         let editorial = attachment.studio_editorial_ready.take();
         let review = attachment.studio_review_ready.take();
+        let save_notice = attachment.studio_save_notice_ready.take();
         let editorial_project = attachment.studio_project_id().ok();
         let failure = attachment.studio_error_ready.take();
         let manual_failed = attachment.studio_manual_failed.take();
@@ -708,10 +709,11 @@ impl KinewrightApp {
         {
             *editorial_state = None;
         }
-        self.focused_mut()
-            .studio
-            .output_review
-            .refresh(review, editorial_project.as_ref());
+        self.focused_mut().studio.output_review.refresh(
+            review,
+            editorial_project.as_ref(),
+            save_notice,
+        );
         if let Some(versions) = versions {
             self.focused_mut().studio.versions = versions;
         }
