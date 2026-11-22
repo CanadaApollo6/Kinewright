@@ -103,6 +103,10 @@ impl HostCommandOwner {
         }
         let owner = self.owner()?;
         let bundle = owner.review_bundle()?;
+        // The save belongs to the open project, which a change of project
+        // leaves by its id. A version inherited by Save As still names the
+        // source in its snapshot, so the snapshot's project is not the key.
+        let open_project = bundle.project_id().clone();
         let owned_roots = bundle.owned_roots()?;
         let association = owner.association().map(|a| a.path().to_path_buf());
         let mut refused_roots: Vec<&Path> = owned_roots.iter().map(PathBuf::as_path).collect();
@@ -126,7 +130,7 @@ impl HostCommandOwner {
             ));
         }
         let cancellation = ExportCancellation::default();
-        let project = snapshot.project.clone();
+        let project = open_project;
         let generation = self.review_runtime.save_generation.wrapping_add(1);
         self.review_runtime.save_generation = generation;
         let worker_project = project.clone();

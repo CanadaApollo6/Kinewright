@@ -228,3 +228,120 @@ fn ja1_s6_c2_fix1_shutdown_mid_save_lets_the_project_reopen() {
     );
     assert_eq!(s6_save_status(&f), None, "S6F1_REOPENED_WITH_NO_SAVE");
 }
+
+/// Save As to `name` next to the fixture's project.
+#[cfg(target_os = "linux")]
+fn s6f1_save_as(f: &Fixture, name: &str) -> HostReply {
+    let snapshot = received_snapshot_for_test(c7f2_owner(f).lock().unwrap().core()).unwrap();
+    f.editor
+        .request(HostCommand::SaveAs {
+            destination: f.temp.path(name),
+            snapshot,
+        })
+        .unwrap()
+}
+
+/// The pins a retained source holds on `media`.
+#[cfg(target_os = "linux")]
+fn s6f1_retained_pins(
+    f: &Fixture,
+    project: &kinewright_project::bundle_records::ProjectId,
+    media: &str,
+) -> u64 {
+    let shared = f.host.owner.upgrade().unwrap();
+    let owner = shared.lock().unwrap();
+    s6f1_pins(
+        owner.owner().unwrap().review_source_bundle(project).unwrap(),
+        media,
+    )
+}
+
+/// The open project's id and its pins on `media`.
+#[cfg(target_os = "linux")]
+fn s6f1_open(
+    f: &Fixture,
+    media: &str,
+) -> (kinewright_project::bundle_records::ProjectId, u64) {
+    let shared = f.host.owner.upgrade().unwrap();
+    let owner = shared.lock().unwrap();
+    let bundle = owner.owner().unwrap().review_bundle().unwrap();
+    (bundle.project_id().clone(), s6f1_pins(bundle, media))
+}
+
+/// Neon recheck F3: a sealed version Save As carried into B still names A
+/// in its snapshot. Its save in B belongs to B, so Save As B→C stops and
+/// joins it, B's pin goes, C saves freely and sees no status of B's save.
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn ja1_s6_c2_fix1_an_inherited_cut_save_goes_with_its_project() {
+    use kinewright_project::review_job::delivery::SealedSaveStatus;
+    let (job, receipt) = s6_sealed_job("Hello world");
+    let f = &job.f;
+    let media = receipt.key.media_ref.sha256.clone();
+    let (a, a_open) = s6f1_open(f, &media);
+    assert_eq!(a, receipt.key.snapshot.project, "S6F1_A_SEALED_IT");
+    let reply = s6f1_save_as(f, "b.kinewright");
+    assert!(reply.error.is_none(), "S6F1_SAVE_AS_B: {:?}", reply.error);
+    // A Save As source is retained with pins of its own: measured here on A,
+    // so B's count after its own Save As can be compared exactly.
+    let retained_extra = s6f1_retained_pins(f, &a, &media)
+        .checked_sub(a_open)
+        .expect("S6F1_RETAINED_KEEPS_ITS_PINS");
+    let (b, pins_before) = s6f1_open(f, &media);
+    assert_ne!(b, a, "S6F1_B_IS_A_NEW_PROJECT");
+
+    // Save the inherited cut in B and hold it inside its copy.
+    let out = f.temp.path("out-b");
+    std::fs::create_dir(&out).unwrap();
+    let stall = S6Stall::default();
+    stall.install(f);
+    ok(
+        f.editor.request(s6_save_command(&receipt, &out)).unwrap(),
+        "S6F1_INHERITED_SAVE_STARTED",
+    );
+    stall.wait_entered(f);
+    assert!(
+        s6f1_open(f, &media).1 > pins_before,
+        "S6F1_B_PINNED_WHILE_SAVING"
+    );
+
+    let reply = s6f1_save_as(f, "c.kinewright");
+    assert!(reply.error.is_none(), "S6F1_SAVE_AS_C: {:?}", reply.error);
+    // Release before the checks, so a save the move missed would finish and
+    // try to report.
+    stall.release();
+    assert_eq!(s6f1_workers(f), 0, "S6F1_INHERITED_SAVE_JOINED");
+    let (c, _) = s6f1_open(f, &media);
+    assert!(c != a && c != b, "S6F1_C_ACTIVE");
+    assert_eq!(
+        s6f1_retained_pins(f, &b, &media),
+        pins_before + retained_extra,
+        "S6F1_B_SAVE_PIN_RELEASED"
+    );
+    assert_eq!(s6_save_status(f), None, "S6F1_NO_STATUS_ON_C");
+    assert!(s6_entries(&out).is_empty(), "S6F1_B_SAVE_LEFT_NOTHING");
+
+    // C admits a save of its own, which runs to the end.
+    f.host
+        .owner
+        .upgrade()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .set_sealed_save_hook(None);
+    let out_c = f.temp.path("out-c");
+    std::fs::create_dir(&out_c).unwrap();
+    ok(
+        f.editor.request(s6_save_command(&receipt, &out_c)).unwrap(),
+        "S6F1_C_ADMITS_A_SAVE",
+    );
+    assert!(
+        matches!(s6_finished(f), SealedSaveStatus::Saved { .. }),
+        "S6F1_C_SAVED"
+    );
+    assert_eq!(s6_entries(&out_c).len(), 1, "S6F1_C_SAVED_ONE_CUT");
+}
