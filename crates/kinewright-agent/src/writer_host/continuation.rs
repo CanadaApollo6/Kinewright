@@ -160,6 +160,9 @@ impl HostCommandOwner {
         }
         self.remote = None;
         self.detached = true;
+        // JA-1 S6 C4 fix 1: a notification sent from now on has no action.
+        #[cfg(target_os = "linux")]
+        self.review_runtime.notifier.set_detached(true);
         Ok(DetachOutcome {
             retained_runs,
             retained_review,

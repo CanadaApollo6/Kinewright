@@ -251,6 +251,8 @@ impl super::HostCommandOwner {
         // JA-1 S6 C3: an attached Editor is never idle.
         if role == super::AttachmentRole::Editor {
             self.detached = false;
+            #[cfg(target_os = "linux")]
+            self.review_runtime.notifier.set_detached(false);
         }
         Ok(())
     }

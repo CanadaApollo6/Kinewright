@@ -556,19 +556,29 @@ impl HostCommandOwner {
                 return;
             }
         };
-        let gui = !self.detached
-            && self.attachments.iter().any(|attachment| {
-                attachment.role == crate::writer_host::AttachmentRole::Editor
-                    && attachment.person_facing
-                    && attachment.alive.load(std::sync::atomic::Ordering::SeqCst)
-            });
-        let select = gui.then(|| (token.snapshot.clone(), sealed.receipt.key_sha256.clone()));
+        // The GUIs attached now; the notifier checks again when it sends.
+        let gui: Vec<_> = if self.detached {
+            Vec::new()
+        } else {
+            self.attachments
+                .iter()
+                .filter(|attachment| {
+                    attachment.role == crate::writer_host::AttachmentRole::Editor
+                        && attachment.person_facing
+                        && attachment.alive.load(std::sync::atomic::Ordering::SeqCst)
+                })
+                .map(|attachment| std::sync::Arc::clone(&attachment.alive))
+                .collect()
+        };
+        let select =
+            (!gui.is_empty()).then(|| (token.snapshot.clone(), sealed.receipt.key_sha256.clone()));
         self.review_runtime
             .notifier
             .notify(super::super::notify::SealNotice::new(
                 &label,
                 &sealed.receipt.outcome,
                 select,
+                gui,
             ));
     }
 

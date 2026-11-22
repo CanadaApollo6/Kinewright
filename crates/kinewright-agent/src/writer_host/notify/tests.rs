@@ -1,11 +1,14 @@
 // JA-1 S6 C4: the notifier against a fake daemon on a private bus.
-use std::sync::atomic::Ordering;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use kinewright_core::output_review::SealedReviewOutcome;
 use kinewright_project::{bundle_records::RecordKind, studio_records::SnapshotKey};
 
 use super::{
-    MAX_QUEUED, Notifier, SealNotice,
+    DEFAULT_ACTION, MAX_QUEUED, Notifier, SealNotice,
     test_bus::{PrivateBus, click, emit, wait_for},
 };
 
@@ -36,7 +39,18 @@ fn facts_not_checked() -> SealedReviewOutcome {
 }
 
 fn notice(label: &str, gui: bool) -> SealNotice {
-    SealNotice::new(label, &delivered(), gui.then(|| (key(3), "ab".repeat(32))))
+    let alive = gui.then(|| Arc::new(AtomicBool::new(true)));
+    notice_for(label, alive.as_ref())
+}
+
+/// A notice whose GUI is `alive`; none means no GUI was attached.
+fn notice_for(label: &str, alive: Option<&Arc<AtomicBool>>) -> SealNotice {
+    SealNotice::new(
+        label,
+        &delivered(),
+        alive.map(|_| (key(3), "ab".repeat(32))),
+        alive.into_iter().map(Arc::clone).collect(),
+    )
 }
 
 #[test]
@@ -46,7 +60,12 @@ fn ja1_s6_c4_a_seal_notifies_once_with_its_label_and_a_click_action() {
     let mut notifier = Notifier::new(Some(bus.connect()));
     notifier.notify(notice("v3", true));
     wait_for(|| daemon.calls.lock().unwrap().len() == 1, "S6C4_SENT");
-    notifier.notify(SealNotice::new("v4", &facts_not_checked(), None));
+    notifier.notify(SealNotice::new(
+        "v4",
+        &facts_not_checked(),
+        None,
+        Vec::new(),
+    ));
     wait_for(|| daemon.calls.lock().unwrap().len() == 2, "S6C4_SENT_TWO");
     notifier.take_stop().finish();
     let calls = daemon.calls.lock().unwrap().clone();
@@ -254,6 +273,11 @@ fn ja1_s6_c4_seals_during_a_send_wait_in_a_bounded_queue() {
     }
     assert_eq!(notifier.status().dropped, 2, "S6C4_DROPPED_COUNTED");
     daemon.hold.store(false, Ordering::SeqCst);
+    // Sent before the stop, which would drop what is still queued.
+    wait_for(
+        || daemon.calls.lock().unwrap().len() == MAX_QUEUED + 1,
+        "S6C4_QUEUE_DRAINED",
+    );
     notifier.take_stop().finish();
     let bodies: Vec<String> = daemon
         .calls
@@ -293,6 +317,88 @@ fn ja1_s6_c4_stop_sends_what_is_queued_then_joins_and_takes_nothing_new() {
     notifier.notify(notice("v2", false));
     assert!(notifier.sender.is_none(), "S6C4_NOTHING_AFTER_STOP");
     assert_eq!(daemon.calls.lock().unwrap().len(), 1, "S6C4_NOTHING_NEW");
+}
+
+// JA-1 S6 C4 fix 1: a hung bus holds a stop for the one send in flight; the
+// queued seals are dropped and counted.
+#[test]
+fn ja1_s6_c4_fix1_stop_finishes_only_the_send_in_flight() {
+    let bus = PrivateBus::start();
+    let (daemon, _server) = bus.daemon(true);
+    daemon.hold.store(true, Ordering::SeqCst);
+    let mut notifier = Notifier::new(Some(bus.connect()));
+    notifier.notify(notice("v1", false));
+    wait_for(
+        || daemon.entered.load(Ordering::SeqCst),
+        "S6C4F1_SEND_IN_FLIGHT",
+    );
+    notifier.notify(notice("v2", false));
+    notifier.notify(notice("v3", false));
+    let stop = notifier.take_stop();
+    assert_eq!(
+        notifier.status().dropped,
+        2,
+        "S6C4F1_QUEUED_DROPPED_ON_STOP"
+    );
+    daemon.hold.store(false, Ordering::SeqCst);
+    stop.finish();
+    let bodies: Vec<String> = daemon
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|call| call.body.clone())
+        .collect();
+    assert_eq!(
+        bodies,
+        vec!["v1 is delivered".to_owned()],
+        "S6C4F1_ONLY_THE_SEND_IN_FLIGHT"
+    );
+}
+
+// JA-1 S6 C4 fix 1: the GUI is read when the notice is sent. A notice queued
+// while a GUI was attached, and sent after a detach or after that GUI is
+// gone, offers no action.
+#[test]
+fn ja1_s6_c4_fix1_the_gui_is_read_when_the_notice_is_sent() {
+    let bus = PrivateBus::start();
+    let (daemon, _server) = bus.daemon(true);
+    daemon.hold.store(true, Ordering::SeqCst);
+    let mut notifier = Notifier::new(Some(bus.connect()));
+    let alive = Arc::new(AtomicBool::new(true));
+    notifier.notify(notice_for("v1", Some(&alive)));
+    wait_for(
+        || daemon.entered.load(Ordering::SeqCst),
+        "S6C4F1_SEND_IN_FLIGHT",
+    );
+    let gone = Arc::new(AtomicBool::new(true));
+    notifier.notify(notice_for("v2", Some(&alive)));
+    notifier.notify(notice_for("v3", Some(&gone)));
+    notifier.set_detached(true);
+    // Read at v3's send too: its GUI is gone even after a new attachment.
+    gone.store(false, Ordering::SeqCst);
+    daemon.hold.store(false, Ordering::SeqCst);
+    wait_for(|| daemon.calls.lock().unwrap().len() >= 2, "S6C4F1_V2_SENT");
+    notifier.set_detached(false);
+    wait_for(|| daemon.calls.lock().unwrap().len() >= 3, "S6C4F1_V3_SENT");
+    let actions: Vec<(String, Vec<String>)> = daemon
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|call| (call.body.clone(), call.actions.clone()))
+        .collect();
+    let offered = vec![DEFAULT_ACTION.to_owned(), "Show".to_owned()];
+    assert_eq!(
+        actions,
+        vec![
+            ("v1 is delivered".to_owned(), offered),
+            ("v2 is delivered".to_owned(), Vec::new()),
+            ("v3 is delivered".to_owned(), Vec::new()),
+        ],
+        "S6C4F1_ACTION_ONLY_WHILE_ATTACHED_AT_SEND"
+    );
+    notifier.take_stop().finish();
 }
 
 #[test]

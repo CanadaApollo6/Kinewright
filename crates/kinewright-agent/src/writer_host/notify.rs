@@ -10,7 +10,10 @@
 //! stream; shutdown ends it by closing the connection.
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -57,6 +60,9 @@ pub(super) fn session_bus() -> Connect {
 pub(super) struct SealNotice {
     body: String,
     select: Option<Target>,
+    /// The attached GUIs at seal time. The action is offered only if one is
+    /// still alive, and the host not detached, when the notice is sent.
+    gui: Vec<Arc<AtomicBool>>,
 }
 
 struct Target {
@@ -65,12 +71,13 @@ struct Target {
 }
 
 impl SealNotice {
-    /// `select` is the sealed receipt's version and key digest, present only
-    /// when a GUI is attached.
+    /// `select` is the sealed receipt's version and key digest; `gui` holds
+    /// the liveness of each GUI attached at seal time.
     pub(super) fn new(
         label: &str,
         outcome: &SealedReviewOutcome,
         select: Option<(SnapshotKey, String)>,
+        gui: Vec<Arc<AtomicBool>>,
     ) -> Self {
         Self {
             body: seal_notice_text(label, outcome),
@@ -78,6 +85,7 @@ impl SealNotice {
                 version,
                 key_sha256,
             }),
+            gui,
         }
     }
 }
@@ -101,6 +109,10 @@ struct Outstanding {
 }
 
 #[derive(Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent sender, listener and host lifecycle flags"
+)]
 struct Shared {
     queue: VecDeque<SealNotice>,
     dropped: u64,
@@ -110,6 +122,11 @@ struct Shared {
     // A listener thread is waiting for signals.
     listening: bool,
     cancelled: bool,
+    // The sender has taken a notice off the queue and not finished it.
+    in_flight: bool,
+    // JA-1 S6 C4 fix 1: the host detached; nothing sent from now on can be
+    // clicked.
+    detached: bool,
     bus: Option<Bus>,
     listener: Option<Listener>,
     outstanding: BTreeMap<u32, Outstanding>,
@@ -229,10 +246,25 @@ impl Notifier {
         }
     }
 
-    /// The host is stopping: take no new seals and stop listening once the
-    /// queued ones are sent. Called under the host lock; waits for nothing.
+    /// The host is stopping: take no new seals, finish only the one in
+    /// flight (or, before the sender takes it, the oldest queued), and drop
+    /// and count the rest, so a hung bus holds the exit for one send. Called
+    /// under the host lock; waits for nothing.
     pub(super) fn cancel(&self) {
-        lock(&self.shared).cancelled = true;
+        let mut shared = lock(&self.shared);
+        shared.cancelled = true;
+        let keep = usize::from(!shared.in_flight);
+        let excess = shared.queue.len().saturating_sub(keep);
+        shared.queue.truncate(keep);
+        shared.dropped = shared
+            .dropped
+            .saturating_add(u64::try_from(excess).unwrap_or(u64::MAX));
+    }
+
+    /// JA-1 S6 C4 fix 1: the host detached from its GUI, or a GUI attached
+    /// again. Read when each notice is sent.
+    pub(super) fn set_detached(&self, detached: bool) {
+        lock(&self.shared).detached = detached;
     }
 
     /// A handle that outlives the notifier, for [`NotifierProbe::joined`].
@@ -242,8 +274,9 @@ impl Notifier {
     }
 
     /// The half of a stop that waits, for running with the host lock
-    /// released: the queued seals are sent, then the connection closes,
-    /// which ends the listener's wait, and both threads are joined.
+    /// released: the one send [`Notifier::cancel`] kept finishes, then the
+    /// connection closes, which ends the listener's wait, and both threads
+    /// are joined.
     pub(super) fn take_stop(&mut self) -> NotifierStop {
         self.cancel();
         NotifierStop {
@@ -355,6 +388,7 @@ fn send_queued(shared: &Arc<Mutex<Shared>>, connect: &Connect) {
                 state.sending = false;
                 return;
             };
+            state.in_flight = true;
             (notice, state.bus.clone())
         };
         let bus = match bus {
@@ -365,16 +399,26 @@ fn send_queued(shared: &Arc<Mutex<Shared>>, connect: &Connect) {
                     bus
                 }
                 Err(error) => {
-                    lock(shared).error = Some(bounded(&error));
+                    let mut state = lock(shared);
+                    state.error = Some(bounded(&error));
+                    state.in_flight = false;
                     continue;
                 }
             },
         };
-        let actionable = notice.select.is_some() && bus.actions && ensure_listener(shared, &bus);
+        // The GUI is read now, not when the seal was queued: a notice sent
+        // after a detach, or after its GUI is gone, offers no action.
+        let attached = {
+            let state = lock(shared);
+            !state.detached && notice.gui.iter().any(|alive| alive.load(Ordering::SeqCst))
+        };
+        let actionable =
+            notice.select.is_some() && attached && bus.actions && ensure_listener(shared, &bus);
         match send(&bus, &notice.body, actionable) {
             Ok((id, daemon)) => {
                 let mut state = lock(shared);
                 state.error = None;
+                state.in_flight = false;
                 if actionable && let Some(target) = notice.select {
                     if state.outstanding.len() >= MAX_OUTSTANDING {
                         state.outstanding.pop_first();
@@ -385,6 +429,7 @@ fn send_queued(shared: &Arc<Mutex<Shared>>, connect: &Connect) {
             Err(error) => {
                 let mut state = lock(shared);
                 state.error = Some(bounded(&error));
+                state.in_flight = false;
                 // A failed bus is opened again for the next seal.
                 if bus.connection.is_closed() {
                     state.bus = None;
