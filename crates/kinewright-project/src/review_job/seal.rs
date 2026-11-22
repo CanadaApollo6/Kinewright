@@ -25,7 +25,7 @@ use crate::{
     bundle::{BundleError, ProjectBundle},
     bundle_records::{ObjectRef, RecordKind, SessionId},
     editorial::{AuditDisposition, EditorialAudit},
-    orchestration_records::{AttemptState, Role, TaskId},
+    orchestration_records::{AttemptState, OrchestrationPayload, Role, TaskId},
     storage_budget::{StorageLimits, StorageReservation},
     store::{BundleRecord, StorePin, record_sealed},
     studio_records::{AudioRange, SnapshotDescriptor, SnapshotKey, VersionId, bounded, kind},
@@ -337,32 +337,20 @@ impl ProjectBundle {
         Ok(None)
     }
 
-    /// The Reviewer task on `checkpoint` that `attempt` is reserved for.
-    pub fn reviewer_task_on_cut(
-        &self,
-        checkpoint: &ObjectRef,
-        attempt: &SessionId,
-    ) -> Result<Option<TaskId>, BundleError> {
-        Ok(match self.reserved_task(attempt)? {
-            Some((task, _)) if self.reviewer_task(&task, checkpoint)? => Some(task),
-            _ => None,
-        })
-    }
-
-    /// The seal's check: a live reservation decides; once it is pruned, the
-    /// task recorded at binding must be a Reviewer task on the cut.
+    /// The seal's check, from the orchestration records alone: the task of
+    /// the live reservation or, once a reopen retired and pruned it, of the
+    /// run's cumulative attempt archive must be a Reviewer task on the cut.
     fn reviewer_on_cut(
         &self,
         checkpoint: &ObjectRef,
         attempt: &SessionId,
-        recorded: Option<&TaskId>,
     ) -> Result<bool, BundleError> {
-        if let Some((task, _)) = self.reserved_task(attempt)? {
-            return Ok(recorded.is_none_or(|recorded| recorded == &task)
-                && self.reviewer_task(&task, checkpoint)?);
-        }
-        if let Some(task) = recorded {
-            return self.reviewer_task(task, checkpoint);
+        let task = match self.reserved_task(attempt)? {
+            Some((task, _)) => Some(task),
+            None => self.archived_task(attempt)?,
+        };
+        if let Some(task) = task {
+            return self.reviewer_task(&task, checkpoint);
         }
         #[cfg(all(test, target_os = "linux"))]
         if test_reviewers::contains(checkpoint, attempt) {
@@ -389,6 +377,32 @@ impl ProjectBundle {
                     reservation.identity.task.clone(),
                     reservation.state.clone(),
                 )));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The task a retired, pruned attempt was reserved for. Each run keeps one
+    /// cumulative archive, the last one in its usage records.
+    fn archived_task(&self, attempt: &SessionId) -> Result<Option<TaskId>, BundleError> {
+        let runs: Vec<_> = self.run_index()?.orchestration.keys().cloned().collect();
+        for run in runs {
+            let Some(projection) = self.orchestration_projection(&run)? else {
+                continue;
+            };
+            for reference in projection.usage.iter().rev() {
+                if let OrchestrationPayload::AttemptArchive(archive) =
+                    self.store.read_run_record(reference)?.payload
+                {
+                    if let Some(reservation) = archive
+                        .attempts
+                        .iter()
+                        .find(|reservation| &reservation.identity.attempt.0 == attempt)
+                    {
+                        return Ok(Some(reservation.identity.task.clone()));
+                    }
+                    break;
+                }
             }
         }
         Ok(None)
@@ -471,11 +485,7 @@ impl ProjectBundle {
         // The visual row must come from a Reviewer task attempt on this cut,
         // whether or not the editor filed a rationale.
         let reviewer = match &checks.reviewer_attempt {
-            Some(attempt) => self.reviewer_on_cut(
-                &descriptor.checkpoint_ref,
-                attempt,
-                checks.reviewer_task.as_ref(),
-            )?,
+            Some(attempt) => self.reviewer_on_cut(&descriptor.checkpoint_ref, attempt)?,
             None => false,
         };
         if !reviewer {

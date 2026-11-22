@@ -1935,3 +1935,63 @@ fn ja1_s5a_c7_fix1_reopen_checks_the_sealed_audit_and_expectations() {
         "C7_FIX1_RECEIPT_EXPECTATIONS_IDENTITY"
     );
 }
+
+#[test]
+fn ja1_s5a_c7_fix2_a_failed_seal_pauses_ready_to_seal_with_its_reason() {
+    use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
+    let temp = TempDirectory::new_in(&workspace_target_dir(), "c7-fix2-seal-failure");
+    let (_core, mut bundle, _) = saved_bundle(&temp);
+    let ready = c7_checked(&mut bundle, &temp, false, None);
+    assert!(
+        matches!(
+            bundle.review_status().unwrap().unwrap().phase,
+            ReviewPhase::ReadyToSeal { .. }
+        ),
+        "C7_FIX2_READY_TO_SEAL"
+    );
+    // The host records why a seal it started failed, where Status shows it.
+    let paused = bundle
+        .update_review_job(
+            &ready.token,
+            UpdateReviewJob::Pause("C7_FIX2_SEAL_FAILED".into()),
+        )
+        .unwrap();
+    let ReviewPhase::Paused {
+        checkpoint: ReviewCheckpoint::Checking(checks),
+        reason,
+        ..
+    } = &paused.phase
+    else {
+        panic!("C7_FIX2_PAUSED_WITH_CHECKS: {:?}", paused.phase);
+    };
+    assert_eq!(reason, "C7_FIX2_SEAL_FAILED");
+    assert_eq!(
+        checks.reviewer_attempt,
+        Some(ready.binding.reviewer_attempt)
+    );
+    assert_eq!(
+        bundle.review_status().unwrap().unwrap().phase,
+        paused.phase,
+        "C7_FIX2_FAILURE_IS_DURABLE"
+    );
+    // Only an explicit Retry continues, and it binds afresh.
+    let retried = bundle
+        .update_review_job(&ready.token, UpdateReviewJob::Retry)
+        .unwrap();
+    assert_eq!(
+        retried.phase,
+        ReviewPhase::Checking(ReviewChecks::default())
+    );
+}
+
+#[test]
+fn ja1_s5a_c7_fix2_persisted_checks_cannot_name_a_reviewer_task() {
+    // The seal derives the Reviewer task from the orchestration records; a
+    // bundle that names one in its checks is refused when it is read.
+    let mut value = serde_json::to_value(ReviewChecks::default()).unwrap();
+    value["reviewer_task"] = serde_json::json!("task-forged");
+    assert!(
+        serde_json::from_value::<ReviewChecks>(value).is_err(),
+        "C7_FIX2_REVIEWER_TASK_REFUSED"
+    );
+}

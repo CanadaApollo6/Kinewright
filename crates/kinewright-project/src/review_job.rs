@@ -141,11 +141,6 @@ pub struct ReviewCheckBinding {
 pub struct ReviewChecks {
     pub configuration_sha256: Option<[u8; 32]>,
     pub reviewer_attempt: Option<SessionId>,
-    /// The Reviewer task the bound attempt was reserved for, recorded at
-    /// binding while its reservation is live. A reopen retires and prunes
-    /// the reservation; the task stays, so the seal checks role and cut here.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reviewer_task: Option<crate::orchestration_records::TaskId>,
     pub rows: BTreeMap<RequiredReviewRow, ReportedReviewCheck>,
 }
 
@@ -713,9 +708,12 @@ impl ProjectBundle {
                 job.stage = None;
             }
             UpdateReviewJob::Pause(reason) => {
+                // A failed seal pauses like a refused one: Retry binds afresh.
                 let checkpoint = match job.phase {
                     Encoding => ReviewCheckpoint::Queued,
-                    Checking(checks) => ReviewCheckpoint::Checking(checks),
+                    Checking(checks) | ReviewPhase::ReadyToSeal { checks, .. } => {
+                        ReviewCheckpoint::Checking(checks)
+                    }
                     _ => return Err(invalid()),
                 };
                 let reason = reason.chars().take(256).collect::<String>();
@@ -754,19 +752,10 @@ impl ProjectBundle {
                 *checks = ReviewChecks::default();
             }
             UpdateReviewJob::BindChecks(binding) => {
-                let checkpoint = self
-                    .read_snapshot(&job.token.snapshot)?
-                    .descriptor
-                    .checkpoint_ref
-                    .clone();
-                let task = self.reviewer_task_on_cut(&checkpoint, &binding.reviewer_attempt)?;
                 let Checking(checks) = &mut job.phase else {
                     return Err(invalid());
                 };
                 checks.bind(binding)?;
-                if task.is_some() {
-                    checks.reviewer_task = task;
-                }
             }
             UpdateReviewJob::RecordCheck { .. } | UpdateReviewJob::RecordUnknown { .. } => {
                 self.record_review_check(&mut job, update)?;
