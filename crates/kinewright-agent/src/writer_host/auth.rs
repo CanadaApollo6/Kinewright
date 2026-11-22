@@ -248,6 +248,10 @@ impl super::HostCommandOwner {
             read_pins: Vec::new(),
             snapshot_leases: std::collections::BTreeMap::new(),
         });
+        // JA-1 S6 C3: an attached Editor is never idle.
+        if role == super::AttachmentRole::Editor {
+            self.detached = false;
+        }
         Ok(())
     }
 

@@ -1199,7 +1199,7 @@ impl HostCommandOwner {
 
     /// The active project's failure is returned; another project's pending Stop
     /// stays armed without blocking this one.
-    fn persist_pending_stops(&mut self) -> Result<(), HostError> {
+    pub(super) fn persist_pending_stops(&mut self) -> Result<(), HostError> {
         let active = self.owner()?.project_id().ok();
         let mut result = Ok(());
         for pending in std::mem::take(&mut self.review_runtime.pending_stop) {
@@ -1372,6 +1372,51 @@ impl HostCommandOwner {
     /// review write lands until it settles.
     pub(super) fn review_writes_frozen(&self) -> bool {
         self.recovering || self.switch_frozen || self.native_recovery_pending
+    }
+
+    /// JA-1 S6 C3: the current job is Queued, Encoding, Checking or
+    /// `ReadyToSeal`, so closing the window detaches instead of shutting down.
+    /// A project with no bundle has no job.
+    pub(super) fn review_active(&self) -> Result<bool, HostError> {
+        Ok(self.review_phase()?.is_some_and(|phase| {
+            matches!(
+                phase,
+                ReviewPhase::Queued
+                    | ReviewPhase::Encoding
+                    | ReviewPhase::Checking(_)
+                    | ReviewPhase::ReadyToSeal { .. }
+            )
+        }))
+    }
+
+    fn review_phase(&self) -> Result<Option<ReviewPhase>, HostError> {
+        let Some(bundle) = self
+            .owner
+            .as_ref()
+            .and_then(|owner| owner.review_bundle().ok())
+        else {
+            return Ok(None);
+        };
+        Ok(bundle.review_job()?.map(|job| job.phase.clone()))
+    }
+
+    /// JA-1 S6 C3: review work a detached host must finish before it exits:
+    /// an active or Stopping job, a pending Stop, an encode worker or its
+    /// cleanup, a running save, or a freeze. A read error counts as work.
+    pub(super) fn review_work_remains(&self) -> bool {
+        let runtime = &self.review_runtime;
+        self.review_writes_frozen()
+            || !runtime.pending_stop.is_empty()
+            || runtime.worker.is_some()
+            || matches!(
+                runtime.save_status,
+                Some(kinewright_project::review_job::delivery::SealedSaveStatus::Saving { .. })
+            )
+            || self.review_phase().map_or(true, |phase| {
+                phase.is_some_and(|phase| {
+                    !matches!(phase, ReviewPhase::Paused { .. } | ReviewPhase::Stopped)
+                })
+            })
     }
 
     /// A retained project's retirement failure waits for its next command or

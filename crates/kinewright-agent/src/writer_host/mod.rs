@@ -712,17 +712,49 @@ impl WriterHost {
         Ok(())
     }
     /// Waits for an authenticated Shutdown command; dropping the router runs all owner Drops.
+    ///
+    /// JA-1 S6 C3: after an explicit detach, the owner fences itself once no
+    /// retained work remains; this loop then finishes the exit exactly as an
+    /// authenticated `Shutdown` does.
     pub fn wait(self) {
+        self.wait_until_stopped();
+    }
+    /// `wait`'s loop; tests run it on a scoped thread beside the fixture.
+    pub(crate) fn wait_until_stopped(&self) {
         // The shipping child calls wait only after flushing discovery.
         #[cfg(target_os = "linux")]
         self.runtime.update();
         if let Some(thread) = &self.server.thread {
+            let mut exiting = false;
+            let mut polls = 0_u32;
             while !thread.is_finished() {
+                polls = polls.wrapping_add(1);
+                if !exiting
+                    && polls.is_multiple_of(DETACHED_POLL_TICKS)
+                    && let Some(owner) = self.owner.upgrade()
+                {
+                    HostCommandOwner::poll_detached(&owner);
+                }
+                if !exiting && self.lifecycle.detached_exit_requested() {
+                    exiting = true;
+                    if let Some(owner) = self.owner.upgrade() {
+                        finish_shutdown(
+                            &owner,
+                            #[cfg(target_os = "linux")]
+                            &self.runtime,
+                            &self.server.stop,
+                        );
+                    } else {
+                        self.server.stop.notify_one();
+                    }
+                }
                 thread::park_timeout(Duration::from_millis(20));
             }
         }
     }
 }
+/// `wait` parks 20 ms per tick; a detached host polls its work every 100 ms.
+const DETACHED_POLL_TICKS: u32 = 5;
 impl Drop for WriterHost {
     fn drop(&mut self) {
         if let Some(owner) = self.owner.upgrade() {
@@ -786,6 +818,8 @@ fn serve(
 #[derive(Default)]
 struct HostLifecycle {
     stopping: AtomicBool,
+    // JA-1 S6 C3: a detached host's work ended and its owner fenced.
+    detached_exit: AtomicBool,
     changed: tokio::sync::Notify,
     media_workers: Mutex<Vec<JoinHandle<()>>>,
 }
@@ -796,6 +830,13 @@ impl HostLifecycle {
     fn stop(&self) {
         self.stopping.store(true, Ordering::Release);
         self.changed.notify_waiters();
+    }
+    /// The owner is already fenced; `WriterHost::wait` finishes the exit.
+    fn request_detached_exit(&self) {
+        self.detached_exit.store(true, Ordering::Release);
+    }
+    fn detached_exit_requested(&self) -> bool {
+        self.detached_exit.load(Ordering::Acquire)
     }
     fn spawn_media(&self, work: impl FnOnce() + Send + 'static) -> std::io::Result<()> {
         let mut workers = self
@@ -969,13 +1010,12 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
         #[cfg(not(target_os = "linux"))]
         let reply = run_inputs::execute(&state.owner, &bearer, request);
         if shutting_down && reply.error.is_none() {
-            // The fenced encode worker exits before the router drops the owner
-            // and its project lock.
-            #[cfg(target_os = "linux")]
-            HostCommandOwner::join_review_for_shutdown(&state.owner);
-            #[cfg(target_os = "linux")]
-            state.runtime.request_stop();
-            state.stop.notify_one();
+            finish_shutdown(
+                &state.owner,
+                #[cfg(target_os = "linux")]
+                &state.runtime,
+                &state.stop,
+            );
         } else {
             #[cfg(target_os = "linux")]
             HostCommandOwner::join_retired_review_drivers(&state.owner);
@@ -984,6 +1024,8 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
             HostCommandOwner::persist_stops_after_thaw(&state.owner);
             #[cfg(target_os = "linux")]
             state.runtime.update();
+            // JA-1 S6 C3: a run this request retired may end a detached host.
+            HostCommandOwner::poll_detached(&state.owner);
         }
         reply
     })
@@ -992,6 +1034,22 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
         Ok(reply) => json_response(&reply),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+/// The half of `Shutdown` that runs with the owner lock released, after the
+/// owner fenced: the fenced encode worker exits before the router drops the
+/// owner and its project lock. The detached exit (JA-1 S6 C3) runs it too.
+fn finish_shutdown(
+    owner: &Mutex<HostCommandOwner>,
+    #[cfg(target_os = "linux")] runtime: &studio_runtime::StudioRuntime,
+    stop: &tokio::sync::Notify,
+) {
+    #[cfg(target_os = "linux")]
+    HostCommandOwner::join_review_for_shutdown(owner);
+    #[cfg(not(target_os = "linux"))]
+    let _ = owner;
+    #[cfg(target_os = "linux")]
+    runtime.request_stop();
+    stop.notify_one();
 }
 #[cfg(target_os = "linux")]
 fn waits_for_startup(state: &HttpState, bearer: &str, request: &HostRequest) -> bool {
@@ -1722,6 +1780,8 @@ pub struct HostCommandOwner {
     manual_root_fault: Option<(&'static str, usize)>,
     next_manual_generation: u64,
     recovering: bool,
+    // JA-1 S6 C3: the GUI explicitly detached; only a reattach clears it.
+    detached: bool,
     recovery_capacity_frozen: bool,
     recovery: Option<RecoveryBarrier>,
     recovery_request: Option<String>,
@@ -1922,6 +1982,7 @@ impl HostCommandOwner {
             manual_root_fault: None,
             next_manual_generation: 1,
             recovering: false,
+            detached: false,
             recovery_capacity_frozen: false,
             recovery: None,
             recovery_request: None,
@@ -2056,6 +2117,15 @@ impl HostCommandOwner {
             .into());
         }
         Ok(())
+    }
+    /// The owner half of `Shutdown`: fence, stop every session, say so.
+    /// The detached exit (JA-1 S6 C3) runs the same steps.
+    fn begin_shutdown(&mut self) {
+        self.fence_shutdown();
+        for session in self.sessions.values_mut() {
+            session.stop();
+        }
+        self.message = "Host shutting down.".into();
     }
     fn fence_shutdown(&mut self) {
         self.lifecycle.stop();
@@ -3049,11 +3119,7 @@ impl HostCommandOwner {
                     )
                     .into());
                 }
-                self.fence_shutdown();
-                for session in self.sessions.values_mut() {
-                    session.stop();
-                }
-                self.message = "Host shutting down.".into();
+                self.begin_shutdown();
             }
         }
         Ok(())
@@ -3166,6 +3232,8 @@ impl HostCommandOwner {
             retention_proven: self.retention_proven,
             #[cfg(target_os = "linux")]
             sealed_save: self.review_runtime.sealed_save_status(),
+            #[cfg(target_os = "linux")]
+            review_active: self.review_active().unwrap_or(false),
             message: self.message.clone(),
             admitted_roots: self.admitted_roots(),
             choice: if self.recovery_choice {

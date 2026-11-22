@@ -148,6 +148,8 @@ impl HostCommandOwner {
                     && let Ok(mut owner) = host.lock()
                 {
                     owner.review_runtime.save_status = Some(status);
+                    // JA-1 S6 C3: the save ended; a detached host may exit.
+                    owner.exit_when_detached_work_ends();
                 }
             })
             .map_err(|_| refused("The save could not be started."))?;

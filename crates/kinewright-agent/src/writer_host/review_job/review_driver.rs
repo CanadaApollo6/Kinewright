@@ -42,6 +42,8 @@ use super::{
 const DRIVER_CONFIGURATION_TAG: &[u8] = b"kinewright.review-driver.s5a-c7.v1\0";
 const REVIEWER_POLL: Duration = Duration::from_millis(50);
 const CANCELLED: &str = "The review checks were cancelled.";
+const NO_REVIEWER: &str =
+    "No Reviewer is left to check this cut. Open the project and resume the review.";
 
 /// Every checker configuration one binding covers.
 pub(in crate::writer_host) struct DriverConfiguration {
@@ -171,6 +173,9 @@ enum DriverStep {
     Wait,
     Drive(SessionId),
     Seal,
+    /// JA-1 S6 C3: the GUI detached and no retained run can still start a
+    /// Reviewer, so the job pauses instead of waiting forever.
+    NoReviewer,
     Done,
 }
 
@@ -189,7 +194,7 @@ fn driver_step(
     let step = owner.next_driver_step(token, cancel, stalled);
     if !matches!(
         step,
-        Ok(DriverStep::Wait | DriverStep::Drive(_) | DriverStep::Seal)
+        Ok(DriverStep::Wait | DriverStep::Drive(_) | DriverStep::Seal | DriverStep::NoReviewer)
     ) {
         exiting.store(true, Ordering::Release);
     }
@@ -234,12 +239,21 @@ impl HostCommandOwner {
                 .map(|job| job.phase.clone())
             {
                 Some(ReviewPhase::ReadyToSeal { .. }) => DriverStep::Seal,
-                Some(ReviewPhase::Checking(checks)) => checks
-                    .reviewer_attempt
-                    .map_or(DriverStep::Wait, DriverStep::Drive),
+                Some(ReviewPhase::Checking(checks)) => match checks.reviewer_attempt {
+                    Some(attempt) => DriverStep::Drive(attempt),
+                    None if self.no_reviewer_can_start() => DriverStep::NoReviewer,
+                    None => DriverStep::Wait,
+                },
                 _ => DriverStep::Done,
             },
         )
+    }
+
+    /// A Reviewer attempt is a task of a retained run (lead question 2): with
+    /// the GUI detached and no run still working or hook pending, none can
+    /// bind until the person reopens the project.
+    fn no_reviewer_can_start(&self) -> bool {
+        self.detached && self.hooks.pending.is_none() && !self.retained_run_working()
     }
 }
 
@@ -263,6 +277,7 @@ pub(in crate::writer_host) fn run_review_driver(
                 continue;
             }
             Ok(DriverStep::Done) | Err(_) => return,
+            Ok(DriverStep::NoReviewer) => Some(refused(NO_REVIEWER)),
             Ok(DriverStep::Drive(attempt)) => {
                 let config = DriverConfiguration::production(&attempt);
                 let check =
@@ -316,7 +331,7 @@ fn pause_after_failure(
     if owner.review_writes_frozen() {
         return true;
     }
-    owner.review_can_seal(token).is_ok()
+    let paused = owner.review_can_seal(token).is_ok()
         && owner.owner_mut().is_ok_and(|session| {
             session
                 .review_source_bundle_mut(&token.project)
@@ -324,7 +339,12 @@ fn pause_after_failure(
                     bundle.update_review_job(token, UpdateReviewJob::Pause(error.to_string()))
                 })
                 .is_ok()
-        })
+        });
+    // JA-1 S6 C3: a Paused job is durable; a detached host may now exit.
+    if paused {
+        owner.exit_when_detached_work_ends();
+    }
+    paused
 }
 
 /// Bind once, run every check with the lock released, record each row, then
@@ -496,6 +516,8 @@ pub(in crate::writer_host) fn seal_checked_review(
         .seal_review(token, command, expected_configuration_sha256, &verified)?;
     if matches!(result, SealResult::Sealed(_)) {
         owner.release_sealed_review(token);
+        // JA-1 S6 C3: the seal ended the review; a detached host may exit.
+        owner.exit_when_detached_work_ends();
     }
     Ok(result)
 }

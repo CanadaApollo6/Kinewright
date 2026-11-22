@@ -78,6 +78,10 @@ pub(super) async fn issuer_request(
     let reply = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let mut owner = state.owner.lock().map_err(|_| ())?;
+        // JA-1 S6 C3: a detached host that began its exit takes no new Editor.
+        if owner.lifecycle.stopping() {
+            return Err(());
+        }
         let roots = owner.admitted_roots();
         let auth = HostAuth::generate().map_err(|_| ())?;
         owner
