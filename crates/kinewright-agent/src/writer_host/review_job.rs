@@ -307,6 +307,8 @@ impl ReviewRuntime {
 
 const DRIVER_RUNNING: &str = "The output review checks are still running.";
 const REVOKED: &str = "Output review authority was revoked.";
+const FROZEN: &str =
+    "The project is recovering. Try the output review again when recovery finishes.";
 const BUSY_WORKER: &str =
     "Another output review is still encoding or retiring; stop it or wait for it to finish first.";
 
@@ -569,14 +571,23 @@ pub(super) fn execute(
                 };
             }
             ReviewControl::Status | ReviewControl::Resume(_) | ReviewControl::Check { .. } => {
+                let status = matches!(control, ReviewControl::Status);
                 let reconciled = {
                     let mut owner = lock(host)?;
                     owner.authorize_review(bearer, request)?;
+                    // A read while frozen: the stored job, nothing hashed or written.
+                    if status && owner.review_writes_frozen() {
+                        return owner.frozen_review_status();
+                    }
                     owner.reconcile_review_job().is_ok()
                 };
                 // A reconcile failure is answered below, as before.
-                if reconciled {
-                    verify_reopened(&Arc::downgrade(host), None)?;
+                if reconciled && let Err(error) = verify_reopened(&Arc::downgrade(host), None) {
+                    let owner = lock(host)?;
+                    if status && owner.review_writes_frozen() {
+                        return owner.frozen_review_status();
+                    }
+                    return Err(error);
                 }
             }
             _ => {}
@@ -770,6 +781,16 @@ impl HostCommandOwner {
     }
 
     #[cfg(test)]
+    pub(super) fn review_fixture_native_pending(&mut self, pending: bool) {
+        self.native_recovery_pending = pending;
+    }
+
+    #[cfg(test)]
+    pub(super) fn review_fixture_recovering(&mut self, recovering: bool) {
+        self.recovering = recovering;
+    }
+
+    #[cfg(test)]
     pub(super) fn review_fixture_verified(&self) -> Option<ReviewToken> {
         self.review_runtime.verified.clone()
     }
@@ -833,7 +854,8 @@ impl HostCommandOwner {
     }
 
     fn retire_for_shutdown(&mut self) -> Result<(), HostError> {
-        if self.settlement_owned_elsewhere() {
+        // A frozen project keeps its job for the next open to reconcile.
+        if self.settlement_owned_elsewhere() || self.review_writes_frozen() {
             return Ok(());
         }
         // A retained source records its own worker's retirement; the active
@@ -883,7 +905,29 @@ impl HostCommandOwner {
         {
             return Err(BundleError::Unsettled.into());
         }
+        // Status and Stop stay open: Status reads, Stop waits behind its fence.
+        if self.review_writes_frozen()
+            && !matches!(
+                request.command,
+                HostCommand::Review(ReviewControl::Stop(_) | ReviewControl::Status)
+            )
+        {
+            return Err(refused(FROZEN));
+        }
         Ok(())
+    }
+
+    /// Status while frozen: a Stop waiting to persist, else the stored job.
+    fn frozen_review_status(&self) -> Result<Option<ReviewStatus>, HostError> {
+        if let Some(pending) = self
+            .owner()?
+            .project_id()
+            .ok()
+            .and_then(|project| self.review_runtime.pending_for(&project))
+        {
+            return Ok(Some(pending.clone()));
+        }
+        self.review_status()
     }
 
     fn apply_review_control(
@@ -965,15 +1009,22 @@ impl HostCommandOwner {
             // Arm the fence before any read that capacity or an unsettled root
             // can refuse; such a read only leaves the phase unknown. Behind
             // another owner's uncertain publication nothing is read or settled.
+            // While frozen the phase is read without settling the root.
             let pending_owner = self.settlement_owned_elsewhere();
+            let frozen = self.review_writes_frozen();
             let phase = match self.owner_mut().map_err(drop).and_then(|session| {
                 if pending_owner {
                     return Err(());
                 }
-                session
+                let bundle = session
                     .review_source_bundle_mut(&token.project)
-                    .and_then(kinewright_project::bundle::ProjectBundle::review_status_for_stop)
-                    .map_err(drop)
+                    .map_err(drop)?;
+                if frozen {
+                    bundle.review_status()
+                } else {
+                    bundle.review_status_for_stop()
+                }
+                .map_err(drop)
             }) {
                 Ok(Some(status)) if &status.token == token => {
                     if status.phase == ReviewPhase::Stopped {
@@ -1009,7 +1060,10 @@ impl HostCommandOwner {
                 self.review_runtime.pending_stop.push(pending);
                 // A finished worker is swept and its charge released; its
                 // retirement persists the waiting Stop with the space it frees.
-                if !self.settlement_owned_elsewhere() && self.review_runtime.worker.is_some() {
+                if !self.settlement_owned_elsewhere()
+                    && !self.review_writes_frozen()
+                    && self.review_runtime.worker.is_some()
+                {
                     let _ = self.retire_review_worker();
                 }
                 if self.review_runtime.fenced(token) {
@@ -1039,6 +1093,10 @@ impl HostCommandOwner {
     fn persist_review_stop(&mut self, token: &ReviewToken) -> Result<bool, HostError> {
         if self.settlement_owned_elsewhere() {
             return Err(BundleError::Unsettled.into());
+        }
+        // The Stop stays armed and persists on the first reconcile after the freeze.
+        if self.review_writes_frozen() {
+            return Err(refused(FROZEN));
         }
         let session = self.owner_mut()?;
         if session.review_source_bundle(&token.project).is_err() {
@@ -1086,6 +1144,9 @@ impl HostCommandOwner {
     pub(super) fn reconcile_review_job(&mut self) -> Result<(), HostError> {
         if self.settlement_owned_elsewhere() {
             return Err(BundleError::Unsettled.into());
+        }
+        if self.review_writes_frozen() {
+            return Err(refused(FROZEN));
         }
         // A finished worker is swept and its charge released even while a Stop
         // waits for space to persist.
@@ -1151,6 +1212,10 @@ impl HostCommandOwner {
         if self.lifecycle.stopping() {
             return Err(refused(REVOKED));
         }
+        // No artifact read while frozen; the first command after it verifies.
+        if self.review_frozen() {
+            return Err(refused(FROZEN));
+        }
         let bundle = self.owner()?.review_bundle()?;
         let Some(job) = bundle.review_job()?.filter(|job| {
             job.artifact_ref.is_some()
@@ -1193,7 +1258,7 @@ impl HostCommandOwner {
         // Recovery, a branch switch or native recovery took the project
         // during the hash: nothing is written; the next command verifies again.
         if self.review_frozen() {
-            return Err(refused(REVOKED));
+            return Err(refused(FROZEN));
         }
         let bound = matches!(&job.phase, ReviewPhase::Checking(checks) if checks.reviewer_attempt.is_some());
         drop(job);
@@ -1209,11 +1274,13 @@ impl HostCommandOwner {
     /// Recovery, a branch switch or native recovery owns the project: review
     /// threads wait and start nothing.
     pub(super) fn review_frozen(&self) -> bool {
-        self.lifecycle.stopping()
-            || self.recovery_only
-            || self.recovering
-            || self.switch_frozen
-            || self.native_recovery_pending
+        self.lifecycle.stopping() || self.recovery_only || self.review_writes_frozen()
+    }
+
+    /// Recovery, a branch switch or native recovery holds the project: no
+    /// review write lands until it settles.
+    pub(super) fn review_writes_frozen(&self) -> bool {
+        self.recovering || self.switch_frozen || self.native_recovery_pending
     }
 
     /// A retained project's retirement failure waits for its next command or
@@ -1422,7 +1489,17 @@ impl HostCommandOwner {
         Ok(())
     }
 
+    /// Every review write's gate, for /host controls, drivers and workers.
     fn review_authority(&self, token: &ReviewToken) -> Result<(), HostError> {
+        self.review_owned(token)?;
+        if self.review_writes_frozen() {
+            return Err(refused(FROZEN));
+        }
+        Ok(())
+    }
+
+    /// This host still owns the job, frozen or not.
+    pub(super) fn review_owned(&self, token: &ReviewToken) -> Result<(), HostError> {
         if self.lifecycle.stopping()
             || self.recovery_only
             || self.settlement_owned_elsewhere()

@@ -2921,7 +2921,7 @@ impl HostCommandOwner {
                 // A finished review worker retires first, so its stage is
                 // swept while this process still holds the copy's lock.
                 #[cfg(target_os = "linux")]
-                if !self.settlement_owned_elsewhere() {
+                if !self.settlement_owned_elsewhere() && !self.review_writes_frozen() {
                     let _ = self.retire_review_worker();
                 }
                 self.owner_mut()?.release_completed_capture(&path)?;

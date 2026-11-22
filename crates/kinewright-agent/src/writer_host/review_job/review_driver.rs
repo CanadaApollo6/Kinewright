@@ -209,7 +209,8 @@ impl HostCommandOwner {
         {
             return Ok(DriverStep::Done);
         }
-        self.review_authority(token)?;
+        // A freeze waits; a write already under way refuses at its own gate.
+        self.review_owned(token)?;
         if self.review_frozen() {
             return Ok(DriverStep::Wait);
         }
@@ -292,7 +293,8 @@ pub(in crate::writer_host) fn run_review_driver(
 }
 
 /// Record why the driver's checks or seal failed. `false`: nothing was
-/// recorded, and the driver leaves the job to the next Status.
+/// recorded, and the driver leaves the job to the next Status. During a
+/// freeze nothing is recorded and the driver stays.
 fn pause_after_failure(
     host: &Weak<Mutex<HostCommandOwner>>,
     token: &ReviewToken,
@@ -309,6 +311,11 @@ fn pause_after_failure(
     let Ok(mut owner) = host.lock() else {
         return false;
     };
+    // A freeze refused the step: nothing is recorded, and the driver waits
+    // it out and runs the step again.
+    if owner.review_writes_frozen() {
+        return true;
+    }
     owner.review_can_seal(token).is_ok()
         && owner.owner_mut().is_ok_and(|session| {
             session
