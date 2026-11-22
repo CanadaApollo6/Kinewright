@@ -246,6 +246,17 @@ pub enum ReviewControl {
         token: ReviewToken,
         command: SessionId,
     },
+    /// JA-1 S6 C2: save the sealed cut of `snapshot` under `coverage`, whose
+    /// receipt key digest Studio showed, into `folder`. The host starts one
+    /// background save and answers at once; status reports its outcome.
+    SaveSealed {
+        snapshot: SnapshotKey,
+        coverage: CoverageProfileId,
+        key_sha256: String,
+        folder: std::path::PathBuf,
+    },
+    /// Stop the running save; its staging folder is removed.
+    StopSave,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

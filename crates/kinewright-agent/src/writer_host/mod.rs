@@ -2459,7 +2459,12 @@ impl HostCommandOwner {
                         .editorial_audit(&key)?
                         .map(|audit| (*audit).clone());
                     reply.review_annotations = self.owner()?.review_annotations(&key)?;
-                    reply.review_receipt = self.owner()?.review_receipts(&key)?.into_iter().next();
+                    // JA-1 S6 C2: the receipt of the profile Studio labels.
+                    reply.review_receipt =
+                        kinewright_project::review_job::delivery::receipt_for_profile(
+                            self.owner()?.review_receipts(&key)?,
+                            kinewright_core::output_review::CoverageProfileId::OutputReviewV1,
+                        );
                 }
                 reply.rulebook_proposal = self
                     .owner()?
@@ -3159,6 +3164,8 @@ impl HostCommandOwner {
                 .filter(|run| run.continuable)
                 .count(),
             retention_proven: self.retention_proven,
+            #[cfg(target_os = "linux")]
+            sealed_save: self.review_runtime.sealed_save_status(),
             message: self.message.clone(),
             admitted_roots: self.admitted_roots(),
             choice: if self.recovery_choice {

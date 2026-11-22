@@ -772,6 +772,9 @@ pub struct HostStatus {
     pub project_id: Option<kinewright_project::bundle_records::ProjectId>,
     #[serde(default)]
     pub continuation_runs: usize,
+    /// JA-1 S6 C2: the running or last save of a sealed cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed_save: Option<kinewright_project::review_job::delivery::SealedSaveStatus>,
     /// The owner epoch and input manifest Current-edit playback leases. A
     /// change means the GUI renews its lease (S3 C11).
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -25,6 +25,8 @@ use kinewright_project::{
 
 pub(super) mod review_checks;
 pub(super) mod review_driver;
+// JA-1 S6 C2: the background save of a sealed cut.
+pub(super) mod sealed_save;
 
 use super::{
     AttachmentRole, HostCommand, HostCommandOwner, HostError, HostRefusal, HostReply, HostRequest,
@@ -83,6 +85,12 @@ pub(super) struct ReviewRuntime {
     reopen: Option<Reopen>,
     // The job whose retained artifact is hashed with the lock released.
     verifying: Option<ReviewToken>,
+    // JA-1 S6 C2: the one save of a sealed cut, and what it last reported.
+    save: Option<sealed_save::SaveWorker>,
+    save_status: Option<kinewright_project::review_job::delivery::SealedSaveStatus>,
+    // Each copied chunk passes through it, with the lock released.
+    #[cfg(test)]
+    pub(super) save_hook: Option<sealed_save::SaveHook>,
     // Counts drivers started, so a test can tell a new driver from the old one.
     #[cfg(test)]
     driver_generation: u64,
@@ -212,6 +220,15 @@ impl ReviewRuntime {
         for (_, cancel) in &self.active_cancellations {
             cancel.cancel();
         }
+        if let Some(save) = &self.save {
+            save.cancel();
+        }
+    }
+
+    pub(super) fn sealed_save_status(
+        &self,
+    ) -> Option<kinewright_project::review_job::delivery::SealedSaveStatus> {
+        self.save_status.clone()
     }
 
     /// Every driver and reopen thread, for joining with the lock released.
@@ -221,6 +238,11 @@ impl ReviewRuntime {
             .chain(&mut self.retired_drivers)
             .filter_map(|driver| driver.thread.take())
             .chain(self.reopen.as_mut().and_then(|reopen| reopen.thread.take()))
+            .chain(
+                self.save
+                    .as_mut()
+                    .and_then(sealed_save::SaveWorker::take_thread),
+            )
             .collect()
     }
 
@@ -527,6 +549,30 @@ pub(super) fn execute(
             }
             ReviewControl::QueueDefault(snapshot) => {
                 return queue(host, bearer, request, snapshot, None);
+            }
+            ReviewControl::SaveSealed {
+                snapshot,
+                coverage,
+                key_sha256,
+                folder,
+            } => {
+                // Admission and pins only; the copy runs on the worker.
+                let mut owner = lock(host)?;
+                owner.authorize_review(bearer, request)?;
+                owner.start_sealed_save(
+                    Arc::downgrade(host),
+                    snapshot,
+                    *coverage,
+                    key_sha256,
+                    folder,
+                )?;
+                return owner.review_status();
+            }
+            ReviewControl::StopSave => {
+                let mut owner = lock(host)?;
+                owner.authorize_review(bearer, request)?;
+                owner.stop_sealed_save()?;
+                return owner.review_status();
             }
             ReviewControl::Seal { token, command } => {
                 {
@@ -907,7 +953,9 @@ impl HostCommandOwner {
             || (self.settlement_owned_elsewhere()
                 && !matches!(
                     request.command,
-                    HostCommand::Review(ReviewControl::Stop(_) | ReviewControl::Status)
+                    HostCommand::Review(
+                        ReviewControl::Stop(_) | ReviewControl::StopSave | ReviewControl::Status
+                    )
                 ))
         {
             return Err(BundleError::Unsettled.into());
@@ -916,7 +964,9 @@ impl HostCommandOwner {
         if self.review_writes_frozen()
             && !matches!(
                 request.command,
-                HostCommand::Review(ReviewControl::Stop(_) | ReviewControl::Status)
+                HostCommand::Review(
+                    ReviewControl::Stop(_) | ReviewControl::StopSave | ReviewControl::Status
+                )
             )
         {
             return Err(refused(FROZEN));
@@ -987,6 +1037,8 @@ impl HostCommandOwner {
             ReviewControl::Queue { .. }
             | ReviewControl::QueueDefault(_)
             | ReviewControl::Seal { .. }
+            | ReviewControl::SaveSealed { .. }
+            | ReviewControl::StopSave
             | ReviewControl::Stop(_) => return Err(unavailable()),
         }
         self.review_status()
