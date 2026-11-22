@@ -538,6 +538,11 @@ fn loudness(
 ) {
     let expected = has_expected_audio(plan);
     let span = [0, end_us];
+    // JA-1 S6 R1: loudness judged against no target is never a pass, with
+    // or without audio, so the cut cannot seal under either label.
+    if inputs.settings.loudness_normalization.is_none() {
+        row.push(FindingKind::LoudnessUnmeasured, Undecided, span);
+    }
     let Ok(Some(audio)) = sound.map(|decoded| decoded.output.as_ref()) else {
         // No scan, or no audio stream where audio is expected.
         if sound.is_err() || expected {
@@ -611,8 +616,8 @@ fn loudness(
                 );
             }
         }
-        // Not normalised: integrated loudness is recorded in `measured`
-        // only; the peak still must not clip.
+        // No target: integrated loudness is recorded in `measured` only
+        // (the row is already undecided above); the peak still must not clip.
         None => peak(
             row,
             measured,

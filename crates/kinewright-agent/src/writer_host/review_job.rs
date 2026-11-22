@@ -641,9 +641,9 @@ fn queue(
     };
     let inputs = frozen.open_review_inputs()?;
     let (settings, byte_limit) = delivery.unwrap_or_else(|| {
-        let settings = kinewright_core::DeliveryProfile::SourceMaster.export_settings(
+        // JA-1 S6 R1: the default review always judges loudness.
+        let settings = kinewright_core::output_review_default_settings(
             &inputs.document,
-            kinewright_core::DeliveryEncodeDepth::Eight,
             ExportCancellation::default(),
         );
         let fps = inputs.document.fps;

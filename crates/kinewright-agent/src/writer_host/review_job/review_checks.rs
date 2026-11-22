@@ -96,9 +96,9 @@ pub(in crate::writer_host) fn run_technical_review_checks(
             .prepare_review_check(token)?
     };
     let required = pending.required_rows();
-    let (report, untranscribed) = match pending.open() {
+    let (report, untranscribed, targeted) = match pending.open() {
         Ok(inputs) => run_check(inputs, check),
-        Err(error) => (Err(error.to_string()), None),
+        Err(error) => (Err(error.to_string()), None, true),
     };
     if let Err(reason) = &report
         && reason == &MediaError::Cancelled.to_string()
@@ -116,6 +116,11 @@ pub(in crate::writer_host) fn run_technical_review_checks(
                 && let Some(reason) = &untranscribed
             {
                 return (row, Err(reason.as_str()));
+            }
+            // R1: loudness judged against no target is not checked, whatever
+            // the scan measured.
+            if row == RequiredReviewRow::LoudnessAndPeak && report.is_ok() && !targeted {
+                return (row, Err(NO_LOUDNESS_TARGET));
             }
             let result = report.as_ref().map_err(String::as_str).and_then(|report| {
                 report
@@ -152,13 +157,18 @@ pub(in crate::writer_host) fn run_technical_review_checks(
     })
 }
 
+/// Why the loudness row is Unknown when the frozen settings carry no target
+/// (JA-1 S6 R1). The seal keeps the first 64 characters: lead with the cause.
+pub(in crate::writer_host) const NO_LOUDNESS_TARGET: &str = "No loudness target: the review's export settings name none, so integrated loudness was not judged.";
+
 /// Run the check on opened inputs. Any failure becomes the reason every row
 /// is Unknown; cancellation is passed through by its message. Beside the
-/// report, name the sources whose kept speech no transcript covers.
+/// report, name the sources whose kept speech no transcript covers, and say
+/// whether the frozen settings carry a loudness target.
 fn run_check(
     inputs: kinewright_project::review_job::ReviewCheckInputs,
     check: &CheckReview<'_>,
-) -> (Result<ReviewCheckReport, String>, Option<String>) {
+) -> (Result<ReviewCheckReport, String>, Option<String>, bool) {
     let kinewright_project::review_job::ReviewCheckInputs {
         artifact,
         media,
@@ -168,6 +178,7 @@ fn run_check(
     } = inputs;
     let context = Arc::new(context);
     let untranscribed = untranscribed_sources(&expectations.0, &context.document);
+    let targeted = request.settings.loudness_normalization.is_some();
     let report = context
         .playback_inputs()
         .map_err(|error| error.to_string())
@@ -184,7 +195,7 @@ fn run_check(
             )
             .map_err(|error| error.to_string())
         });
-    (report, untranscribed)
+    (report, untranscribed, targeted)
 }
 
 /// Which sources need transcribing before their kept speech can be checked.

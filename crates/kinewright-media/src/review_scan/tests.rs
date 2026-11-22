@@ -974,9 +974,32 @@ fn assert_pass(label: &str, row: &ReviewRowReport) {
     }
 }
 
+/// JA-1 S6 R1: the calibration settings carry no loudness target, so the
+/// loudness row is undecided for that reason alone: no other finding, and
+/// the peak still judged.
+fn assert_untargeted(label: &str, row: &ReviewRowReport) {
+    assert_eq!(
+        row.result,
+        ReviewRowResult::Unknown,
+        "{label}: {:?}",
+        kinds(row)
+    );
+    assert_eq!(
+        kinds(row),
+        [&FindingKind::LoudnessUnmeasured],
+        "{label}: {:?}",
+        row.row
+    );
+}
+
+/// Every row passes, except loudness, which is only untargeted.
 fn assert_all_pass(label: &str, checked: &Checked) {
     for row in checked.report.rows() {
-        assert_pass(label, row);
+        if row.row == kinewright_core::output_review::RequiredReviewRow::LoudnessAndPeak {
+            assert_untargeted(label, row);
+        } else {
+            assert_pass(label, row);
+        }
     }
 }
 
@@ -1129,7 +1152,7 @@ fn ja1_s5a_picture_defects_are_found_against_the_source() {
             },
         );
         assert_pass(&label, &report.speech);
-        assert_pass(&label, &report.loudness);
+        assert_untargeted(&label, &report.loudness);
     }
 }
 
@@ -1405,9 +1428,10 @@ fn ja1_s5a_loudness_is_judged_against_the_export_target() {
     let measured = clean.measured.unwrap();
     let lufs = measured.integrated_lufs_hundredths.unwrap();
     let peak = measured.true_peak_dbtp_hundredths.unwrap();
-    // Not normalised: integrated loudness is only recorded, far from −14.
+    // No target: integrated loudness is only recorded, far from −14, and
+    // the row is undecided (JA-1 S6 R1).
     assert!(lufs < -1_800, "{measured:?}");
-    assert_pass("unnormalised", &clean.loudness);
+    assert_untargeted("unnormalised", &clean.loudness);
     let target = |integrated: i32, ceiling: i32| LoudnessTarget {
         integrated_lufs_hundredths: integrated,
         tolerance_lu_hundredths: 100,
@@ -1438,6 +1462,116 @@ fn ja1_s5a_loudness_is_judged_against_the_export_target() {
             .has(|kind| matches!(kind, FindingKind::TruePeak { .. })),
         "{:?}",
         over.report.loudness
+    );
+}
+
+// ---------------------------------------------------------------- JA-1 S6 C1
+
+/// The clean cut's picture over a steady 440 Hz stereo tone the length of
+/// its mix, scaled to `lufs_hundredths` integrated. The speech mix peaks
+/// above −1 dBTP at −14 LUFS; the tone's 3 dB crest keeps the peak well
+/// under the ceiling, so only integrated loudness decides the row.
+fn encode_at_level(sources: &Sources, name: &str, cut: &Cut, lufs_hundredths: i32) -> Encoded {
+    let (picture, mut pcm) = render(sources, cut, Seed::Clean);
+    for (frame, pair) in pcm.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+        let value = 0.1 * (2.0 * std::f32::consts::PI * 440.0 * frame as f32 / RATE as f32).sin();
+        pair.fill(value);
+    }
+    let mix = crate::measure_loudness(&pcm, RATE, 2)
+        .unwrap()
+        .integrated_lufs_hundredths
+        .unwrap();
+    let gain = 10_f32.powf((lufs_hundredths - mix) as f32 / 2_000.0);
+    for sample in &mut pcm {
+        *sample *= gain;
+    }
+    let path = encode(&sources.directory, name, &picture, &pcm, PLAIN);
+    let timing =
+        crate::inspect_review_output(File::open(&path).unwrap(), &ExportCancellation::default())
+            .unwrap();
+    Encoded { path, timing }
+}
+
+/// The loudness target the default review queue freezes into its settings.
+fn default_review_target(sources: &Sources, cut: &Cut) -> LoudnessTarget {
+    let (document, _) = frozen(sources, cut);
+    let settings =
+        kinewright_core::output_review_default_settings(&document, ExportCancellation::default());
+    assert_eq!(
+        settings.loudness_normalization,
+        Some(kinewright_core::STREAMING_PLATFORM_TARGET),
+        "S6_DEFAULT_TARGET_IS_STREAMING"
+    );
+    assert_eq!(
+        kinewright_core::STREAMING_PLATFORM_TARGET.integrated_lufs_hundredths,
+        -1_400
+    );
+    settings.loudness_normalization.unwrap()
+}
+
+/// R1: a cut mixed to about −20 LUFS fails the default review's loudness
+/// row against its −14 LUFS target, and a cut at the target passes it.
+#[test]
+fn ja1_s6_default_review_target_fails_a_quiet_cut_and_passes_one_on_target() {
+    let sources = Sources::new("ja1-s6-default-target", Look::default());
+    let cut = standard_cut();
+    let target = default_review_target(&sources, &cut);
+    let technical = TechnicalScanConfig::default();
+    let quiet = encode_at_level(&sources, "quiet", &cut, -2_000);
+    let report = check_with(&sources, &cut, &quiet, &technical, |settings| {
+        settings.loudness_normalization = Some(target);
+    })
+    .report;
+    let lufs = report.measured.unwrap().integrated_lufs_hundredths.unwrap();
+    assert!((lufs + 2_000).abs() <= 100, "S6_QUIET_FIXTURE_LEVEL {lufs}");
+    assert_failed(
+        "S6_QUIET_FAILS",
+        &report.loudness,
+        |kind| {
+            *kind
+                == FindingKind::IntegratedLoudness {
+                    lufs_hundredths: lufs,
+                    target_hundredths: -1_400,
+                }
+        },
+        none,
+    );
+    let on_target = encode_at_level(&sources, "on-target", &cut, -1_400);
+    let report = check_with(&sources, &cut, &on_target, &technical, |settings| {
+        settings.loudness_normalization = Some(target);
+    })
+    .report;
+    let lufs = report.measured.unwrap().integrated_lufs_hundredths.unwrap();
+    assert!((lufs + 1_400).abs() <= 50, "S6_TARGET_FIXTURE_LEVEL {lufs}");
+    assert_pass("S6_ON_TARGET_PASSES", &report.loudness);
+}
+
+/// R1: settings with no loudness target leave the row undecided, whatever
+/// was measured, so the cut cannot seal under either label.
+#[test]
+fn ja1_s6_no_loudness_target_leaves_the_row_undecided() {
+    let sources = Sources::new("ja1-s6-no-target", Look::default());
+    let cut = standard_cut();
+    let on_target = encode_at_level(&sources, "on-target", &cut, -1_400);
+    let report = check_with(
+        &sources,
+        &cut,
+        &on_target,
+        &TechnicalScanConfig::default(),
+        |settings| settings.loudness_normalization = None,
+    )
+    .report;
+    assert!(report.measured.is_some(), "S6_STILL_MEASURED");
+    assert_eq!(
+        report.loudness.result,
+        ReviewRowResult::Unknown,
+        "S6_NO_TARGET_UNKNOWN: {:?}",
+        report.loudness.findings
+    );
+    assert_eq!(
+        kinds(&report.loudness),
+        [&FindingKind::LoudnessUnmeasured],
+        "S6_NO_TARGET_FINDING"
     );
 }
 

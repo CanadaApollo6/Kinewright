@@ -240,6 +240,25 @@ pub const STREAMING_PLATFORM_TARGET: LoudnessTarget = LoudnessTarget {
     loudness_range_max_lu_hundredths: None,
 };
 
+/// The delivery an output review encodes when its request names none
+/// (JA-1 S6 R1, owner question 1). The owner may change it here; the review's
+/// loudness target follows it.
+pub const OUTPUT_REVIEW_DEFAULT_DELIVERY: DeliveryProfile = DeliveryProfile::Youtube1080p;
+
+/// The export settings of a default output review: [`OUTPUT_REVIEW_DEFAULT_DELIVERY`]
+/// at 8 bits, normalised to that profile's loudness target, so the review
+/// always judges integrated loudness against a named target (JA-1 S6 R1).
+#[must_use]
+pub fn output_review_default_settings(
+    document: &Document,
+    cancellation: ExportCancellation,
+) -> ExportSettings {
+    let profile = OUTPUT_REVIEW_DEFAULT_DELIVERY;
+    let mut settings = profile.export_settings(document, DeliveryEncodeDepth::Eight, cancellation);
+    settings.loudness_normalization = Some(profile.loudness_target());
+    settings
+}
+
 /// The true-peak headroom held under a target's ceiling before a lossy encode,
 /// shared by the export step (AU3 §5.6) and the planner (AU3 §6.3).
 /// Re-baselined only from the §5.8 hot lanes' printed pre-encode and decoded

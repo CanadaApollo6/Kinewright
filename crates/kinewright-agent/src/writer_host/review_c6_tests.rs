@@ -694,7 +694,13 @@ fn s5_c6_overlay_defects_and_unresolved_expectations_record_through_host() {
             .unwrap();
         let (artifact, file) = bundle.open_review_artifact(&token2).unwrap();
         let inputs = Arc::new(ctx.open().unwrap()).playback_inputs().unwrap();
-        (file, artifact.output.clone(), exp.0.clone(), inputs, data_dir)
+        (
+            file,
+            artifact.output.clone(),
+            exp.0.clone(),
+            inputs,
+            data_dir,
+        )
     };
     expectations.overlays.captions = ReviewInventory::NotDetermined { known: Vec::new() };
     let engine = super::super::review_job::review_media_engine_for_data_dir(data_dir).unwrap();
@@ -1768,7 +1774,9 @@ fn s5_c6_fix1_cross_version_clock_mapping_and_uncovered_downgrades_to_unknown() 
         drop(cp);
         drop(snap);
 
-        let text_ref = owner.admit_host_grant(b"Check frame 14 after trim").unwrap();
+        let text_ref = owner
+            .admit_host_grant(b"Check frame 14 after trim")
+            .unwrap();
         let strokes_ref = owner.admit_host_grant(b"[[0.5,0.5]]").unwrap();
         let proof_ref = owner.admit_host_grant(b"proof-v1-14").unwrap();
 
@@ -2164,11 +2172,8 @@ fn s5_c6_live_reviewer_identifies_decoded_only_discrepancy() {
     std::fs::create_dir_all(&settings_dir).unwrap();
     let selection = grant.selection();
     write_director_setting(Some(&settings_dir), &selection).expect("S5_C6_LIVE_WRITE_DIRECTOR");
-    write_specialist_setting(
-        Some(&settings_dir),
-        &SpecialistChoice::Specific(selection),
-    )
-    .expect("S5_C6_LIVE_WRITE_SPECIALIST");
+    write_specialist_setting(Some(&settings_dir), &SpecialistChoice::Specific(selection))
+        .expect("S5_C6_LIVE_WRITE_SPECIALIST");
 
     let bundle_path = temp.path("live-review.kinewright");
     {
@@ -2420,11 +2425,7 @@ fn s5_c6_live_reviewer_identifies_decoded_only_discrepancy() {
                         .find(|a| a.identity.task == reviewer_task.id)
                 {
                     let (b, _) = owner
-                        .bind_c6_review_checks(
-                            &token,
-                            attempt.identity.attempt.0.clone(),
-                            &config,
-                        )
+                        .bind_c6_review_checks(&token, attempt.identity.attempt.0.clone(), &config)
                         .expect("S5_C6_LIVE_BIND_REVIEWER");
                     bound_binding = Some(b);
                 }
@@ -2437,10 +2438,7 @@ fn s5_c6_live_reviewer_identifies_decoded_only_discrepancy() {
             }
         }
         if let Some(reference) = terminal_result {
-            break (
-                reference,
-                bound_binding.expect("S5_C6_LIVE_REVIEWER_BOUND"),
-            );
+            break (reference, bound_binding.expect("S5_C6_LIVE_REVIEWER_BOUND"));
         }
         assert!(
             Instant::now() < run_deadline,
@@ -2479,7 +2477,8 @@ fn s5_c6_live_reviewer_identifies_decoded_only_discrepancy() {
         judgment.findings.iter().any(|finding| {
             finding.severity == super::super::review_stills::VisualFindingSeverity::Blocking && {
                 let lower = finding.summary.to_ascii_lowercase();
-                lower.contains("wrong text") || (lower.contains("wrong") && lower.contains("step 1"))
+                lower.contains("wrong text")
+                    || (lower.contains("wrong") && lower.contains("step 1"))
             }
         }),
         "S5_C6_LIVE_REVIEWER_MUST_NAME_DECODED_ONLY_DISCREPANCY: {:?}",
@@ -2512,9 +2511,7 @@ fn s5_c6_live_reviewer_identifies_decoded_only_discrepancy() {
 #[test]
 #[cfg(target_os = "linux")]
 fn s5_c6_fix2_stills_read_uses_bound_config_not_host_wide() {
-    use super::super::review_stills::{
-        C6CheckConfiguration, VisualJudgment, VisualVerdict,
-    };
+    use super::super::review_stills::{C6CheckConfiguration, VisualJudgment, VisualVerdict};
     use kinewright_core::output_review::ReviewRowResult;
     use kinewright_media::ReviewStillsConfig;
 
@@ -2578,7 +2575,8 @@ fn s5_c6_fix2_stills_read_uses_bound_config_not_host_wide() {
 
     // 3. Register the exact bound 960 px config, then keep/re-set the rogue 64 px / 1-page
     //    host-wide config. `read_review_stills` MUST ignore the host-wide setting and serve
-    //    full 480x270 stills across multiple pages using the bound config.
+    //    stills bounded by the bound config across multiple pages: the default review
+    //    encodes 1920x1080 (JA-1 S6 R1), so 960x540.
     {
         let mut owner = shared.lock().unwrap();
         owner
@@ -2594,9 +2592,16 @@ fn s5_c6_fix2_stills_read_uses_bound_config_not_host_wide() {
         "S5_C6_FIX2_HOST_1PAGE_LIMIT_IGNORED: pages={pages}"
     );
     assert!(
-        stills.iter().all(|s| s.width == 480 && s.height == 270),
+        stills.iter().all(|s| (s.width, s.height)
+            == kinewright_media::bounded_still_dimensions(
+                kinewright_core::OUTPUT_REVIEW_DEFAULT_DELIVERY.resolution((480, 270)),
+                bound_cfg.stills.max_long_edge,
+            )),
         "S5_C6_FIX2_HOST_64PX_LIMIT_IGNORED: {:?}",
-        stills.iter().map(|s| (s.width, s.height)).collect::<Vec<_>>()
+        stills
+            .iter()
+            .map(|s| (s.width, s.height))
+            .collect::<Vec<_>>()
     );
     let expected_stills_hex = {
         use std::fmt::Write as _;

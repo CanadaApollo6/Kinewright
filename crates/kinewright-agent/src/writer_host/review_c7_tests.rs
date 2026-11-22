@@ -275,12 +275,19 @@ fn ja1_s5a_c7_driver_delivers_a_plain_cut_with_the_bound_stills_config() {
         let _ = write!(hex, "{byte:02x}");
         hex
     });
+    // The default review encodes 1920x1080 (JA-1 S6 R1); the bound config
+    // bounds each still of it, not the host-wide 64.
+    let width = kinewright_media::bounded_still_dimensions(
+        kinewright_core::OUTPUT_REVIEW_DEFAULT_DELIVERY.resolution((480, 270)),
+        ReviewStillsConfig::default().max_long_edge,
+    )
+    .0;
     let mut reviewer = C7Reviewer(|_: &ReviewToken| {
         let stills = c7_judge(&job.reviewer);
         assert!(
             stills
                 .iter()
-                .all(|still| still.stills_config_sha256 == bound && still.width == 480),
+                .all(|still| still.stills_config_sha256 == bound && still.width == width),
             "C7_STILLS_USE_BOUND_CONFIG: {:?}",
             stills
                 .iter()
@@ -629,7 +636,10 @@ fn c7_talking_head_job(transcript: C7Transcript) -> (C7Job, String) {
         f.brief.inputs = owner.current_inputs_ref().clone();
         f.brief.scope.base = owner.candidate_binding(candidate.branch_id()).unwrap();
     }
-    (c7_job_on(f), name)
+    (
+        c7_job_with(f, false, s6_c1_start_default_encode_at_source_raster),
+        name,
+    )
 }
 
 #[test]
@@ -720,4 +730,207 @@ fn ja1_s5a_c7_talking_head_without_a_transcript_pauses_speech_unknown() {
 )]
 fn ja1_s5a_c7_a_transcript_of_another_stream_is_refused() {
     c7_assert_speech_unchecked(C7Transcript::OtherStream, "C7_OTHER_STREAM");
+}
+
+// JA-1 S6 commit 1: loudness is never skipped (R1).
+
+/// Queue `key` with explicit source-master settings, which carry no loudness
+/// target, and return once it is checking.
+#[cfg(target_os = "linux")]
+fn s6_c1_start_untargeted_encode(
+    f: &Fixture,
+    key: &kinewright_project::studio_records::SnapshotKey,
+) -> ReviewToken {
+    s6_c1_start_encode_with(f, key, |document| {
+        let settings = kinewright_core::DeliveryProfile::SourceMaster.export_settings(
+            document,
+            kinewright_core::DeliveryEncodeDepth::Eight,
+            kinewright_core::ExportCancellation::default(),
+        );
+        assert_eq!(settings.loudness_normalization, None);
+        settings
+    })
+}
+
+/// Queue `key` with the default review settings, loudness target included,
+/// at the document's own raster: a debug 1080p encode of the talking head
+/// outlasts the encode guard under CI load, and those tests are about
+/// transcripts, not the delivery raster.
+#[cfg(target_os = "linux")]
+fn s6_c1_start_default_encode_at_source_raster(
+    f: &Fixture,
+    key: &kinewright_project::studio_records::SnapshotKey,
+) -> ReviewToken {
+    s6_c1_start_encode_with(f, key, |document| {
+        let mut settings = kinewright_core::output_review_default_settings(
+            document,
+            kinewright_core::ExportCancellation::default(),
+        );
+        settings.resolution = document.resolution;
+        settings
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn s6_c1_start_encode_with(
+    f: &Fixture,
+    key: &kinewright_project::studio_records::SnapshotKey,
+    settings: fn(&Document) -> kinewright_core::ExportSettings,
+) -> ReviewToken {
+    let settings = {
+        let shared = f.host.owner.upgrade().unwrap();
+        let owner = shared.lock().unwrap();
+        let document = owner
+            .owner()
+            .unwrap()
+            .read_snapshot(key)
+            .unwrap()
+            .open_review_inputs()
+            .unwrap()
+            .document;
+        settings(&document)
+    };
+    let queued = s5_review_call(
+        &f.editor,
+        ReviewControl::Queue {
+            snapshot: key.clone(),
+            settings,
+            byte_limit: 64 << 20,
+        },
+    )
+    .unwrap();
+    assert_eq!(queued.phase, ReviewPhase::Queued);
+    s5_review_call(&f.editor, ReviewControl::Resume(queued.token)).unwrap();
+    let status = s5_review_wait(&f.editor, |phase| {
+        matches!(
+            phase,
+            ReviewPhase::Checking(_) | ReviewPhase::Paused { .. } | ReviewPhase::Stopped
+        )
+    });
+    assert!(
+        matches!(status.phase, ReviewPhase::Checking(_)),
+        "S6_C1_QUEUED_CHECKING: {:?}",
+        status.phase
+    );
+    let shared = f.host.owner.upgrade().unwrap();
+    s5_review_until(
+        || {
+            shared
+                .lock()
+                .unwrap()
+                .review_fixture_worker()
+                .is_none_or(|(_, done)| done)
+        },
+        "S6_C1_QUEUED_WORKER_DONE",
+    );
+    status.token
+}
+
+/// The default queue freezes the named −14 LUFS streaming target into the
+/// settings the checks judge, and a plain cut still seals Delivered.
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn ja1_s6_c1_default_queue_judges_loudness_against_the_streaming_target() {
+    use kinewright_core::output_review::SealedReviewOutcome;
+    use kinewright_project::review_job::SealResult;
+    let job = c7_job(c7_title_doc("Hello world"));
+    let mut reviewer = C7Reviewer(|_: &ReviewToken| {
+        c7_judge(&job.reviewer);
+        Ok(())
+    });
+    let seen = std::cell::Cell::new(None);
+    let check = |file: &std::fs::File,
+                 inputs: &kinewright_media::review_scan::ReviewScanInputs<'_>| {
+        seen.set(Some(inputs.settings.loudness_normalization));
+        c7_real_check(file, inputs)
+    };
+    let cancel = kinewright_core::ExportCancellation::default();
+    let SealResult::Sealed(sealed) =
+        c7_drive(&job, &check, &mut reviewer, &cancel).expect("S6_C1_DRIVER_SEALS")
+    else {
+        panic!("S6_C1_DEFAULT_SEALED: {:?}", c7_job_phase(&job));
+    };
+    assert_eq!(
+        seen.get(),
+        Some(Some(kinewright_core::STREAMING_PLATFORM_TARGET)),
+        "S6_C1_DEFAULT_TARGET_FROZEN"
+    );
+    assert_eq!(
+        kinewright_core::OUTPUT_REVIEW_DEFAULT_DELIVERY,
+        kinewright_core::DeliveryProfile::Youtube1080p
+    );
+    assert_eq!(sealed.receipt.outcome, SealedReviewOutcome::Delivered);
+}
+
+/// An explicit queue whose settings carry no loudness target pauses with the
+/// loudness row Unknown, its reason naming the missing target, and no seal.
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    all(target_os = "linux", not(feature = "slow-tests")),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn ja1_s6_c1_a_queue_without_a_loudness_target_pauses_loudness_unknown() {
+    use kinewright_core::output_review::{RequiredReviewRow, ReviewRowResult};
+    use kinewright_project::review_job::SealResult;
+    let job = c7_job_with(
+        Fixture::with_inputs(
+            false,
+            c7_title_doc("Hello world"),
+            "project.kinewright",
+            s5_c6_admit_embedded_font,
+        ),
+        false,
+        s6_c1_start_untargeted_encode,
+    );
+    let mut reviewer = C7Reviewer(|_: &ReviewToken| {
+        c7_judge(&job.reviewer);
+        Ok(())
+    });
+    let cancel = kinewright_core::ExportCancellation::default();
+    let result = c7_drive(&job, &c7_real_check, &mut reviewer, &cancel).expect("S6_C1_DRIVER_RUNS");
+    let SealResult::Paused(status) = result else {
+        panic!("S6_C1_UNTARGETED_PAUSED: {result:?}");
+    };
+    let ReviewPhase::Paused {
+        findings,
+        checkpoint: kinewright_project::review_job::ReviewCheckpoint::Checking(checks),
+        ..
+    } = &status.phase
+    else {
+        panic!("S6_C1_PAUSED_PHASE: {:?}", status.phase);
+    };
+    let expected = super::super::review_job::review_checks::NO_LOUDNESS_TARGET;
+    assert!(expected.starts_with("No loudness target"));
+    let row = checks
+        .rows
+        .get(&RequiredReviewRow::LoudnessAndPeak)
+        .expect("S6_C1_LOUDNESS_ROW_RECORDED");
+    assert_eq!(row.result, ReviewRowResult::Unknown, "S6_C1_ROW_UNKNOWN");
+    assert_eq!(row.reason.as_deref(), Some(expected), "S6_C1_ROW_REASON");
+    // The paused finding keeps the reason's first 64 characters.
+    assert!(
+        findings.iter().any(
+            |finding| finding.row == Some(RequiredReviewRow::LoudnessAndPeak)
+                && finding.note.starts_with("No loudness target")
+                && expected.starts_with(finding.note.as_str())
+        ),
+        "S6_C1_NAMES_THE_TARGET: {findings:?}"
+    );
+    for row in [
+        RequiredReviewRow::StructureAndAvIntegrity,
+        RequiredReviewRow::TechnicalDefectScan,
+        RequiredReviewRow::RetainedSpeechChecks,
+    ] {
+        assert_eq!(
+            checks.rows[&row].result,
+            ReviewRowResult::Pass,
+            "S6_C1_OTHER_ROWS_PASS {row:?}"
+        );
+    }
+    assert!(c7_receipts(&job).is_empty(), "S6_C1_NOT_SEALED");
 }
