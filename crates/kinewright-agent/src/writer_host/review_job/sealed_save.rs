@@ -16,6 +16,7 @@ use std::{
 use kinewright_core::{ExportCancellation, output_review::CoverageProfileId};
 use kinewright_project::{
     bundle::BundleError,
+    bundle_records::ProjectId,
     review_job::delivery::{SealedSaveStatus, admit_save_folder, sealed_cut_name},
     studio_records::SnapshotKey,
 };
@@ -29,14 +30,20 @@ pub(in crate::writer_host) type SaveHook =
 
 pub(in crate::writer_host) const SAVE_RUNNING: &str =
     "A sealed cut is already being saved; wait for it to finish or stop it first.";
-const NO_SAVE: &str = "No sealed cut is being saved.";
+pub(in crate::writer_host) const NO_SAVE: &str = "No sealed cut is being saved.";
 
-pub(super) struct SaveWorker {
+pub(in crate::writer_host) struct SaveWorker {
+    project: ProjectId,
+    generation: u64,
     cancellation: ExportCancellation,
     thread: Option<JoinHandle<()>>,
 }
 
 impl SaveWorker {
+    pub(super) fn project(&self) -> &ProjectId {
+        &self.project
+    }
+
     pub(super) fn running(&self) -> bool {
         self.thread
             .as_ref()
@@ -119,6 +126,10 @@ impl HostCommandOwner {
             ));
         }
         let cancellation = ExportCancellation::default();
+        let project = snapshot.project.clone();
+        let generation = self.review_runtime.save_generation.wrapping_add(1);
+        self.review_runtime.save_generation = generation;
+        let worker_project = project.clone();
         #[cfg(test)]
         let hook = self.review_runtime.save_hook.clone();
         let worker_cancel = cancellation.clone();
@@ -144,15 +155,25 @@ impl HostCommandOwner {
                         reason: failure(&error),
                     },
                 };
+                // Only while this is still the host's save: a change of
+                // project retired it, and its status is not the new project's.
                 if let Some(host) = host.upgrade()
                     && let Ok(mut owner) = host.lock()
+                    && owner
+                        .review_runtime
+                        .save
+                        .as_ref()
+                        .is_some_and(|save| save.generation == generation)
                 {
-                    owner.review_runtime.save_status = Some(status);
+                    owner.review_runtime.save_status = Some((worker_project, status));
                 }
             })
             .map_err(|_| refused("The save could not be started."))?;
-        self.review_runtime.save_status = Some(SealedSaveStatus::Saving { name });
+        self.review_runtime.save_status =
+            Some((project.clone(), SealedSaveStatus::Saving { name }));
         self.review_runtime.save = Some(SaveWorker {
+            project,
+            generation,
             cancellation,
             thread: Some(thread),
         });

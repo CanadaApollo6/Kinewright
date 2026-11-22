@@ -85,9 +85,17 @@ pub(super) struct ReviewRuntime {
     reopen: Option<Reopen>,
     // The job whose retained artifact is hashed with the lock released.
     verifying: Option<ReviewToken>,
-    // JA-1 S6 C2: the one save of a sealed cut, and what it last reported.
-    save: Option<sealed_save::SaveWorker>,
-    save_status: Option<kinewright_project::review_job::delivery::SealedSaveStatus>,
+    // JA-1 S6 C2: the one save of a sealed cut, and what it last reported,
+    // both tied to the project the cut came from.
+    pub(super) save: Option<sealed_save::SaveWorker>,
+    pub(super) save_status: Option<(
+        kinewright_project::bundle_records::ProjectId,
+        kinewright_project::review_job::delivery::SealedSaveStatus,
+    )>,
+    // Saves a change of project cancelled; joined with the lock released.
+    pub(super) retired_saves: Vec<sealed_save::SaveWorker>,
+    // Counts saves started; a worker reports only while it is still the save.
+    save_generation: u64,
     // Each copied chunk passes through it, with the lock released.
     #[cfg(test)]
     pub(super) save_hook: Option<sealed_save::SaveHook>,
@@ -220,7 +228,7 @@ impl ReviewRuntime {
         for (_, cancel) in &self.active_cancellations {
             cancel.cancel();
         }
-        if let Some(save) = &self.save {
+        for save in self.save.iter().chain(&self.retired_saves) {
             save.cancel();
         }
     }
@@ -228,7 +236,7 @@ impl ReviewRuntime {
     pub(super) fn sealed_save_status(
         &self,
     ) -> Option<kinewright_project::review_job::delivery::SealedSaveStatus> {
-        self.save_status.clone()
+        self.save_status.as_ref().map(|(_, status)| status.clone())
     }
 
     /// Every driver and reopen thread, for joining with the lock released.
@@ -240,8 +248,9 @@ impl ReviewRuntime {
             .chain(self.reopen.as_mut().and_then(|reopen| reopen.thread.take()))
             .chain(
                 self.save
-                    .as_mut()
-                    .and_then(sealed_save::SaveWorker::take_thread),
+                    .iter_mut()
+                    .chain(&mut self.retired_saves)
+                    .filter_map(sealed_save::SaveWorker::take_thread),
             )
             .collect()
     }
@@ -273,6 +282,19 @@ impl ReviewRuntime {
         }
         self.active_cancellations
             .retain(|(_, cancel)| !cancel.is_cancelled());
+        // A save of the source stops: it holds the source's store open, and
+        // its status is not the new project's.
+        if let Some(save) = self.save.take_if(|save| save.project() == project) {
+            save.cancel();
+            self.retired_saves.push(save);
+        }
+        if self
+            .save_status
+            .as_ref()
+            .is_some_and(|(owner, _)| owner == project)
+        {
+            self.save_status = None;
+        }
     }
 
     pub(super) fn register_review_cancellation(
@@ -1723,9 +1745,17 @@ impl HostCommandOwner {
                 for driver in &runtime.retired_drivers {
                     driver.cancellation.cancel();
                 }
+                for save in &runtime.retired_saves {
+                    save.cancel();
+                }
                 std::mem::take(&mut runtime.retired_drivers)
                     .into_iter()
                     .filter_map(|mut driver| driver.thread.take())
+                    .chain(
+                        std::mem::take(&mut runtime.retired_saves)
+                            .into_iter()
+                            .filter_map(|mut save| save.take_thread()),
+                    )
                     .collect()
             },
         );
