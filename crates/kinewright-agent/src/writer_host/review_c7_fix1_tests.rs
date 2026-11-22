@@ -472,7 +472,22 @@ fn ja1_s5a_c7_fix1_queue_never_reads_the_person_data() {
     assert!(
         reply.error.as_ref().is_some_and(|error| error
             .message
-            .contains("Review fixture requires a private data directory.")),
+            .contains(super::super::review_job::NO_DATA_ROOT)),
         "C7F_NO_DEFAULT_DATA_DIR: {reply:?}"
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn ja1_s5a_c7_fix2_every_review_engine_needs_its_data_root() {
+    // The encode and the overlay and stills engines share one root rule.
+    let refused = super::super::review_job::review_media_engine_for_data_dir(None)
+        .err()
+        .expect("C7F2_ENGINE_REFUSES_NO_ROOT");
+    assert!(
+        refused
+            .to_string()
+            .contains(super::super::review_job::NO_DATA_ROOT),
+        "C7F2_ENGINE_NO_ROOT: {refused}"
     );
 }

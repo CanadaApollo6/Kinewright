@@ -338,13 +338,16 @@ impl HostAttachment {
                 .expect("GUI source service")
                 .bootstrap(),
         };
+        #[cfg(test)]
+        let data_dir = test_data_dir();
+        #[cfg(not(test))]
+        let data_dir = person_data_dir().map_err(|error| {
+            Self::failed_launch(owner, launch_path.as_deref(), launch_root.as_deref(), error)
+        })?;
         let launched = HostClient::launch_with_issuer(
             executable,
             HostConfig {
-                #[cfg(test)]
-                data_dir: Some(test_data_dir()),
-                #[cfg(not(test))]
-                data_dir: None,
+                data_dir: Some(data_dir),
                 // Production hosts read the person's scheduler settings folder.
                 #[cfg(test)]
                 scheduler_settings: Some(test_scheduler_folder()),
@@ -1504,6 +1507,13 @@ fn request_manual_history(
     }
     // A refused command and its original suffix stay in the outbox for recovery.
     Ok(reply)
+}
+
+/// The person's data root, named here for the host: review and media in the
+/// host read only the root they are given, so no test build discovers it.
+#[cfg(not(test))]
+pub(crate) fn person_data_dir() -> Result<PathBuf, BundleError> {
+    kinewright_media::default_data_dir().map_err(|error| BundleError::Identity(error.to_string()))
 }
 
 #[allow(

@@ -403,14 +403,7 @@ fn queue(
     };
     // Source-clock transcripts come from the media store, bound to the
     // frozen version's pins. A missing one leaves its speech unchecked.
-    // Tests pass explicit roots and never discover the person's data.
-    #[cfg(test)]
-    let data_dir =
-        data_dir.ok_or_else(|| refused("Review fixture requires a private data directory."))?;
-    #[cfg(not(test))]
-    let data_dir = data_dir
-        .map_or_else(kinewright_media::default_data_dir, Ok)
-        .map_err(|error| refused(&error.to_string()))?;
+    let data_dir = review_data_root(data_dir)?;
     let sources = load_source_transcripts(
         &inputs.document,
         &inputs.manifest,
@@ -1391,7 +1384,7 @@ fn encode_review(
         probe(ReviewPoint::BeforeEncode);
         let inputs = Arc::new(work.context.open()?).playback_inputs()?;
         #[cfg(not(test))]
-        let media = super::LazyHostMedia::new(work.data_dir);
+        let media = super::LazyHostMedia::new(Some(review_data_root(work.data_dir)?));
         #[cfg(not(test))]
         let engine = media.get().map_err(|error| refused(&error.to_string()))?;
         #[cfg(test)]
@@ -1515,15 +1508,21 @@ fn encode_review(
     (result, pending)
 }
 
+/// Every build: output review reads only the data root its host was given.
+/// The app names the person's root when it launches the host; no review
+/// path resolves one, so no test build can reach the person's data.
+fn review_data_root(data_dir: Option<std::path::PathBuf>) -> Result<std::path::PathBuf, HostError> {
+    data_dir.ok_or_else(|| refused(NO_DATA_ROOT))
+}
+
+pub(super) const NO_DATA_ROOT: &str = "Output review requires the host's data directory.";
+
 pub(super) fn review_media_engine_for_data_dir(
     data_dir: Option<std::path::PathBuf>,
 ) -> Result<kinewright_media::FfmpegMediaEngine, HostError> {
     #[cfg(not(test))]
     {
-        let root = data_dir
-            .map_or_else(kinewright_media::default_data_dir, Ok)
-            .map_err(|error| refused(&error.to_string()))?;
-        kinewright_media::FfmpegMediaEngine::new_with_data_dir(root)
+        kinewright_media::FfmpegMediaEngine::new_with_data_dir(review_data_root(data_dir)?)
             .map_err(|error| refused(&error.to_string()))
     }
     #[cfg(test)]
@@ -1538,8 +1537,7 @@ fn review_fixture_engine(
 ) -> Result<kinewright_media::FfmpegMediaEngine, HostError> {
     static GPU: std::sync::OnceLock<Result<kinewright_media::GpuContext, MediaError>> =
         std::sync::OnceLock::new();
-    let root =
-        data_dir.ok_or_else(|| refused("Review fixture requires a private data directory."))?;
+    let root = review_data_root(data_dir)?;
     let gpu = GPU
         .get_or_init(|| kinewright_media::GpuContext::headless(true))
         .as_ref()

@@ -342,7 +342,7 @@ impl HostAttachment {
                     #[cfg(test)]
                     data_dir: Some(path.with_extension("test-voice-data")),
                     #[cfg(not(test))]
-                    data_dir: None,
+                    data_dir: Some(super::person_data_dir()?),
                     #[cfg(test)]
                     scheduler_settings: Some(path.with_extension("test-scheduler")),
                     #[cfg(not(test))]
