@@ -2222,11 +2222,23 @@ fn review_fixture_engine(
         std::sync::OnceLock::new();
     let root = review_data_root(data_dir)?;
     let gpu = GPU
-        .get_or_init(|| kinewright_media::GpuContext::headless(true))
+        .get_or_init(|| kinewright_media::GpuContext::headless(review_fixture_software_gpu()))
         .as_ref()
         .map_err(|error| refused(&error.to_string()))?;
     kinewright_media::FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu.clone(), root)
         .map_err(|error| refused(&error.to_string()))
+}
+
+/// Test builds encode on the software adapter (lavapipe). The G20
+/// measurement's NVIDIA lane alone asks for the hardware adapter, as the
+/// repo's `--ignored` GPU lanes do.
+#[cfg(test)]
+fn review_fixture_software_gpu() -> bool {
+    #[cfg(feature = "g20-measure")]
+    if std::env::var_os("KINEWRIGHT_G20_GPU").is_some_and(|lane| lane == "nvidia") {
+        return false;
+    }
+    true
 }
 
 fn current_stage(byte_limit: u64) -> Result<ReviewStage, HostError> {

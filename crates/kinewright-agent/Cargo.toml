@@ -34,6 +34,10 @@ te1-eval = ["eval-harness"]
 # `cfg_attr(not(feature = "slow-tests"), ignore = ...)` run only with this
 # feature, which CI's slow tier and a full local run enable.
 slow-tests = []
+# JA-1 S6 C5 (G20): the scripted host measurement test
+# (`writer_host/review_s6_c5_measure.rs`), run by `scripts/measure-g20.py`.
+# Compiled only when asked for; never a default or a shipping feature.
+g20-measure = []
 
 [[bin]]
 name = "kinewright"

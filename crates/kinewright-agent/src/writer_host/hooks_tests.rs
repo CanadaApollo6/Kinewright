@@ -106,6 +106,8 @@ mod tests {
     include!("review_s6_c3_tests.rs");
     include!("review_s6_c2_fix1_tests.rs");
     include!("review_s6_c4_tests.rs");
+    #[cfg(feature = "g20-measure")]
+    include!("review_s6_c5_measure.rs");
     include!("te12_tests.rs");
     include!("te13_tests.rs");
     include!("te13_fix1_tests.rs");

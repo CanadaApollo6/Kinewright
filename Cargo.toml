@@ -95,6 +95,12 @@ debug = 0
 incremental = false
 strip = "debuginfo"
 
+# JA-1 S6 C5 (G20): optimized measurement builds of the scripted host test.
+# Debug assertions stay on so the comment-delay mutation can build too.
+[profile.g20]
+inherits = "release"
+debug-assertions = true
+
 # Executable identity hashing is on the harness's fixed setup deadline.
 [profile.dev.package.kinewright-hash]
 opt-level = 3

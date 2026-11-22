@@ -519,6 +519,17 @@ enum C7Transcript {
 /// (or not) in the host's media store before the review is queued.
 #[cfg(target_os = "linux")]
 fn c7_talking_head_job(transcript: C7Transcript) -> (C7Job, String) {
+    let (f, name) = c7_talking_head_fixture(transcript);
+    (
+        c7_job_with(f, false, s6_c1_start_default_encode_at_source_raster),
+        name,
+    )
+}
+
+/// The talking-head fixture of [`c7_talking_head_job`], saved, with its
+/// candidate branch bound, before any review job exists.
+#[cfg(target_os = "linux")]
+fn c7_talking_head_fixture(transcript: C7Transcript) -> (Fixture, String) {
     use kinewright_core::{CaptionPreset, Rational, TimeCode, Track, TrackId, TrackKind};
     use kinewright_media::test_support::talking_head;
     let doc = Document {
@@ -636,10 +647,7 @@ fn c7_talking_head_job(transcript: C7Transcript) -> (C7Job, String) {
         f.brief.inputs = owner.current_inputs_ref().clone();
         f.brief.scope.base = owner.candidate_binding(candidate.branch_id()).unwrap();
     }
-    (
-        c7_job_with(f, false, s6_c1_start_default_encode_at_source_raster),
-        name,
-    )
+    (f, name)
 }
 
 #[test]
