@@ -316,6 +316,7 @@ mod tests {
             };
             let mut host = HostCommandOwner::open(HostConfig {
                 data_dir: Some((roots.write[0].join("scheduler")).with_extension("voice-data")),
+                desktop_notifications: false,
                 scheduler_settings: Some(roots.write[0].join("scheduler")),
                 project: "c11-pin-host".into(),
                 path: Some(path.clone()),
@@ -617,6 +618,7 @@ mod tests {
             };
             let mut host = HostCommandOwner::open(HostConfig {
                 data_dir: Some((roots.write[0].join("scheduler")).with_extension("voice-data")),
+                desktop_notifications: false,
                 scheduler_settings: Some(roots.write[0].join("scheduler")),
                 project: "c11-target-host".into(),
                 path: Some(path),
@@ -810,6 +812,7 @@ mod tests {
             };
             let mut host = HostCommandOwner::open(HostConfig {
                 data_dir: Some((roots.write[0].join("scheduler")).with_extension("voice-data")),
+                desktop_notifications: false,
                 scheduler_settings: Some(roots.write[0].join("scheduler")),
                 project: "c11-frozen-host".into(),
                 path: Some(path.clone()),
@@ -1013,6 +1016,7 @@ mod tests {
         };
         let mut host = HostCommandOwner::open(HostConfig {
             data_dir: Some((roots.write[0].join("scheduler")).with_extension("voice-data")),
+            desktop_notifications: false,
             scheduler_settings: Some(roots.write[0].join("scheduler")),
             project: "c11-registered-host".into(),
             path: Some(path.clone()),

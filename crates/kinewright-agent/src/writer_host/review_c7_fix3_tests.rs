@@ -333,6 +333,7 @@ fn ja1_s5a_c7_fix3_an_open_never_reconciles_the_review_job() {
         // leave the job exactly as the gone process left it.
         let owner = HostCommandOwner::open(HostConfig {
             data_dir: None,
+            desktop_notifications: false,
             scheduler_settings: None,
             project: "hooks".into(),
             path: Some(project.to_path_buf()),

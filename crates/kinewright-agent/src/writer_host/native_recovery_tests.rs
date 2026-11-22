@@ -253,6 +253,7 @@ fn real_recovery(after: bool) {
     };
     let writer = WriterHost::start(HostConfig {
                 data_dir: Some((root.join("scheduler")).with_extension("voice-data")),
+        desktop_notifications: false,
         scheduler_settings: Some(root.join("scheduler")),
         project: "hooks".into(),
         path: Some(root.join("project.kinewright")),

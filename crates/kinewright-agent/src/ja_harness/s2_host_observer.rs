@@ -20,6 +20,7 @@ pub(super) fn observe(root: &Path, revised: bool) -> Result<Value, String> {
     }
     let host = WriterHost::start(HostConfig {
         data_dir: Some((root.join("scheduler")).with_extension("voice-data")),
+        desktop_notifications: false,
         scheduler_settings: Some(root.join("scheduler")),
         project: "s0-c8-host-auth-control".into(),
         path: None,

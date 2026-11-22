@@ -96,6 +96,8 @@ pub(super) struct ReviewRuntime {
     pub(super) retired_saves: Vec<sealed_save::SaveWorker>,
     // Counts saves started; a worker reports only while it is still the save.
     save_generation: u64,
+    // JA-1 S6 C4: the seal notification; shutdown cancels and joins it.
+    pub(super) notifier: super::notify::Notifier,
     // Each copied chunk passes through it, with the lock released.
     #[cfg(test)]
     pub(super) save_hook: Option<sealed_save::SaveHook>,
@@ -215,6 +217,16 @@ impl Drop for ReviewRuntime {
 }
 
 impl ReviewRuntime {
+    /// JA-1 S6 C4: with `notifications`, every fresh seal notifies on the
+    /// person's session bus.
+    pub(super) fn notifying(notifications: bool) -> Self {
+        // The runtime has a Drop, so no struct update.
+        let mut runtime = Self::default();
+        runtime.notifier =
+            super::notify::Notifier::new(notifications.then(super::notify::session_bus));
+        runtime
+    }
+
     pub(super) fn cancel_for_shutdown(&self) {
         if let Some(worker) = &self.worker {
             worker.cancellation.cancel();
@@ -231,6 +243,8 @@ impl ReviewRuntime {
         for save in self.save.iter().chain(&self.retired_saves) {
             save.cancel();
         }
+        // The queued seals are still sent; nothing new is taken.
+        self.notifier.cancel();
     }
 
     pub(super) fn sealed_save_status(
@@ -596,6 +610,15 @@ pub(super) fn execute(
                 owner.stop_sealed_save()?;
                 return owner.review_status();
             }
+            ReviewControl::AcknowledgeNotification { nonce } => {
+                // Only the person-facing GUI that was shown the selection.
+                let mut owner = lock(host)?;
+                owner.authorize_review(bearer, request)?;
+                // An in-memory flag: it reads and writes nothing of the
+                // project, so a frozen or unsettled root takes it too.
+                owner.review_runtime.notifier.acknowledge(*nonce);
+                return Ok(None);
+            }
             ReviewControl::Seal { token, command } => {
                 {
                     let mut owner = lock(host)?;
@@ -908,6 +931,15 @@ impl HostCommandOwner {
         for thread in threads {
             join_other(thread);
         }
+        // JA-1 S6 C4: the queued seal notifications are sent, then the
+        // listener's wait ends and both threads are joined.
+        let notifier = host
+            .lock()
+            .ok()
+            .map(|mut owner| owner.review_runtime.notifier.take_stop());
+        if let Some(notifier) = notifier {
+            notifier.finish();
+        }
         let thread = host
             .lock()
             .ok()
@@ -976,7 +1008,10 @@ impl HostCommandOwner {
                 && !matches!(
                     request.command,
                     HostCommand::Review(
-                        ReviewControl::Stop(_) | ReviewControl::StopSave | ReviewControl::Status
+                        ReviewControl::Stop(_)
+                            | ReviewControl::StopSave
+                            | ReviewControl::Status
+                            | ReviewControl::AcknowledgeNotification { .. }
                     )
                 ))
         {
@@ -987,7 +1022,10 @@ impl HostCommandOwner {
             && !matches!(
                 request.command,
                 HostCommand::Review(
-                    ReviewControl::Stop(_) | ReviewControl::StopSave | ReviewControl::Status
+                    ReviewControl::Stop(_)
+                        | ReviewControl::StopSave
+                        | ReviewControl::Status
+                        | ReviewControl::AcknowledgeNotification { .. }
                 )
             )
         {
@@ -1061,6 +1099,7 @@ impl HostCommandOwner {
             | ReviewControl::Seal { .. }
             | ReviewControl::SaveSealed { .. }
             | ReviewControl::StopSave
+            | ReviewControl::AcknowledgeNotification { .. }
             | ReviewControl::Stop(_) => return Err(unavailable()),
         }
         self.review_status()

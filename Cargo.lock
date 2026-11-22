@@ -2329,6 +2329,7 @@ dependencies = [
  "stats_alloc",
  "thiserror 2.0.19",
  "tokio",
+ "zbus",
 ]
 
 [[package]]

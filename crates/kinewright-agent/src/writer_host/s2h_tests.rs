@@ -31,6 +31,7 @@ fn fixture() -> (
         .unwrap();
     let mut host = HostCommandOwner::open(HostConfig {
         data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
+        desktop_notifications: false,
         scheduler_settings: Some(temp.path("scheduler")),
         project: "s2h-review".into(),
         path: None,
@@ -824,6 +825,7 @@ fn s2h_lost_rescue_result_returns_original_activation_without_second_copy() {
     };
     let mut host = HostCommandOwner::open(HostConfig {
         data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
+        desktop_notifications: false,
         scheduler_settings: Some(temp.path("scheduler")),
         project: "fix3-rescue-result".into(),
         path: None,
@@ -911,6 +913,7 @@ fn c7_fix1_rescue_status_names_the_rescue_copy() {
     };
     let mut host = HostCommandOwner::open(HostConfig {
         data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
+        desktop_notifications: false,
         scheduler_settings: Some(temp.path("scheduler")),
         project: "c7-fix1-rescue".into(),
         path: None,

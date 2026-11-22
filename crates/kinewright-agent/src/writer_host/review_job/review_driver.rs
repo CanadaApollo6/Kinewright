@@ -514,8 +514,15 @@ pub(in crate::writer_host) fn seal_checked_review(
         .owner_mut()?
         .review_source_bundle_mut(&token.project)?
         .seal_review(token, command, expected_configuration_sha256, &verified)?;
-    if matches!(result, SealResult::Sealed(_)) {
+    if let SealResult::Sealed(sealed) = &result {
         owner.release_sealed_review(token);
+        // JA-1 S6 C4: `seal_review` returned only after the receipt was
+        // published. A replay (`replayed`, or the early returns above) was
+        // announced by the seal that published it. Queued before a detached
+        // host may begin to exit, so its notification is still sent.
+        if !sealed.replayed {
+            owner.notify_sealed(token, sealed);
+        }
     }
     // JA-1 S6 C3: a seal or a refused seal (the job Paused) ends the review;
     // a detached host may exit.
@@ -524,6 +531,47 @@ pub(in crate::writer_host) fn seal_checked_review(
 }
 
 impl HostCommandOwner {
+    /// JA-1 S6 C4: queue the notification of a fresh seal. A click selects
+    /// the sealed version only while a person-facing GUI is attached; a
+    /// detached or headless host's notification has no action. Never fails
+    /// the seal: a label that cannot be read is reported in status.
+    fn notify_sealed(
+        &mut self,
+        token: &ReviewToken,
+        sealed: &kinewright_project::review_job::SealedReview,
+    ) {
+        let label = self.owner().and_then(|owner| {
+            Ok(owner
+                .review_source_bundle(&token.project)?
+                .read_snapshot(&token.snapshot)?
+                .descriptor
+                .label())
+        });
+        let label = match label {
+            Ok(label) => label,
+            Err(error) => {
+                self.review_runtime
+                    .notifier
+                    .record_error(&format!("The sealed version's label: {error}"));
+                return;
+            }
+        };
+        let gui = !self.detached
+            && self.attachments.iter().any(|attachment| {
+                attachment.role == crate::writer_host::AttachmentRole::Editor
+                    && attachment.person_facing
+                    && attachment.alive.load(std::sync::atomic::Ordering::SeqCst)
+            });
+        let select = gui.then(|| (token.snapshot.clone(), sealed.receipt.key_sha256.clone()));
+        self.review_runtime
+            .notifier
+            .notify(super::super::notify::SealNotice::new(
+                &label,
+                &sealed.receipt.outcome,
+                select,
+            ));
+    }
+
     /// The attempt that recorded `row`, if any.
     pub(in crate::writer_host) fn review_row(
         &self,

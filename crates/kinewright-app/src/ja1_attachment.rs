@@ -2346,6 +2346,7 @@ impl Ja1Attachment {
         let (writer, issuer) = WriterHost::start_protocol_fixture_with_issuer(
             HostConfig {
                 data_dir: Some(scheduler.with_extension("voice-data")),
+                desktop_notifications: false,
                 scheduler_settings: Some(scheduler),
                 project: "c4-notes".into(),
                 path: transfer.named_path,

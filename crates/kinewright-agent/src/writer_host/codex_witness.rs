@@ -913,6 +913,7 @@ fn start_director(
     let host = WriterHost::start_inner(
         HostConfig {
             data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
+            desktop_notifications: false,
             scheduler_settings: Some(temp.path("scheduler")),
             project: project.into(),
             path: Some(path.clone()),

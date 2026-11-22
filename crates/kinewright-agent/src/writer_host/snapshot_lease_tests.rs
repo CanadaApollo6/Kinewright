@@ -18,6 +18,7 @@ mod tests {
             kinewright_project::c0_fixtures::build_c0_fixture_pair(root.root()).unwrap();
         let host = WriterHost::start(HostConfig {
             data_dir: Some((root.path("scheduler")).with_extension("voice-data")),
+            desktop_notifications: false,
             scheduler_settings: Some(root.path("scheduler")),
             project: "c9-lease".into(),
             path: Some(fixture.path),

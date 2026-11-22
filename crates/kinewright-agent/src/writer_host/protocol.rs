@@ -194,6 +194,11 @@ pub struct HostConfig {
     /// scheduler folder; tests name their own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduler_settings: Option<PathBuf>,
+    /// JA-1 S6 C4: send a desktop notification on every seal. Only the app
+    /// outside its tests sets it; every test host leaves it off, so no test
+    /// reaches the person's session bus.
+    #[serde(default)]
+    pub desktop_notifications: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "origin", rename_all = "snake_case", deny_unknown_fields)]
@@ -759,6 +764,22 @@ pub enum HostChoiceKind {
     Forget,
     Release,
 }
+/// JA-1 S6 C4: the version a click on a seal notification selects. The GUI
+/// selects it only if `key_sha256` matches that version's sealed receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotificationSelect {
+    pub nonce: u64,
+    pub version: kinewright_project::studio_records::SnapshotKey,
+    pub key_sha256: String,
+}
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes a reference"
+)]
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[allow(
     clippy::struct_excessive_bools,
@@ -779,6 +800,16 @@ pub struct HostStatus {
     /// JA-1 S6 C2: the running or last save of a sealed cut.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sealed_save: Option<kinewright_project::review_job::delivery::SealedSaveStatus>,
+    /// JA-1 S6 C4: a click on this host's seal notification, reported until
+    /// the GUI acknowledges its nonce. Always `None` off Linux.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_select: Option<NotificationSelect>,
+    /// The last failed seal notification; a later sent one clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_error: Option<String>,
+    /// Seal notifications dropped because too many waited to be sent.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub notify_dropped: u64,
     /// The owner epoch and input manifest Current-edit playback leases. A
     /// change means the GUI renews its lease (S3 C11).
     #[serde(default, skip_serializing_if = "Option::is_none")]

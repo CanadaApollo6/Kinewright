@@ -490,6 +490,7 @@ fn c4_restart_with(
     let host = WriterHost::start_inner(
         HostConfig {
                 data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
+            desktop_notifications: false,
             scheduler_settings: Some(temp.path("scheduler")),
             project: "hooks".into(),
             path: Some(temp.path("project.kinewright")),
@@ -827,6 +828,7 @@ fn s4b_c4_host_session_drives_production_effect_pump() {
     let host = WriterHost::start_inner(
         HostConfig {
                 data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
+            desktop_notifications: false,
             scheduler_settings: Some(temp.path("scheduler")),
             project: "hooks".into(),
             path: Some(temp.path("project.kinewright")),
@@ -1084,6 +1086,7 @@ fn s4b_c4_stop_during_startup_and_full_native_queue() {
                 path: Some(temp.path("project.kinewright")),
                 roots: roots.clone(),
                 origin: HostOrigin::Headless,
+                desktop_notifications: false,
                 scheduler_settings: Some(temp.path("scheduler")),
             },
             HostAuth::generate().unwrap(),

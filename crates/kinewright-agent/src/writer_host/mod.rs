@@ -17,6 +17,8 @@ mod continuation;
 mod manual;
 #[cfg(target_os = "linux")]
 pub(crate) mod native_invocation;
+#[cfg(target_os = "linux")]
+mod notify;
 mod orchestration;
 mod owned_media;
 mod protocol;
@@ -1955,7 +1957,7 @@ impl HostCommandOwner {
             pending_read_pin: None,
             voice_payload: None,
             #[cfg(target_os = "linux")]
-            review_runtime: review_job::ReviewRuntime::default(),
+            review_runtime: review_job::ReviewRuntime::notifying(config.desktop_notifications),
             review_stills: review_stills::ServedReviewStills::default(),
             voice_jobs: BTreeMap::new(),
             prepared_owned_media: None,
@@ -3266,6 +3268,13 @@ impl HostCommandOwner {
             },
             ..HostStatus::default()
         };
+        #[cfg(target_os = "linux")]
+        {
+            let notify = self.review_runtime.notifier.status();
+            status.notification_select = notify.select;
+            status.notify_error = notify.error;
+            status.notify_dropped = notify.dropped;
+        }
         if let Some(owner) = &self.owner {
             status.project_id = owner.project_id().ok();
             status.playback_scope = owner
@@ -3953,6 +3962,7 @@ mod tests {
         );
         let mut owner = HostCommandOwner::open(HostConfig {
             data_dir: Some(temp.path("data")),
+            desktop_notifications: false,
             scheduler_settings: Some(temp.path("scheduler")),
             project: "bootstrap-history-lease".into(),
             path: None,
@@ -4063,6 +4073,7 @@ mod tests {
                 )))
                 .with_extension("voice-data"),
             ),
+            desktop_notifications: false,
             scheduler_settings: Some(std::env::temp_dir().join(format!(
                 "fixture-scheduler-{}",
                 kinewright_media::sha256_bytes(HostAuth::generate().unwrap().bearer().as_bytes())
@@ -4175,6 +4186,7 @@ mod tests {
                 )))
                 .with_extension("voice-data"),
             ),
+            desktop_notifications: false,
             scheduler_settings: Some(std::env::temp_dir().join(format!(
                 "fixture-scheduler-{}",
                 kinewright_media::sha256_bytes(HostAuth::generate().unwrap().bearer().as_bytes())
@@ -4253,6 +4265,7 @@ mod tests {
                     )))
                     .with_extension("voice-data"),
                 ),
+                desktop_notifications: false,
                 scheduler_settings: Some(std::env::temp_dir().join(format!(
                     "fixture-scheduler-{}",
                     kinewright_media::sha256_bytes(
@@ -4310,6 +4323,7 @@ mod tests {
                 )))
                 .with_extension("voice-data"),
             ),
+            desktop_notifications: false,
             scheduler_settings: Some(std::env::temp_dir().join(format!(
                 "fixture-scheduler-{}",
                 kinewright_media::sha256_bytes(HostAuth::generate().unwrap().bearer().as_bytes())

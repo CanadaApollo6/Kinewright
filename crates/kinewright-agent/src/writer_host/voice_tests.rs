@@ -50,6 +50,7 @@ mod tests {
         drop(bundle);
         let host = WriterHost::start(HostConfig {
             data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
+            desktop_notifications: false,
             scheduler_settings: Some(temp.path("scheduler")),
             project: "s3-capabilities".into(),
             path: Some(fixture.path),
@@ -490,6 +491,7 @@ mod tests {
                 &executable,
                 HostConfig {
                     data_dir: Some((root.join("scheduler")).with_extension("voice-data")),
+                    desktop_notifications: false,
                     scheduler_settings: Some(root.join("scheduler")),
                     project: "s3-capabilities".into(),
                     path: Some(root.join("c0-red.kinewright")),
@@ -625,6 +627,7 @@ mod tests {
         host.crash();
         let reopened = WriterHost::start(HostConfig {
             data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
+            desktop_notifications: false,
             scheduler_settings: Some(temp.path("scheduler")),
             project: "s3-capabilities".into(),
             path: Some(temp.path("c0-red.kinewright")),

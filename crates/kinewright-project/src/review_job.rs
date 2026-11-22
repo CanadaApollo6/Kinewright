@@ -257,6 +257,11 @@ pub enum ReviewControl {
     },
     /// Stop the running save; its staging folder is removed.
     StopSave,
+    /// JA-1 S6 C4: the GUI handled the notification selection with this
+    /// nonce; status no longer reports it.
+    AcknowledgeNotification {
+        nonce: u64,
+    },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

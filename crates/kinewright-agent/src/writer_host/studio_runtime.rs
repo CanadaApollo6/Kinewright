@@ -853,6 +853,7 @@ fn recover_on_open(
             // this owner. Its sole capability is reconciliation of this claim.
             let mut owner = HostCommandOwner::open(super::HostConfig {
                 data_dir: None,
+                desktop_notifications: false,
                 scheduler_settings: None,
                 project: project.clone(),
                 path: Some(locator.clone()),
@@ -1337,6 +1338,7 @@ mod tests {
         let host = Arc::new(Mutex::new(
             HostCommandOwner::open(HostConfig {
                 data_dir: Some(temp.path("data")),
+                desktop_notifications: false,
                 scheduler_settings: Some(temp.path("scheduler")),
                 project: "ms-t10".into(),
                 path: None,

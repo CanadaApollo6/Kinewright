@@ -347,6 +347,8 @@ impl HostAttachment {
                     scheduler_settings: Some(path.with_extension("test-scheduler")),
                     #[cfg(not(test))]
                     scheduler_settings: None,
+                    // JA-1 S6 C4: the app notifies on every seal; its tests never do.
+                    desktop_notifications: cfg!(not(test)),
                     project,
                     path: Some(path),
                     roots,

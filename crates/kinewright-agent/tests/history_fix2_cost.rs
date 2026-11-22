@@ -97,6 +97,7 @@ fn history_fix2_startup_sample() {
             read: vec![temp.root().into()],
             write: vec![temp.root().into()],
         },
+        desktop_notifications: false,
         scheduler_settings: Some(temp.path("scheduler")),
         origin: HostOrigin::Gui {
             retention: HostSourceBinding {

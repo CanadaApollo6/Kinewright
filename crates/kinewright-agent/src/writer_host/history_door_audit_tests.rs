@@ -9,6 +9,7 @@ fn snapshot_selection_doors_refuse_every_agent_attachment_before_install() {
     );
     let host = WriterHost::start(HostConfig {
         data_dir: Some(temp.path("data")),
+        desktop_notifications: false,
         scheduler_settings: Some(temp.path("scheduler")),
         project: "history-door-authority".into(),
         path: None,
@@ -477,6 +478,7 @@ fn snapshot_doors_admit_a_long_history_past_the_envelope_cap() {
     );
     let host = WriterHost::start(HostConfig {
         data_dir: Some(temp.path("data")),
+        desktop_notifications: false,
         scheduler_settings: Some(temp.path("scheduler")),
         project: "history-door-ingress".into(),
         path: None,
@@ -801,6 +803,7 @@ fn whole_snapshot_request_at_http_limit_crosses_ingress() {
     );
     let host = WriterHost::start(HostConfig {
         data_dir: Some(temp.path("data")),
+        desktop_notifications: false,
         scheduler_settings: Some(temp.path("scheduler")),
         project: "whole-snapshot-request-cap".into(),
         path: None,
@@ -888,6 +891,7 @@ fn snapshot_over_its_door_cap_is_refused_at_the_client_before_sending() {
     );
     let host = WriterHost::start(HostConfig {
         data_dir: Some(temp.path("data")),
+        desktop_notifications: false,
         scheduler_settings: Some(temp.path("scheduler")),
         project: "history-door-snapshot-cap".into(),
         path: None,
@@ -1081,6 +1085,7 @@ fn barrier_capacity_refusal_keeps_edits_reopenable(door: Door) {
             write: vec![temp.root().into()],
         },
         origin: HostOrigin::Headless,
+        desktop_notifications: false,
         scheduler_settings: Some(temp.path("scheduler")),
     })
     .unwrap();

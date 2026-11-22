@@ -14,6 +14,7 @@ fn restart_plain_copy_fixture(f: Fixture, name: &str) -> Fixture {
     let host = WriterHost::start_with_issuer(
         HostConfig {
                 data_dir: Some((temp.path("scheduler")).with_extension("voice-data")),
+            desktop_notifications: false,
             scheduler_settings: Some(temp.path("scheduler")),
             project: "hooks".into(),
             path: Some(temp.path(name)),

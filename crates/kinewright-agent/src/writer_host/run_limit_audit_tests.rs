@@ -252,6 +252,7 @@ mod kept_audit {
             let host = WriterHost::start_inner(
                 HostConfig {
                 data_dir: Some((root.join("scheduler")).with_extension("voice-data")),
+                    desktop_notifications: false,
                     scheduler_settings: Some(root.join("scheduler")),
                     project: "C4b reopened".into(),
                     path: Some(root.join("project.kinewright")),

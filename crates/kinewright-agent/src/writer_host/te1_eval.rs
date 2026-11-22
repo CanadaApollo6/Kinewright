@@ -689,6 +689,7 @@ impl Studio {
                     write: vec![root.into()],
                 },
                 origin: HostOrigin::Headless,
+                desktop_notifications: false,
                 scheduler_settings: Some(settings),
             },
             HostAuth::generate().map_err(io_error)?,

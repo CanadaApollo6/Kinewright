@@ -2191,6 +2191,7 @@ fn s5_c6_live_reviewer_identifies_decoded_only_discrepancy() {
     let host = WriterHost::start_inner(
         HostConfig {
             data_dir: Some(temp.path("voice-data")),
+            desktop_notifications: false,
             scheduler_settings: Some(settings_dir),
             project: "S5 C6 live reviewer witness".into(),
             path: Some(bundle_path),
