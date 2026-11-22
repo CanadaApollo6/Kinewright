@@ -101,6 +101,7 @@ mod tests {
     include!("review_c7_fix1_tests.rs");
     include!("review_c7_fix2_tests.rs");
     include!("review_c7_fix3_tests.rs");
+    include!("review_c7_fix4_tests.rs");
     include!("te12_tests.rs");
     include!("te13_tests.rs");
     include!("te13_fix1_tests.rs");

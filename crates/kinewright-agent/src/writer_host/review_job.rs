@@ -788,6 +788,11 @@ impl HostCommandOwner {
     }
 
     #[cfg(test)]
+    pub(super) fn review_fixture_stops_queued(&self) -> usize {
+        self.review_runtime.pending_stop.len()
+    }
+
+    #[cfg(test)]
     pub(super) fn review_fixture_recovering(&mut self, recovering: bool) {
         self.recovering = recovering;
     }

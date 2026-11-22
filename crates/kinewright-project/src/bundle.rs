@@ -978,6 +978,12 @@ impl ProjectBundle {
     pub const fn unsettled_probe(&self) -> bool {
         self.unsettled
     }
+    /// Mark the root as needing a settle, as a publication with an unknown
+    /// outcome leaves it.
+    #[cfg(any(test, feature = "test-util"))]
+    pub const fn mark_unsettled_for_test(&mut self) {
+        self.unsettled = true;
+    }
     #[cfg(any(test, feature = "test-util"))]
     #[must_use]
     pub fn has_publication_tag_probe(&self) -> bool {
