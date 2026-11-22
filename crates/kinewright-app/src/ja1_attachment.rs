@@ -1015,10 +1015,10 @@ impl Ja1Attachment {
         self.owner.studio_sealed_versions()
     }
     /// JA-1 S6 C4: the click the attached host reported, once.
-    pub(crate) fn take_notification_select(
+    pub(crate) fn take_notification_click(
         &mut self,
     ) -> Option<kinewright_agent::writer_host::NotificationSelect> {
-        self.host.as_mut()?.take_notification_select()
+        self.host.as_mut()?.take_notification_click()
     }
     /// Tell the host this click was handled. A lost acknowledgement only
     /// repeats the click, which the nonce already ignores.

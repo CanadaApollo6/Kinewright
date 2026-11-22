@@ -1173,7 +1173,7 @@ impl HostAttachment {
     }
 
     /// JA-1 S6 C4: the click this view has not acted on, once.
-    pub(super) fn take_notification_select(
+    pub(super) fn take_notification_click(
         &mut self,
     ) -> Option<kinewright_agent::writer_host::NotificationSelect> {
         self.notification_select.take()

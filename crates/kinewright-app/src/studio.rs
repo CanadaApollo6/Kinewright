@@ -734,7 +734,7 @@ impl KinewrightApp {
                 .focused_mut()
                 .ja1
                 .as_mut()
-                .and_then(crate::ja1_attachment::Ja1Attachment::take_notification_select)
+                .and_then(crate::ja1_attachment::Ja1Attachment::take_notification_click)
         {
             self.dismiss_ready_line();
             self.start_ja1(Action::StudioNotificationSelect(select));
