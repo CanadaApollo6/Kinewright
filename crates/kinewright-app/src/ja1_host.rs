@@ -868,7 +868,7 @@ impl HostAttachment {
         };
         let command = match action {
             Action::DismissManualNotice
-            | Action::StudioVersions
+            | Action::StudioVersions(_)
             | Action::StudioEditorial(_)
             | Action::StudioReview(_)
             | Action::StudioRulebook { .. }

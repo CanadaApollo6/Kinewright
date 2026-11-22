@@ -637,6 +637,40 @@ impl KinewrightApp {
             Err(error) => self.status = error,
         }
     }
+    /// The version the Studio's reads follow: the person's selection, never
+    /// the last details read.
+    pub(crate) fn studio_selected_key(&self) -> Option<SnapshotKey> {
+        self.focused()
+            .studio
+            .selection
+            .as_ref()
+            .map(|context| context.snapshot.descriptor.key.clone())
+    }
+    /// Select a version; its review loads with it.
+    pub(crate) fn select_studio_version(&mut self, key: SnapshotKey) {
+        self.start_ja1(Action::StudioSelect(key));
+    }
+    /// The Versions button: list the versions and load the selected one's
+    /// review.
+    pub(crate) fn open_studio_versions(&mut self) {
+        self.focused_mut().studio.versions_open = true;
+        self.focused_mut().studio.editorial = None;
+        if self.focused().ja1.is_none() {
+            self.enable_ja1();
+        }
+        self.start_ja1(Action::StudioVersions(self.studio_selected_key()));
+    }
+    /// Versions → Refresh: reload the selected version's review, or the
+    /// details shown when nothing is selected.
+    pub(crate) fn refresh_studio_versions(&self) -> Action {
+        Action::StudioEditorial(self.studio_selected_key().or_else(|| {
+            self.focused()
+                .studio
+                .editorial
+                .as_ref()
+                .and_then(|details| details.version.clone())
+        }))
+    }
     pub(crate) fn sync_studio_selection(&mut self) {
         let Some(attachment) = &mut self.focused_mut().ja1 else {
             return;
@@ -748,9 +782,9 @@ impl KinewrightApp {
                 if ui
                     .ctx()
                     .input_mut(|input| input.consume_key(egui::Modifiers::ALT, key))
-                    && let Some(version) = self.focused().studio.versions.get(index)
+                    && let Some(version) = self.focused().studio.versions.get(index).cloned()
                 {
-                    self.start_ja1(Action::StudioSelect(version.clone()));
+                    self.select_studio_version(version);
                 }
             }
             if ui
@@ -828,6 +862,7 @@ impl KinewrightApp {
         let mut versions_open = self.focused().studio.versions_open;
         if versions_open {
             let versions = self.focused().studio.versions.clone();
+            let refresh = self.refresh_studio_versions();
             let mut selected = None;
             let mut editorial_action = None;
             egui::Window::new("Versions")
@@ -857,9 +892,7 @@ impl KinewrightApp {
                         }
                         let current_details = self.focused().studio.editorial.as_ref();
                         if ui.button("Refresh").clicked() {
-                            let version =
-                                current_details.and_then(|details| details.version.clone());
-                            editorial_action = Some(Action::StudioEditorial(version));
+                            editorial_action = Some(refresh);
                         }
                         if let Some(details) = current_details
                             && let Some(action) = show_editorial_details(ui, details)
@@ -885,7 +918,7 @@ impl KinewrightApp {
                 self.start_ja1(action);
             }
             if let Some(key) = selected {
-                self.start_ja1(Action::StudioSelect(key));
+                self.select_studio_version(key);
                 versions_open = false;
             }
         }
@@ -995,12 +1028,7 @@ impl KinewrightApp {
             self.save_project(false);
         }
         if quiet_button(ui, "Versions", true, false).clicked() {
-            self.focused_mut().studio.versions_open = true;
-            self.focused_mut().studio.editorial = None;
-            if self.focused().ja1.is_none() {
-                self.enable_ja1();
-            }
-            self.start_ja1(Action::StudioVersions);
+            self.open_studio_versions();
         }
         let manual_ready = self
             .focused()
@@ -1318,7 +1346,7 @@ impl KinewrightApp {
                     .on_hover_text(version.version.as_str())
                     .clicked()
                 {
-                    self.start_ja1(Action::StudioSelect(version.clone()));
+                    self.select_studio_version(version.clone());
                 }
             }
             let menu = round_button(

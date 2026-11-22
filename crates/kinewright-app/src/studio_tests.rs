@@ -1298,3 +1298,90 @@ fn c9_host_attached_frozen_version_selects_and_plays() {
     drop(engine);
     retire.wait();
 }
+
+/// Finish the attachment job the last button started, then take its replies.
+fn c7f2_settle(app: &mut KinewrightApp, ctx: &egui::Context) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while app.focused().ja1_job.is_some() || app.focused().ja1.is_none() {
+        app.poll_background(ctx);
+        assert!(Instant::now() < deadline, "C7F2_JOB_SETTLES");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    app.sync_studio_selection();
+}
+
+/// `None`: no details; `Some(None)`: details read for no version.
+#[allow(
+    clippy::option_option,
+    reason = "no details and details of no version are different states"
+)]
+fn c7f2_details_version(app: &KinewrightApp) -> Option<Option<SnapshotKey>> {
+    app.focused()
+        .studio
+        .editorial
+        .as_ref()
+        .map(|details| details.version.clone())
+}
+
+#[test]
+fn ja1_s5a_c7_fix2_studio_buttons_load_the_selected_review() {
+    let mut fixtures = fixtures();
+    let context = Arc::clone(&fixtures.contexts[0]);
+    let key = context.snapshot.descriptor.key.clone();
+    let (mut app, _engine) = in1_harness(context.document.clone());
+    attach(&mut app, fixtures.owners.remove(0));
+    let ctx = egui::Context::default();
+    app.install_studio_context(Arc::clone(&context)).unwrap();
+    assert_eq!(app.studio_selected_key(), Some(key.clone()));
+    // Project-level details are on screen: the stale read the buttons used.
+    let stale = |app: &mut KinewrightApp| {
+        app.start_ja1(Action::StudioEditorial(None));
+        c7f2_settle(app, &ctx);
+        assert_eq!(c7f2_details_version(app), Some(None), "C7F2_STALE_DETAILS");
+    };
+    stale(&mut app);
+    app.open_studio_versions();
+    c7f2_settle(&mut app, &ctx);
+    assert_eq!(
+        c7f2_details_version(&app),
+        Some(Some(key.clone())),
+        "C7F2_VERSIONS_LOADS_THE_SELECTION"
+    );
+    stale(&mut app);
+    let refresh = app.refresh_studio_versions();
+    app.start_ja1(refresh);
+    c7f2_settle(&mut app, &ctx);
+    assert_eq!(
+        c7f2_details_version(&app),
+        Some(Some(key.clone())),
+        "C7F2_REFRESH_LOADS_THE_SELECTION"
+    );
+    stale(&mut app);
+    app.select_studio_version(key.clone());
+    c7f2_settle(&mut app, &ctx);
+    assert_eq!(
+        c7f2_details_version(&app),
+        Some(Some(key.clone())),
+        "C7F2_SELECT_LOADS_ITS_REVIEW"
+    );
+    // Refresh review with no host attached says why and shows what is stored.
+    app.start_ja1(Action::StudioReview(Box::new(
+        crate::studio_review::ReviewAction {
+            control: kinewright_project::review_job::ReviewControl::Status,
+            version: Some(key.clone()),
+        },
+    )));
+    c7f2_settle(&mut app, &ctx);
+    assert!(
+        app.focused().studio.failure.is_none(),
+        "C7F2_NO_HOST_REFRESH_IS_NOT_A_FAILURE: {:?}",
+        app.focused().studio.failure.as_ref().map(|f| &f.message)
+    );
+    assert_eq!(
+        app.focused().ja1.as_ref().unwrap().message,
+        crate::studio_review::NO_HOST_REFRESH,
+        "C7F2_NO_HOST_REFRESH_MESSAGE"
+    );
+    assert_eq!(c7f2_details_version(&app), Some(Some(key)));
+    in1_shutdown(&mut app);
+}

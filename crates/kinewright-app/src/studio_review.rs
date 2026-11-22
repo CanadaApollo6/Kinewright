@@ -9,6 +9,10 @@ use crate::ja1_attachment::Action;
 
 pub(crate) struct ReviewRefresh(pub(crate) Option<ReviewStatus>);
 
+/// Refresh review while no writer host holds the project.
+pub(crate) const NO_HOST_REFRESH: &str =
+    "Output reviews run while the writer host holds the saved project; showing the stored review.";
+
 /// A review control and the version selected when it was sent; the reply
 /// reloads that version's details, so a new receipt shows.
 pub(crate) struct ReviewAction {

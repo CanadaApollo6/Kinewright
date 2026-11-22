@@ -82,7 +82,8 @@ pub(crate) struct EditorialDetails {
 
 pub(crate) enum Action {
     DismissManualNotice,
-    StudioVersions,
+    /// The version list, and the review of the selected version.
+    StudioVersions(Option<SnapshotKey>),
     StudioEditorial(Option<SnapshotKey>),
     StudioReview(Box<crate::studio_review::ReviewAction>),
     StudioRulebook {
@@ -135,7 +136,7 @@ impl Action {
             | Self::PreviewForget
             | Self::PreviewRelease(_) => true,
             Self::DismissManualNotice
-            | Self::StudioVersions
+            | Self::StudioVersions(_)
             | Self::StudioEditorial(_)
             | Self::StudioReview(_)
             | Self::StudioRulebook { .. }
@@ -164,7 +165,7 @@ impl Action {
         matches!(
             self,
             Self::DismissManualNotice
-                | Self::StudioVersions
+                | Self::StudioVersions(_)
                 | Self::StudioEditorial(_)
                 | Self::StudioReview(_)
                 | Self::StudioRulebook { .. }
@@ -513,9 +514,9 @@ impl Ja1Attachment {
                     }
                 }
             }
-            Action::StudioVersions => {
+            Action::StudioVersions(version) => {
                 self.studio_versions_ready = Some(self.studio_versions()?);
-                return self.read_studio_editorial(None);
+                return self.read_studio_editorial(version.as_ref());
             }
             Action::StudioEditorial(version) => {
                 return self.read_studio_editorial(version.as_ref());
@@ -549,6 +550,9 @@ impl Ja1Attachment {
                 Ok(context) => {
                     self.studio_ready = Some(Arc::new(context));
                     self.panel_open = false;
+                    // The review panel follows the selection. A failed read
+                    // reports itself; the selection stands.
+                    let _ = self.read_studio_editorial(Some(key));
                     return Ok(());
                 }
                 Err(error) => {
@@ -960,11 +964,21 @@ impl Ja1Attachment {
         review: crate::studio_review::ReviewAction,
     ) -> Result<(), BundleError> {
         let crate::studio_review::ReviewAction { control, version } = review;
-        let host = self.host.as_ref().ok_or_else(|| {
-            BundleError::Identity(
+        let Some(host) = self.host.as_ref() else {
+            // Refresh with no host: show the stored review and say why
+            // nothing is running.
+            if matches!(
+                control,
+                kinewright_project::review_job::ReviewControl::Status
+            ) {
+                self.message = crate::studio_review::NO_HOST_REFRESH.into();
+                self.studio_review_ready = Some(crate::studio_review::ReviewRefresh(None));
+                return self.read_studio_editorial(version.as_ref());
+            }
+            return Err(BundleError::Identity(
                 "Output review requires a saved project attached to the writer host.".into(),
-            )
-        })?;
+            ));
+        };
         let reply = host
             .client
             .request(kinewright_agent::writer_host::HostCommand::Review(control))
@@ -1584,7 +1598,7 @@ impl Ja1Attachment {
     fn apply_inner(&mut self, action: Action) -> Result<(), BundleError> {
         match action {
             Action::DismissManualNotice
-            | Action::StudioVersions
+            | Action::StudioVersions(_)
             | Action::StudioEditorial(_)
             | Action::StudioReview(_)
             | Action::StudioRulebook { .. }
